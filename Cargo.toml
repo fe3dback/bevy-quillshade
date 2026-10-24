@@ -1,0 +1,38 @@
+[workspace]
+resolver = "2"
+members = [
+    # "crates/*",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+[workspace.dependencies]
+# todo: move dynamic_linking to crate feature (before wide use)
+bevy = { version = "0.19.1", features = ["bevy_feathers", "dynamic_linking"] }
+bevy_macro_utils = "0.19.1"
+bevy-inspector-egui = "0.37.0"
+bevy_egui = { version = "0.40", features = ["bevy_ui"] }
+proc-macro2 = "1.0"
+syn = { version = "3.0", features = ["full"] }
+quote = "1.0"
+
+[package]
+name = "bevy-shader-vibe"
+version = { workspace = true }
+edition = { workspace = true }
+description = "Shader graph editor"
+license = "MIT"
+
+[dependencies]
+bevy = { workspace = true }
+bevy-inspector-egui = { workspace = true }
+bevy_egui = { workspace = true }
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+opt-level = 3
+debug = false
