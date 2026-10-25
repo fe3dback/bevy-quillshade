@@ -301,7 +301,7 @@ fn close_requested(mut ev: MessageReader<WindowCloseRequested>, mut actions: Res
 }
 
 // ---------------------------------------------------------------------------------------------
-// Minimap (bottom-right overlay of the canvas)
+// Minimap (bottom-left overlay of the canvas)
 
 const MAP: Vec2 = Vec2::new(200.0, 130.0);
 
@@ -319,7 +319,7 @@ pub fn minimap() -> impl Scene {
         Minimap
         Node {
             position_type: PositionType::Absolute,
-            right: px(10),
+            left: px(10),
             bottom: px(10),
             width: px(MAP.x),
             height: px(MAP.y),

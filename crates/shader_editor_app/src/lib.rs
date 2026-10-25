@@ -21,9 +21,11 @@ mod demo;
 pub mod doc;
 mod external;
 mod fixes;
+pub mod highlight;
 pub mod inline;
 pub mod search;
 pub mod state;
+pub mod tab;
 pub mod ui;
 
 use canvas::{CanvasPlugin, CanvasSystems, EditorCanvas};
@@ -129,6 +131,15 @@ fn open_externally(mut editor: ResMut<Editor>, errors: Local<OpenErrors>) {
     }
 }
 
+fn copy_to_clipboard(mut editor: ResMut<Editor>, clipboard: Option<ResMut<bevy::clipboard::Clipboard>>) {
+    let Some(text) = editor.copy_text.take() else { return };
+    match clipboard.map(|mut c| c.set_text(text)) {
+        Some(Ok(())) => editor.info("Copied to the clipboard"),
+        Some(Err(e)) => editor.error(format!("cannot copy: {e}")),
+        None => editor.error("cannot copy: no clipboard"),
+    }
+}
+
 fn quit(mut editor: ResMut<Editor>, windows: Query<&Window>, mut exit: MessageWriter<AppExit>) {
     if !editor.quit {
         return;
@@ -164,7 +175,8 @@ fn open_startup_project(mut editor: ResMut<Editor>, startup: Res<StartupProject>
 }
 
 /// Debug aid: `SHADER_EDITOR_SCREENSHOT=out.png` saves a screenshot after a few seconds and quits;
-/// `SHADER_EDITOR_OPEN=env/rock_wet.material.ron` opens an asset at startup.
+/// `SHADER_EDITOR_OPEN=env/rock_wet.material.ron` opens an asset at startup (`…ron#wesl` / `#rust`: its generated
+/// file in a text tab, after the asset's graph).
 /// `SHADER_EDITOR_DEMO=palette|wire|dialog|menu` additionally opens that popup before the shot.
 fn debug_screenshot(
     mut frames: Local<u32>,
@@ -177,10 +189,14 @@ fn debug_screenshot(
     let Ok(path) = std::env::var("SHADER_EDITOR_SCREENSHOT") else { return };
     *frames += 1;
     if *frames == 2
-        && let Ok(rel) = std::env::var("SHADER_EDITOR_OPEN")
-        && let Some(id) = shader_project::assets::id_from_rel(&rel)
+        && let Ok(open) = std::env::var("SHADER_EDITOR_OPEN")
+        && let (rel, lang) = open.split_once('#').map_or((open.as_str(), None), |(r, l)| (r, Some(l)))
+        && let Some(id) = shader_project::assets::id_from_rel(rel)
     {
         editor.open_asset(&id);
+        if let Some(lang) = lang.and_then(tab::Lang::from_label) {
+            editor.show_generated(&id, lang);
+        }
         if let Ok(sel) = std::env::var("SHADER_EDITOR_SELECT")
             && let Some(d) = editor.doc_mut()
             && let Some(n) = d.asset.nodes.iter().find(|(_, n)| n.kind == sel).map(|(k, _)| k.clone())
@@ -248,6 +264,9 @@ pub fn run(project: Option<PathBuf>) {
         .insert_resource(StartupProject(project))
         .add_plugins((EditorCorePlugin, ui::UiPlugin))
         .add_systems(Startup, open_startup_project)
-        .add_systems(Update, (open_externally, quit, remember_window_size, debug_screenshot, demo::scripted_input))
+        .add_systems(
+            Update,
+            (open_externally, copy_to_clipboard, quit, remember_window_size, debug_screenshot, demo::scripted_input),
+        )
         .run();
 }

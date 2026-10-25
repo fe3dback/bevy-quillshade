@@ -17,9 +17,10 @@ use shader_graph_core::registry::{NodeRole, ParamKind};
 use shader_graph_core::{PinType, Value};
 
 use super::dialog::InitText;
-use super::{TEXT, TEXT_DIM, text};
+use super::{TEXT, TEXT_DIM, button, text};
 use crate::doc::{node_signature, route_declarations};
-use crate::state::{Action, Actions, Editor, PropTarget, display_value};
+use crate::state::{Action, Actions, Editor, GenFile, PropTarget, display_value};
+use crate::tab::{Lang, Tab, TextDoc};
 
 #[derive(Component, Default, Clone)]
 pub struct PropsBody;
@@ -227,6 +228,22 @@ fn pin_kind(t: PinType) -> Option<ParamKind> {
     })
 }
 
+/// A generated file: where it comes from and how to get to the source.
+fn text_rows(t: &TextDoc, out: &mut Vec<Box<dyn Scene>>) {
+    let (lang, which) = match t.lang {
+        Lang::Wesl => ("WESL", GenFile::Wesl),
+        Lang::Rust => ("Rust", GenFile::Rust),
+    };
+    out.push(Box::new(text(t.rel.clone(), TEXT, 15.0)));
+    out.push(Box::new(text(format!("Generated {lang}, read-only"), TEXT_DIM, 12.0)));
+    out.push(Box::new(text(format!("Source: {}", t.source.source_rel()), TEXT_DIM, 12.0)));
+    if let Some(src) = &t.text {
+        out.push(Box::new(text(format!("{} lines", src.lines().count()), TEXT_DIM, 12.0)));
+    }
+    out.push(Box::new(button("Open source graph", Action::OpenAsset(t.source.clone()), true)));
+    out.push(Box::new(button("Open in default application", Action::ShowFile(t.source.clone(), which), false)));
+}
+
 fn asset_rows(editor: &Editor, out: &mut Vec<Box<dyn Scene>>) {
     let Some(d) = editor.doc() else { return };
     out.push(Box::new(text(d.id.source_rel(), TEXT, 15.0)));
@@ -345,9 +362,10 @@ fn redraw(
     *last = Some(key);
     commands.entity(body).despawn_children();
     let mut rows: Vec<Box<dyn Scene>> = Vec::new();
-    match editor.doc() {
+    match editor.tab() {
         None => rows.push(Box::new(text("Nothing open.", TEXT_DIM, 13.0))),
-        Some(d) => {
+        Some(Tab::Text(t)) => text_rows(t, &mut rows),
+        Some(Tab::Graph(d)) => {
             if let Some(f) = d.selected_frame.as_ref().and_then(|f| d.asset.comments.iter().find(|c| c.id == *f)) {
                 rows.push(Box::new(text("Comment", TEXT, 15.0)));
                 rows.push(Box::new(labeled(

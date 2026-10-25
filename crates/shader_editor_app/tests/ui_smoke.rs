@@ -7,6 +7,7 @@ use bevy_noodle::style::kit;
 use shader_editor_app::EditorCorePlugin;
 use shader_editor_app::canvas::{EditorCanvas, NodeKey, PinKey};
 use shader_editor_app::state::{Action, Actions, Editor, PropTarget};
+use shader_editor_app::tab::Lang;
 use shader_editor_app::ui::EditorCanvasMarker;
 use shader_editor_app::ui::props::PropField;
 use shader_project::{AssetId, AssetType, Project, fixtures, ops};
@@ -151,6 +152,31 @@ fn moving_nodes_updates_model_without_rebuild() {
     assert!(d.is_dirty());
     // Same entity: the canvas was not rebuilt for a move.
     assert!(app.world().get::<NodeKey>(entity).is_some());
+}
+
+#[test]
+fn text_tab_empties_the_canvas_and_graph_tab_restores_it() {
+    let (_dir, mut app) = app();
+    let id = AssetId::new(AssetType::Material, "fx/hologram");
+    act(&mut app, Action::OpenAsset(id.clone()));
+    let shown = counts(&mut app);
+    assert!(shown.0 > 0);
+    let view = |app: &App| {
+        let canvas = app.world().resource::<EditorCanvas>().canvas;
+        app.world().get::<CanvasView>(canvas).map(|v| (v.pan, v.zoom)).unwrap()
+    };
+    act(&mut app, Action::View(shader_editor_app::state::ViewRequest::FitAll));
+    let fitted = view(&app);
+    app.world_mut().resource_mut::<Editor>().regenerate();
+    act(&mut app, Action::ShowGenerated(id.clone(), Lang::Wesl));
+    assert!(app.world().resource::<Editor>().doc().is_none());
+    assert_eq!(counts(&mut app), (0, 0), "a text tab shows no graph");
+    // Graph commands are no-ops on a text tab.
+    act(&mut app, Action::AddNode { kind: "stdlib::Time".into(), pos: (0.0, 0.0), link: None, params: Vec::new() });
+    act(&mut app, Action::ActivateTab(0));
+    assert_eq!(counts(&mut app), shown);
+    assert_eq!(view(&app), fitted, "the graph keeps its camera");
+    assert!(!app.world().resource::<Editor>().is_dirty());
 }
 
 fn added(app: &App, kind: &str, pos: (f32, f32)) -> String {

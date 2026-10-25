@@ -9,48 +9,48 @@ Asset(
   nodes: {
     "01m5r4tbwgbt53z0q87wj6tc76": Node(
       kind: "output::Pbr3d",
-      pos: (668.57416, -143.72652),
+      pos: (668.57416, -156.49605),
       params: {},
     ),
     "01m5r4whtv0wryfpt5qhs1z45g": Node(
       kind: "stdlib::Constant3Vector",
-      pos: (232.34378, -156.49605),
+      pos: (108.57416, -156.49605),
       params: {
         "value": Float3((1.0, 0.0, 0.0)),
       },
     ),
     "01m5r5fvg5nwsw7f4nfzekr156": Node(
       kind: "stdlib::Time",
-      pos: (-145.13283, 80.24603),
+      pos: (-451.42584, -156.49605),
       params: {},
     ),
     "01m5r5g6kgkb2absme5p6sg4vr": Node(
       kind: "stdlib::Sin",
-      pos: (258.47266, 143.55862),
+      pos: (108.57416, -62.496048),
       params: {},
     ),
     "01m5r5g9zxwajrgwe3sqpe956g": Node(
       kind: "stdlib::Constant",
-      pos: (-142.91403, 197.53522),
+      pos: (-451.42584, -62.496048),
       params: {
         "value": Float(0.21),
       },
     ),
     "01m5r5ggky8sh5r98shtdt02wj": Node(
       kind: "stdlib::Divide",
-      pos: (62.867188, 135.12112),
+      pos: (-171.42584, -156.49605),
       params: {},
     ),
     "01m5r5hmmfr7r8v7m2s50k4z9y": Node(
       kind: "stdlib::Constant3Vector",
-      pos: (231.87503, -46.195282),
+      pos: (108.57416, 55.503952),
       params: {
         "value": Float3((0.0, 1.0, 0.0)),
       },
     ),
     "01m5r5zf3079k9ak5dgtk5eqwc": Node(
       kind: "stdlib::Lerp",
-      pos: (456.51532, -93.216354),
+      pos: (388.57416, -156.49605),
       params: {},
     ),
   },

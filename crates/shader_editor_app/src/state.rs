@@ -19,6 +19,7 @@ use crate::autolayout;
 use crate::config::{ProjectTabs, UserConfig};
 use crate::doc::{ClipboardData, Doc, bounds, connection_error, node_signature};
 use crate::search::{self, WireEnd};
+use crate::tab::{Lang, Tab, TextDoc, parse_config_key};
 
 /// Kinds of assets the browser can create.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -212,7 +213,10 @@ pub enum Action {
     MoveTo(AssetId, String),
     Delete(AssetId),
     DeleteFolder(String),
+    /// Opens a file in the user's default application.
     ShowFile(AssetId, GenFile),
+    /// Opens a generated file in a read-only text tab.
+    ShowGenerated(AssetId, Lang),
     ToggleFolder(String),
     SelectFolder(String),
     FocusDiagnostic(Diagnostic),
@@ -256,7 +260,8 @@ pub struct Editor {
     /// Assets as stored on disk (last scan).
     pub disk: AssetSet,
     pub folders: Vec<String>,
-    pub docs: Vec<Doc>,
+    /// Open tabs: graph documents and read-only views of generated files.
+    pub tabs: Vec<Tab>,
     pub active: Option<usize>,
     pub clipboard: Option<ClipboardData>,
     paste_count: u32,
@@ -281,6 +286,8 @@ pub struct Editor {
     pub quit: bool,
     /// Files to open in an external program.
     pub external: Vec<PathBuf>,
+    /// Text for the system clipboard (Ctrl+C in a text tab).
+    pub copy_text: Option<String>,
     pub pick_folder: bool,
 }
 
@@ -291,7 +298,7 @@ impl Default for Editor {
             registry: shader_stdlib::registry(),
             disk: AssetSet::default(),
             folders: Vec::new(),
-            docs: Vec::new(),
+            tabs: Vec::new(),
             active: None,
             clipboard: None,
             paste_count: 0,
@@ -312,6 +319,7 @@ impl Default for Editor {
             config_path: None,
             quit: false,
             external: Vec::new(),
+            copy_text: None,
             pick_folder: false,
         }
     }
@@ -359,25 +367,41 @@ impl Editor {
 
     // ---- documents ----
 
+    pub fn tab(&self) -> Option<&Tab> {
+        self.active.and_then(|i| self.tabs.get(i))
+    }
+
+    /// The active tab's graph document (`None` when another kind of tab is active).
     pub fn doc(&self) -> Option<&Doc> {
-        self.active.and_then(|i| self.docs.get(i))
+        self.tab().and_then(Tab::graph)
     }
 
     pub fn doc_mut(&mut self) -> Option<&mut Doc> {
-        self.active.and_then(|i| self.docs.get_mut(i))
+        self.active.and_then(|i| self.tabs.get_mut(i)).and_then(Tab::graph_mut)
     }
 
+    /// Open graph documents.
+    pub fn docs(&self) -> impl Iterator<Item = &Doc> {
+        self.tabs.iter().filter_map(Tab::graph)
+    }
+
+    /// Tab index of an asset's graph document.
     pub fn doc_index(&self, id: &AssetId) -> Option<usize> {
-        self.docs.iter().position(|d| d.id == *id)
+        self.tabs.iter().position(|t| t.graph().is_some_and(|d| d.id == *id))
+    }
+
+    /// Tab index of an asset's generated file.
+    pub fn text_index(&self, id: &AssetId, lang: Lang) -> Option<usize> {
+        self.tabs.iter().position(|t| t.text().is_some_and(|t| t.source == *id && t.lang == lang))
     }
 
     pub fn is_dirty(&self) -> bool {
-        self.docs.iter().any(Doc::is_dirty)
+        self.tabs.iter().any(Tab::is_dirty)
     }
 
     /// Kind of an asset (open document first, then disk).
     pub fn asset_kind(&self, id: &AssetId) -> Option<AssetKind> {
-        self.docs.iter().find(|d| d.id == *id).map(|d| d.asset.kind).or_else(|| kind_of(&self.disk, id))
+        self.docs().find(|d| d.id == *id).map(|d| d.asset.kind).or_else(|| kind_of(&self.disk, id))
     }
 
     pub fn window_title(&self) -> String {
@@ -385,8 +409,8 @@ impl Editor {
         if let Some(p) = &self.project {
             t.push_str(&format!(" - {}", p.root.display()));
         }
-        if let Some(d) = self.doc() {
-            t.push_str(&format!(" - {}{}", d.id.source_rel(), if d.is_dirty() { " *" } else { "" }));
+        if let Some(tab) = self.tab() {
+            t.push_str(&format!(" - {}{}", tab.title(), if tab.is_dirty() { " *" } else { "" }));
         }
         t
     }
@@ -406,20 +430,20 @@ impl Editor {
         self.config.touch_recent(&project.root);
         let tabs = self.config.tabs.get(&project.root).cloned().unwrap_or_default();
         self.project = Some(project);
-        self.docs.clear();
+        self.tabs.clear();
         self.active = None;
         self.diags.clear();
         self.regen_only.clear();
         self.current_folder.clear();
         self.rescan();
-        for rel in &tabs.open {
-            if let Some(id) = assets::id_from_source_rel(rel)
-                && self.disk.assets.contains_key(&id)
-            {
-                self.open_asset(&id);
+        for key in &tabs.open {
+            match parse_config_key(key) {
+                Some((id, None)) if self.disk.assets.contains_key(&id) => self.open_asset(&id),
+                Some((id, Some(lang))) if self.disk.assets.contains_key(&id) => self.show_generated(&id, lang),
+                _ => {}
             }
         }
-        self.active = tabs.active.filter(|i| *i < self.docs.len()).or(self.active);
+        self.active = tabs.active.filter(|i| *i < self.tabs.len()).or(self.active);
         let root = self.project.as_ref().map(|p| p.root.display().to_string()).unwrap_or_default();
         self.info(format!("Opened project {root}"));
         self.save_config();
@@ -429,7 +453,7 @@ impl Editor {
 
     pub fn save_tabs_to_config(&mut self) {
         let Some(p) = &self.project else { return };
-        let open = self.docs.iter().map(|d| d.id.source_rel()).collect();
+        let open = self.tabs.iter().map(Tab::config_key).collect();
         self.config.tabs.insert(p.root.clone(), ProjectTabs { open, active: self.active });
     }
 
@@ -459,7 +483,7 @@ impl Editor {
             if id.ty != AssetType::Function {
                 continue;
             }
-            let asset = self.docs.iter().find(|d| d.id == *id).map(|d| &d.asset).or(a.as_ref().ok());
+            let asset = self.docs().find(|d| d.id == *id).map(|d| &d.asset).or(a.as_ref().ok());
             if let Some(asset) = asset {
                 sigs.insert(id.path.clone(), declared_function_sig(asset, &id.path, &self.registry));
             }
@@ -475,16 +499,52 @@ impl Editor {
         let Some(project) = &self.project else { return };
         match assets::load(project, id) {
             Ok(a) => {
-                self.docs.push(Doc::new(id.clone(), a));
-                self.activate(self.docs.len() - 1);
+                self.tabs.push(Tab::Graph(Doc::new(id.clone(), a)));
+                self.activate(self.tabs.len() - 1);
                 self.view_requests.push(ViewRequest::FitAll);
             }
             Err(e) => self.io_error(&format!("cannot open {}", id.source_rel()), e),
         }
     }
 
+    /// Opens (or activates) a read-only tab with a file generated from `id`.
+    pub fn show_generated(&mut self, id: &AssetId, lang: Lang) {
+        if let Some(i) = self.text_index(id, lang) {
+            self.activate(i);
+            return;
+        }
+        let Some(project) = &self.project else { return };
+        match TextDoc::open(project, id.clone(), lang) {
+            Some(t) if t.text.is_some() => {
+                self.tabs.push(Tab::Text(t));
+                self.activate(self.tabs.len() - 1);
+            }
+            Some(t) => {
+                let msg = format!("{} does not exist yet (save the asset to generate it)", t.rel);
+                self.push_msg(Level::Warning, msg);
+            }
+            None => self.push_msg(Level::Warning, "functions have no Rust module".into()),
+        }
+    }
+
+    /// Re-reads the files of text tabs (after regeneration, on activation).
+    fn reload_text_tabs(&mut self) {
+        let mut changed = false;
+        for t in &mut self.tabs {
+            if let Tab::Text(t) = t {
+                changed |= t.reload();
+            }
+        }
+        if changed {
+            self.ui.tabs += 1;
+        }
+    }
+
     fn activate(&mut self, i: usize) {
-        if i < self.docs.len() {
+        if i < self.tabs.len() {
+            if let Tab::Text(t) = &mut self.tabs[i] {
+                t.reload();
+            }
             self.active = Some(i);
             self.ui.tabs += 1;
             self.ui.props += 1;
@@ -503,11 +563,11 @@ impl Editor {
         } else {
             i
         };
-        let Some(d) = self.docs.get(i) else { return };
-        if d.is_dirty() && !force {
+        let Some(t) = self.tabs.get(i) else { return };
+        if t.is_dirty() && !force {
             self.dialog = Some(Dialog::Confirm {
                 title: "Unsaved changes".into(),
-                message: format!("Save changes to {} before closing?", d.id.source_rel()),
+                message: format!("Save changes to {} before closing?", t.asset().source_rel()),
                 buttons: vec![
                     ("Cancel".into(), Action::CloseDialog),
                     ("Discard".into(), Action::DiscardTab(i)),
@@ -516,11 +576,11 @@ impl Editor {
             });
             return;
         }
-        self.docs.remove(i);
+        self.tabs.remove(i);
         self.active = match self.active {
-            _ if self.docs.is_empty() => None,
+            _ if self.tabs.is_empty() => None,
             Some(a) if a > i => Some(a - 1),
-            Some(a) => Some(a.min(self.docs.len() - 1)),
+            Some(a) => Some(a.min(self.tabs.len() - 1)),
             None => None,
         };
         self.refresh_functions();
@@ -533,7 +593,7 @@ impl Editor {
 
     fn overridden_set(&self) -> AssetSet {
         let mut set = self.disk.clone();
-        for d in &self.docs {
+        for d in self.docs() {
             set.assets.insert(d.id.clone(), Ok(d.asset.clone()));
         }
         set
@@ -545,7 +605,7 @@ impl Editor {
     }
 
     fn revisions(&self) -> Vec<(AssetId, u64)> {
-        self.docs.iter().map(|d| (d.id.clone(), d.revision)).collect()
+        self.docs().map(|d| (d.id.clone(), d.revision)).collect()
     }
 
     /// Live validation (dry run of the whole pipeline on the unsaved state).
@@ -598,6 +658,7 @@ impl Editor {
                     self.info(msg);
                 }
                 self.validate();
+                self.reload_text_tabs();
                 true
             }
             Err(e) => {
@@ -636,13 +697,15 @@ impl Editor {
 
     pub fn save(&mut self, i: usize) -> bool {
         let Some(project) = self.project.clone() else { return false };
-        let Some(d) = self.docs.get(i) else { return false };
+        let Some(d) = self.tabs.get(i).and_then(Tab::graph) else { return false };
         let (id, asset) = (d.id.clone(), d.asset.clone());
         if let Err(e) = ops::save(&project, &id, &asset) {
             self.io_error(&format!("Cannot save {}", id.source_rel()), e);
             return false;
         }
-        self.docs[i].mark_saved();
+        if let Some(d) = self.tabs[i].graph_mut() {
+            d.mark_saved();
+        }
         self.info(format!("Saved {}", id.source_rel()));
         self.ui.tabs += 1;
         true
@@ -650,8 +713,8 @@ impl Editor {
 
     pub fn save_all(&mut self) -> bool {
         let mut ok = true;
-        for i in 0..self.docs.len() {
-            if self.docs[i].is_dirty() {
+        for i in 0..self.tabs.len() {
+            if self.tabs[i].is_dirty() {
                 ok &= self.save(i);
             }
         }
@@ -673,17 +736,18 @@ impl Editor {
             let (r, d) = project_registry(project);
             self.registry = r;
             self.project_diags = d;
-            for doc in &mut self.docs {
+            for doc in self.tabs.iter_mut().filter_map(Tab::graph_mut) {
                 doc.revision += 1;
             }
         }
-        for i in 0..self.docs.len() {
-            let (id, dirty) = (self.docs[i].id.clone(), self.docs[i].is_dirty());
+        for i in 0..self.tabs.len() {
+            let Some(d) = self.tabs[i].graph() else { continue };
+            let (id, dirty) = (d.id.clone(), d.is_dirty());
             let on_disk = match self.disk.assets.get(&id) {
                 Some(Ok(a)) => a.clone(),
                 Some(Err(_)) | None => continue,
             };
-            let saved = Asset::from_ron(&self.docs[i].saved).ok();
+            let saved = Asset::from_ron(&d.saved).ok();
             if saved.as_ref() == Some(&on_disk) {
                 continue;
             }
@@ -701,8 +765,8 @@ impl Editor {
                         ],
                     });
                 }
-            } else {
-                self.docs[i].reload(on_disk);
+            } else if let Some(d) = self.tabs[i].graph_mut() {
+                d.reload(on_disk);
                 self.info(format!("Reloaded {} (changed on disk)", id.source_rel()));
             }
         }
@@ -747,8 +811,8 @@ impl Editor {
                 }
             }
             Action::NextTab => {
-                if !self.docs.is_empty() {
-                    let n = self.active.map_or(0, |a| (a + 1) % self.docs.len());
+                if !self.tabs.is_empty() {
+                    let n = self.active.map_or(0, |a| (a + 1) % self.tabs.len());
                     self.activate(n);
                 }
             }
@@ -938,6 +1002,7 @@ impl Editor {
                 self.rescan();
             }
             Action::ShowFile(id, which) => self.show_file(&id, which),
+            Action::ShowGenerated(id, lang) => self.show_generated(&id, lang),
             Action::ToggleFolder(f) => {
                 if !self.collapsed.remove(&f) {
                     self.collapsed.insert(f);
@@ -951,17 +1016,21 @@ impl Editor {
             Action::FocusDiagnostic(diag) => self.focus_diagnostic(&diag),
             Action::Reload(id) => {
                 self.dialog = None;
-                if let (Some(i), Some(Ok(a))) = (self.doc_index(&id), self.disk.assets.get(&id).cloned()) {
-                    self.docs[i].reload(a);
+                if let (Some(d), Some(Ok(a))) =
+                    (self.doc_index(&id).and_then(|i| self.tabs[i].graph_mut()), self.disk.assets.get(&id).cloned())
+                {
+                    d.reload(a);
                     self.info(format!("Reloaded {}", id.source_rel()));
                 }
                 self.touch_all();
             }
             Action::KeepMine(id) => {
                 self.dialog = None;
-                if let (Some(i), Some(Ok(a))) = (self.doc_index(&id), self.disk.assets.get(&id)) {
+                if let (Some(d), Some(Ok(a))) =
+                    (self.doc_index(&id).and_then(|i| self.tabs[i].graph_mut()), self.disk.assets.get(&id))
+                {
                     // The disk version becomes the "saved" baseline, so the document stays dirty.
-                    self.docs[i].saved = a.to_ron();
+                    d.saved = a.to_ron();
                 }
                 self.ui.tabs += 1;
             }
@@ -1015,6 +1084,10 @@ impl Editor {
     }
 
     fn copy(&mut self) {
+        if let Some(Tab::Text(t)) = self.tab() {
+            self.copy_text = t.text.clone();
+            return;
+        }
         let Some(d) = self.doc() else { return };
         let clip = d.copy(&d.selection, &self.registry);
         if !clip.nodes.is_empty() {
@@ -1040,8 +1113,7 @@ impl Editor {
 
     fn delete_selection(&mut self) {
         let registry = &self.registry;
-        let Some(i) = self.active else { return };
-        let d = &mut self.docs[i];
+        let Some(d) = self.active.and_then(|i| self.tabs.get_mut(i)).and_then(Tab::graph_mut) else { return };
         if let Some(f) = d.selected_frame.take() {
             d.edit(|a| a.comments.retain(|c| c.id != f));
         } else {
@@ -1052,12 +1124,12 @@ impl Editor {
     }
 
     fn add_node(&mut self, kind: &str, pos: (f32, f32), link: Option<Link>, params: &[(String, Value)]) {
-        let Some(i) = self.active else { return };
-        let asset_kind = self.docs[i].asset.kind;
-        let id = self.docs[i].add_node_with(kind, pos, params);
+        let Some(d) = self.doc_mut() else { return };
+        let asset_kind = d.asset.kind;
+        let id = d.add_node_with(kind, pos, params);
         if let Some(link) = link {
-            let path = self.docs[i].id.path.clone();
-            let d = &self.docs[i];
+            let d = self.doc().expect("active graph");
+            let path = d.id.path.clone();
             let ty = d.asset.nodes.get(&link.node).and_then(|_| {
                 let sig = node_signature(&d.asset, &link.node, &self.registry, &self.functions, &path)?;
                 if link.from_output { sig.output(&link.pin).map(|p| p.ty) } else { sig.input(&link.pin).map(|p| p.ty) }
@@ -1072,29 +1144,30 @@ impl Editor {
                     ((id.clone(), pin), (link.node, link.pin))
                 };
                 // Merge into the creation step: undo removes node and wire together.
-                let d = &mut self.docs[i];
+                let d = self.doc_mut().expect("active graph");
                 if d.undo() {
                     d.redo();
                 }
                 self.connect(from, to);
             }
         }
-        let d = &mut self.docs[i];
+        let d = self.doc_mut().expect("active graph");
         d.selection = [id].into();
         d.selected_frame = None;
         self.ui.props += 1;
     }
 
     fn connect(&mut self, from: (NodeId, String), to: (NodeId, String)) {
-        let Some(i) = self.active else { return };
-        let d = &self.docs[i];
+        let Some(d) = self.doc() else { return };
         if let Some(e) =
             connection_error(&d.asset, (&from.0, &from.1), (&to.0, &to.1), &self.registry, &self.functions, &d.id.path)
         {
             self.push_msg(Level::Warning, format!("Connection refused: {e}"));
             return;
         }
-        self.docs[i].edit(|a| a.connect((&from.0, &from.1), (&to.0, &to.1)));
+        if let Some(d) = self.doc_mut() {
+            d.edit(|a| a.connect((&from.0, &from.1), (&to.0, &to.1)));
+        }
     }
 
     /// Value a property widget shows: the stored one, or the pin's default.
@@ -1355,7 +1428,7 @@ impl Editor {
         self.dialog = None;
         let Some(project) = self.project.clone() else { return };
         if let Some(i) = self.doc_index(id)
-            && self.docs[i].is_dirty()
+            && self.tabs[i].is_dirty()
             && !self.save(i)
         {
             return;
@@ -1368,28 +1441,36 @@ impl Editor {
             return;
         }
         self.rescan();
-        if let Some(i) = self.doc_index(id) {
-            let d = &mut self.docs[i];
+        if let Some(d) = self.doc_index(id).and_then(|i| self.tabs[i].graph_mut()) {
             d.id = new_id.clone();
             d.asset.name = new_id.name().to_string();
             d.mark_saved();
             d.revision += 1;
         }
+        // Generated files follow the asset (regeneration below fills them).
+        for t in &mut self.tabs {
+            if let Tab::Text(t) = t
+                && t.source == *id
+                && let Some(moved) = TextDoc::open(&project, new_id.clone(), t.lang)
+            {
+                *t = TextDoc { revision: t.revision + 1, ..moved };
+            }
+        }
         if id.ty == AssetType::Function {
             let (old_kind, new_kind) =
                 (format!("{FUNCTION_PREFIX}{}", id.path), format!("{FUNCTION_PREFIX}{}", new_id.path));
-            for i in 0..self.docs.len() {
-                if !self.docs[i].asset.nodes.values().any(|n| n.kind == old_kind) {
+            for d in self.tabs.iter_mut().filter_map(Tab::graph_mut) {
+                if !d.asset.nodes.values().any(|n| n.kind == old_kind) {
                     continue;
                 }
-                if self.docs[i].is_dirty() {
-                    self.docs[i].edit(|a| {
+                if d.is_dirty() {
+                    d.edit(|a| {
                         for n in a.nodes.values_mut().filter(|n| n.kind == old_kind) {
                             n.kind = new_kind.clone();
                         }
                     });
-                } else if let Some(Ok(a)) = self.disk.assets.get(&self.docs[i].id).cloned() {
-                    self.docs[i].reload(a);
+                } else if let Some(Ok(a)) = self.disk.assets.get(&d.id) {
+                    d.reload(a.clone());
                 }
             }
         }
@@ -1402,7 +1483,7 @@ impl Editor {
     fn delete(&mut self, id: &AssetId) {
         self.dialog = None;
         let Some(project) = self.project.clone() else { return };
-        if let Some(i) = self.doc_index(id) {
+        while let Some(i) = self.tabs.iter().position(|t| t.asset() == id) {
             self.close_tab(i, true);
         }
         if let Err(e) = ops::delete(&project, id) {
@@ -1487,7 +1568,7 @@ mod tests {
         let (dir, mut e) = project();
         let id = AssetId::new(AssetType::Material, "env/rock_wet");
         e.apply(Action::OpenAsset(id.clone()));
-        assert_eq!(e.docs.len(), 1);
+        assert_eq!(e.tabs.len(), 1);
         e.validate();
         assert!(!e.all_diagnostics().iter().any(Diagnostic::is_error), "{:?}", e.all_diagnostics());
         e.apply(Action::AddNode { kind: "stdlib::Time".into(), pos: (0.0, 0.0), link: None, params: Vec::new() });
@@ -1658,7 +1739,7 @@ mod tests {
         e.apply(Action::OpenAsset(rock.clone()));
         e.apply(Action::RenameDialog(AssetId::new(AssetType::Function, "common/wet_mask")));
         e.apply(Action::Submit("common/wetness".into()));
-        let d = &e.docs[e.doc_index(&rock).unwrap()];
+        let d = e.tabs[e.doc_index(&rock).unwrap()].graph().unwrap();
         assert!(d.asset.nodes.values().any(|n| n.kind == "function::common/wetness"));
         assert!(!d.is_dirty());
     }
@@ -1670,9 +1751,9 @@ mod tests {
         e.apply(Action::AddNode { kind: "stdlib::Time".into(), pos: (0.0, 0.0), link: None, params: Vec::new() });
         e.apply(Action::CloseTab(0));
         assert!(matches!(e.dialog, Some(Dialog::Confirm { .. })));
-        assert_eq!(e.docs.len(), 1);
+        assert_eq!(e.tabs.len(), 1);
         e.apply(Action::DiscardTab(0));
-        assert!(e.docs.is_empty());
+        assert!(e.tabs.is_empty());
         assert!(e.active.is_none());
     }
 
@@ -1683,15 +1764,66 @@ mod tests {
         e.config_path = Some(config.clone());
         e.apply(Action::OpenAsset(AssetId::new(AssetType::Material, "env/rock_wet")));
         e.apply(Action::OpenAsset(AssetId::new(AssetType::Material, "fx/hologram")));
+        e.regenerate();
+        e.apply(Action::ShowGenerated(AssetId::new(AssetType::Material, "fx/hologram"), Lang::Rust));
         e.apply(Action::ActivateTab(0));
         e.apply(Action::Quit);
         assert!(e.quit);
 
         let mut next = Editor::with_config(UserConfig::load(&config), Some(config));
         next.open_project(dir.path()).unwrap();
-        let open: Vec<_> = next.docs.iter().map(|d| d.id.path.as_str()).collect();
-        assert_eq!(open, ["env/rock_wet", "fx/hologram"]);
+        let open: Vec<_> = next.tabs.iter().map(Tab::title).collect();
+        assert_eq!(
+            open,
+            [
+                "shaders/env/rock_wet.material",
+                "shaders/fx/hologram.material",
+                "crates/shaders/src/materials/fx/hologram.rs"
+            ]
+        );
         assert_eq!(next.active, Some(0));
+    }
+
+    #[test]
+    fn generated_files_open_in_text_tabs() {
+        let (_dir, mut e) = project();
+        let rock = AssetId::new(AssetType::Material, "env/rock_wet");
+        let mask = AssetId::new(AssetType::Function, "common/wet_mask");
+        // Not generated yet: a warning instead of an empty tab.
+        e.apply(Action::ShowGenerated(rock.clone(), Lang::Wesl));
+        assert!(e.tabs.is_empty());
+        e.regenerate();
+        e.apply(Action::OpenAsset(rock.clone()));
+        e.apply(Action::ShowGenerated(rock.clone(), Lang::Wesl));
+        assert_eq!(e.tabs.len(), 2);
+        assert_eq!(e.active, Some(1));
+        assert!(e.doc().is_none(), "graph commands must not reach a text tab");
+        let t = e.tab().and_then(Tab::text).unwrap();
+        assert_eq!(t.rel, "assets/shaders/autogen/env/rock_wet.wesl");
+        assert!(t.text.as_deref().unwrap().starts_with("// AUTOGENERATED"));
+        // Showing it again activates the open tab.
+        e.apply(Action::ActivateTab(0));
+        e.apply(Action::ShowGenerated(rock.clone(), Lang::Wesl));
+        assert_eq!((e.tabs.len(), e.active), (2, Some(1)));
+        e.apply(Action::Copy);
+        assert!(e.copy_text.as_deref().unwrap().contains("fn fragment"));
+        // Functions have no Rust module.
+        e.apply(Action::ShowGenerated(mask.clone(), Lang::Rust));
+        assert_eq!(e.tabs.len(), 2);
+        // Regeneration refreshes the text; deleting the asset closes all of its tabs.
+        e.apply(Action::ShowGenerated(mask.clone(), Lang::Wesl));
+        let (path, original) = (e.tabs[1].text().unwrap().path.clone(), e.tabs[1].text().unwrap().text.clone());
+        std::fs::write(&path, format!("{}// stale\n", original.as_deref().unwrap())).unwrap();
+        e.apply(Action::ActivateTab(1));
+        assert!(e.tabs[1].text().unwrap().text.as_deref().unwrap().ends_with("// stale\n"), "activation re-reads");
+        let (rock_rev, mask_rev) = (e.tabs[1].text().unwrap().revision, e.tabs[2].text().unwrap().revision);
+        e.apply(Action::RegenAll);
+        assert_eq!(e.tabs[1].text().unwrap().text, original);
+        assert!(e.tabs[1].text().unwrap().revision > rock_rev);
+        assert_eq!(e.tabs[2].text().unwrap().revision, mask_rev, "an unchanged file keeps its view");
+        e.apply(Action::Delete(rock));
+        assert_eq!(e.tabs.len(), 1);
+        assert_eq!(e.tabs[0].asset(), &mask);
     }
 
     #[test]

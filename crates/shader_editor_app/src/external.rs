@@ -1,4 +1,5 @@
-//! Opening files in the user's default application ("Show generated WESL/Rust", spec §9).
+//! Opening files in the user's default application ("Show source", "Open in the default application" of a
+//! generated-file tab; spec §9, decision 0014).
 //!
 //! The child never inherits the editor's stdio: xdg-open 1.2 ignores `Terminal=true` in desktop entries and
 //! simply execs the handler, so a terminal editor (vim, helix — the usual handler of `text/x-csrc`, which is

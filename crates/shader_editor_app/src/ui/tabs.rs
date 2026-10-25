@@ -6,6 +6,7 @@ use bevy::ui_widgets::Button;
 use super::icons::{IconId, icon};
 use super::{HoverRow, OnActivate, TEXT, TEXT_DIM, text, tool_button};
 use crate::state::{Action, Actions, Editor};
+use crate::tab::Tab;
 
 #[derive(Component, Default, Clone)]
 pub struct TabsBar;
@@ -56,11 +57,15 @@ fn redraw(
     mut commands: Commands,
 ) {
     let key: Vec<(String, IconId, bool, bool)> = editor
-        .docs
+        .tabs
         .iter()
         .enumerate()
-        .map(|(i, d)| {
-            (d.id.source_rel(), IconId::for_asset(Some(d.asset.kind)), d.is_dirty(), editor.active == Some(i))
+        .map(|(i, t)| {
+            let icon = match t {
+                Tab::Graph(d) => IconId::for_asset(Some(d.asset.kind)),
+                Tab::Text(_) => IconId::Code,
+            };
+            (t.title(), icon, t.is_dirty(), editor.active == Some(i))
         })
         .collect();
     if last.as_ref() == Some(&key) {
@@ -69,9 +74,8 @@ fn redraw(
     let Ok(bar) = bar.single() else { return };
     *last = Some(key.clone());
     commands.entity(bar).despawn_children();
-    for (i, (rel, kind, dirty, active)) in key.into_iter().enumerate() {
-        let name = rel.trim_end_matches(".ron").to_string();
-        let label = if dirty { format!("{name} *") } else { name };
+    for (i, (title, kind, dirty, active)) in key.into_iter().enumerate() {
+        let label = if dirty { format!("{title} *") } else { title };
         commands.spawn_scene(bsn! { @tab(i, label, kind, active) ChildOf(bar) });
     }
 }

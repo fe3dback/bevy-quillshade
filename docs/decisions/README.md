@@ -17,3 +17,4 @@ Short records in the "context → decision → consequences" format. Numbering i
 | [0011](0011-named-routes.md) | Named routes (UE-like named reroutes): usages reference the declaration by node id |
 | [0012](0012-inline-pin-editors.md) | Inline value editors on nodes, RMB pin menu, polymorphic pin type |
 | [0013](0013-ui-icons.md) | UI icons: icon-rs SVGs rasterized at runtime with resvg, own icons drawn by hand |
+| [0014](0014-tab-content-kinds.md) | Tab content kinds (graph, read-only text) and syntax-highlighted generated files |

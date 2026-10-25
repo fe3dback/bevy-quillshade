@@ -11,6 +11,7 @@ use bevy::ui_widgets::{Activate, ScrollArea};
 use bevy_noodle::style::kit;
 
 use crate::state::{Action, Actions, Editor, NewKind, ViewRequest};
+use crate::tab::{Tab, ViewKind};
 
 pub mod browser;
 pub mod dialog;
@@ -20,6 +21,7 @@ pub mod log;
 pub mod palette;
 pub mod props;
 pub mod tabs;
+pub mod text_view;
 pub mod tooltip;
 
 use icons::{IconId, icon};
@@ -30,8 +32,20 @@ use tooltip::Tooltip;
 #[derive(Component, Default, Clone)]
 pub struct OnActivate(pub Action);
 
+/// The area the active tab's view fills (below the tab bar).
 #[derive(Component, Default, Clone)]
-pub struct CanvasHost;
+pub struct DocArea;
+
+/// A view in [`DocArea`]: shown only while the active tab is of its kind (the graph view also when no tab is
+/// open). Every view fills the area with a dark background; the [`DocKindText`] watermark stays on top.
+#[derive(Component, Clone)]
+pub struct ViewOf(pub ViewKind);
+
+impl Default for ViewOf {
+    fn default() -> Self {
+        ViewOf(ViewKind::Graph)
+    }
+}
 
 #[derive(Component, Default, Clone)]
 pub struct EditorCanvasMarker;
@@ -42,7 +56,7 @@ pub struct EmptyHint;
 #[derive(Component, Default, Clone)]
 pub struct StatusText;
 
-/// Watermark in the main view's bottom-left corner naming the open document's type.
+/// Watermark in the main view's bottom-right corner naming the open document's type.
 #[derive(Component, Default, Clone)]
 pub struct DocKindText;
 
@@ -53,6 +67,8 @@ pub const ROW_ACTIVE: Color = Color::srgba(0.35, 0.55, 0.95, 0.30);
 pub const PANEL_BG: Color = Color::srgb_u8(32, 34, 39);
 pub const HEADER_BG: Color = Color::srgb_u8(40, 42, 48);
 pub const BORDER: Color = Color::srgb_u8(20, 21, 24);
+/// Background of document views (the window clear color the graph canvas shows through).
+pub const VIEW_BG: Color = Color::srgb_u8(24, 25, 29);
 
 pub struct UiPlugin;
 
@@ -61,6 +77,7 @@ impl Plugin for UiPlugin {
         app.add_plugins((
             browser::BrowserPlugin,
             tabs::TabsPlugin,
+            text_view::TextViewPlugin,
             props::PropsPlugin,
             log::LogPlugin,
             dialog::DialogPlugin,
@@ -70,7 +87,7 @@ impl Plugin for UiPlugin {
             tooltip::TooltipPlugin,
         ))
         .add_systems(Startup, spawn_layout)
-        .add_systems(Update, (show_empty_hint, show_doc_kind, show_status))
+        .add_systems(Update, (show_active_view, show_empty_hint, show_doc_kind, show_status))
         .add_observer(activate_action)
         .add_observer(row_hover_on)
         .add_observer(row_hover_off);
@@ -273,22 +290,24 @@ fn spawn_layout(mut commands: Commands) {
                     Node { flex_direction: FlexDirection::Row, min_height: px(30), align_items: AlignItems::End, column_gap: px(1), padding: UiRect::left(px(4)) }
                     BackgroundColor(HEADER_BG)
                     --
-                    CanvasHost
+                    DocArea
                     Node { flex_grow: 1.0, min_height: px(0) }
                     Children [
-                        @kit::canvas() EditorCanvasMarker
+                        @kit::canvas() EditorCanvasMarker ViewOf(ViewKind::Graph)
+                        --
+                        @text_view::text_view()
                         --
                         EmptyHint
                         Node { position_type: PositionType::Absolute, left: px(24), top: px(24) }
                         Pickable::IGNORE
                         Children [ @text("Open an asset from the browser (or create one with +Pbr / +Unlit / +2D / +Fn).", TEXT_DIM, 14.0) ]
                         --
-                        // Over the document's view (the graph canvas today), whatever view the type gets.
+                        // Over the active view, whatever kind it is.
                         DocKindText
                         Text("")
                         TextFont { font_size: FontSize::Px(72.0), weight: FontWeight::BOLD }
                         TextColor(Color::srgba(1.0, 1.0, 1.0, 0.1))
-                        Node { position_type: PositionType::Absolute, left: px(20), bottom: px(8) }
+                        Node { position_type: PositionType::Absolute, right: px(20), bottom: px(8) }
                         Pickable::IGNORE
                         --
                         @crate::ui::input::minimap()
@@ -326,25 +345,35 @@ fn spawn_layout(mut commands: Commands) {
     });
 }
 
+fn show_active_view(editor: Res<Editor>, mut q: Query<(&ViewOf, &mut Visibility)>) {
+    let active = editor.tab().map_or(ViewKind::Graph, Tab::view);
+    for (view, mut v) in &mut q {
+        v.set_if_neq(if view.0 == active { Visibility::Inherited } else { Visibility::Hidden });
+    }
+}
+
 fn show_empty_hint(editor: Res<Editor>, mut q: Query<&mut Visibility, With<EmptyHint>>) {
-    let want = if editor.doc().is_none() { Visibility::Inherited } else { Visibility::Hidden };
+    let want = if editor.tab().is_none() { Visibility::Inherited } else { Visibility::Hidden };
     for mut v in &mut q {
         v.set_if_neq(want);
     }
 }
 
-/// Watermark text for a document type.
-fn doc_kind_label(kind: AssetKind) -> &'static str {
-    match kind {
-        AssetKind::Function => "function",
-        AssetKind::Material(MaterialKind::Pbr3d(_)) => "pbr3d",
-        AssetKind::Material(MaterialKind::Unlit3d(_)) => "unlit3d",
-        AssetKind::Material(MaterialKind::Sprite2d(_)) => "sprite2d",
+/// Watermark text for a tab: the asset type of a graph, the language of a generated file.
+fn doc_kind_label(tab: &Tab) -> &'static str {
+    match tab {
+        Tab::Graph(d) => match d.asset.kind {
+            AssetKind::Function => "function",
+            AssetKind::Material(MaterialKind::Pbr3d(_)) => "pbr3d",
+            AssetKind::Material(MaterialKind::Unlit3d(_)) => "unlit3d",
+            AssetKind::Material(MaterialKind::Sprite2d(_)) => "sprite2d",
+        },
+        Tab::Text(t) => t.lang.label(),
     }
 }
 
 fn show_doc_kind(editor: Res<Editor>, mut q: Query<&mut Text, With<DocKindText>>) {
-    let label = editor.doc().map_or("", |d| doc_kind_label(d.asset.kind));
+    let label = editor.tab().map_or("", doc_kind_label);
     for mut t in &mut q {
         if t.0 != label {
             t.0 = label.into();

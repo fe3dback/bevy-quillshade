@@ -103,13 +103,15 @@ Bevy reloads the shader without a restart.
 
 On the left is the asset browser (the `shaders/` tree: create a Pbr3d/Unlit3d/Sprite2d material, a function,
 a folder; rename, move by dragging onto a folder, delete; RMB → show the
-generated WESL/Rust), in the center the tabs and the canvas, on the right the properties (node parameters, input
+generated WESL/Rust in a read-only, syntax-highlighted tab), in the center the tabs and the canvas, on the right the properties (node parameters, input
 default values, asset blend mode / two-sided / shading), at the bottom the log (click — focus the node).
 The browser is an IDE-style file tree: folders with expand carets, an icon per asset kind (function, Pbr3d,
 Unlit3d, Sprite2d); tabs, the `+Pbr`/`+Unlit`/`+2D`/`+Fn`/`+Folder` buttons and the browser's RMB menus show icons
 too. In the toolbar Save / Save all / Undo / Redo are icon-only buttons; hover a toolbar button for its name and
-hotkey. The bottom-left corner of the main view shows the open document's type (`pbr3d`, `unlit3d`, `sprite2d`,
-`function`) as a faint watermark over the graph. Icons come from [icon-rs](https://crates.io/crates/icon-rs), plus a few
+hotkey. The bottom-right corner of the main view shows the open document's type (`pbr3d`, `unlit3d`, `sprite2d`,
+`function`, or `wesl`/`rust` for a generated file) as a faint watermark over the view.
+Generated-file tabs refresh after every regeneration; Ctrl+C there copies the whole file, and the header has
+"Open in the default application". Icons come from [icon-rs](https://crates.io/crates/icon-rs), plus a few
 drawn by hand in `crates/shader_editor_app/icons/`.
 Validation runs live: nodes with errors are outlined in red, with warnings — in yellow.
 
@@ -123,7 +125,7 @@ title (ScalarParameter's slider spans Slider Min..Max). RMB on an input pin: the
 | --- | --- |
 | Save (and regenerate) / all | Ctrl+S / Ctrl+Shift+S |
 | Undo / redo | Ctrl+Z / Ctrl+Y, Ctrl+Shift+Z |
-| Copy / cut / paste / duplicate | Ctrl+C / Ctrl+X / Ctrl+V / Ctrl+D |
+| Copy / cut / paste / duplicate | Ctrl+C / Ctrl+X / Ctrl+V / Ctrl+D (in a generated-file tab Ctrl+C copies the file) |
 | Delete selection | Delete, Backspace |
 | Focus selection / whole graph | F / Home |
 | Node palette (search by name, category, synonyms: `*`, `+`, `lerp`) | Tab, RMB click on the canvas |
@@ -135,10 +137,11 @@ title (ScalarParameter's slider spans Slider Min..Max). RMB on an input pin: the
 | Named route: a wire without a visible wire (Named Route + one usage per place) | palette: "Named Route", then "Named Route Usage: {name}" |
 | Auto-layout the selection (or the whole graph) | Ctrl+L |
 | Close tab / next tab | Ctrl+W (or MMB on the tab) / Ctrl+Tab |
+| Scroll a generated file horizontally | Shift+wheel |
 | Open project / quit | Ctrl+O / Ctrl+Q |
 
 Pan — drag with the right (or middle) mouse button (an RMB press that does not move is a click), zoom — wheel, box select — LMB on empty space; the minimap
-in the bottom right is clickable. Unsaved tabs are marked with `*`; on close and on an external change
+in the bottom left is clickable. Unsaved tabs are marked with `*`; on close and on an external change
 of the file (git checkout) the editor asks what to do. Window size, recent projects and open
 tabs are stored in `~/.config/shader-editor/config.ron`.
 

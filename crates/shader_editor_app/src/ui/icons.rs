@@ -58,10 +58,12 @@ pub enum IconId {
     AutoLayout,
     Comment,
     Fit,
+    Copy,
+    OpenExternal,
 }
 
 impl IconId {
-    pub const ALL: [IconId; 22] = [
+    pub const ALL: [IconId; 24] = [
         IconId::File,
         IconId::Folder,
         IconId::FolderOpen,
@@ -84,6 +86,8 @@ impl IconId {
         IconId::AutoLayout,
         IconId::Comment,
         IconId::Fit,
+        IconId::Copy,
+        IconId::OpenExternal,
     ];
 
     fn source(self) -> Icon {
@@ -110,6 +114,8 @@ impl IconId {
             IconId::AutoLayout => AUTO_LAYOUT,
             IconId::Comment => icon_rs::COMMENTS,
             IconId::Fit => FIT,
+            IconId::Copy => icon_rs::COPY,
+            IconId::OpenExternal => icon_rs::OPEN_EXTERNAL,
         }
     }
 

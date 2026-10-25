@@ -104,6 +104,9 @@ atomic write. Key facts that span several files:
   bevy_noodle's scene history.
 - Connection validity is decided by `doc::connection_error` via a custom `ConnectionCheck` (bevy_noodle ports are all
   `PortType::ANY`).
+- Tabs are `tab::Tab` (graph `Doc` or read-only `TextDoc` of a generated file); `Editor::doc()` is `None` on a
+  non-graph tab. Each content kind has a view in `ui::DocArea` tagged `ViewOf(ViewKind)` (decision 0014 lists what
+  a new kind needs). WESL/Rust highlighting is our own lexer (`highlight.rs`).
 - UI is pure Bevy UI + Feathers (`bsn!`); **no egui**. Workarounds for Feathers 0.20 bugs are in `fixes.rs`.
 - `EditorCorePlugin` runs without a window — logic is tested in `state::tests` and `tests/ui_smoke.rs`.
 - User config: `$XDG_CONFIG_HOME/shader-editor/config.ron` (window size, recent projects, open tabs).
@@ -148,7 +151,7 @@ hand-drawn ones, rasterized at runtime with resvg (`crates/shader_editor_app/src
 
 ### Visual checks (debug env hooks)
 
-- Editor: `SHADER_EDITOR_SCREENSHOT=out.png [SHADER_EDITOR_OPEN=env/rock_wet.material.ron]
+- Editor: `SHADER_EDITOR_SCREENSHOT=out.png [SHADER_EDITOR_OPEN=env/rock_wet.material.ron[#wesl|#rust]]
   [SHADER_EDITOR_SELECT=stdlib::Lerp] [SHADER_EDITOR_DEMO=palette|wire|dialog|menu] cargo run -- examples/sample_game`
   — renders, saves the PNG and exits. `SHADER_EDITOR_INPUT=drag|rmb_click|rmb_pan|mmb_pan|slider|color|pin_rmb|hover`
   (+ `SHADER_EDITOR_INPUT_NODE=<id>`, `SHADER_EDITOR_INPUT_TRACE=1`, `SHADER_EDITOR_ZOOM=<f32>`) plays a scripted mouse

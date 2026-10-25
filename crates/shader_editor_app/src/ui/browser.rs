@@ -9,6 +9,7 @@ use super::dialog::open_icon_menu;
 use super::icons::{IconId, icon};
 use super::{HoverRow, ROW_ACTIVE, TEXT, TEXT_DIM, text};
 use crate::state::{Action, Actions, Editor, GenFile, NewKind};
+use crate::tab::{Lang, Tab};
 
 #[derive(Component, Default, Clone)]
 pub struct BrowserBody;
@@ -79,9 +80,9 @@ fn redraw(
 ) {
     let key = (
         editor.ui.browser,
-        editor.doc().map(|d| d.id.clone()),
+        editor.tab().map(|t| t.asset().clone()),
         editor.diags.values().map(|v| v.iter().filter(|d| d.is_error()).count()).sum(),
-        editor.docs.iter().map(|d| d.is_dirty()).collect(),
+        editor.tabs.iter().map(Tab::is_dirty).collect(),
     );
     if last.as_ref() == Some(&key) {
         return;
@@ -93,7 +94,7 @@ fn redraw(
         commands.spawn_scene(bsn! { @text("No project open", TEXT_DIM, 13.0) ChildOf(body) });
         return;
     }
-    let active = editor.doc().map(|d| d.id.clone());
+    let active = editor.tab().map(|t| t.asset().clone());
     let errors: BTreeSet<&AssetId> =
         editor.diags.iter().filter(|(_, v)| v.iter().any(|d| d.is_error())).map(|(k, _)| k).collect();
 
@@ -121,7 +122,7 @@ fn redraw(
                 continue;
             }
             let icons = row_icons(None, IconId::for_asset(editor.asset_kind(id)));
-            let dirty = editor.doc_index(id).is_some_and(|i| editor.docs[i].is_dirty());
+            let dirty = editor.doc_index(id).is_some_and(|i| editor.tabs[i].is_dirty());
             let label = format!("{}{}", id.name(), if dirty { " *" } else { "" });
             let r = BrowserRow { folder: None, asset: Some(id.clone()) };
             let (is_active, err) = (active.as_ref() == Some(id), errors.contains(id));
@@ -186,13 +187,13 @@ fn click_row(
                 (Some(IconId::Edit), "Rename...".into(), Action::RenameDialog(id.clone())),
                 (Some(IconId::MoveToFolder), "Move to...".into(), Action::MoveDialog(id.clone())),
                 (Some(IconId::Delete), "Delete...".into(), Action::DeleteDialog(id.clone())),
-                (Some(IconId::Code), "Show generated WESL".into(), Action::ShowFile(id.clone(), GenFile::Wesl)),
+                (Some(IconId::Code), "Show generated WESL".into(), Action::ShowGenerated(id.clone(), Lang::Wesl)),
             ];
             if id.ty == AssetType::Material {
                 items.push((
                     Some(IconId::Code),
                     "Show generated Rust".into(),
-                    Action::ShowFile(id.clone(), GenFile::Rust),
+                    Action::ShowGenerated(id.clone(), Lang::Rust),
                 ));
             }
             items.push((
