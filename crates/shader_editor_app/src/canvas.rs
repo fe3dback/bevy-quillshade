@@ -22,8 +22,8 @@ use shader_project::AssetId;
 use crate::doc::{connection_error, node_signature, route_declarations};
 use crate::inline::{Inline, inline_for_param, inline_for_pin, inline_scene};
 use crate::state::{Action, Actions, Editor, Link, PropTarget, ViewRequest, display_value};
-use crate::ui::curve_preview;
 use crate::ui::props::PropField;
+use crate::ui::{const_preview, curve_preview};
 
 /// Moves a frame makes to carry the nodes inside it.
 pub const CARRIED: EditOrigin = EditOrigin::Custom(1);
@@ -170,8 +170,12 @@ pub fn node_title(editor: &Editor, asset: &Asset, id: &str) -> String {
         }
         _ if n.kind.starts_with("stdlib::Constant") => params.get("value").map(short).unwrap_or(name),
         _ => {
-            // Sample Curve: the curve's name (decision 0015).
-            let curve = def.params().into_iter().find(|p| p.kind == ParamKind::Curve).map(|c| p(&c.id));
+            // Sample Curve: the curve's name (decision 0015); Global*: the constant's name (decision 0017).
+            let curve = def
+                .params()
+                .into_iter()
+                .find(|p| matches!(p.kind, ParamKind::Curve | ParamKind::GlobalConst(_)))
+                .map(|c| p(&c.id));
             match curve.filter(|c| !c.is_empty()) {
                 Some(path) => format!("{} ({name})", path.rsplit('/').next().unwrap_or(&path)),
                 None => name,
@@ -260,6 +264,9 @@ fn node_scene(editor: &Editor, asset: &Asset, path: &str, id: &str, canvas: Enti
     let params = editor.registry.resolved_params(&n.kind, &n.params);
     if curve_preview::has_preview(editor, &n.kind) {
         rows.push(Box::new(curve_preview::node_preview(id)));
+    }
+    if let Some(ty) = const_preview::preview_type(editor, &n.kind) {
+        rows.push(Box::new(const_preview::node_preview(id, ty)));
     }
     if let Some((key, inline)) = inline_for_param(&n.kind, &params) {
         wide |= matches!(inline, Inline::Vector(_));

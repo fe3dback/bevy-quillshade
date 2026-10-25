@@ -5,12 +5,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use shader_codegen_wesl::check::BevySources;
+use shader_graph_core::consts::{ConstType, GlobalConst, GlobalConsts};
 use shader_graph_core::curve::{Curve, Interp};
+use shader_graph_core::ident::check_ident;
 use shader_graph_core::ir::declared_function_sig;
 use shader_graph_core::model::{
     Asset, AssetKind, BlendMode, MaterialKind, NodeId, PbrSettings, Shading, SpriteSettings, UnlitSettings,
 };
-use shader_graph_core::registry::{FUNCTION_PREFIX, NodeRole};
+use shader_graph_core::registry::{FUNCTION_PREFIX, NodeRole, const_refs};
 use shader_graph_core::{Code, Diagnostic, FunctionSig, PinType, Registry, Value};
 use shader_project::regen::{project_registry, rust_file, wesl_file};
 use shader_project::watch::ShadersWatcher;
@@ -18,6 +20,7 @@ use shader_project::{AssetId, AssetSet, AssetType, Project, RegenOptions, Scope,
 
 use crate::autolayout;
 use crate::config::{ProjectTabs, UserConfig};
+use crate::consts_doc::ConstsDoc;
 use crate::curve_doc::CurveDoc;
 use crate::doc::{ClipboardData, Doc, bounds, connection_error, node_signature};
 use crate::search::{self, WireEnd};
@@ -31,11 +34,12 @@ pub enum NewKind {
     Sprite2d,
     Function,
     Curve,
+    Consts,
 }
 
 impl NewKind {
-    pub const ALL: [NewKind; 5] =
-        [NewKind::Pbr3d, NewKind::Unlit3d, NewKind::Sprite2d, NewKind::Function, NewKind::Curve];
+    pub const ALL: [NewKind; 6] =
+        [NewKind::Pbr3d, NewKind::Unlit3d, NewKind::Sprite2d, NewKind::Function, NewKind::Curve, NewKind::Consts];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -44,6 +48,7 @@ impl NewKind {
             NewKind::Sprite2d => "Material (Sprite2d)",
             NewKind::Function => "Function",
             NewKind::Curve => "Curve",
+            NewKind::Consts => "Global Consts",
         }
     }
 
@@ -52,7 +57,7 @@ impl NewKind {
             NewKind::Pbr3d => Some(MaterialKind::Pbr3d(PbrSettings::default())),
             NewKind::Unlit3d => Some(MaterialKind::Unlit3d(UnlitSettings::default())),
             NewKind::Sprite2d => Some(MaterialKind::Sprite2d(SpriteSettings::default())),
-            NewKind::Function | NewKind::Curve => None,
+            NewKind::Function | NewKind::Curve | NewKind::Consts => None,
         }
     }
 
@@ -61,6 +66,7 @@ impl NewKind {
         match self {
             NewKind::Function => "new_function",
             NewKind::Curve => "new_curve",
+            NewKind::Consts => "new_consts",
             _ => "new_material",
         }
     }
@@ -94,6 +100,14 @@ pub enum PropTarget {
     CurvePoint(usize),
     /// Interpolation the active curve view draws (editor-only).
     CurvePreview,
+    /// Value of a constant of the active table (decision 0017).
+    Const(String),
+    /// Type of a constant of the active table (a change may ask first).
+    ConstType(String),
+    /// Name in the active table's add form.
+    ConstDraftName,
+    /// Type in the active table's add form.
+    ConstDraftType,
 }
 
 /// Which text a dialog's input submits to.
@@ -145,6 +159,19 @@ pub enum CurveAction {
     },
     /// Moves the selected points by `(dt, dvalue)` (arrow keys).
     Nudge((f32, f32)),
+}
+
+/// Edits of the active global constant table (decision 0017).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConstsAction {
+    /// Adds the constant of the add form.
+    Add,
+    /// Changes a constant's type; `confirmed` once the user agreed to clear the references that break.
+    SetType { name: String, ty: ConstType, confirmed: bool },
+    /// Deletes a constant; `confirmed` once the user agreed to clear its references.
+    Delete { name: String, confirmed: bool },
+    /// Undo (`undo`) or redo in the table; asks first when the step retypes or removes a constant nodes read.
+    History { undo: bool, confirmed: bool },
 }
 
 /// Which tabs the tab context menu closes, relative to the tab it was opened on.
@@ -269,6 +296,7 @@ pub enum Action {
         pin: String,
     },
     Curve(CurveAction),
+    Consts(ConstsAction),
     AutoLayout,
     AddComment(Option<(f32, f32)>),
     AddReroute {
@@ -402,6 +430,18 @@ impl Default for Editor {
     }
 }
 
+/// Text of the confirmation before an edit breaking the readers of global constants `names`.
+fn usage_message(what: &str, names: &[String], usages: &[(AssetId, usize)]) -> String {
+    let nodes: usize = usages.iter().map(|u| u.1).sum();
+    let list: Vec<String> = usages.iter().map(|(id, n)| format!("{} ({n} node(s))", id.source_rel())).collect();
+    let consts = names.iter().map(|n| format!("`{n}`")).collect::<Vec<_>>().join(", ");
+    format!(
+        "{what} breaks {nodes} node(s) reading {consts} in:\n{}\nTheir references are cleared (they will output 1.0) \
+         and the changes are saved.",
+        list.join("\n")
+    )
+}
+
 fn kind_of(set: &AssetSet, id: &AssetId) -> Option<AssetKind> {
     set.assets.get(id).and_then(|a| a.as_ref().ok()).map(|a| a.kind)
 }
@@ -469,6 +509,35 @@ impl Editor {
     /// Tab index of a curve document.
     pub fn curve_index(&self, id: &AssetId) -> Option<usize> {
         self.tabs.iter().position(|t| t.curve().is_some_and(|c| c.id == *id))
+    }
+
+    /// The active tab's constant table.
+    pub fn consts_doc(&self) -> Option<&ConstsDoc> {
+        self.tab().and_then(Tab::consts)
+    }
+
+    pub fn consts_doc_mut(&mut self) -> Option<&mut ConstsDoc> {
+        self.active.and_then(|i| self.tabs.get_mut(i)).and_then(Tab::consts_mut)
+    }
+
+    /// Tab index of a constant table.
+    pub fn consts_index(&self, id: &AssetId) -> Option<usize> {
+        self.tabs.iter().position(|t| t.consts().is_some_and(|c| c.id == *id))
+    }
+
+    /// Tab index of an asset's editable document (graph, curve or constant table).
+    pub fn asset_index(&self, id: &AssetId) -> Option<usize> {
+        self.doc_index(id).or_else(|| self.curve_index(id)).or_else(|| self.consts_index(id))
+    }
+
+    /// Every global constant by name with its table: open tables as edited, the others as saved. A name defined in
+    /// several tables keeps the first one (path order), as in code generation.
+    pub fn global_consts(&self) -> BTreeMap<String, (AssetId, GlobalConst)> {
+        let mut set = AssetSet { consts: self.disk.consts.clone(), ..Default::default() };
+        for c in self.tabs.iter().filter_map(Tab::consts) {
+            set.consts.insert(c.id.clone(), Ok(c.table.clone()));
+        }
+        shader_project::regen::collect_consts(&set).0
     }
 
     /// Paths of the project's loadable curve assets (choices of a `Curve` parameter).
@@ -588,11 +657,21 @@ impl Editor {
     }
 
     pub fn open_asset(&mut self, id: &AssetId) {
-        if let Some(i) = self.doc_index(id).or_else(|| self.curve_index(id)) {
+        if let Some(i) = self.asset_index(id) {
             self.activate(i);
             return;
         }
         let Some(project) = &self.project else { return };
+        if id.ty == AssetType::Consts {
+            match assets::load_consts(project, id) {
+                Ok(c) => {
+                    self.tabs.push(Tab::Consts(ConstsDoc::new(id.clone(), c)));
+                    self.activate(self.tabs.len() - 1);
+                }
+                Err(e) => self.io_error(&format!("cannot open {}", id.source_rel()), e),
+            }
+            return;
+        }
         if id.ty == AssetType::Curve {
             match assets::load_curve(project, id) {
                 Ok(c) => {
@@ -629,6 +708,7 @@ impl Editor {
                 let msg = format!("{} does not exist yet (save the asset to generate it)", t.rel);
                 self.push_msg(Level::Warning, msg);
             }
+            None if !id.ty.has_wesl() => self.push_msg(Level::Warning, "constant tables generate no files".into()),
             None => self.push_msg(Level::Warning, "only materials have a Rust module".into()),
         }
     }
@@ -814,6 +894,9 @@ impl Editor {
         for c in self.tabs.iter().filter_map(Tab::curve) {
             set.curves.insert(c.id.clone(), Ok(c.curve.clone()));
         }
+        for c in self.tabs.iter().filter_map(Tab::consts) {
+            set.consts.insert(c.id.clone(), Ok(c.table.clone()));
+        }
         set
     }
 
@@ -823,7 +906,9 @@ impl Editor {
     }
 
     fn revisions(&self) -> Vec<(AssetId, u64)> {
-        self.docs().map(|d| (d.id.clone(), d.revision)).collect()
+        // Open tables too: a constant's type or name changes the diagnostics of the graphs reading it.
+        let tables = self.tabs.iter().filter_map(Tab::consts).map(|c| (c.id.clone(), c.revision));
+        self.docs().map(|d| (d.id.clone(), d.revision)).chain(tables).collect()
     }
 
     /// Live validation (dry run of the whole pipeline on the unsaved state).
@@ -918,6 +1003,7 @@ impl Editor {
         let (id, result) = match self.tabs.get(i) {
             Some(Tab::Graph(d)) => (d.id.clone(), ops::save(&project, &d.id, &d.asset)),
             Some(Tab::Curve(c)) => (c.id.clone(), ops::save_curve(&project, &c.id, &c.curve)),
+            Some(Tab::Consts(c)) => (c.id.clone(), ops::save_consts(&project, &c.id, &c.table)),
             _ => return false,
         };
         if let Err(e) = result {
@@ -927,6 +1013,7 @@ impl Editor {
         match &mut self.tabs[i] {
             Tab::Graph(d) => d.mark_saved(),
             Tab::Curve(c) => c.mark_saved(),
+            Tab::Consts(c) => c.mark_saved(),
             Tab::Text(_) => {}
         }
         self.info(format!("Saved {}", id.source_rel()));
@@ -975,6 +1062,10 @@ impl Editor {
                     Some(Ok(on_disk)) => Curve::from_ron(&c.saved).ok().as_ref() != Some(on_disk),
                     _ => false,
                 },
+                Tab::Consts(c) => match self.disk.consts.get(&id) {
+                    Some(Ok(on_disk)) => GlobalConsts::from_ron(&c.saved).ok().as_ref() != Some(on_disk),
+                    _ => false,
+                },
                 Tab::Text(_) => false,
             };
             if !changed {
@@ -1010,6 +1101,10 @@ impl Editor {
                 _ => return false,
             },
             Tab::Curve(c) => match self.disk.curves.get(&id) {
+                Some(Ok(on_disk)) => c.reload(on_disk.clone()),
+                _ => return false,
+            },
+            Tab::Consts(c) => match self.disk.consts.get(&id) {
                 Some(Ok(on_disk)) => c.reload(on_disk.clone()),
                 _ => return false,
             },
@@ -1180,9 +1275,13 @@ impl Editor {
                 if let Some(c) = self.curve_doc_mut() {
                     c.end_merge();
                 }
+                if let Some(c) = self.consts_doc_mut() {
+                    c.end_merge();
+                }
                 self.ui.props += 1;
             }
             Action::Curve(a) => self.curve_action(a),
+            Action::Consts(a) => self.consts_action(a),
             Action::SetPinType { node, ty } => self.set_pin_type(&node, ty),
             Action::ResetInput { node, pin } => {
                 if let Some(d) = self.doc_mut() {
@@ -1256,9 +1355,18 @@ impl Editor {
                 });
             }
             Action::DeleteDialog(id) => {
+                let message = if id.ty.has_wesl() {
+                    format!("Delete {} and its generated files?", id.source_rel())
+                } else {
+                    let names = self.owned_consts(&id, self.global_consts().into_keys());
+                    match self.const_usages(&names) {
+                        u if u.is_empty() => format!("Delete {}?", id.source_rel()),
+                        u => usage_message(&format!("Deleting {}", id.source_rel()), &names, &u),
+                    }
+                };
                 self.dialog = Some(Dialog::Confirm {
                     title: "Delete asset".into(),
-                    message: format!("Delete {} and its generated files?", id.source_rel()),
+                    message,
                     buttons: vec![("Cancel".into(), Action::CloseDialog), ("Delete".into(), Action::Delete(id))],
                 });
             }
@@ -1304,7 +1412,7 @@ impl Editor {
             Action::FocusDiagnostic(diag) => self.focus_diagnostic(&diag),
             Action::Reload(id) => {
                 self.dialog = None;
-                if let Some(i) = self.doc_index(&id).or_else(|| self.curve_index(&id))
+                if let Some(i) = self.asset_index(&id)
                     && self.reload_tab(i)
                 {
                     self.info(format!("Reloaded {}", id.source_rel()));
@@ -1321,6 +1429,11 @@ impl Editor {
                 }
                 if let (Some(c), Some(Ok(on_disk))) =
                     (self.curve_index(&id).and_then(|i| self.tabs[i].curve_mut()), self.disk.curves.get(&id))
+                {
+                    c.saved = on_disk.to_ron();
+                }
+                if let (Some(c), Some(Ok(on_disk))) =
+                    (self.consts_index(&id).and_then(|i| self.tabs[i].consts_mut()), self.disk.consts.get(&id))
                 {
                     c.saved = on_disk.to_ron();
                 }
@@ -1367,6 +1480,9 @@ impl Editor {
     }
 
     fn history(&mut self, undo: bool) {
+        if self.consts_doc().is_some() {
+            return self.consts_action(ConstsAction::History { undo, confirmed: false });
+        }
         let done = match self.active.and_then(|i| self.tabs.get_mut(i)) {
             Some(Tab::Graph(d)) => {
                 if undo {
@@ -1408,6 +1524,183 @@ impl Editor {
         if refresh {
             self.ui.props += 1;
         }
+    }
+
+    fn consts_action(&mut self, action: ConstsAction) {
+        let Some(c) = self.consts_doc() else { return };
+        let id = c.id.clone();
+        match action {
+            ConstsAction::Add => {
+                let (name, ty) = (c.draft_name.trim().to_string(), c.draft_ty);
+                let problem = match check_ident(&name) {
+                    Err(e) => Some(e),
+                    Ok(()) if c.table.get(&name).is_some() => Some(format!("`{name}` is already in this table")),
+                    Ok(()) => self
+                        .global_consts()
+                        .get(&name)
+                        .filter(|(table, _)| *table != id)
+                        .map(|(table, _)| format!("`{name}` is already defined in {table}")),
+                };
+                let Some(c) = self.consts_doc_mut() else { return };
+                match problem {
+                    Some(p) => {
+                        c.form_error = Some(p);
+                        c.relayout();
+                    }
+                    None => {
+                        c.add(&name, ty);
+                        c.reset_form();
+                    }
+                }
+            }
+            ConstsAction::SetType { name, ty, confirmed } => {
+                let Some(from) = c.table.get(&name).map(|k| k.ty) else { return };
+                if from == ty {
+                    return;
+                }
+                let what = format!("Changing `{name}` from {} to {}", from.label(), ty.label());
+                let again = Action::Consts(ConstsAction::SetType { name: name.clone(), ty, confirmed: true });
+                let names = self.owned_consts(&id, [name.clone()]);
+                self.breaking_edit(names, confirmed, &what, "Change type", again, |c| c.set_type(&name, ty));
+            }
+            ConstsAction::Delete { name, confirmed } => {
+                let what = format!("Deleting `{name}`");
+                let again = Action::Consts(ConstsAction::Delete { name: name.clone(), confirmed: true });
+                let names = self.owned_consts(&id, [name.clone()]);
+                self.breaking_edit(names, confirmed, &what, "Delete", again, |c| c.remove(&name));
+            }
+            ConstsAction::History { undo, confirmed } => {
+                let target = if undo { c.peek_undo() } else { c.peek_redo() };
+                let Some(target) = target else { return };
+                // Constants the step removes or retypes break their readers like a direct edit would.
+                let changed: Vec<String> = c
+                    .table
+                    .consts
+                    .iter()
+                    .filter(|k| target.get(&k.name).is_none_or(|t| t.ty != k.ty))
+                    .map(|k| k.name.clone())
+                    .collect();
+                let what = if undo { "Undo" } else { "Redo" };
+                let again = Action::Consts(ConstsAction::History { undo, confirmed: true });
+                let names = self.owned_consts(&id, changed);
+                self.breaking_edit(names, confirmed, what, what, again, |c| {
+                    if undo {
+                        c.undo();
+                    } else {
+                        c.redo();
+                    }
+                });
+            }
+        }
+        self.ui.props += 1;
+    }
+
+    /// Those of `names` the global constant table `table` defines (a name repeated in a later table belongs to the
+    /// first one, which nodes read).
+    fn owned_consts(&self, table: &AssetId, names: impl IntoIterator<Item = String>) -> Vec<String> {
+        let all = self.global_consts();
+        names.into_iter().filter(|n| all.get(n).is_some_and(|(t, _)| t == table)).collect()
+    }
+
+    /// Runs `apply` on the active table, an edit that breaks the readers of constants `names` (type change, delete,
+    /// an undo/redo doing either). Without readers it just runs. With readers and not `confirmed` yet it opens a
+    /// dialog listing them, whose OK runs `again`; once confirmed the edit runs, the table is saved and the readers'
+    /// references are cleared (decision 0017).
+    fn breaking_edit(
+        &mut self,
+        names: Vec<String>,
+        confirmed: bool,
+        what: &str,
+        ok: &str,
+        again: Action,
+        apply: impl FnOnce(&mut ConstsDoc),
+    ) {
+        self.dialog = None;
+        let usages = self.const_usages(&names);
+        if !usages.is_empty() && !confirmed {
+            self.dialog = Some(Dialog::Confirm {
+                title: "Constant in use".into(),
+                message: usage_message(what, &names, &usages),
+                buttons: vec![("Cancel".into(), Action::CloseDialog), (ok.into(), again)],
+            });
+            // The view shows the old state again under the dialog (a select already shows the new type).
+            if let Some(c) = self.consts_doc_mut() {
+                c.relayout();
+            }
+            return;
+        }
+        if let Some(c) = self.consts_doc_mut() {
+            apply(c);
+        }
+        if !usages.is_empty() {
+            // Saved with the cleared references: the table and its readers never disagree on disk.
+            if let Some(i) = self.active
+                && !self.save(i)
+            {
+                return;
+            }
+            self.clear_const_usages(&names);
+        }
+    }
+
+    /// Graphs whose nodes read any of global constants `names` (open documents as edited, the rest as saved), with
+    /// the number of such nodes.
+    pub fn const_usages(&self, names: &[String]) -> Vec<(AssetId, usize)> {
+        let mut out = Vec::new();
+        if names.is_empty() {
+            return out;
+        }
+        for (id, a) in &self.overridden_set().assets {
+            let Ok(a) = a else { continue };
+            let n = const_refs(a, &self.registry).iter().filter(|r| names.contains(&r.2)).count();
+            if n > 0 {
+                out.push((id.clone(), n));
+            }
+        }
+        out
+    }
+
+    /// Clears every reference to constants `names` (decision 0017): open graphs are edited (and saved unless they
+    /// had unsaved changes), closed ones are rewritten on disk; then the project regenerates.
+    fn clear_const_usages(&mut self, names: &[String]) {
+        let Some(project) = self.project.clone() else { return };
+        let registry = self.registry.clone();
+        let reads = |a: &Asset| const_refs(a, &registry).iter().any(|r| names.contains(&r.2));
+        let mut cleared = Vec::new();
+        for i in 0..self.tabs.len() {
+            let Some(d) = self.tabs[i].graph_mut() else { continue };
+            if !reads(&d.asset) {
+                continue;
+            }
+            let was_dirty = d.is_dirty();
+            d.edit(|a| {
+                for name in names {
+                    ops::clear_const_refs(a, &registry, name);
+                }
+            });
+            cleared.push(d.id.source_rel());
+            if !was_dirty {
+                self.save(i);
+            }
+        }
+        let ids: Vec<AssetId> = self.disk.assets.keys().filter(|id| self.doc_index(id).is_none()).cloned().collect();
+        for id in ids {
+            let Ok(mut a) = assets::load(&project, &id) else { continue };
+            if !reads(&a) {
+                continue;
+            }
+            for name in names {
+                ops::clear_const_refs(&mut a, &registry, name);
+            }
+            if let Err(e) = ops::save(&project, &id, &a) {
+                return self.io_error(&format!("Cannot save {}", id.source_rel()), e);
+            }
+            cleared.push(id.source_rel());
+        }
+        let list = names.iter().map(|n| format!("`{n}`")).collect::<Vec<_>>().join(", ");
+        self.info(format!("Cleared references to {list} in {}", cleared.join(", ")));
+        self.regenerate();
+        self.touch_all();
     }
 
     fn copy(&mut self) {
@@ -1534,6 +1827,12 @@ impl Editor {
                 return Some(Value::Float2([t, v]));
             }
             PropTarget::CurvePreview => return Some(Value::Str(self.curve_doc()?.preview.label().into())),
+            PropTarget::Const(name) => return Some(self.consts_doc()?.table.get(name)?.value.clone()),
+            PropTarget::ConstType(name) => {
+                return Some(Value::Str(self.consts_doc()?.table.get(name)?.ty.label().into()));
+            }
+            PropTarget::ConstDraftName => return Some(Value::Str(self.consts_doc()?.draft_name.clone())),
+            PropTarget::ConstDraftType => return Some(Value::Str(self.consts_doc()?.draft_ty.label().into())),
             _ => {}
         }
         let d = self.doc()?;
@@ -1602,6 +1901,9 @@ impl Editor {
             d.end_merge();
         }
         if is_final && let Some(c) = self.curve_doc_mut() {
+            c.end_merge();
+        }
+        if is_final && let Some(c) = self.consts_doc_mut() {
             c.end_merge();
         }
     }
@@ -1691,6 +1993,30 @@ impl Editor {
                 self.ui.props += 1;
                 return;
             }
+            PropTarget::Const(name) => {
+                if let Some(c) = self.consts_doc_mut() {
+                    c.set_value(name, value, merge);
+                }
+                return;
+            }
+            PropTarget::ConstType(name) => {
+                if let Some(ty) = ConstType::from_label(value.as_str()) {
+                    self.consts_action(ConstsAction::SetType { name: name.clone(), ty, confirmed: false });
+                }
+                return;
+            }
+            PropTarget::ConstDraftName => {
+                if let Some(c) = self.consts_doc_mut() {
+                    c.draft_name = value.as_str().to_string();
+                }
+                return;
+            }
+            PropTarget::ConstDraftType => {
+                if let (Some(c), Some(ty)) = (self.consts_doc_mut(), ConstType::from_label(value.as_str())) {
+                    c.draft_ty = ty;
+                }
+                return;
+            }
             _ => {}
         }
         let Some(d) = self.doc_mut() else { return };
@@ -1752,7 +2078,12 @@ impl Editor {
                 });
                 refresh = false;
             }
-            PropTarget::CurvePoint(_) | PropTarget::CurvePreview => {}
+            PropTarget::CurvePoint(_)
+            | PropTarget::CurvePreview
+            | PropTarget::Const(_)
+            | PropTarget::ConstType(_)
+            | PropTarget::ConstDraftName
+            | PropTarget::ConstDraftType => {}
         }
         if refresh {
             self.ui.props += 1;
@@ -1796,6 +2127,7 @@ impl Editor {
                 let r = match (kind, kind.material()) {
                     (_, Some(m)) => ops::create_material(&project, text, m),
                     (NewKind::Curve, None) => ops::create_curve(&project, text),
+                    (NewKind::Consts, None) => ops::create_consts(&project, text),
                     (_, None) => ops::create_function(&project, text),
                 };
                 match r {
@@ -1827,7 +2159,7 @@ impl Editor {
     fn rename(&mut self, id: &AssetId, new_path: &str) {
         self.dialog = None;
         let Some(project) = self.project.clone() else { return };
-        if let Some(i) = self.doc_index(id).or_else(|| self.curve_index(id))
+        if let Some(i) = self.asset_index(id)
             && self.tabs[i].is_dirty()
             && !self.save(i)
         {
@@ -1852,6 +2184,13 @@ impl Editor {
             c.curve.name = new_id.name().to_string();
             c.mark_saved();
             c.revision += 1;
+        }
+        if let Some(c) = self.consts_index(id).and_then(|i| self.tabs[i].consts_mut()) {
+            c.id = new_id.clone();
+            c.table.name = new_id.name().to_string();
+            c.mark_saved();
+            c.revision += 1;
+            c.relayout();
         }
         // Generated files follow the asset (regeneration below fills them).
         for t in &mut self.tabs {
@@ -1903,6 +2242,8 @@ impl Editor {
     fn delete(&mut self, id: &AssetId) {
         self.dialog = None;
         let Some(project) = self.project.clone() else { return };
+        // A deleted table's constants: their readers lose them (unless another table defines the same name).
+        let owned = self.owned_consts(id, self.global_consts().into_keys());
         while let Some(i) = self.tabs.iter().position(|t| t.asset() == id) {
             self.close_tab(i, true);
         }
@@ -1910,14 +2251,21 @@ impl Editor {
             return self.io_error("Cannot delete", e);
         }
         self.info(format!("Deleted {}", id.source_rel()));
-        self.regenerate();
+        self.rescan();
+        let left = self.global_consts();
+        let lost: Vec<String> = owned.into_iter().filter(|n| !left.contains_key(n)).collect();
+        if self.const_usages(&lost).is_empty() {
+            self.regenerate();
+        } else {
+            self.clear_const_usages(&lost);
+        }
         self.touch_all();
     }
 
     fn show_file(&mut self, id: &AssetId, which: GenFile) {
         let Some(project) = &self.project else { return };
         let path = match which {
-            GenFile::Wesl => Some(wesl_file(project, id)),
+            GenFile::Wesl => wesl_file(project, id),
             GenFile::Rust => rust_file(project, id),
             GenFile::Source => Some(id.file(project)),
         };
@@ -1927,6 +2275,7 @@ impl Editor {
                 let msg = format!("{} does not exist yet (save the asset to generate it)", project.rel(&p));
                 self.push_msg(Level::Warning, msg);
             }
+            None if !id.ty.has_wesl() => self.push_msg(Level::Warning, "constant tables generate no files".into()),
             None => self.push_msg(Level::Warning, "functions have no Rust module".into()),
         }
     }
@@ -2566,5 +2915,179 @@ mod tests {
                 .all(|q| q.0 == t || (q.0 - t - 0.05).abs() < 1e-6 || (q.0 - t - 0.1).abs() < 1e-6)
         );
         assert_eq!(p.iter().filter(|q| **q == (t, v)).count(), 1, "no copy on top of the original");
+    }
+
+    fn tuning() -> AssetId {
+        AssetId::new(AssetType::Consts, "common/tuning")
+    }
+
+    fn global_tint() -> AssetId {
+        AssetId::new(AssetType::Material, "fx/global_tint")
+    }
+
+    fn set(e: &mut Editor, target: PropTarget, value: Value) {
+        e.apply(Action::SetValue { target, value, merge: false });
+    }
+
+    /// The OK action of the open confirmation dialog.
+    fn confirm(e: &Editor) -> Action {
+        match &e.dialog {
+            Some(Dialog::Confirm { buttons, .. }) => buttons.last().unwrap().1.clone(),
+            other => panic!("no confirmation: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn consts_tab_adds_edits_and_saves() {
+        let (dir, mut e) = project();
+        e.apply(Action::NewAssetDialog(NewKind::Consts));
+        e.apply(Action::Submit("more/extra".into()));
+        let extra = AssetId::new(AssetType::Consts, "more/extra");
+        assert_eq!(e.consts_index(&extra), e.active);
+        assert!(e.doc().is_none(), "graph commands must not reach a table tab");
+        assert!(e.consts_doc().unwrap().table.consts.is_empty());
+
+        // The add form refuses bad and taken names (also from other tables).
+        for (name, problem) in [("Wind", "must"), ("glow_amount", "common/tuning")] {
+            set(&mut e, PropTarget::ConstDraftName, Value::Str(name.into()));
+            e.apply(Action::Consts(ConstsAction::Add));
+            let err = e.consts_doc().unwrap().form_error.clone().unwrap_or_default();
+            assert!(err.contains(problem), "{name}: {err}");
+        }
+        set(&mut e, PropTarget::ConstDraftName, Value::Str("wind".into()));
+        set(&mut e, PropTarget::ConstDraftType, Value::Str("vec3".into()));
+        e.apply(Action::Consts(ConstsAction::Add));
+        let c = e.consts_doc().unwrap();
+        assert_eq!((c.form_error.as_deref(), c.draft_name.as_str()), (None, ""));
+        assert_eq!(c.table.get("wind").unwrap().ty, ConstType::Vec3);
+
+        // A picker drag (all components, merged) is one undo step; a typed component another.
+        let target = PropTarget::Const("wind".into());
+        for x in [0.2, 0.4] {
+            for (comp, value) in [x, 0.5, 0.6, 1.0].into_iter().enumerate() {
+                e.apply(Action::SetComponent { target: target.clone(), comp, value, is_final: false });
+            }
+        }
+        e.apply(Action::CommitInline);
+        e.apply(Action::SetComponent { target: target.clone(), comp: 2, value: 3.0, is_final: true });
+        assert_eq!(e.current_value(&target), Some(Value::Float3([0.4, 0.5, 3.0])), "values beyond 0..1 are fine");
+        e.apply(Action::Undo);
+        assert_eq!(e.current_value(&target), Some(Value::Float3([0.4, 0.5, 0.6])));
+        e.apply(Action::Undo);
+        assert_eq!(e.current_value(&target), Some(Value::Float3([1.0; 3])), "new constants start at 1.0");
+        e.apply(Action::Redo);
+
+        // Without readers a type change needs no confirmation (and converts the value).
+        set(&mut e, PropTarget::ConstType("wind".into()), Value::Str("f32".into()));
+        assert!(e.dialog.is_none());
+        assert_eq!(e.current_value(&target), Some(Value::Float(0.4)));
+        e.apply(Action::Save);
+        let on_disk = assets::load_consts(e.project.as_ref().unwrap(), &extra).unwrap();
+        assert_eq!(on_disk.get("wind").unwrap().value, Value::Float(0.4));
+
+        // Editing a table regenerates the shaders reading it; unsaved values already show in the editor.
+        e.apply(Action::OpenAsset(tuning()));
+        let amount = PropTarget::Const("glow_amount".into());
+        e.apply(Action::SetComponent { target: amount, comp: 0, value: 0.9, is_final: true });
+        assert_eq!(e.global_consts()["glow_amount"].1.value, Value::Float(0.9));
+        e.apply(Action::Save);
+        let wesl = std::fs::read_to_string(dir.path().join("assets/shaders/autogen/fx/global_tint.wesl")).unwrap();
+        assert!(wesl.contains("0.9f"), "{wesl}");
+        assert!(!dir.path().join("assets/shaders/autogen/common/tuning.wesl").exists());
+    }
+
+    #[test]
+    fn breaking_const_edits_ask_and_clear_references() {
+        let (_dir, mut e) = project();
+        let usages = |e: &Editor, name: &str| e.const_usages(&[name.to_string()]);
+        e.apply(Action::OpenAsset(global_tint()));
+        e.apply(Action::OpenAsset(tuning()));
+        assert_eq!(usages(&e, "glow_amount"), vec![(global_tint(), 1)]);
+
+        // A type change of a constant in use waits for the confirmation.
+        let ty = PropTarget::ConstType("glow_amount".into());
+        set(&mut e, ty.clone(), Value::Str("vec2".into()));
+        assert_eq!(e.current_value(&ty), Some(Value::Str("f32".into())), "not changed before OK");
+        e.apply(Action::CloseDialog);
+        set(&mut e, ty.clone(), Value::Str("vec2".into()));
+        e.apply(confirm(&e));
+        assert!(e.dialog.is_none());
+        assert_eq!(e.current_value(&ty), Some(Value::Str("vec2".into())));
+        // OK saves the table with the cleared references.
+        assert!(!e.is_dirty());
+        let table = assets::load_consts(e.project.as_ref().unwrap(), &tuning()).unwrap();
+        assert_eq!(table.get("glow_amount").unwrap().ty, ConstType::Vec2);
+        // The open graph had no unsaved changes: edited and saved right away.
+        let g = e.doc_index(&global_tint()).unwrap();
+        let d = e.tabs[g].graph().unwrap();
+        assert!(!d.is_dirty());
+        assert!(const_refs(&d.asset, &e.registry).iter().all(|r| r.2 != "glow_amount"));
+        let on_disk = assets::load(e.project.as_ref().unwrap(), &global_tint()).unwrap();
+        assert!(const_refs(&on_disk, &e.registry).iter().all(|r| r.2 != "glow_amount"));
+        assert!(usages(&e, "glow_amount").is_empty());
+        e.validate();
+        let codes: Vec<Code> = e.diags[&global_tint()].iter().map(|d| d.code).collect();
+        assert_eq!(codes, vec![Code::W106]);
+
+        // Undo / redo of a type change asks too once a node reads the constant again.
+        let t = e.consts_index(&tuning()).unwrap();
+        e.apply(Action::ActivateTab(g));
+        let node = e.doc().unwrap().asset.nodes.iter().find(|(_, n)| n.kind == "stdlib::GlobalConstF32").unwrap();
+        let param = PropTarget::Param { node: node.0.clone(), key: "const".into() };
+        e.apply(Action::Undo); // the graph's clearing
+        assert_eq!(e.current_value(&param), Some(Value::Str("glow_amount".into())));
+        e.apply(Action::ActivateTab(t));
+        e.apply(Action::Undo);
+        assert!(e.dialog.is_some(), "undoing the type change breaks the reader");
+        assert_eq!(e.current_value(&ty), Some(Value::Str("vec2".into())));
+        e.apply(confirm(&e));
+        assert_eq!(e.current_value(&ty), Some(Value::Str("f32".into())));
+        assert!(usages(&e, "glow_amount").is_empty());
+
+        // Deleting a constant read by a closed graph rewrites that file.
+        let g = e.doc_index(&global_tint()).unwrap();
+        e.apply(Action::CloseTab(g));
+        e.apply(Action::Consts(ConstsAction::Delete { name: "fancy_stripes".into(), confirmed: false }));
+        assert!(e.consts_doc().unwrap().table.get("fancy_stripes").is_some());
+        e.apply(confirm(&e));
+        assert!(e.consts_doc().unwrap().table.get("fancy_stripes").is_none());
+        let on_disk = assets::load(e.project.as_ref().unwrap(), &global_tint()).unwrap();
+        assert!(const_refs(&on_disk, &e.registry).iter().all(|r| r.2 != "fancy_stripes"));
+        // An unused constant goes without asking (undo and delete again).
+        e.apply(Action::Undo);
+        assert!(e.dialog.is_none());
+        e.apply(Action::Consts(ConstsAction::Delete { name: "fancy_stripes".into(), confirmed: false }));
+        assert!(e.dialog.is_none());
+        assert!(e.consts_doc().unwrap().table.get("fancy_stripes").is_none());
+    }
+
+    #[test]
+    fn deleting_a_table_clears_the_references_to_its_constants() {
+        let (_dir, mut e) = project();
+        e.apply(Action::DeleteDialog(tuning()));
+        let Some(Dialog::Confirm { message, .. }) = &e.dialog else { panic!("no dialog") };
+        assert!(message.contains("fx/global_tint.material.ron (6 node(s))"), "{message}");
+        assert!(!message.contains("generated files"), "{message}");
+        e.apply(confirm(&e));
+        assert!(!tuning().file(e.project.as_ref().unwrap()).exists());
+        let on_disk = assets::load(e.project.as_ref().unwrap(), &global_tint()).unwrap();
+        assert!(const_refs(&on_disk, &e.registry).is_empty());
+        e.validate();
+        assert!(e.diags[&global_tint()].iter().all(|d| d.code == Code::W106));
+    }
+
+    #[test]
+    fn consts_tabs_are_restored_and_follow_renames() {
+        let (dir, mut e) = project();
+        e.apply(Action::OpenAsset(tuning()));
+        e.rename(&tuning(), "settings/tuning");
+        let moved = AssetId::new(AssetType::Consts, "settings/tuning");
+        assert_eq!(e.consts_doc().map(|c| &c.id), Some(&moved));
+        assert!(e.diags.values().flatten().all(|d| !d.is_error()), "names, not paths: users are unaffected");
+        e.save_tabs_to_config();
+        let config = e.config.clone();
+        let mut next = Editor::with_config(config, None);
+        next.open_project(dir.path()).unwrap();
+        assert_eq!(next.consts_doc().map(|c| &c.id), Some(&moved));
     }
 }

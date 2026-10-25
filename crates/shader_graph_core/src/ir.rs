@@ -3,6 +3,7 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
+use crate::consts::ConstLookup;
 use crate::curve::Interp;
 use crate::diag::{Code, Diagnostic, Diagnostics};
 use crate::ident::check_ident;
@@ -265,11 +266,12 @@ pub fn build_ir(
     registry: &Registry,
     functions: &dyn FunctionLookup,
     curves: &dyn CurveLookup,
+    consts: &dyn ConstLookup,
 ) -> IrResult {
     let routed = with_routes(asset, registry);
     let asset = routed.as_ref();
     let mut diags = Diagnostics::default();
-    let env = Env { asset_kind: asset.kind, asset_path: path, functions, curves };
+    let env = Env { asset_kind: asset.kind, asset_path: path, functions, curves, consts };
 
     if let Err(e) = check_ident(&asset.name) {
         diags.push(Diagnostic::new(Code::E005, format!("asset name: {e}")));

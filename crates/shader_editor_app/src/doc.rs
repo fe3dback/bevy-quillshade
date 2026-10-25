@@ -4,6 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use shader_graph_core::consts::NoConsts;
 use shader_graph_core::ir::{with_routes, would_create_cycle};
 use shader_graph_core::model::{Asset, Edge, Frame, Node, NodeId, new_node_id};
 use shader_graph_core::registry::{FunctionLookup, NoCurves, NodeRole, ROUTE_PARAM, Registry, SigCtx, Signature};
@@ -254,7 +255,7 @@ pub fn node_signature(
     let def = registry.get(&node.kind)?;
     let params = registry.resolved_params(&node.kind, &node.params);
     let connected = connected_types(asset, id, registry, functions, path, 0);
-    let env = Env { asset_kind: asset.kind, asset_path: path, functions, curves: &NoCurves };
+    let env = Env { asset_kind: asset.kind, asset_path: path, functions, curves: &NoCurves, consts: &NoConsts };
     Some(def.signature(&SigCtx {
         node_id: id,
         kind: &node.kind,
@@ -299,7 +300,7 @@ fn output_type(
     let def = registry.get(&n.kind)?;
     let params = registry.resolved_params(&n.kind, &n.params);
     let connected = connected_types(asset, node, registry, functions, path, depth);
-    let env = Env { asset_kind: asset.kind, asset_path: path, functions, curves: &NoCurves };
+    let env = Env { asset_kind: asset.kind, asset_path: path, functions, curves: &NoCurves, consts: &NoConsts };
     let sig = def.signature(&SigCtx {
         node_id: node,
         kind: &n.kind,

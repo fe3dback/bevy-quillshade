@@ -5,7 +5,7 @@ use shader_graph_core::registry::{
     Builtin, MaterialParam, NodeRole, Operand, ParamDef, ParamKind, ParamType, Registry,
 };
 use shader_graph_core::value::wesl_scalar;
-use shader_graph_core::{PinType, Value};
+use shader_graph_core::{Code, ConstType, PinType, Value};
 
 use crate::def::{def, pin_in, pin_out, sig};
 
@@ -88,7 +88,100 @@ pub fn register(r: &mut Registry) {
         ));
     }
 
+    register_globals(r);
     register_parameters(r);
+}
+
+/// Parameter of the `Global*` nodes: the name of the constant they read (decision 0017).
+pub const GLOBAL_CONST_PARAM: &str = "const";
+
+/// Nodes reading a constant of a global constant table; its value is inlined as a literal (decision 0017).
+fn register_globals(r: &mut Registry) {
+    for (id, name, ty, kw, desc) in [
+        (
+            "stdlib::GlobalConstF32",
+            "GlobalConstF32",
+            ConstType::F32,
+            &["global", "const", "scalar", "float", "f32"][..],
+            "Value of an f32 global constant.",
+        ),
+        (
+            "stdlib::GlobalConstVec2",
+            "GlobalConstVec2",
+            ConstType::Vec2,
+            &["global", "const", "vec2", "float2"][..],
+            "Value of a vec2 global constant.",
+        ),
+        (
+            "stdlib::GlobalConstVec3",
+            "GlobalConstVec3",
+            ConstType::Vec3,
+            &["global", "const", "vec3", "float3", "color", "rgb"][..],
+            "Value of a vec3 global constant.",
+        ),
+        (
+            "stdlib::GlobalConstVec4",
+            "GlobalConstVec4",
+            ConstType::Vec4,
+            &["global", "const", "vec4", "float4", "rgba"][..],
+            "Value of a vec4 global constant.",
+        ),
+        (
+            "stdlib::GlobalBool",
+            "GlobalBool",
+            ConstType::Bool,
+            &["global", "const", "bool", "switch", "toggle"][..],
+            "A bool global constant as a number: 1.0 when on, 0.0 when off.",
+        ),
+        (
+            "stdlib::GlobalCompileFlag",
+            "GlobalCompileFlag",
+            ConstType::CompileFlag,
+            &["global", "const", "flag", "compile", "bool", "if", "define"][..],
+            "A compileFlag global constant: true / false for logic nodes (If (Bool), And, Or, Not).",
+        ),
+    ] {
+        let pin = ty.pin_type();
+        r.register(
+            def(id, name, CAT_CONST)
+                .kw(kw)
+                .desc(desc)
+                .param(ParamDef::new(
+                    GLOBAL_CONST_PARAM,
+                    "Constant",
+                    ParamKind::GlobalConst(ty),
+                    Value::Str(String::new()),
+                ))
+                .build(
+                    move |_| sig(vec![], vec![pin_out("out", "", pin)]),
+                    move |c| {
+                        let name = c.param(GLOBAL_CONST_PARAM).as_str().to_string();
+                        let lit = if name.is_empty() {
+                            // 1.0 rather than zero: a divisor or `log` argument stays valid.
+                            c.diag(Code::W106, "no global constant selected; outputs 1.0 (true for a flag)");
+                            Value::Float(1.0).wesl_literal(pin)
+                        } else {
+                            match c.global_const(&name) {
+                                Some(g) if g.ty == ty => ty.wesl_literal(&g.value),
+                                Some(g) => {
+                                    let found = g.ty.label();
+                                    c.diag(
+                                        Code::E003,
+                                        format!("global constant `{name}` is {found}, this node reads {}", ty.label()),
+                                    );
+                                    return;
+                                }
+                                None => {
+                                    c.diag(Code::E006, format!("global constant `{name}` does not exist"));
+                                    return;
+                                }
+                            }
+                        };
+                        c.alias("out", Operand::Value(lit));
+                    },
+                ),
+        );
+    }
 }
 
 fn common_params(default_name: &str) -> Vec<ParamDef> {

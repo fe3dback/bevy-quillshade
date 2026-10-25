@@ -45,6 +45,7 @@ shaders/                      # graph sources, under VCS
   env/rock_wet.material.ron
   common/wet_mask.function.ron
   common/pulse.curve.ron
+  common/tuning.consts.ron    # global constants (no generated file of their own)
 assets/shaders/autogen/       # AUTOGEN WESL: stdlib/, functions/, curves/, one file per material
 crates/shaders/               # AUTOGEN Rust crate
 ```
@@ -103,20 +104,21 @@ Bevy reloads the shader without a restart.
 ## Editor
 
 The toolbar holds the main menu — **File** (Open Project, Close Project, Save, Save All, Quit) and **Assets** (create
-a Pbr3d/Unlit3d/Sprite2d material, a function, a curve, a folder; Regenerate) — then Undo / Redo and the actions of
-the active tab (graph: Auto-layout, Comment, Fit; curve: Select all, Delete; generated file: Copy, Source, Open
-externally).
+a Pbr3d/Unlit3d/Sprite2d material, a function, a curve, a global constant table, a folder; Regenerate) — then Undo /
+Redo and the actions of the active tab (graph: Auto-layout, Comment, Fit; curve: Select all, Delete; constant table:
+Add; generated file: Copy, Source, Open externally).
 
 On the left is the asset browser (the `shaders/` tree: double click opens an asset; RMB on a folder or on the empty
-space below the tree creates a Pbr3d/Unlit3d/Sprite2d material, a function, a curve, a folder; RMB on an asset:
+space below the tree creates a Pbr3d/Unlit3d/Sprite2d material, a function, a curve, a global constant table, a
+folder; RMB on an asset:
 rename, move (also by dragging onto a folder), delete, show the generated WESL/Rust in a read-only,
 syntax-highlighted tab), in the center the tabs and the canvas, on the right the properties (node parameters, input
 default values, asset blend mode / two-sided / shading), at the bottom the log (click — focus the node).
 The browser is an IDE-style file tree: folders with expand carets, an icon per asset kind (function, Pbr3d,
-Unlit3d, Sprite2d, curve); the active tab's asset is highlighted, unsaved assets get an orange dot after the name.
+Unlit3d, Sprite2d, curve, constant table); the active tab's asset is highlighted, unsaved assets get an orange dot after the name.
 Tabs and menus show icons too; Undo / Redo are icon-only buttons — hover a toolbar button for its name and hotkey.
 RMB on a tab: Close / Close All / Close Others / Close to the Left / Close to the Right / Close Unmodified. The bottom-right corner of the main view shows the open document's type (`pbr3d`, `unlit3d`, `sprite2d`,
-`function`, `curve`, or `wesl`/`rust` for a generated file) as a faint watermark over the view.
+`function`, `curve`, `consts`, or `wesl`/`rust` for a generated file) as a faint watermark over the view.
 Generated-file tabs refresh after every regeneration; Ctrl+C there copies the whole file, and the header has
 "Open in the default application". Icons come from [icon-rs](https://crates.io/crates/icon-rs), plus a few
 drawn by hand in `crates/shader_editor_app/icons/`.
@@ -134,6 +136,17 @@ Properties, has a `Type` (`Catmull-Rom` — smooth, may overshoot between points
 value at `T`; outside the first/last point the curve holds the end values. The node shows a small read-only plot of
 its curve (with a line at `T` while `T` is not connected; "n/a" when no curve is selected). Renaming a curve updates the nodes that
 use it.
+
+**Global constants** (`+Global Consts`, decision 0017) are tables of named values shared by every shader: the tab
+has an add form (name, type, Add or Enter) and the table (type select, value, delete). Types: `f32` (slider `0..1`),
+`vec2`/`vec3`/`vec4` (color picker + R/G/B/A fields, any value can be typed), `bool` (read as `1.0` / `0.0`),
+`compileFlag` (a real `bool`, connects only to logic nodes: If (Bool), And, Or, Not). Names are unique in the whole
+project. The nodes `GlobalConstF32`, `GlobalConstVec2/3/4`, `GlobalBool`, `GlobalCompileFlag` (Constants) pick a
+constant of their type from any table in Properties and show its value read-only (number, color square, green `1` /
+grey `0` square). Values are copied into the generated WESL as literals — there is no uniform: saving a table
+regenerates the shaders that read it. New constants start at 1.0 (`true`). Changing a constant's type or deleting it
+(also by undo / redo, or by deleting the table file), when nodes read it, asks first, then saves the table and clears
+those references (the nodes output 1.0 / `true`, W106).
 
 | Action | Keys |
 | --- | --- |
@@ -195,6 +208,9 @@ Asset(
   — points sorted by `t`, clamped to `0..1`. It is generated into `autogen/curves/<path>.wesl` (a const array of
   `(t, value, slope)` and `sample_curve_simple` / `sample_curve_catmullrom`); shaders import the one they sample.
   Materials may not live in `shaders/curves/` (like `stdlib/` and `functions/`).
+- A global constant table (`*.consts.ron`): `GlobalConsts(format_version: 1, name: "tuning", consts:
+  [GlobalConst(name: "glow_amount", ty: F32, value: Float(0.35)), ...])`, `ty` one of `F32`, `Vec2`, `Vec3`,
+  `Vec4`, `Bool`, `CompileFlag` (values `Float`, `Float2`…`Float4`, `Bool`). Nodes store only the constant's name.
 - User node (`shaders/.nodes/*.ron`):
   `UserNode(id: "soft_clamp", name: "SoftClamp", category: "User", inputs: [UserPin(name: "x", ty: Float3)], output: Float3, template: "return x / (vec3<f32>(1.0) + abs(x));")`.
 - Asset and parameter names are `snake_case` (`[a-z][a-z0-9_]*`) and not Rust/WGSL keywords.
@@ -208,15 +224,16 @@ Asset(
 | --- | --- |
 | E001 | missing or multiple output nodes |
 | E002 | cycle |
-| E003 | incompatible types (no allowed auto-conversion) |
+| E003 | incompatible types (no allowed auto-conversion; a Global* node reading a constant of another type) |
 | E004 | required input not connected (or a Named Route Usage without its declaration, a Sample Curve without a curve) |
-| E005 | invalid or duplicate name |
-| E006 | nonexistent function / recursive functions / missing or broken curve |
+| E005 | invalid or duplicate name (also a global constant defined in two tables) |
+| E006 | nonexistent function / recursive functions / missing or broken curve / missing global constant |
 | E007 | WESL of a Custom node does not parse |
 | E008 | an autogen file without the marker blocks the write |
 | E009 | unknown node / broken file |
 | E010 | generated WESL failed wesl+naga (`--compile`, saving in the editor) |
 | W101–W105 | dead branch, inactive output pin, mesh attribute may be missing, vector truncation, `crates/shaders` not in `[workspace.members]` |
+| W106 | a Global* node without a constant (outputs 1.0 / `true`) |
 
 An error blocks generation only of its own asset; the rest are regenerated.
 

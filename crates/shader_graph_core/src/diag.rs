@@ -36,6 +36,8 @@ pub enum Code {
     W104,
     /// `crates/shaders` is not listed in `[workspace.members]`.
     W105,
+    /// Global constant node without a constant: outputs 1.0 / `true` (decision 0017).
+    W106,
 }
 
 impl Code {

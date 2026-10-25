@@ -1,5 +1,6 @@
 //! Reference graphs used by tests, snapshot suites and `examples/sample_game` (spec §15, 17).
 
+use shader_graph_core::consts::{ConstType, GlobalConst, GlobalConsts};
 use shader_graph_core::curve::Curve;
 use shader_graph_core::model::{
     Asset, AssetKind, BlendMode, MaterialKind, Node, PbrSettings, SpriteSettings, UnlitSettings,
@@ -501,6 +502,71 @@ pub fn curve_bands() -> Asset {
     g.finish()
 }
 
+/// Unlit gradient driven by the global constants of `common/tuning` (decision 0017): the base and glow colors,
+/// the glow amount, stripes scaled by a vec2 and faded in by a bool, the striped branch picked by a compile flag.
+pub fn global_tint() -> Asset {
+    let kind = AssetKind::Material(MaterialKind::Unlit3d(UnlitSettings::default()));
+    let mut g = GraphBuilder::new("global_tint", kind);
+    let global = |name: &str| [("const", s(name))];
+    let out = g.node("output::Unlit3d", (1100.0, 0.0));
+    let base = g.node_p("stdlib::GlobalConstVec3", (0.0, 0.0), &global("base_color"));
+    let glow = g.node_p("stdlib::GlobalConstVec4", (0.0, 100.0), &global("glow_color"));
+    let rgb = g.node_p(
+        "stdlib::ComponentMask",
+        (150.0, 100.0),
+        &[("r", Value::Bool(true)), ("g", Value::Bool(true)), ("b", Value::Bool(true)), ("a", Value::Bool(false))],
+    );
+    g.link((&glow, "out"), (&rgb, "x"));
+    let amount = g.node_p("stdlib::GlobalConstF32", (0.0, 200.0), &global("glow_amount"));
+    let color = g.node("stdlib::Lerp", (300.0, 50.0));
+    g.link((&base, "out"), (&color, "a"));
+    g.link((&rgb, "out"), (&color, "b"));
+    g.link((&amount, "out"), (&color, "alpha"));
+    let uv = g.node("stdlib::TextureCoordinate", (0.0, 350.0));
+    let scale = g.node_p("stdlib::GlobalConstVec2", (0.0, 450.0), &global("stripe_scale"));
+    let scaled = g.node("stdlib::Multiply", (150.0, 400.0));
+    g.link((&uv, "out"), (&scaled, "a"));
+    g.link((&scale, "out"), (&scaled, "b"));
+    let br = g.node("stdlib::BreakOutFloat2", (300.0, 400.0));
+    g.link((&scaled, "out"), (&br, "v"));
+    let frac = g.node("stdlib::Frac", (450.0, 400.0));
+    g.link((&br, "x"), (&frac, "x"));
+    let on = g.node_p("stdlib::GlobalBool", (450.0, 500.0), &global("use_stripes"));
+    let fade = g.node("stdlib::Lerp", (600.0, 400.0));
+    g.input(&fade, "a", f(1.0));
+    g.link((&frac, "out"), (&fade, "b"));
+    g.link((&on, "out"), (&fade, "alpha"));
+    let striped = g.node("stdlib::Multiply", (750.0, 200.0));
+    g.link((&color, "out"), (&striped, "a"));
+    g.link((&fade, "out"), (&striped, "b"));
+    let flag = g.node_p("stdlib::GlobalCompileFlag", (750.0, 50.0), &global("fancy_stripes"));
+    let pick = g.node("stdlib::BoolSelect", (900.0, 100.0));
+    g.link((&flag, "out"), (&pick, "cond"));
+    g.link((&striped, "out"), (&pick, "true_value"));
+    g.link((&color, "out"), (&pick, "false_value"));
+    g.link((&pick, "out"), (&out, "color"));
+    g.finish()
+}
+
+/// Global constant table fixtures: (`shaders/`-relative path, table).
+pub fn const_tables() -> Vec<(&'static str, GlobalConsts)> {
+    let c = GlobalConst::new;
+    vec![(
+        "common/tuning",
+        GlobalConsts::new(
+            "tuning",
+            vec![
+                c("base_color", ConstType::Vec3, Value::Float3([0.05, 0.1, 0.3])),
+                c("glow_color", ConstType::Vec4, Value::Float4([1.0, 0.5, 0.1, 1.0])),
+                c("glow_amount", ConstType::F32, Value::Float(0.35)),
+                c("stripe_scale", ConstType::Vec2, Value::Float2([8.0, 1.0])),
+                c("use_stripes", ConstType::Bool, Value::Bool(true)),
+                c("fancy_stripes", ConstType::CompileFlag, Value::Bool(true)),
+            ],
+        ),
+    )]
+}
+
 /// Curve fixtures: (`shaders/`-relative path, curve).
 pub fn curves() -> Vec<(&'static str, Curve)> {
     vec![
@@ -509,7 +575,7 @@ pub fn curves() -> Vec<(&'static str, Curve)> {
     ]
 }
 
-/// Writes every fixture (graphs and curves) into `project`.
+/// Writes every fixture (graphs, curves, constant tables) into `project`.
 pub fn save_all(project: &Project) -> Result<(), OpError> {
     for (path, is_fn, asset) in all() {
         let id = AssetId::new(if is_fn { AssetType::Function } else { AssetType::Material }, path);
@@ -517,6 +583,9 @@ pub fn save_all(project: &Project) -> Result<(), OpError> {
     }
     for (path, curve) in curves() {
         ops::save_curve(project, &AssetId::new(AssetType::Curve, path), &curve)?;
+    }
+    for (path, table) in const_tables() {
+        ops::save_consts(project, &AssetId::new(AssetType::Consts, path), &table)?;
     }
     Ok(())
 }
@@ -531,6 +600,7 @@ pub fn all() -> Vec<(&'static str, bool, Asset)> {
         ("fx/hologram", false, hologram()),
         ("fx/coords", false, coords()),
         ("fx/curve_bands", false, curve_bands()),
+        ("fx/global_tint", false, global_tint()),
         ("ui/dissolve", false, dissolve()),
     ]
 }

@@ -18,6 +18,7 @@ use shader_project::{AssetId, AssetType};
 
 use super::dialog::InitText;
 use super::{TEXT, TEXT_DIM, button, text};
+use crate::consts_doc::ConstsDoc;
 use crate::curve_doc::CurveDoc;
 use crate::doc::{node_signature, route_declarations};
 use crate::state::{Action, Actions, Editor, GenFile, PropTarget, display_value};
@@ -66,7 +67,7 @@ impl Plugin for PropsPlugin {
     }
 }
 
-fn section(title: impl Into<String>) -> impl Scene {
+pub(crate) fn section(title: impl Into<String>) -> impl Scene {
     let title = title.into();
     bsn! {
         Node { margin: UiRect::top(px(6)), padding: UiRect::bottom(px(2)), border: UiRect::bottom(px(1)) }
@@ -75,7 +76,7 @@ fn section(title: impl Into<String>) -> impl Scene {
     }
 }
 
-fn labeled(label: String, widget: Box<dyn Scene>) -> impl Scene {
+pub(crate) fn labeled(label: String, widget: Box<dyn Scene>) -> impl Scene {
     bsn! {
         Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(6), min_height: px(26) }
         Children [
@@ -152,13 +153,18 @@ pub(crate) fn checkbox_w(target: PropTarget, v: bool) -> Box<dyn Scene> {
     }
 }
 
-fn select_w(target: PropTarget, options: Vec<String>, types: Vec<PinType>, current: usize) -> Box<dyn Scene> {
+pub(crate) fn select_w(
+    target: PropTarget,
+    options: Vec<String>,
+    types: Vec<PinType>,
+    current: usize,
+) -> Box<dyn Scene> {
     let rows = list_rows_from_strings(options.clone(), Some(current));
     let field = PropField { target, options, types, ..Default::default() };
     Box::new(bsn! { @FeathersSelect { @options: rows, @max_visible: 10 } Node { flex_grow: 1.0 } field })
 }
 
-fn text_w(target: PropTarget, v: String, multiline: bool) -> Box<dyn Scene> {
+pub(crate) fn text_w(target: PropTarget, v: String, multiline: bool) -> Box<dyn Scene> {
     let sync = FieldText { ready: v.is_empty(), last: v.clone() };
     let (field, init) = (PropField { target, ..Default::default() }, InitText(v));
     if multiline {
@@ -182,7 +188,7 @@ fn text_w(target: PropTarget, v: String, multiline: bool) -> Box<dyn Scene> {
 }
 
 /// Select of `(stored value, label)` choices with a leading `(none)` (= empty string): named route declarations
-/// (node ids), curve assets (paths).
+/// (node ids), curve assets (paths), global constants (names).
 fn keyed_select(target: PropTarget, choices: &[(String, String)], current: &str) -> Box<dyn Scene> {
     let options: Vec<String> =
         std::iter::once("(none)".to_string()).chain(choices.iter().map(|r| r.1.clone())).collect();
@@ -193,11 +199,13 @@ fn keyed_select(target: PropTarget, choices: &[(String, String)], current: &str)
     Box::new(bsn! { @FeathersSelect { @options: rows, @max_visible: 10 } Node { flex_grow: 1.0 } field })
 }
 
-/// Choices of reference parameters: named route declarations of the asset, curve assets of the project.
-#[derive(Default)]
+/// Choices of reference parameters: named route declarations of the asset, curve assets of the project, global
+/// constants (of the parameter's type).
+#[derive(Default, Clone)]
 struct Choices {
     routes: Vec<(String, String)>,
     curves: Vec<(String, String)>,
+    consts: Vec<(String, String)>,
 }
 
 /// Widget editing a value of `kind`.
@@ -205,6 +213,7 @@ fn value_widget(target: PropTarget, kind: &ParamKind, v: &Value, choices: &Choic
     match kind {
         ParamKind::Route => keyed_select(target, &choices.routes, v.as_str()),
         ParamKind::Curve => keyed_select(target, &choices.curves, v.as_str()),
+        ParamKind::GlobalConst(_) => keyed_select(target, &choices.consts, v.as_str()),
         ParamKind::Float { .. } => number(target, 0, v.as_f32(), None),
         ParamKind::Float2 => vector(target, &v.coerce(PinType::Float2).floats(), false),
         ParamKind::Float3 => vector(target, &v.coerce(PinType::Float3).floats(), false),
@@ -271,7 +280,7 @@ const CURVE_HOTKEYS: [(&str, &str); 12] = [
 ];
 
 /// One hotkey row: the keys as a key cap, then what they do.
-fn hotkey_row(keys: &'static str, what: &'static str) -> impl Scene {
+pub(crate) fn hotkey_row(keys: &'static str, what: &'static str) -> impl Scene {
     bsn! {
         Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(8), min_height: px(22) }
         Children [
@@ -311,6 +320,25 @@ fn curve_rows(c: &CurveDoc, out: &mut Vec<Box<dyn Scene>>) {
     }
     out.push(Box::new(section("Hotkeys")));
     for (keys, what) in CURVE_HOTKEYS {
+        out.push(Box::new(hotkey_row(keys, what)));
+    }
+}
+
+/// A constant table tab: what it is and how it is used (the table itself is the view).
+fn consts_rows(c: &ConstsDoc, out: &mut Vec<Box<dyn Scene>>) {
+    out.push(Box::new(text(c.id.source_rel(), TEXT, 15.0)));
+    out.push(Box::new(text(format!("Type: Global Consts, {} constant(s)", c.table.consts.len()), TEXT_DIM, 12.0)));
+    out.push(Box::new(section("Usage")));
+    for line in [
+        "Read a constant with the Global* nodes (Constants category); names are unique project-wide.",
+        "Values are copied into the generated WESL as literals: saving the table regenerates the shaders reading it.",
+        "bool reads as 1.0 / 0.0; compileFlag is a real bool for logic nodes (If (Bool), And, Or, Not).",
+        "Changing a type or deleting a constant clears the references of the nodes reading it (after a confirmation).",
+    ] {
+        out.push(Box::new(text(line, TEXT_DIM, 12.0)));
+    }
+    out.push(Box::new(section("Hotkeys")));
+    for (keys, what) in [("Ctrl+Z / Y", "Undo / redo"), ("Ctrl+S", "Save and regenerate")] {
         out.push(Box::new(hotkey_row(keys, what)));
     }
 }
@@ -384,7 +412,9 @@ fn node_rows(editor: &Editor, id: &str, out: &mut Vec<Box<dyn Scene>>) {
     let choices = Choices {
         routes: route_declarations(&d.asset, &editor.registry),
         curves: editor.curve_paths().into_iter().map(|p| (p.clone(), p)).collect(),
+        consts: Vec::new(),
     };
+    let global_consts = editor.global_consts();
     let defs = def.params();
     if !defs.is_empty() {
         out.push(Box::new(section("Parameters")));
@@ -395,8 +425,18 @@ fn node_rows(editor: &Editor, id: &str, out: &mut Vec<Box<dyn Scene>>) {
         // A deleted or broken curve stays visible as the current choice (the node reports E006).
         let mut choices_here = None;
         if p.kind == ParamKind::Curve && !v.as_str().is_empty() && !choices.curves.iter().any(|c| c.0 == v.as_str()) {
-            let mut c = Choices { routes: Vec::new(), curves: choices.curves.clone() };
+            let mut c = choices.clone();
             c.curves.push((v.as_str().to_string(), format!("{} (missing)", v.as_str())));
+            choices_here = Some(c);
+        }
+        // Constants of the node's type; a missing one or one of another type stays visible (E006 / E003).
+        if let ParamKind::GlobalConst(ty) = p.kind {
+            let mut c = choices.clone();
+            c.consts = global_consts.iter().filter(|k| k.1.1.ty == ty).map(|k| (k.0.clone(), k.0.clone())).collect();
+            if !v.as_str().is_empty() && !c.consts.iter().any(|k| k.0 == v.as_str()) {
+                let why = global_consts.get(v.as_str()).map_or("missing".into(), |k| format!("is {}", k.1.ty.label()));
+                c.consts.push((v.as_str().to_string(), format!("{} ({why})", v.as_str())));
+            }
             choices_here = Some(c);
         }
         let choices = choices_here.as_ref().unwrap_or(&choices);
@@ -404,6 +444,9 @@ fn node_rows(editor: &Editor, id: &str, out: &mut Vec<Box<dyn Scene>>) {
         if p.kind == ParamKind::Curve && !v.as_str().is_empty() {
             let open = Action::OpenAsset(AssetId::new(AssetType::Curve, v.as_str()));
             out.push(Box::new(button("Open curve", open, false)));
+        }
+        if let (ParamKind::GlobalConst(_), Some((table, _))) = (&p.kind, global_consts.get(v.as_str())) {
+            out.push(Box::new(button("Open constant table", Action::OpenAsset(table.clone()), false)));
         }
     }
     let Some(sig) = node_signature(&d.asset, id, &editor.registry, &editor.functions, &d.id.path) else { return };
@@ -452,6 +495,7 @@ fn redraw(
         None => rows.push(Box::new(text("Nothing open.", TEXT_DIM, 13.0))),
         Some(Tab::Text(t)) => text_rows(t, &mut rows),
         Some(Tab::Curve(c)) => curve_rows(c, &mut rows),
+        Some(Tab::Consts(c)) => consts_rows(c, &mut rows),
         Some(Tab::Graph(d)) => {
             if let Some(f) = d.selected_frame.as_ref().and_then(|f| d.asset.comments.iter().find(|c| c.id == *f)) {
                 rows.push(Box::new(text("Comment", TEXT, 15.0)));

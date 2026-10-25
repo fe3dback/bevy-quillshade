@@ -65,10 +65,13 @@ pub enum IconId {
     OpenExternal,
     Curve,
     Close,
+    Consts,
+    Check,
+    Plus,
 }
 
 impl IconId {
-    pub const ALL: [IconId; 26] = [
+    pub const ALL: [IconId; 29] = [
         IconId::File,
         IconId::Folder,
         IconId::FolderOpen,
@@ -95,6 +98,9 @@ impl IconId {
         IconId::OpenExternal,
         IconId::Curve,
         IconId::Close,
+        IconId::Consts,
+        IconId::Check,
+        IconId::Plus,
     ];
 
     fn source(self) -> Icon {
@@ -125,6 +131,9 @@ impl IconId {
             IconId::OpenExternal => icon_rs::OPEN_EXTERNAL,
             IconId::Curve => icon_rs::SPLINE,
             IconId::Close => icon_rs::CLOSE,
+            IconId::Consts => icon_rs::CUSTOM_TABLE,
+            IconId::Check => icon_rs::CHECK,
+            IconId::Plus => icon_rs::PLUS,
         }
     }
 
@@ -141,7 +150,11 @@ impl IconId {
 
     /// The icon of asset `id`; `kind` is its graph kind when it is a loaded graph.
     pub fn for_id(id: &AssetId, kind: Option<AssetKind>) -> IconId {
-        if id.ty == AssetType::Curve { IconId::Curve } else { IconId::for_asset(kind) }
+        match id.ty {
+            AssetType::Curve => IconId::Curve,
+            AssetType::Consts => IconId::Consts,
+            AssetType::Material | AssetType::Function => IconId::for_asset(kind),
+        }
     }
 
     /// The icon of the asset `kind` creates.
@@ -152,6 +165,7 @@ impl IconId {
             NewKind::Sprite2d => IconId::Sprite,
             NewKind::Function => IconId::Function,
             NewKind::Curve => IconId::Curve,
+            NewKind::Consts => IconId::Consts,
         }
     }
 

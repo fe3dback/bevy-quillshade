@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 
+use shader_graph_core::consts::NoConsts;
 use shader_graph_core::model::{Asset, AssetKind};
 use shader_graph_core::registry::{FUNCTION_PREFIX, FunctionLookup, NoCurves, NodeRole, ROUTE_PARAM, Registry, SigCtx};
 use shader_graph_core::{Env, FunctionSig, PinType, Value, conversion};
@@ -164,7 +165,7 @@ pub fn fresh_pins(
     let params = registry.resolved_params(kind, &BTreeMap::new());
     let connected = BTreeMap::new();
     let inputs: BTreeMap<String, Value> = BTreeMap::new();
-    let env = Env { asset_kind, asset_path: "", functions, curves: &NoCurves };
+    let env = Env { asset_kind, asset_path: "", functions, curves: &NoCurves, consts: &NoConsts };
     let sig = def.signature(&SigCtx {
         node_id: "new",
         kind,

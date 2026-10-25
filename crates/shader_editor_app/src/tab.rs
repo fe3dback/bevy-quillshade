@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use shader_project::regen::{rust_file, wesl_file};
 use shader_project::{AssetId, Project, assets};
 
+use crate::consts_doc::ConstsDoc;
 use crate::curve_doc::CurveDoc;
 use crate::doc::Doc;
 
@@ -19,6 +20,8 @@ pub enum ViewKind {
     Text,
     /// Curve asset editor (decision 0015).
     Curve,
+    /// Global constant table: add form + table (decision 0017).
+    Consts,
 }
 
 /// Generated file shown in a text tab.
@@ -57,10 +60,10 @@ pub struct TextDoc {
 }
 
 impl TextDoc {
-    /// `None` when the asset has no such file (functions have no Rust module).
+    /// `None` when the asset has no such file (functions have no Rust module, constant tables nothing at all).
     pub fn open(project: &Project, source: AssetId, lang: Lang) -> Option<TextDoc> {
         let path = match lang {
-            Lang::Wesl => wesl_file(project, &source),
+            Lang::Wesl => wesl_file(project, &source)?,
             Lang::Rust => rust_file(project, &source)?,
         };
         let mut doc = TextDoc { source, lang, rel: project.rel(&path), path, text: None, revision: 0 };
@@ -86,6 +89,7 @@ pub enum Tab {
     Graph(Doc),
     Text(TextDoc),
     Curve(CurveDoc),
+    Consts(ConstsDoc),
 }
 
 impl Tab {
@@ -94,6 +98,7 @@ impl Tab {
             Tab::Graph(_) => ViewKind::Graph,
             Tab::Text(_) => ViewKind::Text,
             Tab::Curve(_) => ViewKind::Curve,
+            Tab::Consts(_) => ViewKind::Consts,
         }
     }
 
@@ -103,12 +108,15 @@ impl Tab {
             Tab::Graph(d) => &d.id,
             Tab::Text(t) => &t.source,
             Tab::Curve(c) => &c.id,
+            Tab::Consts(c) => &c.id,
         }
     }
 
     pub fn title(&self) -> String {
         match self {
-            Tab::Graph(_) | Tab::Curve(_) => self.asset().source_rel().trim_end_matches(".ron").to_string(),
+            Tab::Graph(_) | Tab::Curve(_) | Tab::Consts(_) => {
+                self.asset().source_rel().trim_end_matches(".ron").to_string()
+            }
             Tab::Text(t) => t.rel.clone(),
         }
     }
@@ -117,6 +125,7 @@ impl Tab {
         match self {
             Tab::Graph(d) => d.is_dirty(),
             Tab::Curve(c) => c.is_dirty(),
+            Tab::Consts(c) => c.is_dirty(),
             Tab::Text(_) => false,
         }
     }
@@ -156,10 +165,24 @@ impl Tab {
         }
     }
 
+    pub fn consts(&self) -> Option<&ConstsDoc> {
+        match self {
+            Tab::Consts(c) => Some(c),
+            _ => None,
+        }
+    }
+
+    pub fn consts_mut(&mut self) -> Option<&mut ConstsDoc> {
+        match self {
+            Tab::Consts(c) => Some(c),
+            _ => None,
+        }
+    }
+
     /// Key in the user config: `AssetId::source_rel`, plus `#wesl` / `#rust` for generated files.
     pub fn config_key(&self) -> String {
         match self {
-            Tab::Graph(_) | Tab::Curve(_) => self.asset().source_rel(),
+            Tab::Graph(_) | Tab::Curve(_) | Tab::Consts(_) => self.asset().source_rel(),
             Tab::Text(t) => format!("{}#{}", t.source.source_rel(), t.lang.label()),
         }
     }

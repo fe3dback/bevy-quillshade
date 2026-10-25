@@ -1,8 +1,9 @@
-//! Editor asset discovery and loading (`shaders/**/*.{material,function,curve}.ron`).
+//! Editor asset discovery and loading (`shaders/**/*.{material,function,curve,consts}.ron`).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use shader_graph_core::consts::GlobalConsts;
 use shader_graph_core::curve::Curve;
 use shader_graph_core::ident::check_ident;
 use shader_graph_core::model::{Asset, AssetKind};
@@ -13,6 +14,8 @@ use crate::layout::{Project, USER_NODES_DIR};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum AssetType {
+    /// Global constant table (decision 0017), not a node graph.
+    Consts,
     /// Curve asset (decision 0015), not a node graph.
     Curve,
     Function,
@@ -25,12 +28,18 @@ impl AssetType {
             AssetType::Material => "material",
             AssetType::Function => "function",
             AssetType::Curve => "curve",
+            AssetType::Consts => "consts",
         }
     }
 
     /// Node graph assets (materials, functions), stored as [`Asset`].
     pub fn is_graph(self) -> bool {
-        self != AssetType::Curve
+        matches!(self, AssetType::Material | AssetType::Function)
+    }
+
+    /// Assets with a generated WESL module (constant tables have none: their values are inlined).
+    pub fn has_wesl(self) -> bool {
+        self != AssetType::Consts
     }
 
     pub fn of(kind: &AssetKind) -> Self {
@@ -73,7 +82,7 @@ impl std::fmt::Display for AssetId {
 /// Parses `shaders/`-relative file path into an asset id.
 pub fn id_from_rel(rel: &str) -> Option<AssetId> {
     let rel = rel.replace('\\', "/");
-    [AssetType::Material, AssetType::Function, AssetType::Curve]
+    [AssetType::Material, AssetType::Function, AssetType::Curve, AssetType::Consts]
         .into_iter()
         .find_map(|ty| rel.strip_suffix(&format!(".{}.ron", ty.suffix())).map(|p| AssetId::new(ty, p)))
 }
@@ -155,6 +164,17 @@ pub fn load_curve(project: &Project, id: &AssetId) -> Result<Curve, String> {
     Ok(curve)
 }
 
+/// Loads a global constant table; the file name wins over the `name` stored inside.
+pub fn load_consts(project: &Project, id: &AssetId) -> Result<GlobalConsts, String> {
+    if id.ty != AssetType::Consts {
+        return Err(format!("{} is not a constant table", id.source_rel()));
+    }
+    let text = std::fs::read_to_string(id.file(project)).map_err(|e| e.to_string())?;
+    let mut table = GlobalConsts::from_ron(&text).map_err(|e| e.to_string())?;
+    table.name = id.name().to_string();
+    Ok(table)
+}
+
 /// Checks the asset path (spec §5): snake_case components, no reserved autogen directories.
 pub fn validate_path(id: &AssetId) -> Vec<Diagnostic> {
     let mut out = Vec::new();
@@ -223,34 +243,43 @@ pub struct AssetSet {
     /// Node graphs (materials, functions).
     pub assets: BTreeMap<AssetId, Result<Asset, String>>,
     pub curves: BTreeMap<AssetId, Result<Curve, String>>,
+    /// Global constant tables.
+    pub consts: BTreeMap<AssetId, Result<GlobalConsts, String>>,
 }
 
 impl AssetSet {
     pub fn load_all(project: &Project) -> AssetSet {
         let mut set = AssetSet::default();
         for id in scan(project) {
-            if id.ty.is_graph() {
-                let a = load(project, &id);
-                set.assets.insert(id, a);
-            } else {
-                let c = load_curve(project, &id);
-                set.curves.insert(id, c);
+            match id.ty {
+                AssetType::Material | AssetType::Function => {
+                    let a = load(project, &id);
+                    set.assets.insert(id, a);
+                }
+                AssetType::Curve => {
+                    let c = load_curve(project, &id);
+                    set.curves.insert(id, c);
+                }
+                AssetType::Consts => {
+                    let c = load_consts(project, &id);
+                    set.consts.insert(id, c);
+                }
             }
         }
         set
     }
 
-    /// Every asset, graphs and curves (sorted within each kind).
+    /// Every asset: graphs, curves, constant tables (sorted within each kind).
     pub fn ids(&self) -> impl Iterator<Item = &AssetId> {
-        self.assets.keys().chain(self.curves.keys())
+        self.assets.keys().chain(self.curves.keys()).chain(self.consts.keys())
     }
 
     pub fn contains(&self, id: &AssetId) -> bool {
-        self.assets.contains_key(id) || self.curves.contains_key(id)
+        self.assets.contains_key(id) || self.curves.contains_key(id) || self.consts.contains_key(id)
     }
 
     pub fn len(&self) -> usize {
-        self.assets.len() + self.curves.len()
+        self.assets.len() + self.curves.len() + self.consts.len()
     }
 
     pub fn is_empty(&self) -> bool {

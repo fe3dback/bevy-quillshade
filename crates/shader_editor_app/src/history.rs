@@ -39,6 +39,16 @@ impl<T> History<T> {
         self.merge_key = None;
     }
 
+    /// The state an undo would restore.
+    pub fn peek_undo(&self) -> Option<&T> {
+        self.undo.last()
+    }
+
+    /// The state a redo would restore.
+    pub fn peek_redo(&self) -> Option<&T> {
+        self.redo.last()
+    }
+
     pub fn can_undo(&self) -> bool {
         !self.undo.is_empty()
     }

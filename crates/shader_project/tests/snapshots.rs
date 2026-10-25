@@ -8,6 +8,7 @@
 use std::collections::BTreeMap;
 
 use shader_codegen_wesl::check::BevySources;
+use shader_graph_core::consts::NoConsts;
 use shader_graph_core::model::{AssetKind, MaterialKind, SpriteSettings, UnlitSettings};
 use shader_graph_core::registry::{FUNCTION_CALL_KIND, NoCurves, NoFunctions, NodeRole, SigCtx};
 use shader_graph_core::{Asset, Env, PinType, Value, conversion};
@@ -19,9 +20,11 @@ use shader_project::{AssetId, AssetType, Project, RegenOptions, ops, regenerate}
 fn node_material(kind: &str) -> Option<(String, Asset)> {
     let reg = shader_stdlib::registry();
     let def = reg.get(kind)?;
-    // Sample Curve needs a curve asset: covered by the `fx/curve_bands` fixture.
+    // Sample Curve needs a curve asset, Global* nodes a constant table: covered by the `fx/curve_bands` and
+    // `fx/global_tint` fixtures.
     if kind == FUNCTION_CALL_KIND
         || kind == "stdlib::SampleCurve"
+        || kind.starts_with("stdlib::Global")
         || !matches!(def.role(), NodeRole::Normal | NodeRole::Parameter | NodeRole::Reroute)
     {
         return None;
@@ -40,7 +43,7 @@ fn node_material(kind: &str) -> Option<(String, Asset)> {
 
     let params = reg.resolved_params(kind, &BTreeMap::new());
     let (connected, inputs) = (BTreeMap::new(), BTreeMap::new());
-    let env = Env { asset_kind, asset_path: &name, functions: &NoFunctions, curves: &NoCurves };
+    let env = Env { asset_kind, asset_path: &name, functions: &NoFunctions, curves: &NoCurves, consts: &NoConsts };
     let sig = def.signature(&SigCtx {
         node_id: &n,
         kind,
@@ -112,7 +115,7 @@ fn every_stdlib_node_generates_and_compiles() {
     let errors: Vec<String> = report.diagnostics().filter(|d| d.is_error()).map(|d| d.to_string()).collect();
     assert!(errors.is_empty(), "errors:\n{}", errors.join("\n"));
     for id in &ids {
-        let text = std::fs::read_to_string(wesl_file(&p, id)).unwrap();
+        let text = std::fs::read_to_string(wesl_file(&p, id).unwrap()).unwrap();
         snapshot(&format!("wesl__{}", id.name()), &text);
     }
 }
@@ -135,7 +138,7 @@ fn composite_materials_generate_and_compile() {
             AssetType::Curve => format!("curves__{}", id.path.replace('/', "__")),
             _ => id.path.replace('/', "__"),
         };
-        snapshot(&format!("wesl__{flat}"), &std::fs::read_to_string(wesl_file(&p, id)).unwrap());
+        snapshot(&format!("wesl__{flat}"), &std::fs::read_to_string(wesl_file(&p, id).unwrap()).unwrap());
         if let Some(rs) = rust_file(&p, id) {
             snapshot(&format!("rust__{flat}"), &std::fs::read_to_string(rs).unwrap());
         }

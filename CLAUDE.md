@@ -84,6 +84,11 @@ atomic write. Key facts that span several files:
   `autogen/curves/<path>.wesl`; the `stdlib::SampleCurve` node (param of `ParamKind::Curve`) imports
   `sample_curve_simple`/`sample_curve_catmullrom` from it under a per-curve alias (`curve_fn_alias`).
   `curve_refs` finds the nodes referring to a curve (deps, rename). `Curve::sample` is the reference math.
+- **Global constant tables** (`shaders/**/*.consts.ron`, decision 0017) are not graphs either:
+  `shader_graph_core::consts::GlobalConsts`, `AssetType::Consts`, `AssetSet::consts`; they generate no file. The
+  `stdlib::Global*` nodes (param `const`, `ParamKind::GlobalConst(ty)`) inline the value as a literal through
+  `Env::consts`; `regen::collect_consts` resolves names (unique project-wide), `const_refs` finds readers (deps,
+  clearing on type change / delete). `regen::wesl_file` / `module_of` are `None` for tables.
 - **Node kinds** are string paths: `stdlib::*`, `param::*`, `output::*`, `function::<sub/name>`, `user::<id>`.
 - **Type conversions** (broadcast, truncation, Color↔Float4, Int→Float) are applied in codegen on the edge, not as
   inserted nodes (`shader_graph_core::types::conversion`); truncation emits W104.
@@ -109,8 +114,8 @@ atomic write. Key facts that span several files:
   bevy_noodle's scene history.
 - Connection validity is decided by `doc::connection_error` via a custom `ConnectionCheck` (bevy_noodle ports are all
   `PortType::ANY`).
-- Tabs are `tab::Tab` (graph `Doc`, read-only `TextDoc` of a generated file, `CurveDoc`); `Editor::doc()` is
-  `None` on a non-graph tab, `Editor::curve_doc()` gives the curve one. Both document kinds share
+- Tabs are `tab::Tab` (graph `Doc`, read-only `TextDoc` of a generated file, `CurveDoc`, `ConstsDoc`);
+  `Editor::doc()` is `None` on a non-graph tab, `Editor::curve_doc()` / `consts_doc()` give the others. Both document kinds share
   `history::History<T>`. Each content kind has a view in `ui::DocArea` tagged `ViewOf(ViewKind)` (decision 0014 lists what
   a new kind needs). WESL/Rust highlighting is our own lexer (`highlight.rs`).
 - UI is pure Bevy UI + Feathers (`bsn!`); **no egui**. Workarounds for Feathers 0.20 bugs are in `fixes.rs`.

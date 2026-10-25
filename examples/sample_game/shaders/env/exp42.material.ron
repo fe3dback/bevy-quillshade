@@ -14,7 +14,7 @@ Asset(
     ),
     "01m5r4whtv0wryfpt5qhs1z45g": Node(
       kind: "stdlib::Constant3Vector",
-      pos: (49.317825, -433.97025),
+      pos: (-40.223312, -506.2974),
       params: {
         "value": Float3((1.0, 0.0, 0.0)),
       },
@@ -29,24 +29,10 @@ Asset(
       pos: (-50.887005, -25.082565),
       params: {},
     ),
-    "01m5r5g9zxwajrgwe3sqpe956g": Node(
-      kind: "stdlib::Constant",
-      pos: (-532.72705, 69.60741),
-      params: {
-        "value": Float(0.21),
-      },
-    ),
     "01m5r5ggky8sh5r98shtdt02wj": Node(
       kind: "stdlib::Divide",
       pos: (-252.72708, -24.392591),
       params: {},
-    ),
-    "01m5r5hmmfr7r8v7m2s50k4z9y": Node(
-      kind: "stdlib::Constant3Vector",
-      pos: (45.173294, -329.51584),
-      params: {
-        "value": Float3((0.0, 1.0, 0.0)),
-      },
     ),
     "01m5r5zf3079k9ak5dgtk5eqwc": Node(
       kind: "stdlib::Lerp",
@@ -61,6 +47,20 @@ Asset(
       },
       inputs: {
         "t": Float(0.7),
+      },
+    ),
+    "01m5snxhc2hgmhqb287zpbbyzz": Node(
+      kind: "stdlib::GlobalConstF32",
+      pos: (-530.0148, 73.61316),
+      params: {
+        "const": Str("glow_amount"),
+      },
+    ),
+    "01m5snxy0d3d3kk068athbvtst": Node(
+      kind: "stdlib::GlobalConstVec3",
+      pos: (-43.19693, -375.26147),
+      params: {
+        "const": Str("base_color"),
       },
     ),
   },
@@ -78,7 +78,7 @@ Asset(
       to: ("01m5r5ggky8sh5r98shtdt02wj", "a"),
     ),
     Edge(
-      from: ("01m5r5g9zxwajrgwe3sqpe956g", "out"),
+      from: ("01m5snxhc2hgmhqb287zpbbyzz", "out"),
       to: ("01m5r5ggky8sh5r98shtdt02wj", "b"),
     ),
     Edge(
@@ -90,7 +90,7 @@ Asset(
       to: ("01m5r5zf3079k9ak5dgtk5eqwc", "alpha"),
     ),
     Edge(
-      from: ("01m5r5hmmfr7r8v7m2s50k4z9y", "out"),
+      from: ("01m5snxy0d3d3kk068athbvtst", "out"),
       to: ("01m5r5zf3079k9ak5dgtk5eqwc", "b"),
     ),
     Edge(

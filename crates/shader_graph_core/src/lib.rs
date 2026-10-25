@@ -2,6 +2,7 @@
 //!
 //! Independent from Bevy so the CLI and code generators build fast and run headless.
 
+pub mod consts;
 pub mod curve;
 pub mod diag;
 pub mod ident;
@@ -11,6 +12,7 @@ pub mod registry;
 pub mod types;
 pub mod value;
 
+pub use consts::{ConstLookup, ConstType, GlobalConst, GlobalConsts};
 pub use curve::{Curve, Interp};
 pub use diag::{Code, Diagnostic, Diagnostics};
 pub use ir::{Ir, IrResult, IrStage, UniformField, UniformLayout, UniformTy, build_ir};

@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
+use crate::consts::{ConstLookup, ConstType, GlobalConst};
 use crate::curve::{Interp, curve_fn_alias};
 use crate::diag::{Code, Diagnostic};
 use crate::model::{AssetKind, NodeId};
@@ -37,6 +38,8 @@ pub enum ParamKind {
     Route,
     /// Path of a curve asset of the project (`env/falloff`, stored as `Value::Str`; decision 0015).
     Curve,
+    /// Name of a global constant of this type from any constant table (stored as `Value::Str`; decision 0017).
+    GlobalConst(ConstType),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -170,6 +173,22 @@ pub fn curve_refs(asset: &crate::model::Asset, registry: &Registry) -> Vec<(Node
             let path = n.params.get(&p.id).unwrap_or(&p.default).as_str();
             if !path.is_empty() {
                 out.push((id.clone(), p.id, path.to_string()));
+            }
+        }
+    }
+    out
+}
+
+/// Global constant names `asset` refers to through [`ParamKind::GlobalConst`] parameters:
+/// `(node id, param id, name)`.
+pub fn const_refs(asset: &crate::model::Asset, registry: &Registry) -> Vec<(NodeId, String, String)> {
+    let mut out = Vec::new();
+    for (id, n) in &asset.nodes {
+        let Some(def) = registry.get(&n.kind) else { continue };
+        for p in def.params().into_iter().filter(|p| matches!(p.kind, ParamKind::GlobalConst(_))) {
+            let name = n.params.get(&p.id).unwrap_or(&p.default).as_str();
+            if !name.is_empty() {
+                out.push((id.clone(), p.id, name.to_string()));
             }
         }
     }
@@ -364,6 +383,7 @@ pub struct Env<'a> {
     pub asset_path: &'a str,
     pub functions: &'a dyn FunctionLookup,
     pub curves: &'a dyn CurveLookup,
+    pub consts: &'a dyn ConstLookup,
 }
 
 /// Inputs for computing a node signature.
@@ -606,6 +626,11 @@ impl EmitCtx<'_> {
         }
         self.sink.curves.insert((path.into(), interp));
         Some(curve_fn_alias(path, interp))
+    }
+
+    /// A global constant of the project (`None` if no table defines `name`).
+    pub fn global_const(&self, name: &str) -> Option<&GlobalConst> {
+        self.env.consts.global_const(name)
     }
 
     /// Adds a standalone fn definition (Custom node).

@@ -201,8 +201,14 @@ fn click_row(
                 (Some(IconId::Edit), "Rename...".into(), Action::RenameDialog(id.clone())),
                 (Some(IconId::MoveToFolder), "Move to...".into(), Action::MoveDialog(id.clone())),
                 (Some(IconId::Delete), "Delete...".into(), Action::DeleteDialog(id.clone())),
-                (Some(IconId::Code), "Show generated WESL".into(), Action::ShowGenerated(id.clone(), Lang::Wesl)),
             ];
+            if id.ty.has_wesl() {
+                items.push((
+                    Some(IconId::Code),
+                    "Show generated WESL".into(),
+                    Action::ShowGenerated(id.clone(), Lang::Wesl),
+                ));
+            }
             if id.ty == AssetType::Material {
                 items.push((
                     Some(IconId::Code),

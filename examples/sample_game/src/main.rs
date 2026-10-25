@@ -5,7 +5,7 @@
 
 use bevy::prelude::*;
 use bevy::sprite_render::SpriteMaterial;
-use shaders::{CoordsMaterial, CurveBandsMaterial, DissolveMaterial, Exp42Ext, Exp42Material, FlagExt, FlagMaterial, HologramMaterial, RockWetExt, RockWetMaterial, WaterExt, WaterMaterial};
+use shaders::{CoordsMaterial, CurveBandsMaterial, DissolveMaterial, GlobalTintMaterial, Exp42Ext, Exp42Material, FlagExt, FlagMaterial, HologramMaterial, RockWetExt, RockWetMaterial, WaterExt, WaterMaterial};
 
 fn main() {
     App::new()
@@ -51,6 +51,7 @@ fn setup(
     mut coords: ResMut<Assets<CoordsMaterial>>,
     mut dissolve: ResMut<Assets<DissolveMaterial>>,
     mut curve_bands: ResMut<Assets<CurveBandsMaterial>>,
+    mut global_tint: ResMut<Assets<GlobalTintMaterial>>,
 ) {
     commands.spawn((Camera3d::default(), Transform::from_xyz(0.0, 3.0, 9.0).looking_at(Vec3::new(0.0, 0.5, 0.0), Vec3::Y)));
     commands.spawn((
@@ -104,6 +105,13 @@ fn setup(
         Mesh3d(meshes.add(Plane3d::new(Vec3::Z, Vec2::new(0.9, 0.6)).mesh().build())),
         MeshMaterial3d(curve_bands.add(CurveBandsMaterial::new())),
         Transform::from_xyz(3.3, 3.3, 0.0),
+    ));
+
+    // Colors, stripes and the striped branch come from the global constants of `common/tuning`.
+    commands.spawn((
+        Mesh3d(meshes.add(Plane3d::new(Vec3::Z, Vec2::new(0.9, 0.6)).mesh().build())),
+        MeshMaterial3d(global_tint.add(GlobalTintMaterial::new())),
+        Transform::from_xyz(-3.3, 3.3, 0.0),
     ));
 
     commands.spawn((

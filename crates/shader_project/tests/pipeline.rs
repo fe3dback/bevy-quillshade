@@ -131,6 +131,7 @@ fn workspace_warning_w105() {
 
 #[test]
 fn named_routes_teleport_wires() {
+    use shader_graph_core::consts::NoConsts;
     use shader_graph_core::ir::build_ir;
     use shader_graph_core::model::{Asset, AssetKind, MaterialKind, Node, PbrSettings};
     use shader_graph_core::registry::{NoCurves, NoFunctions};
@@ -146,7 +147,7 @@ fn named_routes_teleport_wires() {
         a
     };
     let ir = |a: &Asset| -> (Option<Ir>, Vec<Code>) {
-        let r = build_ir(a, "m", &reg, &NoFunctions, &NoCurves);
+        let r = build_ir(a, "m", &reg, &NoFunctions, &NoCurves, &NoConsts);
         (r.ir, r.diagnostics.iter().map(|d| d.code).collect())
     };
 
@@ -251,4 +252,76 @@ fn a_curve_named_like_a_broken_function_is_not_that_function() {
     let r = regenerate(&p, &RegenOptions { dry_run: true, ..Default::default() }).unwrap();
     let errors: Vec<_> = r.assets[&bands].diagnostics.iter().filter(|d| d.is_error()).collect();
     assert!(errors.is_empty(), "{errors:?}");
+}
+
+#[test]
+fn global_consts_are_inlined_and_their_users_follow() {
+    use shader_graph_core::{ConstType, GlobalConst, Value};
+    let (_d, p) = temp_project();
+    let r = regenerate(&p, &RegenOptions::default()).unwrap();
+    assert!(!r.has_errors(), "{:?}", r.diagnostics().collect::<Vec<_>>());
+    assert!(r.diagnostics().all(|d| d.code != Code::W106), "every node of the fixture has a constant");
+    let tint = p.root.join("assets/shaders/autogen/fx/global_tint.wesl");
+    let wesl = read(&tint);
+    // Values are literals: no module for the table, no uniform.
+    assert!(wesl.contains("vec3<f32>(0.05, 0.1, 0.3)"), "{wesl}");
+    assert!(wesl.contains("0.35f"), "{wesl}");
+    assert!(wesl.contains("1.0f"), "GlobalBool reads 1.0: {wesl}");
+    assert!(wesl.contains(", true)"), "GlobalCompileFlag is a bool literal: {wesl}");
+    assert!(!p.root.join("assets/shaders/autogen/common/tuning.wesl").exists());
+
+    // Editing the table rewrites the materials reading it, also in an affected-only run.
+    let id = AssetId::new(AssetType::Consts, "common/tuning");
+    let mut table = shader_project::assets::load_consts(&p, &id).unwrap();
+    table.get_mut("glow_amount").unwrap().value = Value::Float(0.75);
+    ops::save_consts(&p, &id, &table).unwrap();
+    let scope = shader_project::Scope::Affected([id.clone()].into());
+    let r = regenerate(&p, &RegenOptions { scope, ..Default::default() }).unwrap();
+    let changed: Vec<String> = r.changes.iter().map(|c| c.path().display().to_string()).collect();
+    assert_eq!(changed.len(), 1, "{changed:?}");
+    assert!(changed[0].ends_with("fx/global_tint.wesl"), "{changed:?}");
+    assert!(read(&tint).contains("0.75f"));
+
+    // A name defined twice: E005 at the later table, the first definition counts.
+    let other = AssetId::new(AssetType::Consts, "more");
+    let dup = shader_graph_core::GlobalConsts::new(
+        "more",
+        vec![GlobalConst::new("glow_amount", ConstType::Vec2, Value::Float(0.0))],
+    );
+    ops::save_consts(&p, &other, &dup).unwrap();
+    let r = regenerate(&p, &RegenOptions { dry_run: true, ..Default::default() }).unwrap();
+    let errors: Vec<_> = r.diagnostics().filter(|d| d.is_error()).collect();
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert_eq!((errors[0].code, errors[0].asset.as_deref()), (Code::E005, Some("shaders/more.consts.ron")));
+
+    // Type mismatch (E003), missing constant (E006), cleared reference (W106, outputs zero).
+    std::fs::remove_file(other.file(&p)).unwrap();
+    table.get_mut("glow_amount").unwrap().ty = ConstType::Vec2;
+    ops::save_consts(&p, &id, &table).unwrap();
+    let r = regenerate(&p, &RegenOptions { dry_run: true, ..Default::default() }).unwrap();
+    let mat = AssetId::new(AssetType::Material, "fx/global_tint");
+    let codes = |r: &shader_project::RegenReport| r.assets[&mat].diagnostics.iter().map(|d| d.code).collect::<Vec<_>>();
+    assert_eq!(codes(&r), vec![Code::E003], "{:?}", r.assets[&mat].diagnostics);
+    let mut a = shader_project::assets::load(&p, &mat).unwrap();
+    let (registry, _) = shader_project::regen::project_registry(&p);
+    assert!(ops::clear_const_refs(&mut a, &registry, "glow_amount"));
+    assert!(!ops::clear_const_refs(&mut a, &registry, "glow_amount"));
+    ops::save(&p, &mat, &a).unwrap();
+    let r = regenerate(&p, &RegenOptions::default()).unwrap();
+    assert_eq!(codes(&r), vec![Code::W106]);
+    std::fs::remove_file(id.file(&p)).unwrap();
+    let r = regenerate(&p, &RegenOptions { dry_run: true, ..Default::default() }).unwrap();
+    assert_eq!(r.diagnostics().filter(|d| d.code == Code::E006).count(), 5, "every other node lost its constant");
+
+    // Every node without a constant outputs 1.0 / true, and the shader still compiles.
+    for name in ["base_color", "glow_color", "stripe_scale", "use_stripes", "fancy_stripes"] {
+        ops::clear_const_refs(&mut a, &registry, name);
+    }
+    ops::save(&p, &mat, &a).unwrap();
+    let bevy = BevySources::discover();
+    let r = regenerate(&p, &RegenOptions { compile_check: bevy.as_ref(), ..Default::default() }).unwrap();
+    assert_eq!(codes(&r), vec![Code::W106; 6], "{:?}", r.assets[&mat].diagnostics);
+    let wesl = read(&tint);
+    assert!(wesl.contains("mix(vec3<f32>(1.0, 1.0, 1.0), n_n04_out, 1.0f)"), "{wesl}");
+    assert!(wesl.contains(", true)"), "{wesl}");
 }

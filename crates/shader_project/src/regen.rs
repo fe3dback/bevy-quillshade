@@ -6,9 +6,11 @@ use std::path::PathBuf;
 use shader_codegen_rust::MaterialEntry;
 use shader_codegen_wesl::check::{self, BevySources, Files};
 use shader_codegen_wesl::{GenCtx, Generated, paths};
+use shader_graph_core::consts::GlobalConst;
+use shader_graph_core::ident::check_ident;
 use shader_graph_core::ir::{Ir, build_ir, declared_function_sig, find_cycle};
 use shader_graph_core::model::Asset;
-use shader_graph_core::registry::{FUNCTION_PREFIX, curve_refs};
+use shader_graph_core::registry::{FUNCTION_PREFIX, const_refs, curve_refs};
 use shader_graph_core::{Code, Diagnostic, FunctionSig, Registry};
 
 use crate::assets::{self, AssetId, AssetSet, AssetType};
@@ -62,7 +64,7 @@ impl RegenReport {
     }
 }
 
-/// Dependencies between assets (function calls, sampled curves).
+/// Dependencies between assets (function calls, sampled curves, global constants read).
 #[derive(Debug, Clone, Default)]
 pub struct DepGraph {
     pub uses: BTreeMap<AssetId, BTreeSet<AssetId>>,
@@ -72,6 +74,7 @@ pub struct DepGraph {
 impl DepGraph {
     pub fn build(set: &AssetSet, registry: &Registry) -> DepGraph {
         let mut g = DepGraph::default();
+        let (consts, _) = collect_consts(set);
         let mut add = |user: &AssetId, used: AssetId| {
             g.uses.entry(user.clone()).or_default().insert(used.clone());
             g.used_by.entry(used).or_default().insert(user.clone());
@@ -85,6 +88,11 @@ impl DepGraph {
             }
             for (_, _, path) in curve_refs(a, registry) {
                 add(id, AssetId::new(AssetType::Curve, path));
+            }
+            for (_, _, name) in const_refs(a, registry) {
+                if let Some((table, _)) = consts.get(&name) {
+                    add(id, table.clone());
+                }
             }
         }
         g
@@ -105,6 +113,41 @@ impl DepGraph {
     }
 }
 
+/// Global constants nodes can read (decision 0017), by name with their table, and the problems of every table:
+/// load errors, bad paths (the whole table is ignored), bad or repeated names (that constant is ignored; a name
+/// defined again in a later table, in path order, is reported there and the first definition counts).
+pub type ConstTables = (BTreeMap<String, (AssetId, GlobalConst)>, BTreeMap<AssetId, Vec<Diagnostic>>);
+
+pub fn collect_consts(set: &AssetSet) -> ConstTables {
+    let mut consts: BTreeMap<String, (AssetId, GlobalConst)> = BTreeMap::new();
+    let mut diags: BTreeMap<AssetId, Vec<Diagnostic>> = BTreeMap::new();
+    for (id, table) in &set.consts {
+        let d = diags.entry(id.clone()).or_default();
+        d.extend(assets::validate_path(id));
+        let table = match table {
+            Ok(t) if d.is_empty() => t,
+            Ok(_) => continue,
+            Err(e) => {
+                d.push(Diagnostic::new(Code::E009, format!("cannot load: {e}")).in_asset(id.source_rel()));
+                continue;
+            }
+        };
+        for c in &table.consts {
+            let problem = match (check_ident(&c.name), consts.get(&c.name)) {
+                (Err(e), _) => format!("constant name: {e}"),
+                (Ok(()), Some((other, _))) if other == id => format!("duplicate constant `{}`", c.name),
+                (Ok(()), Some((other, _))) => format!("constant `{}` is already defined in {other}", c.name),
+                (Ok(()), None) => {
+                    consts.insert(c.name.clone(), (id.clone(), c.clone()));
+                    continue;
+                }
+            };
+            d.push(Diagnostic::new(Code::E005, problem).in_asset(id.source_rel()));
+        }
+    }
+    (consts, diags)
+}
+
 /// Registry with stdlib + project user nodes.
 pub fn project_registry(project: &Project) -> (Registry, Vec<Diagnostic>) {
     let mut r = shader_stdlib::registry();
@@ -112,18 +155,19 @@ pub fn project_registry(project: &Project) -> (Registry, Vec<Diagnostic>) {
     (r, d)
 }
 
-/// Output paths of an asset.
-pub fn wesl_file(project: &Project, id: &AssetId) -> PathBuf {
-    project.root.join("assets").join(paths::module_file(&module_of(id)))
+/// Output paths of an asset (`None` for constant tables, which generate nothing).
+pub fn wesl_file(project: &Project, id: &AssetId) -> Option<PathBuf> {
+    Some(project.root.join("assets").join(paths::module_file(&module_of(id)?)))
 }
 
 /// WESL module of an asset.
-pub fn module_of(id: &AssetId) -> Vec<String> {
-    match id.ty {
+pub fn module_of(id: &AssetId) -> Option<Vec<String>> {
+    Some(match id.ty {
         AssetType::Material => paths::material_module(&id.path),
         AssetType::Function => paths::function_module(&id.path),
         AssetType::Curve => paths::curve_module(&id.path),
-    }
+        AssetType::Consts => return None,
+    })
 }
 
 pub fn rust_file(project: &Project, id: &AssetId) -> Option<PathBuf> {
@@ -197,6 +241,12 @@ pub fn regenerate_set(project: &Project, set: &AssetSet, opts: &RegenOptions) ->
         }
     }
     let curve_paths: BTreeSet<String> = curves.keys().map(|id| id.path.clone()).collect();
+    // Global constants: values are inlined by the nodes reading them, tables generate nothing.
+    let (consts, const_diags) = collect_consts(set);
+    for (id, d) in const_diags {
+        results.entry(id).or_default().diagnostics.extend(d);
+    }
+    let consts: BTreeMap<String, GlobalConst> = consts.into_iter().map(|(name, (_, c))| (name, c)).collect();
     let materials: Vec<&AssetId> = set.ids().filter(|i| i.ty == AssetType::Material).collect();
     for d in assets::module_conflicts(&materials) {
         let id = materials.iter().find(|m| Some(m.source_rel()) == d.asset).copied();
@@ -259,7 +309,7 @@ pub fn regenerate_set(project: &Project, set: &AssetSet, opts: &RegenOptions) ->
     for p in order {
         let id = AssetId::new(AssetType::Function, p);
         let asset = loaded[&id];
-        let r = build_ir(asset, p, &registry, &sigs, &curve_paths);
+        let r = build_ir(asset, p, &registry, &sigs, &curve_paths, &consts);
         let entry = results.entry(id.clone()).or_default();
         entry.diagnostics.extend(r.diagnostics.into_iter().map(|d| d.in_asset(id.source_rel())));
         for u in deps.uses.get(&id).into_iter().flatten().filter(|u| u.ty == AssetType::Function) {
@@ -288,7 +338,7 @@ pub fn regenerate_set(project: &Project, set: &AssetSet, opts: &RegenOptions) ->
 
     // Materials.
     for id in loaded.keys().copied().filter(|i| i.ty == AssetType::Material) {
-        let r = build_ir(loaded[id], &id.path, &registry, &sigs, &curve_paths);
+        let r = build_ir(loaded[id], &id.path, &registry, &sigs, &curve_paths, &consts);
         let entry = results.entry(id.clone()).or_default();
         entry.diagnostics.extend(r.diagnostics.into_iter().map(|d| d.in_asset(id.source_rel())));
         for u in deps.uses.get(id).into_iter().flatten().filter(|u| u.ty == AssetType::Function) {
@@ -326,7 +376,7 @@ pub fn regenerate_set(project: &Project, set: &AssetSet, opts: &RegenOptions) ->
         let mut g = match id.ty {
             AssetType::Material => shader_codegen_wesl::material(ir, &ctx),
             AssetType::Function => shader_codegen_wesl::function(ir, &ctx),
-            AssetType::Curve => continue,
+            AssetType::Curve | AssetType::Consts => continue,
         };
         if let Some(d) = &date {
             insert_date(&mut g.text, d);
@@ -355,10 +405,10 @@ pub fn regenerate_set(project: &Project, set: &AssetSet, opts: &RegenOptions) ->
             files.add(&paths::stdlib_module(name), shader_codegen_wesl::stdlib_module(name, src));
         }
         for (id, r) in &results {
-            let module = module_of(id);
+            let (Some(module), Some(file)) = (module_of(id), wesl_file(project, id)) else { continue };
             if let Some(g) = &r.wesl {
                 files.add(&module, g.text.clone());
-            } else if let Ok(old) = std::fs::read_to_string(wesl_file(project, id)) {
+            } else if let Ok(old) = std::fs::read_to_string(file) {
                 files.add(&module, old);
             }
         }
@@ -400,7 +450,7 @@ pub fn regenerate_set(project: &Project, set: &AssetSet, opts: &RegenOptions) ->
     for ty in [AssetType::Curve, AssetType::Function, AssetType::Material] {
         for (id, r) in &results {
             if id.ty == ty && r.ok && scoped(id) {
-                desired.push((wesl_file(project, id), r.wesl.as_ref().unwrap().text.clone()));
+                desired.push((wesl_file(project, id).unwrap(), r.wesl.as_ref().unwrap().text.clone()));
             }
         }
     }
@@ -424,10 +474,10 @@ pub fn regenerate_set(project: &Project, set: &AssetSet, opts: &RegenOptions) ->
                 modules.insert(id.path.clone(), text);
             } else {
                 keep.insert(rs);
-                keep.insert(wesl_file(project, id));
+                keep.extend(wesl_file(project, id));
             }
         } else {
-            keep.insert(wesl_file(project, id));
+            keep.extend(wesl_file(project, id));
             if let Ok(old) = std::fs::read_to_string(&rs)
                 && has_marker(&old)
             {
@@ -438,7 +488,7 @@ pub fn regenerate_set(project: &Project, set: &AssetSet, opts: &RegenOptions) ->
     }
     for (id, r) in &results {
         if id.ty != AssetType::Material && (!r.ok || !scoped(id)) {
-            keep.insert(wesl_file(project, id));
+            keep.extend(wesl_file(project, id));
         }
     }
     let crate_dir = project.crate_dir();
@@ -457,10 +507,9 @@ pub fn regenerate_set(project: &Project, set: &AssetSet, opts: &RegenOptions) ->
                     Code::E008,
                     format!("`{}` has no AUTOGENERATED marker; not overwriting", project.rel(&path)),
                 );
-                match results
-                    .iter_mut()
-                    .find(|(id, _)| wesl_file(project, id) == path || rust_file(project, id).as_ref() == Some(&path))
-                {
+                match results.iter_mut().find(|(id, _)| {
+                    wesl_file(project, id).as_ref() == Some(&path) || rust_file(project, id).as_ref() == Some(&path)
+                }) {
                     Some((id, r)) => {
                         r.diagnostics.push(d.in_asset(id.source_rel()));
                         r.ok = false;

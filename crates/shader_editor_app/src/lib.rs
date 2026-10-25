@@ -17,6 +17,7 @@ use bevy_noodle::prelude::*;
 pub mod autolayout;
 pub mod canvas;
 pub mod config;
+pub mod consts_doc;
 pub mod curve_doc;
 mod demo;
 pub mod doc;

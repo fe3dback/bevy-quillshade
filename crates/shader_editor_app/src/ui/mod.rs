@@ -12,10 +12,12 @@ use bevy::ui::ui_transform::UiGlobalTransform;
 use bevy::ui_widgets::{Activate, ScrollArea};
 use bevy_noodle::style::kit;
 
-use crate::state::{Action, Actions, Editor, GenFile, Unsaved, ViewRequest};
+use crate::state::{Action, Actions, ConstsAction, Editor, GenFile, Unsaved, ViewRequest};
 use crate::tab::{Lang, Tab, ViewKind};
 
 pub mod browser;
+pub mod const_preview;
+pub mod consts_view;
 pub mod curve_preview;
 pub mod curve_view;
 pub mod dialog;
@@ -89,6 +91,8 @@ impl Plugin for UiPlugin {
             text_view::TextViewPlugin,
             curve_view::CurveViewPlugin,
             curve_preview::CurvePreviewPlugin,
+            consts_view::ConstsViewPlugin,
+            const_preview::ConstPreviewPlugin,
             props::PropsPlugin,
             log::LogPlugin,
             dialog::DialogPlugin,
@@ -306,6 +310,12 @@ fn view_tools(tab: &Tab) -> Vec<Box<dyn Scene>> {
                 "Delete the selected points (Del)",
             )),
         ],
+        Tab::Consts(_) => vec![Box::new(icon_tool_button(
+            IconId::Plus,
+            "Add",
+            Action::Consts(ConstsAction::Add),
+            "Add the constant of the form",
+        ))],
         Tab::Text(t) => {
             let which = match t.lang {
                 Lang::Wesl => GenFile::Wesl,
@@ -405,6 +415,8 @@ fn spawn_layout(mut commands: Commands) {
                         --
                         @curve_view::curve_view()
                         --
+                        @consts_view::consts_view()
+                        --
                         EmptyHint
                         Node { position_type: PositionType::Absolute, left: px(24), top: px(24) }
                         Pickable::IGNORE
@@ -478,6 +490,7 @@ fn doc_kind_label(tab: &Tab) -> &'static str {
         },
         Tab::Text(t) => t.lang.label(),
         Tab::Curve(_) => "curve",
+        Tab::Consts(_) => "consts",
     }
 }
 
