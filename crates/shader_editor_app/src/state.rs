@@ -51,6 +51,12 @@ impl NewKind {
     }
 }
 
+/// Value a number field shows: Feathers prints every digit it is given (a picked color gives `0.73803073`),
+/// so fields show 3 decimals like their `NumberInputPrecision`. The model keeps full precision.
+pub fn display_value(v: f32) -> f32 {
+    (v * 1000.0).round() / 1000.0
+}
+
 /// What a property widget edits.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub enum PropTarget {
@@ -149,6 +155,8 @@ pub enum Action {
         kind: String,
         pos: (f32, f32),
         link: Option<Link>,
+        /// Preset parameters (a palette entry of one named route).
+        params: Vec<(String, Value)>,
     },
     Connect {
         from: (NodeId, String),
@@ -172,6 +180,19 @@ pub enum Action {
         comp: usize,
         value: f32,
         is_final: bool,
+    },
+    /// An edit made on the canvas finished (slider released, field committed, picker closed): ends undo
+    /// merging and redraws Properties, which is not redrawn during merged edits.
+    CommitInline,
+    /// Type of a node's polymorphic inputs, stored as the type of their inline values (RMB pin menu).
+    SetPinType {
+        node: NodeId,
+        ty: PinType,
+    },
+    /// Drops an inline value override; the pin falls back to its default.
+    ResetInput {
+        node: NodeId,
+        pin: String,
     },
     AutoLayout,
     AddComment(Option<(f32, f32)>),
@@ -392,7 +413,7 @@ impl Editor {
         self.current_folder.clear();
         self.rescan();
         for rel in &tabs.open {
-            if let Some(id) = assets::id_from_rel(rel)
+            if let Some(id) = assets::id_from_source_rel(rel)
                 && self.disk.assets.contains_key(&id)
             {
                 self.open_asset(&id);
@@ -778,7 +799,7 @@ impl Editor {
                     self.ui.props += 1;
                 }
             }
-            Action::AddNode { kind, pos, link } => self.add_node(&kind, pos, link),
+            Action::AddNode { kind, pos, link, params } => self.add_node(&kind, pos, link, &params),
             Action::Connect { from, to } => self.connect(from, to),
             Action::Disconnect { to } => {
                 if let Some(d) = self.doc_mut() {
@@ -804,6 +825,19 @@ impl Editor {
             }
             Action::SetValue { target, value, merge } => self.set_value(target, value, merge),
             Action::SetComponent { target, comp, value, is_final } => self.set_component(target, comp, value, is_final),
+            Action::CommitInline => {
+                if let Some(d) = self.doc_mut() {
+                    d.end_merge();
+                }
+                self.ui.props += 1;
+            }
+            Action::SetPinType { node, ty } => self.set_pin_type(&node, ty),
+            Action::ResetInput { node, pin } => {
+                if let Some(d) = self.doc_mut() {
+                    d.edit(|a| a.nodes.get_mut(&node).map(|n| n.inputs.remove(&pin)));
+                }
+                self.ui.props += 1;
+            }
             Action::AutoLayout => self.auto_layout(),
             Action::AddComment(at) => {
                 if let Some(d) = self.doc_mut() {
@@ -1017,10 +1051,10 @@ impl Editor {
         self.ui.props += 1;
     }
 
-    fn add_node(&mut self, kind: &str, pos: (f32, f32), link: Option<Link>) {
+    fn add_node(&mut self, kind: &str, pos: (f32, f32), link: Option<Link>, params: &[(String, Value)]) {
         let Some(i) = self.active else { return };
         let asset_kind = self.docs[i].asset.kind;
-        let id = self.docs[i].add_node(kind, pos);
+        let id = self.docs[i].add_node_with(kind, pos, params);
         if let Some(link) = link {
             let path = self.docs[i].id.path.clone();
             let d = &self.docs[i];
@@ -1063,7 +1097,8 @@ impl Editor {
         self.docs[i].edit(|a| a.connect((&from.0, &from.1), (&to.0, &to.1)));
     }
 
-    fn current_value(&self, target: &PropTarget) -> Option<Value> {
+    /// Value a property widget shows: the stored one, or the pin's default.
+    pub fn current_value(&self, target: &PropTarget) -> Option<Value> {
         let d = self.doc()?;
         match target {
             PropTarget::Param { node, key } => {
@@ -1072,11 +1107,14 @@ impl Editor {
             }
             PropTarget::Input { node, pin } => {
                 let n = d.asset.nodes.get(node)?;
-                if let Some(v) = n.inputs.get(pin) {
-                    return Some(v.clone());
+                let pin_def = node_signature(&d.asset, node, &self.registry, &self.functions, &d.id.path)
+                    .and_then(|sig| sig.input(pin).cloned());
+                // In the pin's resolved type: a wire on another poly pin may widen a stored scalar.
+                match (n.inputs.get(pin), pin_def) {
+                    (Some(v), Some(p)) => Some(v.coerce(p.ty)),
+                    (Some(v), None) => Some(v.clone()),
+                    (None, p) => p.map(|p| p.default.coerce(p.ty)),
                 }
-                let sig = node_signature(&d.asset, node, &self.registry, &self.functions, &d.id.path)?;
-                sig.input(pin).map(|p| p.default.coerce(p.ty))
             }
             PropTarget::Description => Some(Value::Str(d.asset.meta.description.clone())),
             PropTarget::FrameTitle(id) => {
@@ -1088,6 +1126,11 @@ impl Editor {
 
     fn set_component(&mut self, target: PropTarget, comp: usize, value: f32, is_final: bool) {
         let Some(cur) = self.current_value(&target) else { return };
+        // A field sends its shown (rounded) text back on focus loss: that is not an edit.
+        let old = cur.floats().get(comp).copied();
+        if old.is_some_and(|old| old != value && display_value(old) == value) {
+            return;
+        }
         let new = match cur {
             Value::Float(_) => Value::Float(value),
             Value::Int(_) => Value::Int(value.round() as i32),
@@ -1121,6 +1164,56 @@ impl Editor {
         if is_final && let Some(d) = self.doc_mut() {
             d.end_merge();
         }
+    }
+
+    /// Context menu of an input pin (RMB): type of polymorphic inputs while no poly pin is wired, reset of the
+    /// inline value, or disconnect.
+    pub fn pin_menu(&self, node: &str, pin: &str) -> Vec<(String, Action)> {
+        let Some(d) = self.doc() else { return Vec::new() };
+        let Some(sig) = node_signature(&d.asset, node, &self.registry, &self.functions, &d.id.path) else {
+            return Vec::new();
+        };
+        let Some(p) = sig.input(pin) else { return Vec::new() };
+        let wired = |id: &str| d.asset.edge_into(node, id).is_some();
+        if wired(pin) {
+            return vec![("Disconnect".into(), Action::Disconnect { to: (node.into(), pin.into()) })];
+        }
+        let mut items = Vec::new();
+        if p.poly && !sig.inputs.iter().any(|q| q.poly && wired(&q.id)) {
+            for ty in [PinType::Float, PinType::Float2, PinType::Float3, PinType::Float4] {
+                let label = if ty == p.ty { format!("{} (current)", ty.label()) } else { ty.label().to_string() };
+                items.push((label, Action::SetPinType { node: node.into(), ty }));
+            }
+        }
+        if p.implicit.is_none() && !p.required {
+            items.push(("Reset to default".into(), Action::ResetInput { node: node.into(), pin: pin.into() }));
+        }
+        items
+    }
+
+    /// Rewrites every unconnected polymorphic input of `node` to `ty`: they resolve to one common type
+    /// (the widest), so changing only one pin could not narrow it.
+    fn set_pin_type(&mut self, node: &str, ty: PinType) {
+        let Some(d) = self.doc() else { return };
+        let Some(n) = d.asset.nodes.get(node) else { return };
+        let Some(sig) = node_signature(&d.asset, node, &self.registry, &self.functions, &d.id.path) else { return };
+        let values: Vec<(String, Value)> = sig
+            .inputs
+            .iter()
+            .filter(|p| p.poly && d.asset.edge_into(node, &p.id).is_none())
+            .map(|p| (p.id.clone(), n.inputs.get(&p.id).unwrap_or(&p.default).coerce(ty)))
+            .collect();
+        if values.is_empty() {
+            return;
+        }
+        if let Some(d) = self.doc_mut() {
+            d.edit(|a| {
+                if let Some(n) = a.nodes.get_mut(node) {
+                    n.inputs.extend(values);
+                }
+            });
+        }
+        self.ui.props += 1;
     }
 
     fn set_value(&mut self, target: PropTarget, value: Value, merge: bool) {
@@ -1338,7 +1431,7 @@ impl Editor {
     }
 
     fn focus_diagnostic(&mut self, diag: &Diagnostic) {
-        let Some(id) = diag.asset.as_deref().and_then(assets::id_from_rel) else { return };
+        let Some(id) = diag.asset.as_deref().and_then(assets::id_from_source_rel) else { return };
         if self.disk.assets.contains_key(&id) {
             self.open_asset(&id);
         }
@@ -1397,7 +1490,7 @@ mod tests {
         assert_eq!(e.docs.len(), 1);
         e.validate();
         assert!(!e.all_diagnostics().iter().any(Diagnostic::is_error), "{:?}", e.all_diagnostics());
-        e.apply(Action::AddNode { kind: "stdlib::Time".into(), pos: (0.0, 0.0), link: None });
+        e.apply(Action::AddNode { kind: "stdlib::Time".into(), pos: (0.0, 0.0), link: None, params: Vec::new() });
         assert!(e.is_dirty());
         e.validate();
         assert!(e.all_diagnostics().iter().any(|d| d.code == Code::W101));
@@ -1417,13 +1510,131 @@ mod tests {
         let out = e.doc().unwrap().asset.nodes.iter().find(|(_, n)| n.kind == "output::Pbr3d").unwrap().0.clone();
         e.apply(Action::Disconnect { to: (out.clone(), "roughness".into()) });
         let link = Link { node: out.clone(), pin: "roughness".into(), from_output: false };
-        e.apply(Action::AddNode { kind: "stdlib::Constant".into(), pos: (0.0, 0.0), link: Some(link) });
+        e.apply(Action::AddNode {
+            kind: "stdlib::Constant".into(),
+            pos: (0.0, 0.0),
+            link: Some(link),
+            params: Vec::new(),
+        });
         let d = e.doc().unwrap();
         let edge = d.asset.edge_into(&out, "roughness").expect("auto-connected");
         assert_eq!(d.asset.nodes[&edge.from.0].kind, "stdlib::Constant");
         // One undo removes node and wire.
         e.apply(Action::Undo);
         assert!(e.doc().unwrap().asset.edge_into(&out, "roughness").is_none());
+    }
+
+    fn add_lerp(e: &mut Editor) -> NodeId {
+        e.apply(Action::OpenAsset(AssetId::new(AssetType::Material, "env/rock_wet")));
+        e.apply(Action::AddNode { kind: "stdlib::Lerp".into(), pos: (-700.0, 0.0), link: None, params: Vec::new() });
+        let d = e.doc().unwrap();
+        d.asset.nodes.iter().find(|(_, n)| n.kind == "stdlib::Lerp").unwrap().0.clone()
+    }
+
+    #[test]
+    fn inline_drag_is_one_undo_step() {
+        let (_dir, mut e) = project();
+        let lerp = add_lerp(&mut e);
+        let alpha = PropTarget::Input { node: lerp.clone(), pin: "alpha".into() };
+        let set = |value: f32| Action::SetComponent { target: alpha.clone(), comp: 0, value, is_final: false };
+        let input = |e: &Editor| e.doc().unwrap().asset.nodes[&lerp].inputs.get("alpha").cloned();
+        for v in [0.2, 0.4, 0.6] {
+            e.apply(set(v));
+        }
+        let props = e.ui.props;
+        e.apply(Action::CommitInline);
+        assert!(e.ui.props > props, "Properties redraws with the committed value");
+        // The next drag is a separate undo step.
+        e.apply(set(0.9));
+        e.apply(Action::Undo);
+        assert_eq!(input(&e), Some(Value::Float(0.6)));
+        e.apply(Action::Undo);
+        assert_eq!(input(&e), None);
+    }
+
+    fn lerp_types(e: &Editor, lerp: &str) -> Vec<PinType> {
+        let d = e.doc().unwrap();
+        let sig = node_signature(&d.asset, lerp, &e.registry, &e.functions, &d.id.path).unwrap();
+        ["a", "b", "alpha"].iter().map(|p| sig.input(p).unwrap().ty).chain([sig.outputs[0].ty]).collect()
+    }
+
+    #[test]
+    fn set_pin_type_resolves_poly() {
+        let (_dir, mut e) = project();
+        let lerp = add_lerp(&mut e);
+        e.apply(Action::SetPinType { node: lerp.clone(), ty: PinType::Float3 });
+        use PinType::*;
+        assert_eq!(lerp_types(&e, &lerp), vec![Float3, Float3, Float, Float3]);
+        e.apply(Action::SetPinType { node: lerp.clone(), ty: Float });
+        assert_eq!(lerp_types(&e, &lerp), vec![Float, Float, Float, Float]);
+        e.apply(Action::Undo);
+        assert_eq!(lerp_types(&e, &lerp), vec![Float3, Float3, Float, Float3]);
+    }
+
+    #[test]
+    fn reset_input_removes_override() {
+        let (_dir, mut e) = project();
+        let lerp = add_lerp(&mut e);
+        let alpha = PropTarget::Input { node: lerp.clone(), pin: "alpha".into() };
+        e.apply(Action::SetComponent { target: alpha, comp: 0, value: 0.8, is_final: true });
+        e.apply(Action::ResetInput { node: lerp.clone(), pin: "alpha".into() });
+        let input = |e: &Editor| e.doc().unwrap().asset.nodes[&lerp].inputs.get("alpha").cloned();
+        assert_eq!(input(&e), None);
+        e.apply(Action::Undo);
+        assert_eq!(input(&e), Some(Value::Float(0.8)));
+    }
+
+    #[test]
+    fn pin_menu_offers_type_reset_and_disconnect() {
+        let (_dir, mut e) = project();
+        let lerp = add_lerp(&mut e);
+        let labels = |e: &Editor, pin: &str| e.pin_menu(&lerp, pin).into_iter().map(|i| i.0).collect::<Vec<_>>();
+        assert_eq!(labels(&e, "a"), ["Float (current)", "Float2", "Float3", "Float4", "Reset to default"]);
+        // Alpha is not polymorphic.
+        assert_eq!(labels(&e, "alpha"), ["Reset to default"]);
+        let pick = e.pin_menu(&lerp, "a").into_iter().find(|i| i.0 == "Float3").unwrap().1;
+        assert_eq!(pick, Action::SetPinType { node: lerp.clone(), ty: PinType::Float3 });
+
+        e.apply(Action::AddNode { kind: "stdlib::Time".into(), pos: (-900.0, 0.0), link: None, params: Vec::new() });
+        let d = e.doc().unwrap();
+        let time = d.asset.nodes.iter().find(|(_, n)| n.kind == "stdlib::Time").unwrap().0.clone();
+        e.apply(Action::Connect { from: (time, "out".into()), to: (lerp.clone(), "b".into()) });
+        // A wire fixes the poly type: no type choice on any poly pin.
+        assert_eq!(labels(&e, "a"), ["Reset to default"]);
+        assert_eq!(labels(&e, "b"), ["Disconnect"]);
+    }
+
+    #[test]
+    fn component_edit_follows_resolved_pin_type() {
+        let (_dir, mut e) = project();
+        let lerp = add_lerp(&mut e);
+        let a = PropTarget::Input { node: lerp.clone(), pin: "a".into() };
+        e.apply(Action::SetValue { target: a.clone(), value: Value::Float(0.3), merge: false });
+        e.apply(Action::AddNode {
+            kind: "stdlib::Constant3Vector".into(),
+            pos: (-900.0, 0.0),
+            link: None,
+            params: Vec::new(),
+        });
+        let d = e.doc().unwrap();
+        let c3 = d.asset.nodes.iter().find(|(_, n)| n.kind == "stdlib::Constant3Vector").unwrap().0.clone();
+        e.apply(Action::Connect { from: (c3, "out".into()), to: (lerp.clone(), "b".into()) });
+        // A (stored as a scalar) now resolves to Float3: editing G must keep R and B.
+        e.apply(Action::SetComponent { target: a.clone(), comp: 1, value: 0.9, is_final: true });
+        assert_eq!(e.doc().unwrap().asset.nodes[&lerp].inputs.get("a"), Some(&Value::Float3([0.3, 0.9, 0.3])));
+    }
+
+    #[test]
+    fn committing_the_shown_rounded_value_keeps_precision() {
+        let (_dir, mut e) = project();
+        let lerp = add_lerp(&mut e);
+        let alpha = PropTarget::Input { node: lerp.clone(), pin: "alpha".into() };
+        e.apply(Action::SetValue { target: alpha.clone(), value: Value::Float(0.73803), merge: false });
+        // A field shows 0.738; focus loss sends that text back.
+        e.apply(Action::SetComponent { target: alpha.clone(), comp: 0, value: 0.738, is_final: true });
+        assert_eq!(e.doc().unwrap().asset.nodes[&lerp].inputs.get("alpha"), Some(&Value::Float(0.73803)));
+        e.apply(Action::SetComponent { target: alpha, comp: 0, value: 0.5, is_final: true });
+        assert_eq!(e.doc().unwrap().asset.nodes[&lerp].inputs.get("alpha"), Some(&Value::Float(0.5)));
     }
 
     #[test]
@@ -1456,12 +1667,80 @@ mod tests {
     fn close_dirty_tab_asks() {
         let (_dir, mut e) = project();
         e.apply(Action::OpenAsset(AssetId::new(AssetType::Material, "env/rock_wet")));
-        e.apply(Action::AddNode { kind: "stdlib::Time".into(), pos: (0.0, 0.0), link: None });
+        e.apply(Action::AddNode { kind: "stdlib::Time".into(), pos: (0.0, 0.0), link: None, params: Vec::new() });
         e.apply(Action::CloseTab(0));
         assert!(matches!(e.dialog, Some(Dialog::Confirm { .. })));
         assert_eq!(e.docs.len(), 1);
         e.apply(Action::DiscardTab(0));
         assert!(e.docs.is_empty());
         assert!(e.active.is_none());
+    }
+
+    #[test]
+    fn tabs_are_restored_on_next_launch() {
+        let (dir, mut e) = project();
+        let config = dir.path().join("config/config.ron");
+        e.config_path = Some(config.clone());
+        e.apply(Action::OpenAsset(AssetId::new(AssetType::Material, "env/rock_wet")));
+        e.apply(Action::OpenAsset(AssetId::new(AssetType::Material, "fx/hologram")));
+        e.apply(Action::ActivateTab(0));
+        e.apply(Action::Quit);
+        assert!(e.quit);
+
+        let mut next = Editor::with_config(UserConfig::load(&config), Some(config));
+        next.open_project(dir.path()).unwrap();
+        let open: Vec<_> = next.docs.iter().map(|d| d.id.path.as_str()).collect();
+        assert_eq!(open, ["env/rock_wet", "fx/hologram"]);
+        assert_eq!(next.active, Some(0));
+    }
+
+    #[test]
+    fn clicking_a_diagnostic_opens_its_asset() {
+        let (_dir, mut e) = project();
+        let id = AssetId::new(AssetType::Material, "env/rock_wet");
+        let node = e.disk.assets[&id].as_ref().unwrap().nodes.keys().next().unwrap().clone();
+        let diag = Diagnostic::new(Code::W101, "x").in_asset(id.source_rel()).at_node(node.clone());
+        e.apply(Action::FocusDiagnostic(diag));
+        assert_eq!(e.doc().map(|d| &d.id), Some(&id));
+        assert!(e.doc().unwrap().selection.contains(&node));
+    }
+
+    #[test]
+    fn named_routes_in_the_editor() {
+        let (_dir, mut e) = project();
+        e.apply(Action::OpenAsset(AssetId::new(AssetType::Material, "env/rock_wet")));
+        e.apply(Action::AddNode { kind: "stdlib::NamedRoute".into(), pos: (0.0, 0.0), link: None, params: Vec::new() });
+        let decl = e.doc().unwrap().selection.first().unwrap().clone();
+
+        // The palette offers one usage entry per declaration, preset to it.
+        let entries = search::route_entries(&e.registry, &e.doc().unwrap().asset);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "Named Route Usage: route");
+        let params = entries[0].params.clone();
+        e.apply(Action::AddNode { kind: entries[0].kind.clone(), pos: (0.0, 0.0), link: None, params });
+        let usage = e.doc().unwrap().selection.first().unwrap().clone();
+        let d = e.doc().unwrap();
+        assert_eq!(d.asset.nodes[&usage].params["route"], Value::Str(decl.clone()));
+        assert_eq!(crate::canvas::node_title(&e, &d.asset, &usage), "route (Named Route Usage)");
+
+        // usage → declaration would close a loop through the route.
+        let err = connection_error(&d.asset, (&usage, "out"), (&decl, "in"), &e.registry, &e.functions, &d.id.path);
+        assert!(err.unwrap().contains("E002"));
+
+        // Copied with its declaration, a usage follows the copy; copied alone, it keeps the original.
+        e.apply(Action::Select([decl.clone(), usage.clone()].into()));
+        e.apply(Action::Duplicate);
+        let d = e.doc().unwrap();
+        let (new_decl, new_usage) = {
+            let new: Vec<_> = d.selection.iter().cloned().collect();
+            let is_decl = |id: &String| d.asset.nodes[id].kind == "stdlib::NamedRoute";
+            (new.iter().find(|i| is_decl(i)).unwrap().clone(), new.iter().find(|i| !is_decl(i)).unwrap().clone())
+        };
+        assert_eq!(d.asset.nodes[&new_usage].params["route"], Value::Str(new_decl));
+        e.apply(Action::Select([usage.clone()].into()));
+        e.apply(Action::Duplicate);
+        let d = e.doc().unwrap();
+        let copy = d.selection.first().unwrap();
+        assert_eq!(d.asset.nodes[copy].params["route"], Value::Str(decl));
     }
 }

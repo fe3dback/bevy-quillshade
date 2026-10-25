@@ -12,7 +12,7 @@ pub struct UserConfig {
     pub maximized: bool,
     /// Most recent first.
     pub recent: Vec<PathBuf>,
-    /// Open tabs (asset source paths relative to `shaders/`) per project root.
+    /// Open tabs (`AssetId::source_rel`, e.g. `shaders/env/rock.material.ron`) per project root.
     pub tabs: BTreeMap<PathBuf, ProjectTabs>,
 }
 
@@ -79,7 +79,7 @@ mod tests {
         c.touch_recent(Path::new("/b"));
         c.touch_recent(Path::new("/a"));
         assert_eq!(c.recent, vec![PathBuf::from("/a"), PathBuf::from("/b")]);
-        c.tabs.insert("/a".into(), ProjectTabs { open: vec!["env/rock.material.ron".into()], active: Some(0) });
+        c.tabs.insert("/a".into(), ProjectTabs { open: vec!["shaders/env/rock.material.ron".into()], active: Some(0) });
         c.save(&path).unwrap();
         assert_eq!(UserConfig::load(&path), c);
         assert_eq!(UserConfig::load(&dir.path().join("missing.ron")), UserConfig::default());

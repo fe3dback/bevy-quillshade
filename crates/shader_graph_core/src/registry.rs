@@ -32,6 +32,8 @@ pub enum ParamKind {
     Enum(Vec<String>),
     /// One of the listed pin types (stored as `Value::Type`).
     PinType(Vec<PinType>),
+    /// Node id of a named route declaration in the same asset (stored as `Value::Str`).
+    Route,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -63,6 +65,8 @@ pub struct PinDef {
     pub inactive: bool,
     /// Unconnected input has a meaningful built-in fallback (shown instead of a value field).
     pub implicit: Option<String>,
+    /// Sensible value range of a scalar input (inline slider bounds in the editor; not enforced in codegen).
+    pub range: Option<(f32, f32)>,
 }
 
 impl PinDef {
@@ -76,6 +80,7 @@ impl PinDef {
             required: false,
             inactive: false,
             implicit: None,
+            range: None,
         }
     }
 
@@ -101,6 +106,11 @@ impl PinDef {
 
     pub fn implicit(mut self, what: &str) -> Self {
         self.implicit = Some(what.into());
+        self
+    }
+
+    pub fn range(mut self, min: f32, max: f32) -> Self {
+        self.range = Some((min, max));
         self
     }
 
@@ -138,7 +148,15 @@ pub enum NodeRole {
     /// Material parameter (Scalar/Vector/Color/Texture/Bool).
     Parameter,
     Reroute,
+    /// Named route declaration (`in` → `out`): a wire end that its usages read without a visible wire.
+    RouteDeclaration,
+    /// Named route usage: `out` carries the input of the declaration whose node id is in [`ROUTE_PARAM`].
+    /// Its `in` pin is fed by an implicit edge ([`crate::ir::route_edges`]), never by a stored one.
+    RouteUsage,
 }
+
+/// Parameter of a [`NodeRole::RouteUsage`] node: the node id of its declaration (decision 0011).
+pub const ROUTE_PARAM: &str = "route";
 
 #[derive(Debug, Clone)]
 pub struct NodeInfo {

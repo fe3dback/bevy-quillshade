@@ -2,8 +2,8 @@
 
 use std::collections::BTreeMap;
 
-use shader_graph_core::model::AssetKind;
-use shader_graph_core::registry::{FUNCTION_PREFIX, FunctionLookup, NodeRole, Registry, SigCtx};
+use shader_graph_core::model::{Asset, AssetKind};
+use shader_graph_core::registry::{FUNCTION_PREFIX, FunctionLookup, NodeRole, ROUTE_PARAM, Registry, SigCtx};
 use shader_graph_core::{Env, FunctionSig, PinType, Value, conversion};
 
 /// One palette item.
@@ -14,6 +14,8 @@ pub struct Entry {
     pub category: String,
     pub keywords: Vec<String>,
     pub description: String,
+    /// Preset parameters of the new node.
+    pub params: Vec<(String, Value)>,
 }
 
 /// Which end of a wire the palette was opened from.
@@ -36,7 +38,8 @@ pub fn entries(
     for def in registry.defs() {
         let info = def.info();
         let allowed = match def.role() {
-            NodeRole::MaterialOutput => false,
+            // Usages are offered per declaration ([`route_entries`]).
+            NodeRole::MaterialOutput | NodeRole::RouteUsage => false,
             NodeRole::FunctionInput | NodeRole::FunctionOutput => kind.is_function(),
             NodeRole::Parameter => !kind.is_function(),
             _ => info.id != shader_graph_core::registry::FUNCTION_CALL_KIND,
@@ -51,6 +54,7 @@ pub fn entries(
             category: info.category.clone(),
             keywords: info.keywords.clone(),
             description: info.description.clone(),
+            params: Vec::new(),
         });
     }
     for (path, sig) in functions {
@@ -63,10 +67,28 @@ pub fn entries(
             category: "Functions".into(),
             keywords: vec![path.clone()],
             description: format!("Call function `{path}`"),
+            params: Vec::new(),
         });
     }
     out.sort_by(|a, b| (&a.category, &a.name).cmp(&(&b.category, &b.name)));
     out
+}
+
+/// One "Named Route Usage" entry per declaration in `asset` (UE-like): picking it creates a usage of that route.
+pub fn route_entries(registry: &Registry, asset: &Asset) -> Vec<Entry> {
+    let Some(def) = registry.defs().find(|d| d.role() == NodeRole::RouteUsage) else { return Vec::new() };
+    let info = def.info();
+    crate::doc::route_declarations(asset, registry)
+        .into_iter()
+        .map(|(id, name)| Entry {
+            kind: info.id.clone(),
+            name: format!("{}: {name}", info.name),
+            category: info.category.clone(),
+            keywords: info.keywords.iter().cloned().chain([name.clone()]).collect(),
+            description: format!("Outputs the input of Named Route `{name}`"),
+            params: vec![(ROUTE_PARAM.to_string(), Value::Str(id))],
+        })
+        .collect()
 }
 
 fn squash(s: &str) -> String {
@@ -120,10 +142,15 @@ pub fn score(e: &Entry, query: &str) -> u32 {
 
 /// Matching entries, best first (stable by category/name on ties).
 pub fn search<'a>(entries: &'a [Entry], query: &str) -> Vec<&'a Entry> {
+    search_indices(entries, query).into_iter().map(|i| &entries[i]).collect()
+}
+
+/// Like [`search`], as indices into `entries`.
+pub fn search_indices(entries: &[Entry], query: &str) -> Vec<usize> {
     let mut hits: Vec<(u32, usize)> =
         entries.iter().enumerate().map(|(i, e)| (score(e, query), i)).filter(|(s, _)| *s > 0).collect();
     hits.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
-    hits.into_iter().map(|(_, i)| &entries[i]).collect()
+    hits.into_iter().map(|(_, i)| i).collect()
 }
 
 /// Signature of a freshly created node of `kind` (default params, nothing connected).

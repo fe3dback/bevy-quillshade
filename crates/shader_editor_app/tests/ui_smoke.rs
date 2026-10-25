@@ -6,8 +6,9 @@ use bevy_noodle::prelude::*;
 use bevy_noodle::style::kit;
 use shader_editor_app::EditorCorePlugin;
 use shader_editor_app::canvas::{EditorCanvas, NodeKey, PinKey};
-use shader_editor_app::state::{Action, Actions, Editor};
+use shader_editor_app::state::{Action, Actions, Editor, PropTarget};
 use shader_editor_app::ui::EditorCanvasMarker;
+use shader_editor_app::ui::props::PropField;
 use shader_project::{AssetId, AssetType, Project, fixtures, ops};
 
 fn app() -> (tempfile::TempDir, App) {
@@ -30,6 +31,11 @@ fn app() -> (tempfile::TempDir, App) {
         bevy::input::InputPlugin,
         NoodleCorePlugin,
     ));
+    // Inline editors on nodes are Feathers widgets; their templates load fonts.
+    app.init_asset::<Font>().init_asset::<Image>();
+    app.init_resource::<bevy::input_focus::InputFocus>().init_resource::<bevy::input_focus::InputFocusVisible>();
+    app.init_resource::<bevy::feathers::controls::UnitsRegistry>();
+    app.insert_resource(bevy::feathers::theme::UiTheme(bevy::feathers::dark_theme::create_dark_theme()));
     app.insert_resource(editor);
     app.add_plugins(EditorCorePlugin);
     app.world_mut().spawn_scene(bsn! { @kit::canvas() EditorCanvasMarker }).unwrap();
@@ -71,7 +77,10 @@ fn canvas_mirrors_model_and_user_edits_flow_back() {
     assert_eq!(counts(&mut app), (n_model, e_model));
 
     // Create a node (palette pick) and connect it by "dragging" a wire.
-    act(&mut app, Action::AddNode { kind: "stdlib::Constant".into(), pos: (-400.0, 0.0), link: None });
+    act(
+        &mut app,
+        Action::AddNode { kind: "stdlib::Constant".into(), pos: (-400.0, 0.0), link: None, params: Vec::new() },
+    );
     let editor = app.world().resource::<Editor>();
     let d = editor.doc().unwrap();
     let c =
@@ -89,7 +98,15 @@ fn canvas_mirrors_model_and_user_edits_flow_back() {
     assert_eq!(d.asset.edge_into(&out, "metallic").map(|e| e.from.0.clone()), Some(c.clone()));
 
     // Type check (spec §7.2): a Float2 into Base Color (Float3) is refused by `ConnectionCheck`.
-    act(&mut app, Action::AddNode { kind: "stdlib::Constant2Vector".into(), pos: (-400.0, 200.0), link: None });
+    act(
+        &mut app,
+        Action::AddNode {
+            kind: "stdlib::Constant2Vector".into(),
+            pos: (-400.0, 200.0),
+            link: None,
+            params: Vec::new(),
+        },
+    );
     let d = app.world().resource::<Editor>().doc().unwrap();
     let v2 = d.asset.nodes.iter().find(|(_, n)| n.kind == "stdlib::Constant2Vector").unwrap().0.clone();
     let from = port(&mut app, &v2, "out", true);
@@ -134,4 +151,124 @@ fn moving_nodes_updates_model_without_rebuild() {
     assert!(d.is_dirty());
     // Same entity: the canvas was not rebuilt for a move.
     assert!(app.world().get::<NodeKey>(entity).is_some());
+}
+
+fn added(app: &App, kind: &str, pos: (f32, f32)) -> String {
+    let d = app.world().resource::<Editor>().doc().unwrap();
+    d.asset.nodes.iter().find(|(_, n)| n.kind == kind && n.pos == pos).unwrap().0.clone()
+}
+
+fn has_inline(app: &mut App, node: &str, pin: &str) -> bool {
+    let want = PropTarget::Input { node: node.into(), pin: pin.into() };
+    let w = app.world_mut();
+    w.query::<&PropField>().iter(w).any(|f| f.target == want)
+}
+
+#[test]
+fn inline_editor_follows_connection() {
+    let (_dir, mut app) = app();
+    act(&mut app, Action::OpenAsset(AssetId::new(AssetType::Material, "env/rock_wet")));
+    let new = |kind: &str, pos| Action::AddNode { kind: kind.into(), pos, link: None, params: Vec::new() };
+    act(&mut app, new("stdlib::Lerp", (-600.0, 0.0)));
+    act(&mut app, new("stdlib::Time", (-900.0, 0.0)));
+    let (lerp, time) = (added(&app, "stdlib::Lerp", (-600.0, 0.0)), added(&app, "stdlib::Time", (-900.0, 0.0)));
+    assert!(has_inline(&mut app, &lerp, "alpha"), "unconnected alpha shows its editor");
+
+    act(&mut app, Action::Connect { from: (time.clone(), "out".into()), to: (lerp.clone(), "alpha".into()) });
+    assert!(!has_inline(&mut app, &lerp, "alpha"), "a wire hides the editor");
+    assert!(has_inline(&mut app, &lerp, "a"));
+
+    act(&mut app, Action::Undo);
+    assert!(has_inline(&mut app, &lerp, "alpha"), "disconnecting brings it back");
+}
+
+fn inline_entity(app: &mut App, node: &str, pin: &str) -> Option<Entity> {
+    let want = PropTarget::Input { node: node.into(), pin: pin.into() };
+    let w = app.world_mut();
+    w.query::<(Entity, &PropField)>().iter(w).find(|(_, f)| f.target == want).map(|(e, _)| e)
+}
+
+/// The editable text inside widget `root`.
+fn text_in(app: &mut App, root: Entity) -> Entity {
+    let w = app.world_mut();
+    let texts: Vec<Entity> = w.query_filtered::<Entity, With<bevy::text::EditableText>>().iter(w).collect();
+    let inside = |mut e: Entity| loop {
+        if e == root {
+            return true;
+        }
+        match w.get::<ChildOf>(e) {
+            Some(p) => e = p.parent(),
+            None => return false,
+        }
+    };
+    texts.into_iter().find(|&t| inside(t)).unwrap()
+}
+
+fn focus(app: &mut App, e: Entity) {
+    app.world_mut().resource_mut::<bevy::input_focus::InputFocus>().set(e, bevy::input_focus::FocusCause::Pressed);
+}
+
+#[test]
+fn focused_inline_text_field_defers_rebuild() {
+    let (_dir, mut app) = app();
+    act(&mut app, Action::OpenAsset(AssetId::new(AssetType::Material, "env/rock_wet")));
+    act(&mut app, Action::AddNode { kind: "stdlib::Lerp".into(), pos: (-600.0, 0.0), link: None, params: Vec::new() });
+    let lerp = added(&app, "stdlib::Lerp", (-600.0, 0.0));
+
+    // A slider keeps focus after a click; that alone must not freeze the canvas.
+    let slider = inline_entity(&mut app, &lerp, "alpha").unwrap();
+    focus(&mut app, slider);
+    let alpha = PropTarget::Input { node: lerp.clone(), pin: "alpha".into() };
+    act(&mut app, Action::SetComponent { target: alpha, comp: 0, value: 0.7, is_final: true });
+    assert!(app.world().get_entity(slider).is_err(), "rebuilt despite the focused slider");
+
+    // Text being typed into a number field survives the rebuild that its own edit would cause.
+    let field = inline_entity(&mut app, &lerp, "a").unwrap();
+    let text = text_in(&mut app, field);
+    focus(&mut app, text);
+    let target = PropTarget::Input { node: lerp.clone(), pin: "a".into() };
+    act(&mut app, Action::SetComponent { target, comp: 0, value: 0.3, is_final: true });
+    assert!(app.world().get_entity(field).is_ok(), "the focused field survives the edit");
+
+    app.world_mut().resource_mut::<bevy::input_focus::InputFocus>().clear();
+    app.update();
+    app.update();
+    assert!(app.world().get_entity(field).is_err(), "the canvas catches up once focus leaves");
+    assert!(inline_entity(&mut app, &lerp, "a").is_some());
+}
+
+#[test]
+fn inline_fields_follow_the_model_while_rebuild_waits() {
+    let (_dir, mut app) = app();
+    act(&mut app, Action::OpenAsset(AssetId::new(AssetType::Material, "env/rock_wet")));
+    act(&mut app, Action::AddNode { kind: "stdlib::Lerp".into(), pos: (-600.0, 0.0), link: None, params: Vec::new() });
+    let lerp = added(&app, "stdlib::Lerp", (-600.0, 0.0));
+    act(&mut app, Action::SetPinType { node: lerp.clone(), ty: shader_graph_core::PinType::Float3 });
+    let a = PropTarget::Input { node: lerp.clone(), pin: "a".into() };
+    let field = |app: &mut App, comp: usize| {
+        let w = app.world_mut();
+        let mut q = w.query_filtered::<(Entity, &PropField), With<bevy::feathers::controls::FeathersNumberInput>>();
+        q.iter(w).find(|(_, f)| f.target == a && f.comp == comp).map(|(e, _)| e).unwrap()
+    };
+    // Typing into R defers the rebuild; G still shows what the model has.
+    let r = field(&mut app, 0);
+    let text = text_in(&mut app, r);
+    focus(&mut app, text);
+    let g = field(&mut app, 1);
+    act(&mut app, Action::SetComponent { target: a.clone(), comp: 1, value: 0.42, is_final: false });
+    assert!(app.world().get_entity(g).is_ok(), "not rebuilt");
+    let shown = app.world().get::<bevy::feathers::controls::NumberInputValue>(g).cloned();
+    assert!(matches!(shown, Some(bevy::feathers::controls::NumberInputValue::F32(v)) if v == 0.42), "{shown:?}");
+}
+
+#[test]
+fn rows_without_editor_keep_their_alignment() {
+    let (_dir, mut app) = app();
+    act(&mut app, Action::OpenAsset(AssetId::new(AssetType::Material, "env/rock_wet")));
+    act(&mut app, Action::AddNode { kind: "stdlib::Lerp".into(), pos: (-600.0, 0.0), link: None, params: Vec::new() });
+    let lerp = added(&app, "stdlib::Lerp", (-600.0, 0.0));
+    // An output row is just label + port: an empty growing editor slot would push the label off the right edge.
+    let out = port(&mut app, &lerp, "out", true);
+    let row = app.world().get::<ChildOf>(out).unwrap().parent();
+    assert_eq!(app.world().get::<Children>(row).unwrap().len(), 2);
 }

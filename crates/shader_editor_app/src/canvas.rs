@@ -5,18 +5,24 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
+use bevy::feathers::controls::NumberInputValue;
+use bevy::input_focus::InputFocus;
 use bevy::prelude::*;
+use bevy::text::EditableText;
 use bevy::ui::Selected;
 use bevy::ui::ui_transform::UiGlobalTransform;
+use bevy::ui_widgets::popover::Popover;
 use bevy_noodle::prelude::*;
 use bevy_noodle::style::kit;
 use shader_graph_core::model::{Asset, NodeId};
-use shader_graph_core::registry::{FUNCTION_PREFIX, NodeRole};
+use shader_graph_core::registry::{FUNCTION_PREFIX, NodeRole, ROUTE_PARAM};
 use shader_graph_core::{Code, PinType, Value};
 use shader_project::AssetId;
 
-use crate::doc::{connection_error, node_signature};
-use crate::state::{Action, Actions, Editor, Link, ViewRequest};
+use crate::doc::{connection_error, node_signature, route_declarations};
+use crate::inline::{Inline, inline_for_param, inline_for_pin, inline_scene};
+use crate::state::{Action, Actions, Editor, Link, PropTarget, ViewRequest, display_value};
+use crate::ui::props::PropField;
 
 /// Moves a frame makes to carry the nodes inside it.
 pub const CARRIED: EditOrigin = EditOrigin::Custom(1);
@@ -81,6 +87,7 @@ impl Plugin for CanvasPlugin {
                     commit_moves,
                     sync_selection,
                     rebuild_canvas,
+                    sync_inline_fields,
                     highlight_diagnostics,
                     keep_center_on_resize,
                     apply_view_requests,
@@ -148,7 +155,12 @@ pub fn node_title(editor: &Editor, asset: &Asset, id: &str) -> String {
     let name = def.info().name.clone();
     let p = |k: &str| params.get(k).map(short).unwrap_or_default();
     match def.role() {
-        NodeRole::Parameter => format!("{} ({name})", p("name")),
+        NodeRole::Parameter | NodeRole::RouteDeclaration => format!("{} ({name})", p("name")),
+        NodeRole::RouteUsage => {
+            let route = params.get(ROUTE_PARAM).map(|v| v.as_str().to_string()).unwrap_or_default();
+            let decl = route_declarations(asset, &editor.registry).into_iter().find(|r| r.0 == route);
+            format!("{} ({name})", decl.map_or("?".into(), |r| r.1))
+        }
         NodeRole::FunctionInput => format!("Input: {}", p("name")),
         NodeRole::FunctionOutput => format!("Output: {}", p("name")),
         _ if n.kind.starts_with(FUNCTION_PREFIX) => {
@@ -160,12 +172,28 @@ pub fn node_title(editor: &Editor, asset: &Asset, id: &str) -> String {
     }
 }
 
-fn pin_row(label: String, port: Port, color: Color, key: PinKey, text: Color) -> impl Scene {
+fn pin_row(
+    label: String,
+    port: Port,
+    color: Color,
+    key: PinKey,
+    text: Color,
+    editor: Option<Box<dyn Scene>>,
+) -> impl Scene {
     let justify = match port.direction {
         PortDirection::Input => JustifyContent::FlexStart,
         PortDirection::Output => JustifyContent::FlexEnd,
     };
     let tag = PinLabel { node: key.node.clone(), pin: key.pin.clone(), base: text };
+    // Only rows with an editor get the growing slot: an empty one would push labels off the right edge.
+    let editor: Vec<Box<dyn Scene>> = editor
+        .map(|e| -> Box<dyn Scene> {
+            Box::new(bsn! {
+                Node { flex_grow: 1.0, margin: UiRect::left(px(6)), align_items: AlignItems::Center } Children [ @{e} ]
+            })
+        })
+        .into_iter()
+        .collect();
     bsn! {
         Node {
             justify_content: justify,
@@ -180,6 +208,8 @@ fn pin_row(label: String, port: Port, color: Color, key: PinKey, text: Color) ->
             TextColor(text)
             tag
             Pickable { should_block_lower: false, is_hoverable: false }
+            --
+            {editor}
             --
             @kit::port(port, color) key
         ]
@@ -217,35 +247,52 @@ fn node_scene(editor: &Editor, asset: &Asset, path: &str, id: &str, canvas: Enti
     let cat = def.map_or("Unknown".to_string(), |d| d.info().category.clone());
     let head = category_color(&cat);
     let mut rows: Vec<Box<dyn Scene>> = Vec::new();
+    // Wide editors (vectors, colors) need a wider node.
+    let mut wide = false;
+    let params = editor.registry.resolved_params(&n.kind, &n.params);
+    if let Some((key, inline)) = inline_for_param(&n.kind, &params) {
+        wide |= matches!(inline, Inline::Vector(_) | Inline::Color(_));
+        let v = params.get(&key).cloned().unwrap_or(Value::Float(0.0));
+        let target = PropTarget::Param { node: id.into(), key };
+        rows.push(Box::new(bsn! { Node { min_height: px(26), align_items: AlignItems::Center } Children [ @{inline_scene(target, inline, &v)} ] }));
+    }
     if let Some(sig) = &sig {
         for p in &sig.outputs {
             let key = PinKey { node: id.into(), pin: p.id.clone(), output: true };
             let label = if p.label.is_empty() { p.ty.label().to_string() } else { p.label.clone() };
-            rows.push(Box::new(pin_row(label, Port::output(PortType::ANY), pin_color(p.ty), key, LABEL)));
+            rows.push(Box::new(pin_row(label, Port::output(PortType::ANY), pin_color(p.ty), key, LABEL, None)));
         }
-        for p in &sig.inputs {
+        // A usage's input is fed by its declaration, not by a wire.
+        let usage = def.is_some_and(|d| d.role() == NodeRole::RouteUsage);
+        for p in sig.inputs.iter().filter(|_| !usage) {
             let key = PinKey { node: id.into(), pin: p.id.clone(), output: false };
             let connected = asset.edge_into(id, &p.id).is_some();
             let mut label = if p.label.is_empty() { p.id.clone() } else { p.label.clone() };
+            let mut editor_scene = None;
             if !connected {
                 if let Some(what) = &p.implicit {
                     label.push_str(&format!(" ({what})"));
-                } else if p.ty.is_numeric() && !p.required {
-                    let v = n.inputs.get(&p.id).cloned().unwrap_or_else(|| p.default.coerce(p.ty));
-                    label.push_str(&format!(" = {}", short(&v)));
+                } else if !p.required
+                    && let Some(inline) = inline_for_pin(p.ty, p.range)
+                {
+                    wide |= matches!(inline, Inline::Vector(_) | Inline::Color(_));
+                    let v = n.inputs.get(&p.id).cloned().unwrap_or_else(|| p.default.clone()).coerce(p.ty);
+                    let target = PropTarget::Input { node: id.into(), pin: p.id.clone() };
+                    editor_scene = Some(inline_scene(target, inline, &v));
                 }
             }
             let text = if p.inactive { LABEL_DIM } else { LABEL };
-            rows.push(Box::new(pin_row(label, Port::input(PortType::ANY), pin_color(p.ty), key, text)));
+            rows.push(Box::new(pin_row(label, Port::input(PortType::ANY), pin_color(p.ty), key, text, editor_scene)));
         }
     } else {
         rows.push(Box::new(
             bsn! { Text("unknown node kind") TextColor(ERROR) TextFont { font_size: FontSize::Px(12.0) } },
         ));
     }
+    let min_width = if wide { px(250) } else { px(170) };
     Some(Box::new(bsn! {
         @kit::node(pos)
-        Node { min_width: px(150) }
+        Node { min_width: min_width }
         key
         ChildOf(canvas)
         Children [ @kit::title(title) BackgroundColor(head) -- {rows} ]
@@ -287,12 +334,66 @@ fn frame_scene(f: &shader_graph_core::Frame, canvas: Entity) -> impl Scene {
 // ---------------------------------------------------------------------------------------------
 // Model → canvas
 
+/// No gesture is running and no finished move is waiting for its commit (a rebuild would put the nodes back).
 fn idle(world: &mut World) -> bool {
+    if world.get_resource::<PendingMoves>().is_some_and(|m| !m.entities.is_empty()) {
+        return false;
+    }
     let wires = world.query::<&PendingWire>().iter(world).next().is_some();
     let pressed = world
         .get_resource::<ButtonInput<MouseButton>>()
         .is_some_and(|b| b.any_pressed([MouseButton::Left, MouseButton::Right, MouseButton::Middle]));
-    !wires && !pressed
+    !wires && !pressed && !inline_editing(world)
+}
+
+/// While the rebuild waits (see [`inline_editing`]), number fields on nodes still show the model: a color
+/// picker or another field may be changing their value. The field being typed into is left alone.
+fn sync_inline_fields(
+    editor: Res<Editor>,
+    focus: Option<Res<InputFocus>>,
+    fields: Query<(Entity, &PropField, &NumberInputValue)>,
+    parents: Query<&ChildOf>,
+    graph: GraphQuery,
+    mut commands: Commands,
+) {
+    if !editor.is_changed() {
+        return;
+    }
+    let typing = focus.and_then(|f| f.get()).and_then(|f| parents.get(f).ok()).map(ChildOf::parent);
+    for (e, field, shown) in &fields {
+        if Some(e) == typing || graph.node_of(e).is_none() {
+            continue;
+        }
+        let Some(v) = editor.current_value(&field.target) else { continue };
+        let want = match (shown, v) {
+            (NumberInputValue::I32(_), Value::Int(i)) => NumberInputValue::I32(i),
+            (_, v) => NumberInputValue::F32(display_value(v.floats().get(field.comp).copied().unwrap_or(0.0))),
+        };
+        if *shown != want {
+            commands.entity(e).insert(want);
+        }
+    }
+}
+
+/// Text is being typed into a field inside a node, or an editor's popup (color picker) is open: a rebuild
+/// would despawn it. Focused sliders/buttons don't count: they keep focus after a click, and their drags are
+/// covered by the pressed-button check.
+fn inline_editing(world: &mut World) -> bool {
+    let in_node = |world: &World, mut e: Entity| loop {
+        if world.get::<NodeKey>(e).is_some() {
+            return true;
+        }
+        match world.get::<ChildOf>(e) {
+            Some(parent) => e = parent.parent(),
+            None => return false,
+        }
+    };
+    let focus = world.get_resource::<InputFocus>().and_then(InputFocus::get);
+    if focus.is_some_and(|e| world.get::<EditableText>(e).is_some() && in_node(world, e)) {
+        return true;
+    }
+    let popovers: Vec<Entity> = world.query_filtered::<Entity, With<Popover>>().iter(world).collect();
+    popovers.into_iter().any(|e| in_node(world, e))
 }
 
 /// Rebuilds the canvas when the active document or its revision changed (and no gesture is running).

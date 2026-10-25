@@ -17,8 +17,11 @@ use bevy_noodle::prelude::*;
 pub mod autolayout;
 pub mod canvas;
 pub mod config;
+mod demo;
 pub mod doc;
+mod external;
 mod fixes;
+pub mod inline;
 pub mod search;
 pub mod state;
 pub mod ui;
@@ -49,13 +52,17 @@ impl Plugin for EditorCorePlugin {
     }
 }
 
-/// Inserts [`EditorCanvas`] once the canvas entity exists.
+/// Inserts [`EditorCanvas`] once the canvas entity exists. RMB drag pans (UE-like); MMB pan is
+/// handled in `ui::input`, RMB click without a drag opens the palette.
 fn attach_canvas(world: &mut World) {
     if world.contains_resource::<EditorCanvas>() {
         return;
     }
     let found = world.query_filtered::<Entity, With<ui::EditorCanvasMarker>>().iter(world).next();
     if let Some(canvas) = found {
+        if let Some(mut interaction) = world.get_mut::<CanvasInteraction>(canvas) {
+            interaction.pan_button = Some(PointerButton::Secondary);
+        }
         world.insert_resource(EditorCanvas::new(canvas));
     }
 }
@@ -99,21 +106,26 @@ fn poll_watcher(mut editor: ResMut<Editor>, time: Res<Time>, mut since: Local<f3
     }
 }
 
-fn open_externally(mut editor: ResMut<Editor>) {
+/// Errors of background openers, shown in the log.
+struct OpenErrors(std::sync::mpsc::Sender<String>, std::sync::mpsc::Receiver<String>);
+
+impl Default for OpenErrors {
+    fn default() -> Self {
+        let (tx, rx) = std::sync::mpsc::channel();
+        OpenErrors(tx, rx)
+    }
+}
+
+fn open_externally(mut editor: ResMut<Editor>, errors: Local<OpenErrors>) {
+    while let Ok(e) = errors.1.try_recv() {
+        editor.error(e);
+    }
     if editor.external.is_empty() {
         return;
     }
     for path in std::mem::take(&mut editor.external) {
-        let result = if cfg!(target_os = "macos") {
-            std::process::Command::new("open").arg(&path).spawn()
-        } else if cfg!(target_os = "windows") {
-            std::process::Command::new("cmd").args(["/C", "start", ""]).arg(&path).spawn()
-        } else {
-            std::process::Command::new("xdg-open").arg(&path).spawn()
-        };
-        if let Err(e) = result {
-            editor.error(format!("cannot open {}: {e}", path.display()));
-        }
+        let tx = errors.0.clone();
+        external::open(path, move |e| drop(tx.send(e)));
     }
 }
 
@@ -235,6 +247,6 @@ pub fn run(project: Option<PathBuf>) {
         .insert_resource(StartupProject(project))
         .add_plugins((EditorCorePlugin, ui::UiPlugin))
         .add_systems(Startup, open_startup_project)
-        .add_systems(Update, (open_externally, quit, remember_window_size, debug_screenshot))
+        .add_systems(Update, (open_externally, quit, remember_window_size, debug_screenshot, demo::scripted_input))
         .run();
 }

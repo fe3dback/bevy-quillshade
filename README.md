@@ -107,6 +107,12 @@ generated WESL/Rust), in the center the tabs and the canvas, on the right the pr
 default values, asset blend mode / two-sided / shading), at the bottom the log (click — focus the node).
 Validation runs live: nodes with errors are outlined in red, with warnings — in yellow.
 
+Values are also edited right on the nodes (UE-style): an unconnected input shows a slider (inputs with a known
+range, e.g. Lerp Alpha), a number field, X/Y fields, or a color button with R/G/B(/A) fields — the button opens a
+color picker (values are linear); a wire hides the editor. Constants and parameters edit their value under the
+title (ScalarParameter's slider spans Slider Min..Max). RMB on an input pin: the type of polymorphic inputs
+(Float…Float4, e.g. Lerp A/B), Reset to default, Disconnect.
+
 | Action | Keys |
 | --- | --- |
 | Save (and regenerate) / all | Ctrl+S / Ctrl+Shift+S |
@@ -114,16 +120,18 @@ Validation runs live: nodes with errors are outlined in red, with warnings — i
 | Copy / cut / paste / duplicate | Ctrl+C / Ctrl+X / Ctrl+V / Ctrl+D |
 | Delete selection | Delete, Backspace |
 | Focus selection / whole graph | F / Home |
-| Node palette (search by name, category, synonyms: `*`, `+`, `lerp`) | Tab, RMB on the canvas |
+| Node palette (search by name, category, synonyms: `*`, `+`, `lerp`) | Tab, RMB click on the canvas |
 | Palette filtered by wire type + auto-connect | release a wire on empty space |
 | Node under the cursor: Constant/2/3/4Vector, Scalar/Vector parameter, TextureSample, Multiply, Add, Lerp, TexCoord, Reroute | `1` `2` `3` `4` `S` `V` `T` `M` `A` `L` `U` `R` + LMB |
 | Comment frame around the selection | C |
-| Reroute point on a wire / delete a wire | double click / RMB on the wire |
+| Reroute point on a wire / delete a wire | double click / RMB click on the wire |
+| Pin menu: polymorphic type / reset value / disconnect | RMB click on an input pin |
+| Named route: a wire without a visible wire (Named Route + one usage per place) | palette: "Named Route", then "Named Route Usage: {name}" |
 | Auto-layout the selection (or the whole graph) | Ctrl+L |
 | Close tab / next tab | Ctrl+W (or MMB on the tab) / Ctrl+Tab |
 | Open project / quit | Ctrl+O / Ctrl+Q |
 
-Pan — middle mouse button, zoom — wheel, box select — LMB on empty space; the minimap
+Pan — drag with the right (or middle) mouse button (an RMB press that does not move is a click), zoom — wheel, box select — LMB on empty space; the minimap
 in the bottom right is clickable. Unsaved tabs are marked with `*`; on close and on an external change
 of the file (git checkout) the editor asks what to do. Window size, recent projects and open
 tabs are stored in `~/.config/shader-editor/config.ron`.
@@ -166,7 +174,7 @@ Asset(
 | E001 | missing or multiple output nodes |
 | E002 | cycle |
 | E003 | incompatible types (no allowed auto-conversion) |
-| E004 | required input not connected |
+| E004 | required input not connected (or a Named Route Usage without its declaration) |
 | E005 | invalid or duplicate name |
 | E006 | nonexistent function / recursive functions |
 | E007 | WESL of a Custom node does not parse |
@@ -205,4 +213,5 @@ in `examples/sample_game` renders the scene, saves `out-1.png`/`out-2.png` and e
 
 WPO is not visible to the prepass/shadows; function outputs of type Texture2D are not supported; user nodes
 have a single output; Static Switch is out of v1; there is no native folder picker (the path is typed in,
-with a list of recent projects). Details — [`docs/decisions/0010-v1-limitations.md`](docs/decisions/0010-v1-limitations.md).
+with a list of recent projects); sliders on nodes drag at the wrong speed and the color picker opens off its button when the canvas
+is zoomed (Bevy 0.20 bugs, see decision 0012). Details — [`docs/decisions/0010-v1-limitations.md`](docs/decisions/0010-v1-limitations.md).

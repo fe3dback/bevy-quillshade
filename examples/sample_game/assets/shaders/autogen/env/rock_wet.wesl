@@ -33,7 +33,7 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     let n_n03_rgba: vec4<f32> = sg_unpack_normal(textureSample(normal_map, normal_map_sampler, b_uv0));
     let n_n07_out: vec3<f32> = (n_n02_rgba.rgb * params.tint.rgb);
     let n_n08_ret_: WetMaskOut = wet_mask(params.wetness, n_n07_out, b_world_position);
-    let n_n09_out: f32 = mix(0.9f, 0.15f, n_n08_ret_.mask);
+    let n_n09_out: f32 = mix(1.358f, 0.15f, n_n08_ret_.mask);
     let n_n11_out: f32 = (b_time * params.speed);
     let n_n12_out: f32 = sin(n_n11_out);
     let n_n13_out: f32 = saturate(n_n12_out);

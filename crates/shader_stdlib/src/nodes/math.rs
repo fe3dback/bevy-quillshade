@@ -130,7 +130,7 @@ pub fn register(r: &mut Registry) {
                 Some(t) if t.dim().unwrap_or(1) > 1 => ty,
                 _ => PinType::Float,
             };
-            ins.push(pin_in("alpha", "Alpha", alpha_ty, 0.5));
+            ins.push(pin_in("alpha", "Alpha", alpha_ty, 0.5).range(0.0, 1.0));
             sig(ins, vec![poly_out("out", ty)])
         },
         |c| {

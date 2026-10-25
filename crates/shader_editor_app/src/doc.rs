@@ -4,10 +4,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use shader_graph_core::ir::would_create_cycle;
+use shader_graph_core::ir::{with_routes, would_create_cycle};
 use shader_graph_core::model::{Asset, Edge, Frame, Node, NodeId, new_node_id};
-use shader_graph_core::registry::{FunctionLookup, NodeRole, Registry, SigCtx, Signature};
-use shader_graph_core::{Env, PinType, conversion};
+use shader_graph_core::registry::{FunctionLookup, NodeRole, ROUTE_PARAM, Registry, SigCtx, Signature};
+use shader_graph_core::{Env, PinType, Value, conversion};
 use shader_project::AssetId;
 
 const HISTORY_LIMIT: usize = 200;
@@ -129,8 +129,14 @@ impl Doc {
     }
 
     pub fn add_node(&mut self, kind: &str, pos: (f32, f32)) -> NodeId {
+        self.add_node_with(kind, pos, &[])
+    }
+
+    /// Adds a node with preset parameters (e.g. the route of a Named Route Usage).
+    pub fn add_node_with(&mut self, kind: &str, pos: (f32, f32), params: &[(String, Value)]) -> NodeId {
         let id = new_node_id();
-        let node = Node::new(kind, pos);
+        let mut node = Node::new(kind, pos);
+        node.params.extend(params.iter().cloned());
         let nid = id.clone();
         self.edit(move |a| {
             a.nodes.insert(nid, node);
@@ -187,6 +193,12 @@ impl Doc {
             for (old, node) in &clip.nodes {
                 let mut n = node.clone();
                 n.pos = (n.pos.0 + offset.0, n.pos.1 + offset.1);
+                // A usage pasted together with its declaration follows the copy, otherwise the original.
+                if let Some(Value::Str(route)) = n.params.get_mut(ROUTE_PARAM)
+                    && let Some(new) = map.get(route.as_str())
+                {
+                    *route = new.clone();
+                }
                 a.nodes.insert(map[old].clone(), n);
             }
             for e in &clip.edges {
@@ -225,6 +237,21 @@ pub fn bounds(asset: &Asset, ids: &BTreeSet<NodeId>) -> Option<(f32, f32, f32, f
     Some(it.fold((first.0, first.1, first.0, first.1), |b, p| (b.0.min(p.0), b.1.min(p.1), b.2.max(p.0), b.3.max(p.1))))
 }
 
+/// Named route declarations of `asset` as (node id, name), sorted by name.
+pub fn route_declarations(asset: &Asset, registry: &Registry) -> Vec<(NodeId, String)> {
+    let mut out: Vec<(NodeId, String)> = asset
+        .nodes
+        .iter()
+        .filter(|(_, n)| registry.get(&n.kind).is_some_and(|d| d.role() == NodeRole::RouteDeclaration))
+        .map(|(id, n)| {
+            let params = registry.resolved_params(&n.kind, &n.params);
+            (id.clone(), params.get("name").map(|v| v.as_str().to_string()).unwrap_or_default())
+        })
+        .collect();
+    out.sort_by(|a, b| (&a.1, &a.0).cmp(&(&b.1, &b.0)));
+    out
+}
+
 /// Typed view of a node for the UI: signature resolved against the current model.
 pub fn node_signature(
     asset: &Asset,
@@ -233,6 +260,8 @@ pub fn node_signature(
     functions: &dyn FunctionLookup,
     path: &str,
 ) -> Option<Signature> {
+    let routed = with_routes(asset, registry);
+    let asset = routed.as_ref();
     let node = asset.nodes.get(id)?;
     let def = registry.get(&node.kind)?;
     let params = registry.resolved_params(&node.kind, &node.params);
@@ -303,6 +332,8 @@ pub fn connection_error(
     functions: &dyn FunctionLookup,
     path: &str,
 ) -> Option<String> {
+    let routed = with_routes(asset, registry);
+    let asset = routed.as_ref();
     if would_create_cycle(asset, from.0, to.0) {
         return Some("would create a cycle (E002)".into());
     }

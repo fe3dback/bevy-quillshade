@@ -14,3 +14,5 @@ Short records in the "context → decision → consequences" format. Numbering i
 | [0008](0008-editor-architecture.md) | Editor architecture: the model is the source of truth, model-level undo |
 | [0009](0009-user-config.md) | User config |
 | [0010](0010-v1-limitations.md) | v1 limitations and additional diagnostic codes |
+| [0011](0011-named-routes.md) | Named routes (UE-like named reroutes): usages reference the declaration by node id |
+| [0012](0012-inline-pin-editors.md) | Inline value editors on nodes, RMB pin menu, polymorphic pin type |

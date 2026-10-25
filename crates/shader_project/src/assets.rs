@@ -71,6 +71,11 @@ pub fn id_from_rel(rel: &str) -> Option<AssetId> {
     }
 }
 
+/// Inverse of [`AssetId::source_rel`]: `shaders/env/rock_wet.material.ron` (relative to the project root).
+pub fn id_from_source_rel(rel: &str) -> Option<AssetId> {
+    id_from_rel(rel.replace('\\', "/").strip_prefix("shaders/")?)
+}
+
 /// Lists all editor assets under `shaders/` (hidden directories skipped), sorted.
 pub fn scan(project: &Project) -> Vec<AssetId> {
     let root = project.shaders_dir();

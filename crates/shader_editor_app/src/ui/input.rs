@@ -8,6 +8,7 @@ use bevy::ui::ui_transform::UiGlobalTransform;
 use bevy::window::WindowCloseRequested;
 use bevy_noodle::prelude::*;
 
+use super::dialog::open_menu;
 use super::palette::Palette;
 use crate::canvas::{EditorCanvas, NodeKey, PinKey, link_of, window_to_graph};
 use crate::doc::connection_error;
@@ -17,9 +18,13 @@ pub struct InputPlugin;
 
 impl Plugin for InputPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, (shortcuts.run_if(not_typing), close_requested, draw_minimap))
+        app.init_resource::<RightPress>()
+            .add_systems(Update, (shortcuts.run_if(not_typing), close_requested, draw_minimap))
+            .add_observer(remember_right_press)
+            .add_observer(middle_pan)
             .add_observer(canvas_click)
             .add_observer(edge_click)
+            .add_observer(pin_click)
             .add_observer(wire_dropped);
     }
 }
@@ -120,6 +125,45 @@ fn hotkey_node(keys: &ButtonInput<KeyCode>) -> Option<&'static str> {
     .map(|(_, n)| n)
 }
 
+/// How far (logical px) the pointer may move between RMB press and release for it to count as a click
+/// (palette, wire removal) rather than a pan.
+const CLICK_SLOP: f32 = 3.0;
+
+/// Where the right button was last pressed.
+#[derive(Resource, Default)]
+struct RightPress(Option<Vec2>);
+
+impl RightPress {
+    fn is_click(&self, release: Vec2) -> bool {
+        self.0.is_some_and(|p| p.distance(release) <= CLICK_SLOP)
+    }
+}
+
+fn remember_right_press(press: On<PointerPress>, mut right: ResMut<RightPress>) {
+    if press.button == PointerButton::Secondary {
+        right.0 = Some(press.pointer.position);
+    }
+}
+
+/// MMB drag pans too (bevy_noodle has one pan button, set to RMB). Drags bubble from nodes up to the
+/// canvas; edges have no parent, so their drags are taken where they start.
+fn middle_pan(
+    drag: On<PointerDrag>,
+    ec: Option<Res<EditorCanvas>>,
+    graph: GraphQuery,
+    mut views: Query<&mut CanvasView>,
+) {
+    let Some(ec) = ec else { return };
+    let target = drag.event_target();
+    let on_edge = graph.edge_ports(target).is_some_and(|p| graph.canvas_of(p.input) == Some(ec.canvas));
+    if drag.button != PointerButton::Middle || !(target == ec.canvas || on_edge) {
+        return;
+    }
+    if let Ok(mut view) = views.get_mut(ec.canvas) {
+        view.pan += drag.delta;
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn canvas_click(
     click: On<PointerClick>,
@@ -128,6 +172,7 @@ fn canvas_click(
     canvases: Query<(&ComputedNode, &UiGlobalTransform, &CanvasView)>,
     keys: Res<ButtonInput<KeyCode>>,
     editor: Res<Editor>,
+    right: Res<RightPress>,
     mut palette: ResMut<Palette>,
     mut actions: ResMut<Actions>,
 ) {
@@ -141,25 +186,46 @@ fn canvas_click(
     let Ok((c, t, v)) = canvases.get(ec.canvas) else { return };
     let Some(at) = window_to_graph(click.pointer.position, c, t, v) else { return };
     match click.button {
-        PointerButton::Secondary => palette.show(click.pointer.position, at, None),
+        PointerButton::Secondary if right.is_click(click.pointer.position) => {
+            palette.show(click.pointer.position, at, None)
+        }
         PointerButton::Primary => {
             if let Some(kind) = hotkey_node(&keys)
                 && editor.asset_kind(&editor.doc().expect("checked").id).is_some()
             {
-                actions.push(Action::AddNode { kind: kind.into(), pos: (at.x, at.y), link: None });
+                actions.push(Action::AddNode { kind: kind.into(), pos: (at.x, at.y), link: None, params: Vec::new() });
             }
         }
         _ => {}
     }
 }
 
-/// Right click on a wire removes it; double click inserts a reroute point.
+/// Right click (not a pan) on an input pin opens its menu (type of polymorphic inputs, reset, disconnect).
+fn pin_click(
+    click: On<PointerClick>,
+    keys: Query<&PinKey>,
+    editor: Res<Editor>,
+    right: Res<RightPress>,
+    mut commands: Commands,
+) {
+    let Ok(key) = keys.get(click.event_target()) else { return };
+    if key.output || click.button != PointerButton::Secondary || !right.is_click(click.pointer.position) {
+        return;
+    }
+    let items = editor.pin_menu(&key.node, &key.pin);
+    if !items.is_empty() {
+        open_menu(&mut commands, click.pointer.position, items);
+    }
+}
+
+/// Right click (not a pan) on a wire removes it; double click inserts a reroute point.
 fn edge_click(
     click: On<PointerClick>,
     ec: Option<Res<EditorCanvas>>,
     graph: GraphQuery,
     keys_q: Query<&PinKey>,
     canvases: Query<(&ComputedNode, &UiGlobalTransform, &CanvasView)>,
+    right: Res<RightPress>,
     mut actions: ResMut<Actions>,
 ) {
     let Some(ec) = ec else { return };
@@ -170,7 +236,9 @@ fn edge_click(
     }
     let (Ok(a), Ok(b)) = (keys_q.get(ports.output), keys_q.get(ports.input)) else { return };
     match click.button {
-        PointerButton::Secondary => actions.push(Action::Disconnect { to: (b.node.clone(), b.pin.clone()) }),
+        PointerButton::Secondary if right.is_click(click.pointer.position) => {
+            actions.push(Action::Disconnect { to: (b.node.clone(), b.pin.clone()) })
+        }
         PointerButton::Primary if click.count >= 2 => {
             let Ok((c, t, v)) = canvases.get(ec.canvas) else { return };
             if let Some(at) = window_to_graph(click.pointer.position, c, t, v) {

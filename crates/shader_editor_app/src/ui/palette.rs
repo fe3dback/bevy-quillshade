@@ -22,7 +22,8 @@ pub struct Palette {
     pub graph: Vec2,
     pub link: Option<Link>,
     entries: Vec<Entry>,
-    results: Vec<String>,
+    /// Indices into `entries`.
+    results: Vec<usize>,
     query: Option<String>,
     highlight: usize,
     rows_for: Option<(Option<String>, usize)>,
@@ -78,6 +79,8 @@ fn spawn_or_close(
     // Entries for this asset, filtered by the wire's type.
     let d = editor.doc().expect("checked");
     let mut entries = search::entries(&editor.registry, &editor.functions, d.asset.kind, &d.id.path);
+    entries.extend(search::route_entries(&editor.registry, &d.asset));
+    entries.sort_by(|a, b| (&a.category, &a.name).cmp(&(&b.category, &b.name)));
     if let Some(link) = &palette.link
         && let Some(t) = editor.pin_type(&link.node, &link.pin, link.from_output)
     {
@@ -136,17 +139,17 @@ fn filter(mut palette: ResMut<Palette>, inputs: Query<&EditableText, With<Palett
     if palette.query.as_deref() == Some(q.as_str()) {
         return;
     }
-    let results: Vec<String> =
-        search::search(&palette.entries, &q).into_iter().take(MAX_ROWS).map(|e| e.kind.clone()).collect();
+    let results: Vec<usize> = search::search_indices(&palette.entries, &q).into_iter().take(MAX_ROWS).collect();
     palette.results = results;
     palette.query = Some(q);
     palette.highlight = 0;
 }
 
 fn pick(palette: &mut Palette, actions: &mut Actions, i: usize) {
-    if let Some(kind) = palette.results.get(i) {
+    if let Some(e) = palette.results.get(i).and_then(|r| palette.entries.get(*r)) {
         let pos = (palette.graph.x, palette.graph.y);
-        actions.push(Action::AddNode { kind: kind.clone(), pos, link: palette.link.clone() });
+        let (kind, params) = (e.kind.clone(), e.params.clone());
+        actions.push(Action::AddNode { kind, pos, link: palette.link.clone(), params });
     }
     palette.open = false;
 }
@@ -190,8 +193,8 @@ fn rows(mut palette: ResMut<Palette>, list: Query<Entity, With<PaletteList>>, mu
     if palette.results.is_empty() {
         commands.spawn_scene(bsn! { @text("No matching nodes", TEXT_DIM, 12.0) ChildOf(list) });
     }
-    for (i, kind) in palette.results.iter().enumerate() {
-        let Some(e) = palette.entries.iter().find(|e| e.kind == *kind) else { continue };
+    for (i, r) in palette.results.iter().enumerate() {
+        let Some(e) = palette.entries.get(*r) else { continue };
         let base = if i == palette.highlight { ROW_ACTIVE } else { Color::NONE };
         let (name, cat, row, hover) = (e.name.clone(), e.category.clone(), PaletteRow(i), HoverRow { base });
         commands.spawn_scene(bsn! {

@@ -1,5 +1,6 @@
 //! Model → IR (spec §6.3): type resolution, conversions, topological order, validation.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::diag::{Code, Diagnostic, Diagnostics};
@@ -7,7 +8,7 @@ use crate::ident::check_ident;
 use crate::model::{Asset, AssetKind, Edge, NodeId};
 use crate::registry::{
     Builtin, EmitCtx, EmitSink, Env, FnPort, FunctionLookup, FunctionSig, IrLine, MaterialParam, NodeDef, NodeRole,
-    Operand, ParamType, Registry, SigCtx, Signature, Stage,
+    Operand, ParamType, ROUTE_PARAM, Registry, SigCtx, Signature, Stage,
 };
 use crate::types::{PinType, conversion};
 use crate::value::Value;
@@ -225,8 +226,39 @@ pub fn declared_function_sig(asset: &Asset, path: &str, registry: &Registry) -> 
     }
 }
 
+/// Implicit edges of named routes: declaration `out` → usage `in`, for every usage whose
+/// [`ROUTE_PARAM`] names an existing declaration (decision 0011). They are never stored in the file;
+/// usages whose `in` already has an edge are skipped (so applying this twice adds nothing).
+pub fn route_edges(asset: &Asset, registry: &Registry) -> Vec<Edge> {
+    let role = |kind: &str| registry.get(kind).map(|d| d.role());
+    let mut out = Vec::new();
+    for (id, node) in &asset.nodes {
+        if role(&node.kind) != Some(NodeRole::RouteUsage) || asset.edge_into(id, "in").is_some() {
+            continue;
+        }
+        let decl = node.params.get(ROUTE_PARAM).map(|v| v.as_str()).unwrap_or_default();
+        if asset.nodes.get(decl).is_some_and(|d| role(&d.kind) == Some(NodeRole::RouteDeclaration)) {
+            out.push(Edge { from: (decl.to_string(), "out".into()), to: (id.clone(), "in".into()) });
+        }
+    }
+    out
+}
+
+/// `asset` with its [`route_edges`] added: the graph that types, cycles and codegen see.
+pub fn with_routes<'a>(asset: &'a Asset, registry: &Registry) -> Cow<'a, Asset> {
+    let edges = route_edges(asset, registry);
+    if edges.is_empty() {
+        return Cow::Borrowed(asset);
+    }
+    let mut a = asset.clone();
+    a.edges.extend(edges);
+    Cow::Owned(a)
+}
+
 /// Builds the IR of `asset` located at `path` (`{sub}/{name}` without suffix).
 pub fn build_ir(asset: &Asset, path: &str, registry: &Registry, functions: &dyn FunctionLookup) -> IrResult {
+    let routed = with_routes(asset, registry);
+    let asset = routed.as_ref();
     let mut diags = Diagnostics::default();
     let env = Env { asset_kind: asset.kind, asset_path: path, functions };
 
@@ -310,6 +342,9 @@ pub fn build_ir(asset: &Asset, path: &str, registry: &Registry, functions: &dyn 
             }
             NodeRole::Parameter if asset.kind.is_function() => diags.push(
                 Diagnostic::new(Code::E009, "parameters are only allowed in materials; use FunctionInput").at_node(*id),
+            ),
+            NodeRole::RouteUsage if !edge_into.contains_key(&(*id, "in")) => diags.push(
+                Diagnostic::new(Code::E004, "named route not found: pick a declaration in the properties").at_node(*id),
             ),
             _ => {}
         }

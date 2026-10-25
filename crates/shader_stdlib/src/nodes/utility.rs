@@ -1,7 +1,8 @@
-//! Utility category: If, logic, shading helpers, FunctionCall, Custom, Reroute.
+//! Utility category: If, logic, shading helpers, FunctionCall, Custom, Reroute, Named Route.
 
 use shader_graph_core::registry::{
-    Builtin, FUNCTION_CALL_KIND, FUNCTION_PREFIX, NodeRole, Operand, ParamDef, ParamKind, PinDef, Registry,
+    Builtin, FUNCTION_CALL_KIND, FUNCTION_PREFIX, NodeRole, Operand, ParamDef, ParamKind, PinDef, ROUTE_PARAM,
+    Registry, Signature,
 };
 use shader_graph_core::{Code, EmitCtx, PinType, SigCtx, Value};
 
@@ -104,7 +105,7 @@ pub fn register(r: &mut Registry) {
             sig(
                 vec![
                     pin_in("exponent", "Exponent", PinType::Float, 5.0),
-                    pin_in("base", "Base Reflect Fraction", PinType::Float, 0.04),
+                    pin_in("base", "Base Reflect Fraction", PinType::Float, 0.04).range(0.0, 1.0),
                     pin_in("normal", "Normal", PinType::Float3, 0.0).implicit("vertex normal"),
                 ],
                 vec![pin_out("out", "", PinType::Float)],
@@ -128,7 +129,7 @@ pub fn register(r: &mut Registry) {
                     sig(
                         vec![
                             pin_in("color", "Color", PinType::Float3, 0.0),
-                            pin_in("fraction", "Fraction", PinType::Float, 1.0),
+                            pin_in("fraction", "Fraction", PinType::Float, 1.0).range(0.0, 1.0),
                         ],
                         vec![pin_out("out", "", PinType::Float3)],
                     )
@@ -284,25 +285,47 @@ pub fn register(r: &mut Registry) {
     );
 
     r.register(
-        def("stdlib::Reroute", "Reroute", CAT).kw(&["reroute", "knot", "dot", "wire"]).role(NodeRole::Reroute).build(
-            |c| {
-                let ty = c.connected.get("in").copied().unwrap_or(PinType::Float);
-                let resolved = c.connected.contains_key("in");
-                let mut i = PinDef::new("in", "", ty);
-                let mut o = PinDef::new("out", "", ty);
-                i.poly = !resolved;
-                o.poly = !resolved;
-                sig(vec![i], vec![o])
-            },
-            |c| {
-                let op = match c.input_texture("in") {
-                    Some((tex, sampler)) => Operand::Texture { tex, sampler },
-                    None => Operand::Value(c.input("in")),
-                };
-                c.alias("out", op);
-            },
-        ),
+        def("stdlib::Reroute", "Reroute", CAT)
+            .kw(&["reroute", "knot", "dot", "wire"])
+            .role(NodeRole::Reroute)
+            .build(pass_through_sig, pass_through),
     );
+    // Named routes (decision 0011): usages read the declaration's input without a wire.
+    r.register(
+        def("stdlib::NamedRoute", "Named Route", CAT)
+            .kw(&["named reroute", "declaration", "teleport", "wireless", "route"])
+            .desc("Wire end with a name; Named Route Usage nodes output its input anywhere in this graph.")
+            .role(NodeRole::RouteDeclaration)
+            .param(ParamDef::new("name", "Name", ParamKind::Str, Value::Str("route".into())))
+            .build(pass_through_sig, pass_through),
+    );
+    r.register(
+        def("stdlib::NamedRouteUsage", "Named Route Usage", CAT)
+            .kw(&["named reroute", "usage", "teleport", "wireless", "route"])
+            .desc("Outputs the input of the chosen Named Route.")
+            .role(NodeRole::RouteUsage)
+            .param(ParamDef::new(ROUTE_PARAM, "Route", ParamKind::Route, Value::Str(String::new())))
+            .build(pass_through_sig, pass_through),
+    );
+}
+
+/// `in` → `out` of the connected type (Float while unconnected).
+fn pass_through_sig(c: &SigCtx) -> Signature {
+    let ty = c.connected.get("in").copied().unwrap_or(PinType::Float);
+    let resolved = c.connected.contains_key("in");
+    let mut i = PinDef::new("in", "", ty);
+    let mut o = PinDef::new("out", "", ty);
+    i.poly = !resolved;
+    o.poly = !resolved;
+    sig(vec![i], vec![o])
+}
+
+fn pass_through(c: &mut EmitCtx) {
+    let op = match c.input_texture("in") {
+        Some((tex, sampler)) => Operand::Texture { tex, sampler },
+        None => Operand::Value(c.input("in")),
+    };
+    c.alias("out", op);
 }
 
 /// Parses `a: Float3, tex: Texture2D` into pin names and types.

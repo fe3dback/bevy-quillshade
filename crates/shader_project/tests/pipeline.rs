@@ -131,3 +131,60 @@ fn workspace_warning_w105() {
     assert_eq!(w.code, Code::W105);
     assert!(w.message.contains("crates/shaders"));
 }
+
+#[test]
+fn named_routes_teleport_wires() {
+    use shader_graph_core::ir::build_ir;
+    use shader_graph_core::model::{Asset, AssetKind, MaterialKind, Node, PbrSettings};
+    use shader_graph_core::registry::NoFunctions;
+    use shader_graph_core::{Value, ir::Ir};
+
+    let reg = shader_stdlib::registry();
+    let base = || {
+        let mut a = Asset::new("m", AssetKind::Material(MaterialKind::Pbr3d(PbrSettings::default())));
+        a.nodes.insert("out".into(), Node::new("output::Pbr3d", (0.0, 0.0)));
+        let mut c = Node::new("stdlib::Constant3Vector", (0.0, 0.0));
+        c.params.insert("value".into(), Value::Float3([0.25, 0.5, 0.75]));
+        a.nodes.insert("c".into(), c);
+        a
+    };
+    let ir = |a: &Asset| -> (Option<Ir>, Vec<Code>) {
+        let r = build_ir(a, "m", &reg, &NoFunctions);
+        (r.ir, r.diagnostics.iter().map(|d| d.code).collect())
+    };
+
+    let mut direct = base();
+    direct.connect(("c", "out"), ("out", "base_color"));
+    let (want, codes) = ir(&direct);
+    assert!(codes.is_empty(), "{codes:?}");
+
+    // c → [Named Route "tint"] … [Usage] → base_color: the same expression reaches the output.
+    let mut routed = base();
+    let mut decl = Node::new("stdlib::NamedRoute", (0.0, 0.0));
+    decl.params.insert("name".into(), Value::Str("tint".into()));
+    routed.nodes.insert("r".into(), decl);
+    let mut usage = Node::new("stdlib::NamedRouteUsage", (0.0, 0.0));
+    usage.params.insert("route".into(), Value::Str("r".into()));
+    routed.nodes.insert("u".into(), usage);
+    routed.connect(("c", "out"), ("r", "in"));
+    routed.connect(("u", "out"), ("out", "base_color"));
+    let (got, codes) = ir(&routed);
+    assert!(codes.is_empty(), "{codes:?}");
+    assert_eq!(got.unwrap().main.outputs["base_color"], want.unwrap().main.outputs["base_color"]);
+    // The implicit edge is not stored.
+    assert_eq!(routed.edges.len(), 2);
+
+    // A usage without a declaration: E004.
+    let mut dangling = routed.clone();
+    dangling.nodes.remove("r");
+    dangling.edges.retain(|e| e.to.0 != "r");
+    assert!(ir(&dangling).1.contains(&Code::E004));
+
+    // A loop through the route: E002.
+    let mut cyclic = routed.clone();
+    cyclic.nodes.insert("m".into(), Node::new("stdlib::Multiply", (0.0, 0.0)));
+    cyclic.edges.retain(|e| e.to.0 != "r");
+    cyclic.connect(("u", "out"), ("m", "a"));
+    cyclic.connect(("m", "out"), ("r", "in"));
+    assert!(ir(&cyclic).1.contains(&Code::E002));
+}

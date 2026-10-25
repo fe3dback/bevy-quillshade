@@ -22,7 +22,7 @@ impl Default for RockWetParams {
     /// Default values from the graph.
     fn default() -> Self {
         Self {
-            tint: Vec4::new(0.9, 0.85, 0.8, 1.0),
+            tint: Vec4::new(0.6288158, 0.14549951, 0.65770394, 1.0),
             wetness: 0.3,
             speed: 1.0,
             _pad0: 0.0,
