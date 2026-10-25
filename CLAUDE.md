@@ -81,7 +81,7 @@ atomic write. Key facts that span several files:
   (`shader_stdlib::user`).
 - **Curves** (`shaders/**/*.curve.ron`, decision 0015) are not graphs: `shader_graph_core::curve::Curve`,
   `AssetType::Curve`, kept in `AssetSet::curves` (not `assets`). Each becomes its own module
-  `autogen/curves/<path>.wesl`; the `stdlib::SampleCurve` node (param of `ParamKind::Curve`) imports
+  `autogen/curves/dir_…/crv_<name>.wesl`; the `stdlib::SampleCurve` node (param of `ParamKind::Curve`) imports
   `sample_curve_simple`/`sample_curve_catmullrom` from it under a per-curve alias (`curve_fn_alias`).
   `curve_refs` finds the nodes referring to a curve (deps, rename). `Curve::sample` is the reference math.
 - **Global constant tables** (`shaders/**/*.consts.ron`, decision 0017) are not graphs either:
@@ -90,6 +90,9 @@ atomic write. Key facts that span several files:
   `Env::consts`; `regen::collect_consts` resolves names (unique project-wide), `const_refs` finds readers (deps,
   clearing on type change / delete). `regen::wesl_file` / `module_of` are `None` for tables.
 - **Node kinds** are string paths: `stdlib::*`, `param::*`, `output::*`, `function::<sub/name>`, `user::<id>`.
+- **Node context actions** (decision 0021) are data on `NodeDef` (node RMB menu, `Shift + - * /` convert, `V`). A material
+  can store a **node preview** (`Asset::preview`, decision 0022): the node's output replaces the material output in the
+  generated WESL (W107/W108); `Node::label` is an optional title for Constant nodes.
 - **Type conversions** (broadcast, truncation, Color↔Float4, Int→Float) are applied in codegen on the edge, not as
   inserted nodes (`shader_graph_core::types::conversion`); truncation emits W104.
 - **Functions** are separate WESL modules imported by materials via relative `super::` paths (`codegen_wesl::paths`) —
@@ -166,7 +169,7 @@ hand-drawn ones, rasterized at runtime with resvg (`crates/shader_editor_app/src
 
 - Editor: `SHADER_EDITOR_SCREENSHOT=out.png [SHADER_EDITOR_OPEN=env/rock_wet.material.ron[#wesl|#rust]]
   [SHADER_EDITOR_SELECT=stdlib::Lerp] [SHADER_EDITOR_DEMO=palette|wire|dialog|about|quick_start|open_project|welcome|menu|tab_menu] cargo run -- examples/sample_game`
-  — renders, saves the PNG and exits. `SHADER_EDITOR_INPUT=drag|rmb_click|rmb_pan|mmb_pan|slider|color|pin_rmb|hover|curve_drag|curve_add`
+  — renders, saves the PNG and exits. `SHADER_EDITOR_INPUT=drag|rmb_click|rmb_pan|mmb_pan|slider|color|pin_rmb|node_rmb|hover|curve_drag|curve_add`
   (+ `SHADER_EDITOR_INPUT_NODE=<id>`, `SHADER_EDITOR_INPUT_TRACE=1`, `SHADER_EDITOR_ZOOM=<f32>`) plays a scripted mouse
   gesture through winit's messages and logs the outcome (`demo` lines; `slider`/`color` also log the edited value).
 - Sample game: `cd examples/sample_game && SAMPLE_SCREENSHOT=out cargo run` → `out-1.png`, `out-2.png` (used to verify
@@ -174,9 +177,12 @@ hand-drawn ones, rasterized at runtime with resvg (`crates/shader_editor_app/src
 
 ## File format (`*.material.ron` / `*.function.ron`; curves: decision 0015)
 
-Serialized `Asset { format_version, kind, name, nodes, edges, comments, meta }` with struct names, 2-space indent,
-nodes in a `BTreeMap` by id. Asset name comes from the file name (file wins over the `name` field); names must be
-`[a-z][a-z0-9_]*` and not Rust/WGSL keywords. Loading probes `format_version` first; bump it on incompatible changes and
+Serialized `Asset { format_version, kind, name, nodes, edges, comments, meta, preview }` (`preview` omitted when
+default, decision 0022) with struct names, 2-space indent,
+nodes in a `BTreeMap` by id. Asset name comes from the file name (file wins over the `name` field); names must match
+`[a-z][a-z0-9_]*` (keywords are fine: generated identifiers and paths are prefixed `inp_`/`out_`/`fun_`/`dir_`/`mat_`/`crv_`,
+decision 0020; only user path components are prefixed — `autogen/stdlib/`, `autogen/functions/` and `autogen/curves/`
+stay unprefixed; only Custom/user-node input names keep the keyword check). Loading probes `format_version` first; bump it on incompatible changes and
 add a migration in `Asset::from_ron` (current version: 1). See decision 0003.
 
 ## Rules

@@ -8,6 +8,7 @@ pub mod diag;
 pub mod ident;
 pub mod ir;
 pub mod model;
+pub mod preview;
 pub mod registry;
 pub mod types;
 pub mod value;
@@ -15,14 +16,16 @@ pub mod value;
 pub use consts::{ConstLookup, ConstType, GlobalConst, GlobalConsts};
 pub use curve::{Curve, Interp};
 pub use diag::{Code, Diagnostic, Diagnostics};
-pub use ir::{Ir, IrResult, IrStage, UniformField, UniformLayout, UniformTy, build_ir};
+pub use ir::{Ir, IrPreview, IrResult, IrStage, UniformField, UniformLayout, UniformTy, build_ir};
 pub use model::{
-    Asset, AssetKind, BlendMode, Edge, Frame, MaterialKind, Meta, Node, NodeId, PbrSettings, Shading, SpriteSettings,
-    UnlitSettings,
+    Asset, AssetKind, BlendMode, Edge, Frame, MaterialKind, Meta, Node, NodeId, PbrSettings, Preview, PreviewMode,
+    Shading, SpriteSettings, UnlitSettings,
 };
+pub use preview::{PreviewSlot, ShaderOutputDto, albedo_expr, converts_to_albedo};
 pub use registry::{
-    Builtin, CurveLookup, EmitCtx, Env, FnPort, FunctionLookup, FunctionSig, MaterialParam, NodeDef, NodeInfo,
-    NodeRole, Operand, ParamDef, ParamKind, ParamType, PinDef, Registry, SigCtx, Signature, Stage,
+    Builtin, CurveLookup, EmitCtx, Env, FnPort, FunctionLookup, FunctionSig, Hotkey, HotkeyKey, MaterialParam,
+    NodeAction, NodeDef, NodeInfo, NodeOp, NodeRole, Operand, ParamDef, ParamKind, ParamType, PinDef, Registry, SigCtx,
+    Signature, Stage,
 };
 pub use types::{Conversion, PinType, conversion};
 pub use value::Value;

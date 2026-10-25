@@ -1,5 +1,6 @@
 //! Output category: MaterialOutput per asset type, FunctionInput, FunctionOutput.
 
+use shader_graph_core::ident::input_ident;
 use shader_graph_core::registry::{NodeRole, Operand, ParamDef, ParamKind, PinDef, Registry};
 use shader_graph_core::{AssetKind, BlendMode, Code, MaterialKind, PinType, Shading, SigCtx, Value};
 
@@ -124,7 +125,8 @@ pub fn register(r: &mut Registry) {
                     sig(vec![], vec![pin_out("out", c.param("name").as_str(), ty)])
                 },
                 |c| {
-                    let name = c.param("name").as_str().to_string();
+                    // Argument of the generated `fn` (decision 0020).
+                    let name = input_ident(c.param("name").as_str());
                     let op = if c.out_type("out") == PinType::Texture2D {
                         Operand::Texture { tex: name.clone(), sampler: format!("{name}_sampler") }
                     } else {

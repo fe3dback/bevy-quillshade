@@ -11,8 +11,8 @@ import super::super::stdlib::math::sg_remap;
 import super::super::stdlib::transform::sg_mat3;
 import super::super::stdlib::uv::{sg_flipbook_uv, sg_rotate_uv};
 
-@group(constants::MATERIAL_BIND_GROUP) @binding(101) var atlas: texture_2d<f32>;
-@group(constants::MATERIAL_BIND_GROUP) @binding(102) var atlas_sampler: sampler;
+@group(constants::MATERIAL_BIND_GROUP) @binding(101) var inp_atlas: texture_2d<f32>;
+@group(constants::MATERIAL_BIND_GROUP) @binding(102) var inp_atlas_sampler: sampler;
 
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
@@ -31,7 +31,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let n_n04_out: vec2<f32> = sg_rotate_uv(b_uv0, vec2<f32>(0.5, 0.5), 0.25f * b_time);
     let n_n05_out: vec2<f32> = ((n_n04_out - vec2<f32>(0.5)) * vec2<f32>(2.0, 2.0) + vec2<f32>(0.5));
     let n_n03_uv: vec2<f32> = sg_flipbook_uv(n_n05_out, 4.0f, 4.0f, fract(b_time));
-    let n_n03_rgba: vec4<f32> = textureSampleGrad(atlas, atlas_sampler, n_n03_uv, dpdx(n_n05_out), dpdy(n_n05_out));
+    let n_n03_rgba: vec4<f32> = textureSampleGrad(inp_atlas, inp_atlas_sampler, n_n03_uv, dpdx(n_n05_out), dpdy(n_n05_out));
     let n_n07_out: vec3<f32> = vec3<f32>(length(b_world_from_local[0].xyz), length(b_world_from_local[1].xyz), length(b_world_from_local[2].xyz));
     let n_n08_out: vec3<f32> = normalize(b_camera_position - b_world_position);
     let n_n09_out: f32 = -(b_view_from_world * vec4<f32>(b_world_position, 1.0)).z;

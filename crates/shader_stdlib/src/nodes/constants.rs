@@ -1,6 +1,6 @@
 //! Constants and Parameters categories.
 
-use shader_graph_core::ident::to_snake_case;
+use shader_graph_core::ident::{input_ident, to_snake_case};
 use shader_graph_core::registry::{
     Builtin, MaterialParam, NodeRole, Operand, ParamDef, ParamKind, ParamType, Registry,
 };
@@ -192,6 +192,8 @@ fn common_params(default_name: &str) -> Vec<ParamDef> {
     ]
 }
 
+/// Declares the material parameter; returns its WESL name (`inp_{name}`: uniform field, or the texture with
+/// `inp_{name}_sampler`; decision 0020).
 fn declare(c: &mut shader_graph_core::EmitCtx, ty: ParamType) -> String {
     let name = to_snake_case(c.param("name").as_str());
     let default = c.param("default").clone();
@@ -207,7 +209,7 @@ fn declare(c: &mut shader_graph_core::EmitCtx, ty: ParamType) -> String {
         node: c.node_id.to_string(),
     };
     c.declare_param(p);
-    name
+    input_ident(&name)
 }
 
 fn register_parameters(r: &mut Registry) {

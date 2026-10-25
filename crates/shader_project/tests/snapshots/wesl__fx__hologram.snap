@@ -8,7 +8,7 @@ import bevy_pbr::render::forward_io::VertexOutput;
 import bevy_pbr::render::mesh_view_bindings::{globals, view};
 import super::super::stdlib::shading::sg_fresnel;
 
-struct HologramParams { color: vec4<f32>, scan_speed: f32, _pad0: f32, _pad1: f32, _pad2: f32 }
+struct HologramParams { inp_color: vec4<f32>, inp_scan_speed: f32, _pad0: f32, _pad1: f32, _pad2: f32 }
 @group(constants::MATERIAL_BIND_GROUP) @binding(100) var<uniform> params: HologramParams;
 
 @fragment
@@ -24,13 +24,13 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let n_n06_y: f32 = (b_world_position).y;
     let n_n06_z: f32 = (b_world_position).z;
     let n_n08_out: f32 = (n_n06_y * 20.0f);
-    let n_n09_out: f32 = (b_time * params.scan_speed);
+    let n_n09_out: f32 = (b_time * params.inp_scan_speed);
     let n_n10_out: f32 = (n_n08_out + n_n09_out);
     let n_n11_out: f32 = fract(n_n10_out);
     let n_n12_out: f32 = step(0.5f, n_n11_out);
     let n_n13_out: f32 = (n_n12_out * 0.3f);
     let n_n14_out: f32 = (n_n04_out + n_n13_out);
-    let n_n15_out: vec3<f32> = (params.color.rgb * vec3<f32>(n_n14_out));
+    let n_n15_out: vec3<f32> = (params.inp_color.rgb * vec3<f32>(n_n14_out));
     let n_n16_out: f32 = saturate(n_n14_out);
     // --- outputs ---
     let color: vec3<f32> = n_n15_out;

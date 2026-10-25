@@ -5,13 +5,13 @@ source: crates/shader_project/tests/snapshots.rs
 // bevy 0.20, stdlib v1
 import bevy_pbr::render::forward_io::VertexOutput;
 
-@group(constants::MATERIAL_BIND_GROUP) @binding(101) var tex_tex: texture_2d<f32>;
-@group(constants::MATERIAL_BIND_GROUP) @binding(102) var tex_tex_sampler: sampler;
+@group(constants::MATERIAL_BIND_GROUP) @binding(101) var inp_tex_tex: texture_2d<f32>;
+@group(constants::MATERIAL_BIND_GROUP) @binding(102) var inp_tex_tex_sampler: sampler;
 
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // --- graph ---
-    let n_n02_out: vec2<f32> = vec2<f32>(textureDimensions(tex_tex));
+    let n_n02_out: vec2<f32> = vec2<f32>(textureDimensions(inp_tex_tex));
     let n_n04_out: vec3<f32> = vec3<f32>(n_n02_out, 0.0f);
     // --- outputs ---
     let color: vec3<f32> = n_n04_out;

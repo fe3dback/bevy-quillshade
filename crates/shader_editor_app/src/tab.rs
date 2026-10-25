@@ -4,6 +4,7 @@
 
 use std::path::PathBuf;
 
+use shader_graph_core::model::AssetKind;
 use shader_project::regen::{rust_file, wesl_file};
 use shader_project::{AssetId, Project, assets};
 
@@ -113,6 +114,10 @@ impl Tab {
     }
 
     pub fn title(&self) -> String {
+        format!("{}{}", self.base_title(), self.suffix())
+    }
+
+    fn base_title(&self) -> String {
         match self {
             Tab::Graph(_) | Tab::Curve(_) | Tab::Consts(_) => {
                 self.asset().source_rel().trim_end_matches(".ron").to_string()
@@ -121,10 +126,25 @@ impl Tab {
         }
     }
 
+    /// ` (preview)` on a material with a previewed node (decision 0022).
+    fn suffix(&self) -> &'static str {
+        match self {
+            Tab::Graph(d) if matches!(d.asset.kind, AssetKind::Material(_)) && d.asset.preview.node.is_some() => {
+                " (preview)"
+            }
+            _ => "",
+        }
+    }
+
     /// File name without directories and extensions (`rock_wet`); the tab bar falls back to [`Tab::title`] when
     /// several tabs share one.
     pub fn short_title(&self) -> String {
-        let title = self.title();
+        format!("{}{}", self.short_name(), self.suffix())
+    }
+
+    /// [`Tab::short_title`] without the preview suffix: what tab labels compare to find shared names.
+    fn short_name(&self) -> String {
+        let title = self.base_title();
         let name = title.rsplit('/').next().unwrap_or(&title);
         name.split('.').next().unwrap_or(name).to_string()
     }
@@ -204,11 +224,12 @@ pub fn parse_config_key(key: &str) -> Option<(AssetId, Option<Lang>)> {
     }
 }
 
-/// Tab bar labels: [`Tab::short_title`], or the full [`Tab::title`] for every tab whose short title is shared.
+/// Tab bar labels: [`Tab::short_title`], or the full [`Tab::title`] for every tab whose short name is shared
+/// (the ` (preview)` suffix does not tell two `rock` tabs apart).
 pub fn labels(tabs: &[Tab]) -> Vec<String> {
-    let short: Vec<String> = tabs.iter().map(Tab::short_title).collect();
+    let short: Vec<String> = tabs.iter().map(Tab::short_name).collect();
     tabs.iter()
         .zip(&short)
-        .map(|(t, s)| if short.iter().filter(|o| *o == s).count() > 1 { t.title() } else { s.clone() })
+        .map(|(t, s)| if short.iter().filter(|o| *o == s).count() > 1 { t.title() } else { t.short_title() })
         .collect()
 }

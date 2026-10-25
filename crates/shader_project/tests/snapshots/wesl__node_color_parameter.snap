@@ -5,13 +5,13 @@ source: crates/shader_project/tests/snapshots.rs
 // bevy 0.20, stdlib v1
 import bevy_pbr::render::forward_io::VertexOutput;
 
-struct NodeColorParameterParams { color: vec4<f32> }
+struct NodeColorParameterParams { inp_color: vec4<f32> }
 @group(constants::MATERIAL_BIND_GROUP) @binding(100) var<uniform> params: NodeColorParameterParams;
 
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // --- outputs ---
-    let color: vec3<f32> = params.color.rgb;
+    let color: vec3<f32> = params.inp_color.rgb;
     let alpha: f32 = 1.0;
     return vec4<f32>(color, alpha);
 }

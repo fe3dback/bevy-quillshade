@@ -148,3 +148,69 @@ fn composite_materials_generate_and_compile() {
         snapshot(&format!("crate__{}", f.replace(['/', '.'], "_")), &text);
     }
 }
+
+/// Node preview (spec §5, decision 0022): every material kind × preview mode generates and compiles, and the
+/// generated Rust is the same as without the preview (only `.wesl` changes, the game hot-reloads it).
+#[test]
+fn preview_modes_generate_and_compile() {
+    use shader_graph_core::model::{PbrSettings, Preview, PreviewMode};
+    let kinds = [
+        ("pbr3d", MaterialKind::Pbr3d(PbrSettings::default()), "base_color"),
+        ("unlit3d", MaterialKind::Unlit3d(UnlitSettings::default()), "color"),
+        ("sprite2d", MaterialKind::Sprite2d(SpriteSettings::default()), "color"),
+    ];
+    let (_dir, p) = project();
+    let mut ids = Vec::new();
+    for (kind_name, mat, color) in kinds {
+        for mode in PreviewMode::ALL {
+            let name = format!("{kind_name}_{}", mode.label());
+            let mut g = GraphBuilder::new(&name, AssetKind::Material(mat));
+            let out = g.node(mat.output_node_kind(), (600.0, 0.0));
+            let uv = g.node("stdlib::TextureCoordinate", (0.0, 0.0));
+            let lerp = g.node("stdlib::Lerp", (300.0, 0.0));
+            // Float2 → Float truncation (W104) on purpose.
+            g.link((&uv, "out"), (&lerp, "alpha"));
+            g.link((&lerp, "out"), (&out, color));
+            if matches!(mat, MaterialKind::Pbr3d(_)) {
+                let rough = g.node_p("param::Scalar", (300.0, 200.0), &[("name", Value::Str("rough".into()))]);
+                g.link((&rough, "out"), (&out, "roughness"));
+            }
+            if matches!(mat, MaterialKind::Unlit3d(_)) {
+                let c =
+                    g.node_p("stdlib::Constant3Vector", (300.0, 200.0), &[("value", Value::Float3([0.0, 0.1, 0.0]))]);
+                g.link((&c, "out"), (&out, shader_graph_core::ir::WPO_PIN));
+            }
+            let mut asset = g.finish();
+            asset.preview = Preview { node: Some(lerp), mode };
+            let id = AssetId::new(AssetType::Material, format!("preview/{name}"));
+            ops::save(&p, &id, &asset).unwrap();
+            ids.push((id, asset));
+        }
+    }
+    let bevy = BevySources::discover();
+    if bevy.is_none() {
+        eprintln!("warning: Bevy 0.20 sources not in the cargo registry; WESL compile check skipped");
+    }
+    let report = regenerate(&p, &RegenOptions { compile_check: bevy.as_ref(), ..Default::default() }).unwrap();
+    let errors: Vec<String> = report.diagnostics().filter(|d| d.is_error()).map(|d| d.to_string()).collect();
+    assert!(errors.is_empty(), "errors:\n{}", errors.join("\n"));
+    let mut rust = BTreeMap::new();
+    for (id, _) in &ids {
+        assert!(report.assets[id].ir.as_ref().is_some_and(|ir| ir.preview.is_some()), "{id:?}: preview ignored");
+        let text = std::fs::read_to_string(wesl_file(&p, id).unwrap()).unwrap();
+        snapshot(&format!("wesl__preview__{}", id.name()), &text);
+        rust.insert(id.clone(), std::fs::read_to_string(rust_file(&p, id).unwrap()).unwrap());
+    }
+
+    // Preview off: the Rust modules do not change.
+    for (id, asset) in &mut ids {
+        asset.preview.node = None;
+        ops::save(&p, id, asset).unwrap();
+    }
+    let report = regenerate(&p, &RegenOptions::default()).unwrap();
+    assert!(!report.has_errors());
+    for (id, _) in &ids {
+        let text = std::fs::read_to_string(rust_file(&p, id).unwrap()).unwrap();
+        assert_eq!(rust[id], text, "{id:?}: the Rust module changed with preview");
+    }
+}

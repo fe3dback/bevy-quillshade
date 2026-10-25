@@ -6,7 +6,8 @@ pub mod paths;
 use std::collections::{BTreeMap, BTreeSet};
 
 use shader_graph_core::curve::{Curve, Interp, curve_fn_alias};
-use shader_graph_core::ident::to_pascal_case;
+use shader_graph_core::ident::{function_ident, input_ident, output_ident, to_pascal_case};
+use shader_graph_core::model::PreviewMode;
 use shader_graph_core::registry::{Builtin, FunctionSig, ParamType};
 use shader_graph_core::{BlendMode, GENERATOR_VERSION, Ir, IrStage, MaterialKind, NodeId, PinType};
 
@@ -118,7 +119,7 @@ fn graph_imports(ir: &Ir, extra_stdlib: &[(&str, &str)], this: &[String], ctx: &
     for path in &ir.functions {
         let Some(sig) = ctx.functions.get(path) else { continue };
         let m = paths::relative(this, &paths::function_module(path));
-        imports.add(&m, &sig.name);
+        imports.add(&m, &function_ident(&sig.name));
         if sig.outputs.len() > 1 {
             imports.add(&m, &sig.out_struct());
         }
@@ -145,7 +146,8 @@ fn write_custom_fns(w: &mut Writer, ir: &Ir) {
     }
 }
 
-/// Material uniform struct + texture bindings (100, 101/102, …).
+/// Material uniform struct + texture bindings (100, 101/102, …). Field and texture names are `inp_*`
+/// (decision 0020).
 fn write_bindings(w: &mut Writer, ir: &Ir) {
     let struct_name = params_struct(&ir.name);
     if !ir.uniform.is_empty() {
@@ -159,13 +161,14 @@ fn write_bindings(w: &mut Writer, ir: &Ir) {
     }
     for (i, p) in ir.texture_params().enumerate() {
         let b = 101 + 2 * i;
+        let tex = input_ident(&p.name);
         w.node_line(
             &p.node,
-            format!("@group(constants::MATERIAL_BIND_GROUP) @binding({b}) var {}: texture_2d<f32>;", p.name),
+            format!("@group(constants::MATERIAL_BIND_GROUP) @binding({b}) var {tex}: texture_2d<f32>;"),
         );
         w.node_line(
             &p.node,
-            format!("@group(constants::MATERIAL_BIND_GROUP) @binding({}) var {}_sampler: sampler;", b + 1, p.name),
+            format!("@group(constants::MATERIAL_BIND_GROUP) @binding({}) var {tex}_sampler: sampler;", b + 1),
         );
     }
 }
@@ -290,6 +293,9 @@ pub fn material(ir: &Ir, ctx: &GenCtx) -> Generated {
     let mut imports = Imports::default();
     w.line(header(ctx.source_file));
     w.line(format!("// bevy 0.20, stdlib v{}", shader_stdlib::STDLIB_VERSION));
+    if let Some(p) = &ir.preview {
+        w.line(format!("// preview of node {} ({}): the material output is bypassed", p.node, p.mode.label()));
+    }
 
     let normal = ir.main.outputs.contains_key("normal") && matches!(kind, MaterialKind::Pbr3d(_));
     let extra: Vec<(&str, &str)> = if normal { vec![("transform", "sg_tbn")] } else { vec![] };
@@ -366,7 +372,9 @@ fn pbr_fragment(ir: &Ir, kind: &MaterialKind, normal: bool, imports: &mut Import
     }
     w.line("    // --- outputs ---");
     if let Some(v) = o.get("base_color") {
-        w.line(format!("    pbr_input.material.base_color = vec4<f32>({v}, pbr_input.material.base_color.a);"));
+        // Node preview forces alpha to 1 (decision 0022).
+        let alpha = if ir.preview.is_some() { "1.0" } else { "pbr_input.material.base_color.a" };
+        w.line(format!("    pbr_input.material.base_color = vec4<f32>({v}, {alpha});"));
     }
     if let Some(v) = o.get("metallic") {
         w.line(format!("    pbr_input.material.metallic = {v};"));
@@ -401,12 +409,23 @@ fn pbr_fragment(ir: &Ir, kind: &MaterialKind, normal: bool, imports: &mut Import
         w.line(format!("        pbr_input.N = normalize(sg_tbn(pbr_input.world_normal, in.world_tangent) * {v});"));
         w.line("    }");
     }
+    // Unlit preview bypasses lighting in WESL only (spec §5), like Bevy's `pbr.wesl` does for unlit materials:
+    // the flag also reaches the deferred G-buffer through `deferred_output`.
+    let unlit_preview = ir.preview.as_ref().is_some_and(|p| p.mode == PreviewMode::Unlit);
+    if unlit_preview {
+        imports.add("bevy_pbr::render::pbr_types", "STANDARD_MATERIAL_FLAGS_UNLIT_BIT");
+        w.line("    pbr_input.material.flags = pbr_input.material.flags | STANDARD_MATERIAL_FLAGS_UNLIT_BIT;");
+    }
     w.line("    pbr_input.material.base_color = alpha_discard(pbr_input.material.flags, pbr_input.material.alpha_cutoff, pbr_input.material.base_color);");
     w.line("    var out: FragmentOutput;");
     w.line("    @if(PREPASS_PIPELINE) {");
     w.line("        out = deferred_output(in, pbr_input);");
     w.line("    } @else {");
-    w.line("        out.color = apply_pbr_lighting(pbr_input);");
+    if unlit_preview {
+        w.line("        out.color = pbr_input.material.base_color;");
+    } else {
+        w.line("        out.color = apply_pbr_lighting(pbr_input);");
+    }
     w.line("        out.color = main_pass_post_lighting_processing(pbr_input, out.color);");
     w.line("    }");
     w.line("    return out;");
@@ -431,6 +450,12 @@ fn unlit_fragment(ir: &Ir, kind: &MaterialKind, imports: &mut Imports, w: &mut W
     }
     w.line("    // --- outputs ---");
     let color = o.get("color").cloned().unwrap_or_else(|| "vec3<f32>(0.0)".into());
+    if ir.preview.is_some() {
+        // Node preview (decision 0022): opaque color, no opacity, mask or blend-mode handling.
+        w.line(format!("    return vec4<f32>({color}, 1.0);"));
+        w.line("}");
+        return;
+    }
     let alpha = match blend {
         BlendMode::Opaque | BlendMode::Mask => "1.0".to_string(),
         _ => o.get("opacity").cloned().unwrap_or_else(|| "1.0".into()),
@@ -467,6 +492,8 @@ fn sprite_fragment(ir: &Ir, imports: &mut Imports, w: &mut Writer) {
     }
     w.line("    // --- outputs ---");
     match o.get("color") {
+        // Node preview (decision 0022): the IR built `vec4<f32>(albedo, 1.0)`, no sprite color/tint.
+        Some(c) if ir.preview.is_some() => w.line(format!("    return {c};")),
         Some(c) => w.line(format!("    return get_final_color({c}, in.instance_index);")),
         None => {
             let uv = o.get("uv").cloned().unwrap_or_else(|| "in.uv".into());
@@ -538,7 +565,8 @@ fn vertex_3d(vs: &IrStage, pbr: bool, imports: &mut Imports, w: &mut Writer) {
     w.line("}");
 }
 
-/// Generates the WESL module of a project function.
+/// Generates the WESL module of a project function: `fn fun_{name}(inp_*, b_*)` returning the value or a
+/// `{Name}Out { out_* }` struct (decision 0020).
 pub fn function(ir: &Ir, ctx: &GenCtx) -> Generated {
     let sig = ir.function_sig.as_ref().expect("function IR");
     let this = paths::function_module(&ir.path);
@@ -554,10 +582,11 @@ pub fn function(ir: &Ir, ctx: &GenCtx) -> Generated {
 
     let mut args = Vec::new();
     for i in &sig.inputs {
+        let name = input_ident(&i.name);
         if i.ty == PinType::Texture2D {
-            args.push(format!("{0}: texture_2d<f32>, {0}_sampler: sampler", i.name));
+            args.push(format!("{name}: texture_2d<f32>, {name}_sampler: sampler"));
         } else {
-            args.push(format!("{}: {}", i.name, i.ty.wesl()));
+            args.push(format!("{name}: {}", i.ty.wesl()));
         }
     }
     for b in &sig.builtins {
@@ -565,11 +594,12 @@ pub fn function(ir: &Ir, ctx: &GenCtx) -> Generated {
     }
     let ret = if sig.outputs.len() == 1 { sig.outputs[0].ty.wesl().to_string() } else { sig.out_struct() };
     if sig.outputs.len() > 1 {
-        let fields: Vec<String> = sig.outputs.iter().map(|o| format!("{}: {}", o.name, o.ty.wesl())).collect();
+        let fields: Vec<String> =
+            sig.outputs.iter().map(|o| format!("{}: {}", output_ident(&o.name), o.ty.wesl())).collect();
         w.line(format!("struct {} {{ {} }}", sig.out_struct(), fields.join(", ")));
         w.blank();
     }
-    w.line(format!("fn {}({}) -> {ret} {{", sig.name, args.join(", ")));
+    w.line(format!("fn {}({}) -> {ret} {{", function_ident(&sig.name), args.join(", ")));
     write_lines(&mut w, &ir.main, "    ");
     let value = |name: &str, ty: PinType| {
         ir.main.outputs.get(name).cloned().unwrap_or_else(|| shader_graph_core::Value::zero(ty).wesl_literal(ty))

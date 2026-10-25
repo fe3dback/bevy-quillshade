@@ -1,6 +1,8 @@
 //! Closure-based [`NodeDef`] builder used by all stdlib nodes.
 
-use shader_graph_core::registry::{EmitCtx, NodeDef, NodeInfo, NodeRole, ParamDef, PinDef, SigCtx, Signature};
+use shader_graph_core::registry::{
+    EmitCtx, NodeAction, NodeDef, NodeInfo, NodeRole, ParamDef, PinDef, SigCtx, Signature,
+};
 use shader_graph_core::{PinType, Value};
 
 type SigFn = dyn Fn(&SigCtx) -> Signature + Send + Sync;
@@ -10,6 +12,7 @@ pub struct Def {
     info: NodeInfo,
     role: NodeRole,
     params: Vec<ParamDef>,
+    actions: Vec<NodeAction>,
     sig: Box<SigFn>,
     emit: Box<EmitFn>,
 }
@@ -27,6 +30,10 @@ impl NodeDef for Def {
         self.params.clone()
     }
 
+    fn context_actions(&self) -> Vec<NodeAction> {
+        self.actions.clone()
+    }
+
     fn signature(&self, ctx: &SigCtx) -> Signature {
         (self.sig)(ctx)
     }
@@ -40,10 +47,16 @@ pub struct DefBuilder {
     info: NodeInfo,
     role: NodeRole,
     params: Vec<ParamDef>,
+    actions: Vec<NodeAction>,
 }
 
 pub fn def(id: &str, name: &str, category: &str) -> DefBuilder {
-    DefBuilder { info: NodeInfo::new(id, name, category), role: NodeRole::Normal, params: Vec::new() }
+    DefBuilder {
+        info: NodeInfo::new(id, name, category),
+        role: NodeRole::Normal,
+        params: Vec::new(),
+        actions: Vec::new(),
+    }
 }
 
 impl DefBuilder {
@@ -67,12 +80,24 @@ impl DefBuilder {
         self
     }
 
+    pub fn action(mut self, a: NodeAction) -> Self {
+        self.actions.push(a);
+        self
+    }
+
     pub fn build(
         self,
         sig: impl Fn(&SigCtx) -> Signature + Send + Sync + 'static,
         emit: impl Fn(&mut EmitCtx) + Send + Sync + 'static,
     ) -> Def {
-        Def { info: self.info, role: self.role, params: self.params, sig: Box::new(sig), emit: Box::new(emit) }
+        Def {
+            info: self.info,
+            role: self.role,
+            params: self.params,
+            actions: self.actions,
+            sig: Box::new(sig),
+            emit: Box::new(emit),
+        }
     }
 }
 

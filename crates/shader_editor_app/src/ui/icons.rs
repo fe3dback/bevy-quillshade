@@ -71,10 +71,11 @@ pub enum IconId {
     Info,
     Link,
     Help,
+    Warning,
 }
 
 impl IconId {
-    pub const ALL: [IconId; 32] = [
+    pub const ALL: [IconId; 33] = [
         IconId::File,
         IconId::Folder,
         IconId::FolderOpen,
@@ -107,6 +108,7 @@ impl IconId {
         IconId::Info,
         IconId::Link,
         IconId::Help,
+        IconId::Warning,
     ];
 
     fn source(self) -> Icon {
@@ -143,6 +145,7 @@ impl IconId {
             IconId::Info => icon_rs::INFO,
             IconId::Link => icon_rs::LINK,
             IconId::Help => icon_rs::HELP,
+            IconId::Warning => icon_rs::WARNING_FILLED,
         }
     }
 

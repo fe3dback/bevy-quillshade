@@ -29,6 +29,9 @@ pub struct Asset {
     pub comments: Vec<Frame>,
     #[serde(default)]
     pub meta: Meta,
+    /// Exclusive node preview of a material (spec §5, decision 0022); ignored in functions.
+    #[serde(default, skip_serializing_if = "Preview::is_default")]
+    pub preview: Preview,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -181,11 +184,14 @@ pub struct Node {
     /// Overrides of default values of unconnected inputs, edited inline in the node.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub inputs: BTreeMap<String, Value>,
+    /// Editor-only title of a constant node; codegen never reads it (decision 0021).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub label: String,
 }
 
 impl Node {
     pub fn new(kind: impl Into<String>, pos: (f32, f32)) -> Self {
-        Node { kind: kind.into(), pos, params: BTreeMap::new(), inputs: BTreeMap::new() }
+        Node { kind: kind.into(), pos, params: BTreeMap::new(), inputs: BTreeMap::new(), label: String::new() }
     }
 
     pub fn with_param(mut self, id: &str, v: Value) -> Self {
@@ -232,6 +238,46 @@ pub struct Meta {
     pub tags: Vec<String>,
 }
 
+/// How a previewed node's output is rendered (spec §5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum PreviewMode {
+    /// Albedo only, no lighting.
+    #[default]
+    Unlit,
+    /// Albedo only, through the material's normal lit template.
+    Lit,
+    /// Every slot of the node's `ShaderOutputDto`.
+    Full,
+}
+
+impl PreviewMode {
+    pub const ALL: [PreviewMode; 3] = [PreviewMode::Unlit, PreviewMode::Lit, PreviewMode::Full];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            PreviewMode::Unlit => "unlit",
+            PreviewMode::Lit => "lit",
+            PreviewMode::Full => "full",
+        }
+    }
+}
+
+/// Previewed node and preview mode, stored in the material file (decision 0022).
+/// The mode is kept while no node is previewed.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Preview {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node: Option<NodeId>,
+    #[serde(default)]
+    pub mode: PreviewMode,
+}
+
+impl Preview {
+    pub fn is_default(&self) -> bool {
+        *self == Preview::default()
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum LoadError {
     #[error("parse error: {0}")]
@@ -258,6 +304,7 @@ impl Asset {
             edges: Vec::new(),
             comments: Vec::new(),
             meta: Meta::default(),
+            preview: Preview::default(),
         }
     }
 
@@ -299,6 +346,14 @@ impl Asset {
             c.nodes.retain(|n| self.nodes.contains_key(n));
             c.nodes.sort();
             c.nodes.dedup();
+        }
+    }
+
+    /// Clears `preview.node` when that node no longer exists (the mode stays). Called by editor edits, not by
+    /// [`Asset::normalize`], so a dangling id read from a file reaches `build_ir` and is reported (W107).
+    pub fn clear_dangling_preview(&mut self) {
+        if self.preview.node.as_ref().is_some_and(|n| !self.nodes.contains_key(n)) {
+            self.preview.node = None;
         }
     }
 
@@ -347,6 +402,54 @@ mod tests {
         let b = Asset::from_ron(&text).unwrap();
         assert_eq!(a, b);
         assert_eq!(text, b.to_ron());
+    }
+
+    #[test]
+    fn node_label_roundtrip() {
+        let mut a = Asset::new("rock", AssetKind::Material(MaterialKind::Pbr3d(PbrSettings::default())));
+        let mut n = Node::new("stdlib::Constant", (0.0, 0.0));
+        n.label = "rim width".into();
+        a.add_node(n);
+        let text = a.to_ron();
+        assert!(text.contains("label: \"rim width\""), "{text}");
+        assert_eq!(Asset::from_ron(&text).unwrap(), a);
+        let mut b = a.clone();
+        b.nodes.values_mut().for_each(|n| n.label.clear());
+        assert!(!b.to_ron().contains("label:"));
+    }
+
+    #[test]
+    fn preview_roundtrip_and_default_not_serialized() {
+        let mut a = Asset::new("rock", AssetKind::Material(MaterialKind::Pbr3d(PbrSettings::default())));
+        let n = a.add_node(Node::new("stdlib::Constant", (0.0, 0.0)));
+        assert!(!a.to_ron().contains("preview"));
+        a.preview = Preview { node: Some(n.clone()), mode: PreviewMode::Full };
+        let text = a.to_ron();
+        assert!(text.contains("preview: Preview("), "{text}");
+        assert!(text.contains("mode: Full"), "{text}");
+        assert_eq!(Asset::from_ron(&text).unwrap(), a);
+        a.preview = Preview { node: None, mode: PreviewMode::Lit };
+        assert_eq!(Asset::from_ron(&a.to_ron()).unwrap().preview, a.preview);
+    }
+
+    #[test]
+    fn preview_clear_dangling_keeps_mode() {
+        let mut a = Asset::new("rock", AssetKind::Material(MaterialKind::Pbr3d(PbrSettings::default())));
+        let n = a.add_node(Node::new("stdlib::Constant", (0.0, 0.0)));
+        a.preview = Preview { node: Some(n.clone()), mode: PreviewMode::Lit };
+        a.clear_dangling_preview();
+        assert_eq!(a.preview.node.as_deref(), Some(n.as_str()));
+        a.remove_node(&n);
+        a.clear_dangling_preview();
+        assert_eq!(a.preview, Preview { node: None, mode: PreviewMode::Lit });
+    }
+
+    #[test]
+    fn preview_dangling_id_survives_loading() {
+        let mut a = Asset::new("rock", AssetKind::Material(MaterialKind::Pbr3d(PbrSettings::default())));
+        a.preview = Preview { node: Some("zzz".into()), mode: PreviewMode::Full };
+        let b = Asset::from_ron(&a.to_ron()).unwrap();
+        assert_eq!(b.preview, a.preview);
     }
 
     #[test]

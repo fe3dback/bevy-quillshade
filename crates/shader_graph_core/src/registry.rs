@@ -7,6 +7,7 @@ use crate::consts::{ConstLookup, ConstType, GlobalConst};
 use crate::curve::{Interp, curve_fn_alias};
 use crate::diag::{Code, Diagnostic};
 use crate::model::{AssetKind, NodeId};
+use crate::preview::ShaderOutputDto;
 use crate::types::PinType;
 use crate::value::Value;
 
@@ -322,7 +323,7 @@ pub struct FnPort {
 pub struct FunctionSig {
     /// Asset path without suffix (`common/wet_mask`).
     pub path: String,
-    /// WESL fn name (= asset name).
+    /// Asset name; the WESL fn is `fun_{name}` (`ident::function_ident`, decision 0020).
     pub name: String,
     pub inputs: Vec<FnPort>,
     pub outputs: Vec<FnPort>,
@@ -660,6 +661,11 @@ impl EmitCtx<'_> {
 pub trait NodeDef: Send + Sync {
     fn info(&self) -> &NodeInfo;
 
+    /// Extra items of the node's context menu (decision 0021).
+    fn context_actions(&self) -> Vec<NodeAction> {
+        Vec::new()
+    }
+
     fn role(&self) -> NodeRole {
         NodeRole::Normal
     }
@@ -673,6 +679,62 @@ pub trait NodeDef: Send + Sync {
 
     /// Emits WESL for the node. Errors are reported through `ctx.diag`.
     fn emit(&self, ctx: &mut EmitCtx);
+
+    /// Outputs fed into the material when this node is previewed (decision 0022).
+    fn preview_output(&self, sig: &Signature) -> ShaderOutputDto {
+        ShaderOutputDto::main_output(sig)
+    }
+}
+
+/// Key of a node action's hotkey; the editor maps it to physical keys (decision 0021).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HotkeyKey {
+    Plus,
+    Minus,
+    Star,
+    Slash,
+    Letter(char),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Hotkey {
+    pub shift: bool,
+    pub key: HotkeyKey,
+}
+
+impl Hotkey {
+    pub const fn shift(key: HotkeyKey) -> Self {
+        Self { shift: true, key }
+    }
+
+    pub const fn plain(key: HotkeyKey) -> Self {
+        Self { shift: false, key }
+    }
+
+    /// Menu text: `Shift +`, `Shift -`, `Shift *`, `Shift /`, `V`.
+    pub fn label(&self) -> String {
+        let key = match self.key {
+            HotkeyKey::Plus => '+',
+            HotkeyKey::Minus => '-',
+            HotkeyKey::Star => '*',
+            HotkeyKey::Slash => '/',
+            HotkeyKey::Letter(c) => c.to_ascii_uppercase(),
+        };
+        if self.shift { format!("Shift {key}") } else { key.to_string() }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NodeOp {
+    /// Replace the node with another kind (target node kind).
+    ConvertTo(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodeAction {
+    pub label: String,
+    pub hotkey: Option<Hotkey>,
+    pub op: NodeOp,
 }
 
 /// Registry of node definitions by kind.

@@ -10,9 +10,9 @@ use shader_graph_core::curve::{Curve, Interp};
 use shader_graph_core::ident::check_ident;
 use shader_graph_core::ir::declared_function_sig;
 use shader_graph_core::model::{
-    Asset, AssetKind, BlendMode, MaterialKind, NodeId, PbrSettings, Shading, SpriteSettings, UnlitSettings,
+    Asset, AssetKind, BlendMode, MaterialKind, NodeId, PbrSettings, PreviewMode, Shading, SpriteSettings, UnlitSettings,
 };
-use shader_graph_core::registry::{FUNCTION_PREFIX, NodeRole, const_refs};
+use shader_graph_core::registry::{FUNCTION_PREFIX, Hotkey, HotkeyKey, NodeAction, NodeOp, NodeRole, const_refs};
 use shader_graph_core::{Code, Diagnostic, FunctionSig, PinType, Registry, Value};
 use shader_project::regen::{project_registry, rust_file, wesl_file};
 use shader_project::watch::ShadersWatcher;
@@ -95,6 +95,10 @@ pub enum PropTarget {
     TwoSided,
     Shading,
     Description,
+    /// Preview mode of the active material (decision 0022).
+    PreviewMode,
+    /// Editor-only label of a constant node (decision 0021).
+    NodeLabel(NodeId),
     FrameTitle(String),
     /// `(t, value)` of a point of the active curve, as a `Float2`.
     CurvePoint(usize),
@@ -323,6 +327,13 @@ pub enum Action {
         node: NodeId,
         pin: String,
     },
+    /// Changes the kind of nodes in place (node menu / hotkey "Convert to", decision 0021).
+    ConvertNodes {
+        nodes: Vec<NodeId>,
+        kind: String,
+    },
+    /// Previews a node of the active material, or stops previewing it (node menu / `V`, decision 0022).
+    TogglePreview(NodeId),
     Curve(CurveAction),
     Consts(ConstsAction),
     AutoLayout,
@@ -470,6 +481,15 @@ fn usage_message(what: &str, names: &[String], usages: &[(AssetId, usize)]) -> S
          and the changes are saved.",
         list.join("\n")
     )
+}
+
+/// Label of a preview mode in the Properties select (`Unlit`, `Lit`, `Full`).
+pub fn preview_mode_label(mode: PreviewMode) -> &'static str {
+    match mode {
+        PreviewMode::Unlit => "Unlit",
+        PreviewMode::Lit => "Lit",
+        PreviewMode::Full => "Full",
+    }
 }
 
 fn kind_of(set: &AssetSet, id: &AssetId) -> Option<AssetKind> {
@@ -848,6 +868,7 @@ impl Editor {
         if !close.contains(&true) {
             return;
         }
+        let restore = self.memory_regenerated(|i| close[i]);
         let kept_before = |i: usize| (0..i).filter(|j| !close[*j]).count();
         let kept = close.iter().filter(|c| !**c).count();
         self.active = match self.active {
@@ -863,8 +884,22 @@ impl Editor {
         });
         self.refresh_functions();
         self.validated = None;
+        for id in &restore {
+            self.regenerate_from_disk(id);
+        }
         self.touch_all();
         self.save_config();
+    }
+
+    /// Graph documents among the tabs `pick` selects whose generated files were written from unsaved edits
+    /// (decision 0022): discarding them must regenerate those assets from disk.
+    fn memory_regenerated(&self, pick: impl Fn(usize) -> bool) -> Vec<AssetId> {
+        (0..self.tabs.len())
+            .filter(|i| pick(*i))
+            .filter_map(|i| self.tabs[i].graph())
+            .filter(|d| d.regen_from_memory && d.is_dirty())
+            .map(|d| d.id.clone())
+            .collect()
     }
 
     /// Closes the project (its open tabs are remembered for the next time it opens). Asks first when tabs have
@@ -887,7 +922,11 @@ impl Editor {
                     });
                     return;
                 }
-                Unsaved::Discard => {}
+                Unsaved::Discard => {
+                    for id in self.memory_regenerated(|_| true) {
+                        self.regenerate_from_disk(&id);
+                    }
+                }
                 Unsaved::Save => {
                     if !self.save_all() {
                         return;
@@ -959,8 +998,13 @@ impl Editor {
     pub fn regenerate(&mut self) -> bool {
         let Some(project) = self.project.clone() else { return false };
         self.rescan();
+        // Unsaved documents already written from memory (a preview, decision 0022) keep that output.
+        let mut set = self.disk.clone();
+        for d in self.docs().filter(|d| d.regen_from_memory && d.is_dirty()) {
+            set.assets.insert(d.id.clone(), Ok(d.asset.clone()));
+        }
         let opts = RegenOptions { scope: Scope::All, dry_run: false, compile_check: self.bevy.as_ref() };
-        match shader_project::regen::regenerate_set(&project, &self.disk, &opts) {
+        match shader_project::regen::regenerate_set(&project, &set, &opts) {
             Ok(report) => {
                 let errors = report.diagnostics().filter(|d| d.is_error()).count();
                 self.regen_only = report
@@ -999,6 +1043,58 @@ impl Editor {
                 false
             }
         }
+    }
+
+    /// Regenerates the material of tab `i` from its in-memory document (other assets as on disk), without saving
+    /// it (a preview change, spec §5 of the QA design / decision 0022). `false` when the asset has errors (its
+    /// generated files are kept) or writing failed.
+    fn regenerate_from_memory(&mut self, i: usize) -> bool {
+        let Some(d) = self.tabs.get_mut(i).and_then(Tab::graph_mut) else { return false };
+        // A clean document generates what the file does: nothing to restore later.
+        d.regen_from_memory = d.is_dirty();
+        let (id, asset) = (d.id.clone(), d.asset.clone());
+        let mut set = self.disk.clone();
+        set.assets.insert(id.clone(), Ok(asset));
+        self.regenerate_one(&id, &set)
+    }
+
+    /// Regenerates one asset from what is saved on disk (an unsaved preview was discarded, decision 0022).
+    fn regenerate_from_disk(&mut self, id: &AssetId) {
+        let set = self.disk.clone();
+        self.regenerate_one(id, &set);
+    }
+
+    /// Writes the generated files of `id` (and its dependents) from `set`, through the usual writer.
+    fn regenerate_one(&mut self, id: &AssetId, set: &AssetSet) -> bool {
+        let Some(project) = self.project.clone() else { return false };
+        let opts = RegenOptions {
+            scope: Scope::Affected([id.clone()].into()),
+            dry_run: false,
+            compile_check: self.bevy.as_ref(),
+        };
+        let ok = match shader_project::regen::regenerate_set(&project, set, &opts) {
+            Ok(report) => {
+                let diags = report.assets.get(id).map(|r| r.diagnostics.as_slice()).unwrap_or_default();
+                let errors = diags.iter().filter(|d| d.is_error()).count();
+                let regen_only = diags.iter().filter(|d| matches!(d.code, Code::E008 | Code::E010)).cloned().collect();
+                self.regen_only.insert(id.clone(), regen_only);
+                if errors > 0 {
+                    let msg =
+                        format!("Preview: {errors} error(s) in {} - its generated files were kept", id.source_rel());
+                    self.push_msg(Level::Warning, msg);
+                } else {
+                    self.info(format!("Preview: regenerated {}", id.source_rel()));
+                }
+                errors == 0
+            }
+            Err(e) => {
+                self.io_error("Regeneration failed", e);
+                false
+            }
+        };
+        self.validate();
+        self.reload_text_tabs();
+        ok
     }
 
     /// All diagnostics for display: live ones plus regeneration-only codes.
@@ -1146,6 +1242,25 @@ impl Editor {
     // ---- commands ----
 
     pub fn apply(&mut self, action: Action) {
+        // A preview change (toggle, mode, undo, deleting the previewed node) regenerates the material from the
+        // in-memory document (decision 0022).
+        let before = self.doc().map(|d| (d.id.clone(), d.asset.preview.clone()));
+        self.apply_action(action);
+        if let Some((id, preview)) = before
+            && id.ty == AssetType::Material
+            && let Some(i) = self.doc_index(&id)
+            && self.tabs[i].graph().is_some_and(|d| d.asset.preview != preview)
+        {
+            self.ui.tabs += 1;
+            // The mode alone, with no node previewed before or after, generates nothing different.
+            if preview.node.is_none() && self.tabs[i].graph().is_some_and(|d| d.asset.preview.node.is_none()) {
+                return;
+            }
+            self.regenerate_from_memory(i);
+        }
+    }
+
+    fn apply_action(&mut self, action: Action) {
         match action {
             Action::None => {}
             Action::OpenProjectDialog => {
@@ -1345,6 +1460,8 @@ impl Editor {
                 }
                 self.ui.props += 1;
             }
+            Action::ConvertNodes { nodes, kind } => self.convert_nodes(&nodes, &kind),
+            Action::TogglePreview(node) => self.toggle_preview(node),
             Action::AutoLayout => self.auto_layout(),
             Action::AddComment(at) => {
                 if let Some(d) = self.doc_mut() {
@@ -1468,10 +1585,15 @@ impl Editor {
             Action::FocusDiagnostic(diag) => self.focus_diagnostic(&diag),
             Action::Reload(id) => {
                 self.dialog = None;
-                if let Some(i) = self.asset_index(&id)
-                    && self.reload_tab(i)
-                {
-                    self.info(format!("Reloaded {}", id.source_rel()));
+                if let Some(i) = self.asset_index(&id) {
+                    // Unsaved edits written to the generated files are discarded too (decision 0022).
+                    let restore = self.memory_regenerated(|j| j == i);
+                    if self.reload_tab(i) {
+                        self.info(format!("Reloaded {}", id.source_rel()));
+                        for id in &restore {
+                            self.regenerate_from_disk(id);
+                        }
+                    }
                 }
                 self.touch_all();
             }
@@ -1521,6 +1643,9 @@ impl Editor {
                 }
             }
             Action::ForceQuit => {
+                for id in self.memory_regenerated(|_| true) {
+                    self.regenerate_from_disk(&id);
+                }
                 self.save_config();
                 self.quit = true;
             }
@@ -1909,6 +2034,8 @@ impl Editor {
                 }
             }
             PropTarget::Description => Some(Value::Str(d.asset.meta.description.clone())),
+            PropTarget::PreviewMode => Some(Value::Str(preview_mode_label(d.asset.preview.mode).into())),
+            PropTarget::NodeLabel(id) => d.asset.nodes.get(id).map(|n| Value::Str(n.label.clone())),
             PropTarget::FrameTitle(id) => {
                 d.asset.comments.iter().find(|f| f.id == *id).map(|f| Value::Str(f.title.clone()))
             }
@@ -1987,6 +2114,128 @@ impl Editor {
             items.push(("Reset to default".into(), Action::ResetInput { node: node.into(), pin: pin.into() }));
         }
         items
+    }
+
+    /// Context menu of a node (RMB): its own actions, then the generic selection actions (decision 0021).
+    /// A convert acts on every selected node offering it when `node` is selected, otherwise on `node` alone.
+    pub fn node_menu(&self, node: &str) -> Vec<(String, Action)> {
+        let Some(d) = self.doc() else { return Vec::new() };
+        let mut items = Vec::new();
+        for a in self.node_actions(node) {
+            let NodeOp::ConvertTo(kind) = &a.op;
+            let nodes = if d.selection.contains(node) {
+                d.selection.iter().filter(|n| self.node_actions(n).iter().any(|b| b.op == a.op)).cloned().collect()
+            } else {
+                vec![node.to_string()]
+            };
+            let label = match a.hotkey {
+                Some(h) => format!("{}\t{}", a.label, h.label()),
+                None => a.label.clone(),
+            };
+            items.push((label, Action::ConvertNodes { nodes, kind: kind.clone() }));
+        }
+        if !items.is_empty() {
+            items.push((String::new(), Action::None));
+        }
+        if matches!(d.asset.kind, AssetKind::Material(_)) {
+            // The previewed node can always be turned off, even when its output stopped converting to a color.
+            let previewed = d.asset.preview.node.as_deref() == Some(node);
+            items.push(match self.preview_refusal(node) {
+                _ if previewed => ("Stop preview\tV".into(), Action::TogglePreview(node.into())),
+                None => ("Exclusive preview\tV".into(), Action::TogglePreview(node.into())),
+                Some(why) => ("Exclusive preview (not available)".into(), Action::Notify(why)),
+            });
+        }
+        items.extend([
+            ("Copy\tCtrl+C".into(), Action::Copy),
+            ("Duplicate\tCtrl+D".into(), Action::Duplicate),
+            ("Delete\tDel".into(), Action::DeleteSelection),
+        ]);
+        items
+    }
+
+    /// Actions of the selected nodes bound to `key` (decision 0021): selected nodes are grouped by the target
+    /// kind of their convert, one [`Action::ConvertNodes`] per kind.
+    pub fn hotkey_actions(&self, key: Hotkey) -> Vec<Action> {
+        let Some(d) = self.doc() else { return Vec::new() };
+        // `V` previews the one selected node, or stops previewing it (decision 0022).
+        if key == Hotkey::plain(HotkeyKey::Letter('v')) {
+            return match d.selection.iter().collect::<Vec<_>>()[..] {
+                [n] if d.asset.preview.node.as_ref() == Some(n) || self.preview_refusal(n).is_none() => {
+                    vec![Action::TogglePreview(n.clone())]
+                }
+                _ => Vec::new(),
+            };
+        }
+        let mut by_kind: BTreeMap<String, Vec<NodeId>> = BTreeMap::new();
+        for n in &d.selection {
+            for a in self.node_actions(n).into_iter().filter(|a| a.hotkey == Some(key)) {
+                let NodeOp::ConvertTo(kind) = a.op;
+                by_kind.entry(kind).or_default().push(n.clone());
+            }
+        }
+        by_kind.into_iter().map(|(kind, nodes)| Action::ConvertNodes { nodes, kind }).collect()
+    }
+
+    /// Why `node` of the active document cannot be previewed (`None`: it can). Only material nodes whose
+    /// resolved signature gives a color-like output can (decision 0022); the MaterialOutput node has no outputs.
+    fn preview_refusal(&self, node: &str) -> Option<String> {
+        let d = self.doc()?;
+        if !matches!(d.asset.kind, AssetKind::Material(_)) {
+            return Some("only material nodes can be previewed".into());
+        }
+        let Some(n) = d.asset.nodes.get(node) else { return Some(format!("node `{node}` does not exist")) };
+        let sig = node_signature(&d.asset, node, &self.registry, &self.functions, &d.id.path);
+        let previewable =
+            self.registry.get(&n.kind).zip(sig).is_some_and(|(def, sig)| {
+                def.role() != NodeRole::MaterialOutput && !def.preview_output(&sig).is_empty()
+            });
+        let title = crate::canvas::node_title(self, &d.asset, node);
+        (!previewable).then(|| format!("`{title}` has no output that converts to a color"))
+    }
+
+    /// Sets the active material's previewed node to `node`, or clears it when it already is (one undo step).
+    fn toggle_preview(&mut self, node: NodeId) {
+        let Some(d) = self.doc() else { return };
+        let on = d.asset.preview.node.as_ref() != Some(&node);
+        if on && let Some(why) = self.preview_refusal(&node) {
+            return self.push_msg(Level::Warning, why);
+        }
+        if let Some(d) = self.doc_mut() {
+            d.edit(|a| a.preview.node = on.then_some(node));
+        }
+        self.ui.props += 1;
+    }
+
+    /// The node's own context actions (none for an unknown kind).
+    fn node_actions(&self, node: &str) -> Vec<NodeAction> {
+        let Some(n) = self.doc().and_then(|d| d.asset.nodes.get(node)) else { return Vec::new() };
+        self.registry.get(&n.kind).map(|def| def.context_actions()).unwrap_or_default()
+    }
+
+    /// Sets the kind of `nodes` in one undo step, keeping id, position, params, inline values and wires; wires
+    /// and inline values of pins the new kind lacks are dropped (spec §2 of the QA design).
+    fn convert_nodes(&mut self, nodes: &[NodeId], kind: &str) {
+        let Some(d) = self.doc() else { return };
+        let mut asset = d.asset.clone();
+        for id in nodes {
+            if let Some(n) = asset.nodes.get_mut(id) {
+                n.kind = kind.to_string();
+            }
+        }
+        for id in nodes {
+            let Some(sig) = node_signature(&asset, id, &self.registry, &self.functions, &d.id.path) else { continue };
+            asset.edges.retain(|e| {
+                (e.to.0 != *id || sig.input(&e.to.1).is_some()) && (e.from.0 != *id || sig.output(&e.from.1).is_some())
+            });
+            if let Some(n) = asset.nodes.get_mut(id) {
+                n.inputs.retain(|pin, _| sig.input(pin).is_some());
+            }
+        }
+        if let Some(d) = self.doc_mut() {
+            d.edit(|a| *a = asset);
+        }
+        self.ui.props += 1;
     }
 
     /// Rewrites every unconnected polymorphic input of `node` to `ty`: they resolve to one common type
@@ -2124,6 +2373,19 @@ impl Editor {
             }
             PropTarget::Description => {
                 d.edit_merge(key, |a| a.meta.description = value.as_str().to_string());
+                refresh = false;
+            }
+            PropTarget::PreviewMode => {
+                if let Some(mode) = PreviewMode::ALL.into_iter().find(|m| preview_mode_label(*m) == value.as_str()) {
+                    d.edit(|a| a.preview.mode = mode);
+                }
+            }
+            PropTarget::NodeLabel(id) => {
+                d.edit_merge(key, |a| {
+                    if let Some(n) = a.nodes.get_mut(id) {
+                        n.label = value.as_str().to_string();
+                    }
+                });
                 refresh = false;
             }
             PropTarget::FrameTitle(id) => {
@@ -2387,6 +2649,26 @@ mod tests {
     }
 
     #[test]
+    fn constant_label_replaces_title() {
+        let (_dir, mut e) = project();
+        e.apply(Action::OpenAsset(AssetId::new(AssetType::Material, "env/rock_wet")));
+        let before: Vec<_> = e.doc().unwrap().asset.nodes.keys().cloned().collect();
+        e.apply(Action::AddNode { kind: "stdlib::Constant".into(), pos: (0.0, 0.0), link: None, params: Vec::new() });
+        let id = e.doc().unwrap().asset.nodes.keys().find(|k| !before.contains(k)).unwrap().clone();
+        let title = |e: &Editor| crate::canvas::node_title(e, &e.doc().unwrap().asset, &id);
+        let value_title = title(&e);
+        let set = |s: &str| Action::SetValue {
+            target: PropTarget::NodeLabel(id.clone()),
+            value: Value::Str(s.into()),
+            merge: true,
+        };
+        e.apply(set("rim"));
+        assert_eq!(title(&e), "rim");
+        e.apply(set(""));
+        assert_eq!(title(&e), value_title);
+    }
+
+    #[test]
     fn open_edit_save_regenerates() {
         let (dir, mut e) = project();
         let id = AssetId::new(AssetType::Material, "env/rock_wet");
@@ -2403,8 +2685,8 @@ mod tests {
         e.apply(Action::Redo);
         e.apply(Action::Save);
         assert!(!e.is_dirty());
-        assert!(dir.path().join("assets/shaders/autogen/env/rock_wet.wesl").is_file());
-        assert!(dir.path().join("crates/shaders/src/materials/env/rock_wet.rs").is_file());
+        assert!(dir.path().join("assets/shaders/autogen/dir_env/mat_rock_wet.wesl").is_file());
+        assert!(dir.path().join("crates/shaders/src/materials/dir_env/mat_rock_wet.rs").is_file());
     }
 
     #[test]
@@ -2489,6 +2771,289 @@ mod tests {
     }
 
     #[test]
+    fn convert_keeps_wires_and_inputs_in_one_undo_step() {
+        let (_dir, mut e) = project();
+        e.apply(Action::OpenAsset(AssetId::new(AssetType::Material, "env/rock_wet")));
+        e.apply(Action::AddNode { kind: "stdlib::Add".into(), pos: (-700.0, 0.0), link: None, params: Vec::new() });
+        let add = e.doc().unwrap().asset.nodes.iter().find(|(_, n)| n.kind == "stdlib::Add").unwrap().0.clone();
+        e.apply(Action::SetValue {
+            target: PropTarget::Input { node: add.clone(), pin: "b".into() },
+            value: Value::Float(3.0),
+            merge: false,
+        });
+        let lerp = add_lerp(&mut e);
+        e.apply(Action::Connect { from: (add.clone(), "out".into()), to: (lerp.clone(), "a".into()) });
+        e.apply(Action::Select([add.clone(), lerp.clone()].into()));
+        let acts = e.hotkey_actions(Hotkey::shift(HotkeyKey::Slash));
+        assert_eq!(acts.len(), 1);
+        for a in acts {
+            e.apply(a);
+        }
+        let d = e.doc().unwrap();
+        assert_eq!(d.asset.nodes[&add].kind, "stdlib::Divide");
+        assert_eq!(d.asset.nodes[&lerp].kind, "stdlib::Lerp");
+        assert_eq!(d.asset.nodes[&add].inputs.get("b"), Some(&Value::Float(3.0)));
+        assert!(d.asset.edge_into(&lerp, "a").is_some());
+        e.apply(Action::Undo);
+        assert_eq!(e.doc().unwrap().asset.nodes[&add].kind, "stdlib::Add");
+    }
+
+    #[test]
+    fn convert_drops_wires_and_inputs_of_missing_pins() {
+        let (_dir, mut e) = project();
+        let lerp = add_lerp(&mut e);
+        e.apply(Action::AddNode { kind: "stdlib::Add".into(), pos: (-900.0, 0.0), link: None, params: Vec::new() });
+        e.apply(Action::AddNode { kind: "stdlib::Time".into(), pos: (-1100.0, 0.0), link: None, params: Vec::new() });
+        let find =
+            |e: &Editor, k: &str| e.doc().unwrap().asset.nodes.iter().find(|(_, n)| n.kind == k).unwrap().0.clone();
+        let (add, time) = (find(&e, "stdlib::Add"), find(&e, "stdlib::Time"));
+        e.apply(Action::SetValue {
+            target: PropTarget::Input { node: add.clone(), pin: "b".into() },
+            value: Value::Float(3.0),
+            merge: false,
+        });
+        e.apply(Action::Connect { from: (time, "out".into()), to: (add.clone(), "a".into()) });
+        e.apply(Action::Connect { from: (add.clone(), "out".into()), to: (lerp.clone(), "a".into()) });
+        e.apply(Action::ConvertNodes { nodes: vec![add.clone()], kind: "stdlib::Abs".into() });
+        let d = e.doc().unwrap();
+        assert_eq!(d.asset.nodes[&add].kind, "stdlib::Abs");
+        assert!(d.asset.nodes[&add].inputs.is_empty(), "`b` does not exist on Abs");
+        assert!(d.asset.edge_into(&add, "a").is_none(), "the wire into `a` is dropped");
+        assert!(d.asset.edge_into(&lerp, "a").is_some(), "`out` exists on both");
+    }
+
+    #[test]
+    fn node_menu_lists_convert_with_hotkeys_and_generic_rows() {
+        let (_dir, mut e) = project();
+        e.apply(Action::OpenAsset(AssetId::new(AssetType::Material, "env/rock_wet")));
+        e.apply(Action::AddNode { kind: "stdlib::Multiply".into(), pos: (0.0, 0.0), link: None, params: Vec::new() });
+        let m = e.doc().unwrap().asset.nodes.iter().find(|(_, n)| n.kind == "stdlib::Multiply").unwrap().0.clone();
+        let labels: Vec<String> = e.node_menu(&m).into_iter().map(|r| r.0).collect();
+        assert!(labels.contains(&"Convert to Add\tShift +".to_string()));
+        assert!(labels.contains(&"Convert to Divide\tShift /".to_string()));
+        assert!(!labels.iter().any(|l| l.starts_with("Convert to Multiply")));
+        assert!(labels.contains(&"Delete\tDel".to_string()));
+        // The preview row follows the separator after the node's own actions (decision 0022).
+        let at = |l: &str| labels.iter().position(|x| x == l).unwrap();
+        assert_eq!(at("Exclusive preview\tV"), at("") + 1);
+        assert_eq!(at("Copy\tCtrl+C"), at("") + 2);
+    }
+
+    fn press_v(e: &mut Editor) {
+        for a in e.hotkey_actions(Hotkey::plain(HotkeyKey::Letter('v'))) {
+            e.apply(a);
+        }
+    }
+
+    fn rock_wet_wesl(e: &Editor) -> PathBuf {
+        wesl_file(e.project.as_ref().unwrap(), &AssetId::new(AssetType::Material, "env/rock_wet")).unwrap()
+    }
+
+    #[test]
+    fn preview_toggle_regenerates_from_memory_and_discard_restores() {
+        let (dir, mut e) = project();
+        e.apply(Action::RegenAll);
+        let wesl = rock_wet_wesl(&e);
+        let normal = std::fs::read_to_string(&wesl).unwrap();
+        let rust = rust_file(e.project.as_ref().unwrap(), &AssetId::new(AssetType::Material, "env/rock_wet")).unwrap();
+        let lerp = add_lerp(&mut e);
+        let rust_before = std::fs::read(&rust).unwrap();
+        e.apply(Action::Select([lerp.clone()].into()));
+        press_v(&mut e);
+        assert_eq!(e.doc().unwrap().asset.preview.node.as_deref(), Some(lerp.as_str()));
+        assert_eq!(std::fs::read(&rust).unwrap(), rust_before, "a plain toggle leaves the Rust module alone");
+        assert!(e.is_dirty(), "toggling the preview is a document edit");
+        assert_eq!(e.tab().unwrap().title(), "shaders/env/rock_wet.material (preview)");
+        assert_eq!(e.tab().unwrap().short_title(), "rock_wet (preview)");
+        let previewed = std::fs::read_to_string(&wesl).unwrap();
+        assert!(previewed.contains(&format!("// preview of node {lerp} (unlit)")), "{previewed}");
+        let source = dir.path().join("shaders/env/rock_wet.material.ron");
+        assert!(!std::fs::read_to_string(&source).unwrap().contains("preview"), "nothing is saved");
+        e.apply(Action::Undo);
+        assert!(e.doc().unwrap().asset.preview.node.is_none());
+        assert!(!std::fs::read_to_string(&wesl).unwrap().contains("// preview of node"));
+        press_v(&mut e);
+        assert!(std::fs::read_to_string(&wesl).unwrap().contains("// preview of node"));
+        e.apply(Action::DiscardTab(e.active.unwrap()));
+        assert!(e.tabs.is_empty());
+        assert_eq!(std::fs::read_to_string(&wesl).unwrap(), normal, "closing regenerates from disk");
+    }
+
+    #[test]
+    fn reload_restores_memory_regenerated_files() {
+        let (_dir, mut e) = project();
+        e.apply(Action::RegenAll);
+        let wesl = rock_wet_wesl(&e);
+        let normal = std::fs::read_to_string(&wesl).unwrap();
+        let rock = AssetId::new(AssetType::Material, "env/rock_wet");
+        let flag = |e: &Editor| e.tabs[e.doc_index(&rock).unwrap()].graph().unwrap().regen_from_memory;
+        // Reload of an inactive tab (the watcher asks about any tab) and of the active one.
+        for other_active in [true, false] {
+            let lerp = add_lerp(&mut e);
+            e.apply(Action::TogglePreview(lerp));
+            assert!(flag(&e));
+            assert!(std::fs::read_to_string(&wesl).unwrap().contains("// preview of node"));
+            if other_active {
+                e.apply(Action::OpenAsset(pulse()));
+            }
+            e.apply(Action::Reload(rock.clone()));
+            assert_eq!(std::fs::read_to_string(&wesl).unwrap(), normal, "other_active: {other_active}");
+            assert!(!flag(&e), "other_active: {other_active}");
+            assert!(!e.tabs[e.doc_index(&rock).unwrap()].is_dirty());
+        }
+    }
+
+    #[test]
+    fn preview_suffix_keeps_shared_names_apart() {
+        let (_dir, mut e) = project();
+        let rock = AssetId::new(AssetType::Material, "env/rock_wet");
+        let twin = AssetId::new(AssetType::Material, "props/rock_wet");
+        let asset = assets::load(e.project.as_ref().unwrap(), &rock).unwrap();
+        ops::save(e.project.as_ref().unwrap(), &twin, &asset).unwrap();
+        e.rescan();
+        let lerp = add_lerp(&mut e);
+        e.apply(Action::TogglePreview(lerp));
+        e.apply(Action::OpenAsset(twin));
+        assert_eq!(
+            crate::tab::labels(&e.tabs),
+            ["shaders/env/rock_wet.material (preview)", "shaders/props/rock_wet.material"]
+        );
+        e.apply(Action::OpenAsset(pulse()));
+        assert_eq!(crate::tab::labels(&e.tabs)[2], "pulse");
+    }
+
+    fn preview_messages(e: &Editor) -> usize {
+        e.messages.iter().filter(|m| m.text.starts_with("Preview:")).count()
+    }
+
+    #[test]
+    fn saving_another_tab_keeps_an_unsaved_preview() {
+        let (dir, mut e) = project();
+        e.apply(Action::RegenAll);
+        let wesl = rock_wet_wesl(&e);
+        let rock = AssetId::new(AssetType::Material, "env/rock_wet");
+        let lerp = add_lerp(&mut e);
+        e.apply(Action::TogglePreview(lerp.clone()));
+        let header = format!("// preview of node {lerp} (unlit)");
+        // A trivial edit of a function the material calls, saved: the full regeneration keeps the preview.
+        e.apply(Action::OpenAsset(AssetId::new(AssetType::Function, "common/wet_mask")));
+        e.apply(Action::SetValue { target: PropTarget::Description, value: Value::Str("tweak".into()), merge: false });
+        e.apply(Action::Save);
+        assert!(std::fs::read_to_string(&wesl).unwrap().contains(&header));
+        e.apply(Action::RegenAll);
+        assert!(std::fs::read_to_string(&wesl).unwrap().contains(&header));
+        let i = e.doc_index(&rock).unwrap();
+        assert!(e.tabs[i].graph().unwrap().regen_from_memory);
+        // Saving the previewed tab stores the preview in the file and clears the flag.
+        e.apply(Action::ActivateTab(i));
+        e.apply(Action::Save);
+        assert!(std::fs::read_to_string(dir.path().join("shaders/env/rock_wet.material.ron")).unwrap().contains(&lerp));
+        assert!(!e.tabs[i].graph().unwrap().regen_from_memory);
+        assert!(std::fs::read_to_string(&wesl).unwrap().contains(&header));
+    }
+
+    #[test]
+    fn a_preview_that_stopped_working_can_be_turned_off() {
+        let (_dir, mut e) = project();
+        e.apply(Action::OpenAsset(AssetId::new(AssetType::Material, "env/rock_wet")));
+        e.apply(Action::AddNode { kind: "stdlib::Not".into(), pos: (0.0, 0.0), link: None, params: Vec::new() });
+        let not = e.doc().unwrap().asset.nodes.iter().find(|(_, n)| n.kind == "stdlib::Not").unwrap().0.clone();
+        // As if stored in the file (or the node's output stopped converting to a color): W107 "preview ignored".
+        e.doc_mut().unwrap().edit(|a| a.preview.node = Some(not.clone()));
+        let row = e.node_menu(&not).into_iter().next().unwrap();
+        assert_eq!(row, ("Stop preview\tV".to_string(), Action::TogglePreview(not.clone())));
+        e.apply(Action::Select([not.clone()].into()));
+        assert_eq!(e.hotkey_actions(Hotkey::plain(HotkeyKey::Letter('v'))), [Action::TogglePreview(not.clone())]);
+        press_v(&mut e);
+        assert!(e.doc().unwrap().asset.preview.node.is_none());
+        // Off, it cannot be turned on again.
+        assert!(e.hotkey_actions(Hotkey::plain(HotkeyKey::Letter('v'))).is_empty());
+        assert_eq!(e.node_menu(&not)[0].0, "Exclusive preview (not available)");
+    }
+
+    #[test]
+    fn mode_change_without_a_previewed_node_does_not_regenerate() {
+        let (_dir, mut e) = project();
+        e.apply(Action::OpenAsset(AssetId::new(AssetType::Material, "env/rock_wet")));
+        let before = preview_messages(&e);
+        e.apply(Action::SetValue { target: PropTarget::PreviewMode, value: Value::Str("Full".into()), merge: false });
+        assert_eq!(e.doc().unwrap().asset.preview.mode, PreviewMode::Full);
+        assert_eq!(preview_messages(&e), before);
+        assert!(!e.tabs[e.active.unwrap()].graph().unwrap().regen_from_memory);
+    }
+
+    #[test]
+    fn preview_with_errors_elsewhere_keeps_file_and_warns() {
+        let (_dir, mut e) = project();
+        e.apply(Action::RegenAll);
+        let wesl = rock_wet_wesl(&e);
+        let normal = std::fs::read_to_string(&wesl).unwrap();
+        let lerp = add_lerp(&mut e);
+        e.apply(Action::AddNode {
+            kind: "stdlib::TextureSample".into(),
+            pos: (-900.0, 0.0),
+            link: None,
+            params: Vec::new(),
+        });
+        let tex = e.doc().unwrap().asset.nodes.iter().find(|(_, n)| n.kind == "stdlib::TextureSample").unwrap().0;
+        let tex = tex.clone();
+        e.apply(Action::Connect { from: (tex, "rgb".into()), to: (lerp.clone(), "a".into()) });
+        let warnings = e.messages.iter().filter(|m| m.level == Level::Warning).count();
+        e.apply(Action::TogglePreview(lerp.clone()));
+        assert_eq!(e.doc().unwrap().asset.preview.node.as_deref(), Some(lerp.as_str()));
+        let new: Vec<&Message> = e.messages.iter().filter(|m| m.level == Level::Warning).skip(warnings).collect();
+        assert!(new.iter().any(|m| m.text.starts_with("Preview:") && m.text.contains("error")), "{new:?}");
+        assert_eq!(std::fs::read_to_string(&wesl).unwrap(), normal, "a blocked asset keeps its file");
+    }
+
+    #[test]
+    fn deleting_previewed_node_clears_preview() {
+        let (_dir, mut e) = project();
+        e.apply(Action::RegenAll);
+        let wesl = rock_wet_wesl(&e);
+        let lerp = add_lerp(&mut e);
+        e.apply(Action::TogglePreview(lerp.clone()));
+        e.apply(Action::SetValue { target: PropTarget::PreviewMode, value: Value::Str("Lit".into()), merge: false });
+        assert_eq!(e.doc().unwrap().asset.preview.mode, PreviewMode::Lit);
+        assert!(std::fs::read_to_string(&wesl).unwrap().contains(&format!("// preview of node {lerp} (lit)")));
+        e.apply(Action::Select([lerp.clone()].into()));
+        e.apply(Action::DeleteSelection);
+        let d = e.doc().unwrap();
+        assert!(d.asset.preview.node.is_none());
+        assert_eq!(d.asset.preview.mode, PreviewMode::Lit, "the mode is remembered");
+        assert!(!std::fs::read_to_string(&wesl).unwrap().contains("// preview of node"));
+    }
+
+    #[test]
+    fn preview_rows_in_node_menu_and_hotkey() {
+        let (_dir, mut e) = project();
+        let lerp = add_lerp(&mut e);
+        let labels = |e: &Editor, n: &str| e.node_menu(n).into_iter().map(|r| r.0).collect::<Vec<_>>();
+        assert_eq!(labels(&e, &lerp), ["Exclusive preview\tV", "Copy\tCtrl+C", "Duplicate\tCtrl+D", "Delete\tDel"]);
+        let row = e.node_menu(&lerp).into_iter().next().unwrap();
+        assert_eq!(row.1, Action::TogglePreview(lerp.clone()));
+        e.apply(row.1);
+        assert_eq!(labels(&e, &lerp)[0], "Stop preview\tV");
+        // The output node and nodes without a color-like output cannot be previewed.
+        let out = e.doc().unwrap().asset.nodes.iter().find(|(_, n)| n.kind == "output::Pbr3d").unwrap().0.clone();
+        let row = e.node_menu(&out).into_iter().next().unwrap();
+        assert_eq!(row.0, "Exclusive preview (not available)");
+        assert!(matches!(row.1, Action::Notify(_)));
+        e.apply(Action::Select([out].into()));
+        assert!(e.hotkey_actions(Hotkey::plain(HotkeyKey::Letter('v'))).is_empty());
+        // `V` needs exactly one selected node.
+        let all: BTreeSet<NodeId> = e.doc().unwrap().asset.nodes.keys().cloned().collect();
+        e.apply(Action::Select(all));
+        assert!(e.hotkey_actions(Hotkey::plain(HotkeyKey::Letter('v'))).is_empty());
+        // Not offered in function graphs.
+        e.apply(Action::OpenAsset(AssetId::new(AssetType::Function, "common/wet_mask")));
+        let n = e.doc().unwrap().asset.nodes.keys().next().unwrap().clone();
+        assert!(!labels(&e, &n).iter().any(|l| l.contains("preview")));
+        e.apply(Action::Select([n].into()));
+        assert!(e.hotkey_actions(Hotkey::plain(HotkeyKey::Letter('v'))).is_empty());
+    }
+
+    #[test]
     fn pin_menu_offers_type_reset_and_disconnect() {
         let (_dir, mut e) = project();
         let lerp = add_lerp(&mut e);
@@ -2548,15 +3113,15 @@ mod tests {
         e.apply(Action::Submit("fx/glow".into()));
         let id = AssetId::new(AssetType::Material, "fx/glow");
         assert!(e.doc_index(&id).is_some());
-        assert!(dir.path().join("assets/shaders/autogen/fx/glow.wesl").is_file());
+        assert!(dir.path().join("assets/shaders/autogen/dir_fx/mat_glow.wesl").is_file());
         e.apply(Action::MoveTo(id.clone(), "fx2".into()));
         let moved = AssetId::new(AssetType::Material, "fx2/glow");
         assert!(e.doc_index(&moved).is_some());
-        assert!(!dir.path().join("assets/shaders/autogen/fx/glow.wesl").exists());
-        assert!(dir.path().join("assets/shaders/autogen/fx2/glow.wesl").is_file());
+        assert!(!dir.path().join("assets/shaders/autogen/dir_fx/mat_glow.wesl").exists());
+        assert!(dir.path().join("assets/shaders/autogen/dir_fx2/mat_glow.wesl").is_file());
         e.apply(Action::Delete(moved.clone()));
         assert!(e.doc_index(&moved).is_none());
-        assert!(!dir.path().join("assets/shaders/autogen/fx2/glow.wesl").exists());
+        assert!(!dir.path().join("assets/shaders/autogen/dir_fx2/mat_glow.wesl").exists());
         // Function rename updates open callers in memory.
         let rock = AssetId::new(AssetType::Material, "env/rock_wet");
         e.apply(Action::OpenAsset(rock.clone()));
@@ -2739,7 +3304,7 @@ mod tests {
             [
                 "shaders/env/rock_wet.material",
                 "shaders/fx/hologram.material",
-                "crates/shaders/src/materials/fx/hologram.rs"
+                "crates/shaders/src/materials/dir_fx/mat_hologram.rs"
             ]
         );
         assert_eq!(next.active, Some(0));
@@ -2760,7 +3325,7 @@ mod tests {
         assert_eq!(e.active, Some(1));
         assert!(e.doc().is_none(), "graph commands must not reach a text tab");
         let t = e.tab().and_then(Tab::text).unwrap();
-        assert_eq!(t.rel, "assets/shaders/autogen/env/rock_wet.wesl");
+        assert_eq!(t.rel, "assets/shaders/autogen/dir_env/mat_rock_wet.wesl");
         assert!(t.text.as_deref().unwrap().starts_with("// AUTOGENERATED"));
         // Showing it again activates the open tab.
         e.apply(Action::ActivateTab(0));
@@ -2853,10 +3418,18 @@ mod tests {
         e.apply(Action::OpenAsset(rock.clone()));
         e.apply(Action::OpenAsset(pulse()));
         assert_eq!(crate::tab::labels(&e.tabs), ["rock_wet", "pulse"]);
-        e.apply(Action::ShowGenerated(rock, Lang::Wesl));
+        // Generated files are named `mat_*` (decision 0020): no clash with the graph tab.
+        e.apply(Action::ShowGenerated(rock.clone(), Lang::Wesl));
+        assert_eq!(crate::tab::labels(&e.tabs), ["rock_wet", "pulse", "mat_rock_wet"]);
+        e.apply(Action::ShowGenerated(rock, Lang::Rust));
         assert_eq!(
             crate::tab::labels(&e.tabs),
-            ["shaders/env/rock_wet.material", "pulse", "assets/shaders/autogen/env/rock_wet.wesl"]
+            [
+                "rock_wet",
+                "pulse",
+                "assets/shaders/autogen/dir_env/mat_rock_wet.wesl",
+                "crates/shaders/src/materials/dir_env/mat_rock_wet.rs"
+            ]
         );
     }
 
@@ -2904,7 +3477,8 @@ mod tests {
 
         e.apply(Action::Save);
         assert!(!e.is_dirty());
-        let wesl = std::fs::read_to_string(dir.path().join("assets/shaders/autogen/curves/common/pulse.wesl")).unwrap();
+        let wesl = std::fs::read_to_string(dir.path().join("assets/shaders/autogen/curves/dir_common/crv_pulse.wesl"))
+            .unwrap();
         assert!(wesl.contains("vec3<f32>(0.0, 0.5, "), "{wesl}");
         let on_disk = assets::load_curve(e.project.as_ref().unwrap(), &pulse()).unwrap();
         assert_eq!(on_disk.points, points(&e));
@@ -2934,7 +3508,7 @@ mod tests {
         e.apply(Action::Submit("ramps/fade".into()));
         let fade = AssetId::new(AssetType::Curve, "ramps/fade");
         assert_eq!(e.curve_index(&fade), e.active);
-        assert!(dir.path().join("assets/shaders/autogen/curves/ramps/fade.wesl").is_file());
+        assert!(dir.path().join("assets/shaders/autogen/curves/dir_ramps/crv_fade.wesl").is_file());
         assert!(e.curve_paths().contains(&"ramps/fade".to_string()));
 
         // A material using `common/pulse` is open; renaming the curve updates the node, the file and the tab.
@@ -3094,9 +3668,10 @@ mod tests {
         e.apply(Action::SetComponent { target: amount, comp: 0, value: 0.9, is_final: true });
         assert_eq!(e.global_consts()["glow_amount"].1.value, Value::Float(0.9));
         e.apply(Action::Save);
-        let wesl = std::fs::read_to_string(dir.path().join("assets/shaders/autogen/fx/global_tint.wesl")).unwrap();
+        let wesl =
+            std::fs::read_to_string(dir.path().join("assets/shaders/autogen/dir_fx/mat_global_tint.wesl")).unwrap();
         assert!(wesl.contains("0.9f"), "{wesl}");
-        assert!(!dir.path().join("assets/shaders/autogen/common/tuning.wesl").exists());
+        assert!(!dir.path().join("assets/shaders/autogen/dir_common").exists());
     }
 
     #[test]

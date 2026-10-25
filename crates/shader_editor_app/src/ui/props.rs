@@ -11,7 +11,7 @@ use bevy::text::{EditableText, TextEditChange};
 use bevy::ui::Checked;
 use bevy::ui_widgets::ValueChange;
 use bevy_noodle::prelude::GraphQuery;
-use shader_graph_core::model::{AssetKind, BlendMode, MaterialKind, Shading};
+use shader_graph_core::model::{AssetKind, BlendMode, MaterialKind, PreviewMode, Shading};
 use shader_graph_core::registry::{NodeRole, ParamKind};
 use shader_graph_core::{PinType, Value};
 use shader_project::{AssetId, AssetType};
@@ -21,7 +21,7 @@ use super::{TEXT, TEXT_DIM, button, text};
 use crate::consts_doc::ConstsDoc;
 use crate::curve_doc::CurveDoc;
 use crate::doc::{node_signature, route_declarations};
-use crate::state::{Action, Actions, Editor, GenFile, PropTarget, display_value};
+use crate::state::{Action, Actions, Editor, GenFile, PropTarget, display_value, preview_mode_label};
 use crate::tab::{Lang, Tab, TextDoc};
 
 #[derive(Component, Default, Clone)]
@@ -378,6 +378,20 @@ fn asset_rows(editor: &Editor, out: &mut Vec<Box<dyn Scene>>) {
                 select_w(PropTarget::Shading, vec!["Lit".into(), "Unlit".into()], Vec::new(), cur),
             )));
         }
+        // Exclusive node preview (decision 0022): the mode is kept even while no node is previewed.
+        out.push(Box::new(section("Preview")));
+        let modes: Vec<String> = PreviewMode::ALL.iter().map(|m| preview_mode_label(*m).to_string()).collect();
+        let cur = PreviewMode::ALL.iter().position(|m| *m == d.asset.preview.mode).unwrap_or(0);
+        out.push(Box::new(labeled("Mode".into(), select_w(PropTarget::PreviewMode, modes, Vec::new(), cur))));
+        let status = match &d.asset.preview.node {
+            Some(n) if d.asset.nodes.contains_key(n) => {
+                format!("Previewing: {}", crate::canvas::node_title(editor, &d.asset, n))
+            }
+            Some(n) => format!("Previewed node `{n}` does not exist (ignored)"),
+            // ASCII dash: the UI font has no em dash glyph.
+            None => "No node previewed - select a node and press V".to_string(),
+        };
+        out.push(Box::new(text(status, TEXT_DIM, 12.0)));
     }
     out.push(Box::new(section("Description")));
     out.push(Box::new(text_w(PropTarget::Description, d.asset.meta.description.clone(), false)));
@@ -416,6 +430,10 @@ fn node_rows(editor: &Editor, id: &str, out: &mut Vec<Box<dyn Scene>>) {
     };
     let global_consts = editor.global_consts();
     let defs = def.params();
+    if crate::canvas::has_label(&n.kind) {
+        let target = PropTarget::NodeLabel(id.to_string());
+        out.push(Box::new(labeled("Label".to_string(), text_w(target, n.label.clone(), false))));
+    }
     if !defs.is_empty() {
         out.push(Box::new(section("Parameters")));
     }

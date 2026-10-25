@@ -125,7 +125,7 @@ fn canvas_mirrors_model_and_user_edits_flow_back() {
     let saved = std::fs::read_to_string(dir.path().join("shaders/env/rock_wet.material.ron")).unwrap();
     assert!(saved.contains("stdlib::Constant\""));
     assert!(!app.world().resource::<Editor>().is_dirty());
-    assert!(dir.path().join("assets/shaders/autogen/env/rock_wet.wesl").is_file());
+    assert!(dir.path().join("assets/shaders/autogen/dir_env/mat_rock_wet.wesl").is_file());
 }
 
 #[test]

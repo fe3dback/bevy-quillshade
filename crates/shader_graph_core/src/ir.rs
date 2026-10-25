@@ -6,8 +6,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use crate::consts::ConstLookup;
 use crate::curve::Interp;
 use crate::diag::{Code, Diagnostic, Diagnostics};
-use crate::ident::check_ident;
-use crate::model::{Asset, AssetKind, Edge, NodeId};
+use crate::ident::{check_ident, input_ident};
+use crate::model::{Asset, AssetKind, Edge, MaterialKind, NodeId, PreviewMode};
+use crate::preview::{PreviewSlot, albedo_expr};
 use crate::registry::{
     Builtin, CurveLookup, EmitCtx, EmitSink, Env, FnPort, FunctionLookup, FunctionSig, IrLine, MaterialParam, NodeDef,
     NodeRole, Operand, ParamType, ROUTE_PARAM, Registry, SigCtx, Signature, Stage,
@@ -75,6 +76,7 @@ impl UniformTy {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UniformField {
+    /// Emitted field name: `inp_{param}` (decision 0020) or `_padN`.
     pub name: String,
     pub ty: UniformTy,
     pub offset: u32,
@@ -122,7 +124,7 @@ impl UniformLayout {
                 ParamType::Bool => UniformTy::U32,
                 ParamType::Texture => unreachable!(),
             };
-            fields.push(UniformField { name: params[i].name.clone(), ty, offset, param: Some(i) });
+            fields.push(UniformField { name: input_ident(&params[i].name), ty, offset, param: Some(i) });
             offset += ty.size();
             if ty == UniformTy::Vec3 {
                 push_pad(&mut fields, &mut offset);
@@ -135,6 +137,13 @@ impl UniformLayout {
         }
         UniformLayout { fields, size: offset }
     }
+}
+
+/// Active node preview of a material (decision 0022).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IrPreview {
+    pub node: NodeId,
+    pub mode: PreviewMode,
 }
 
 /// Typed, validated graph ready for code generation.
@@ -161,6 +170,8 @@ pub struct Ir {
     /// Function assets: callable signature (with hidden builtins).
     pub function_sig: Option<FunctionSig>,
     pub uses_normal: bool,
+    /// Previewed node: its outputs replace the material output's in [`Ir::main`] (decision 0022).
+    pub preview: Option<IrPreview>,
 }
 
 impl Ir {
@@ -268,6 +279,7 @@ pub fn build_ir(
     curves: &dyn CurveLookup,
     consts: &dyn ConstLookup,
 ) -> IrResult {
+    let original = asset;
     let routed = with_routes(asset, registry);
     let asset = routed.as_ref();
     let mut diags = Diagnostics::default();
@@ -402,6 +414,23 @@ pub fn build_ir(
         }
     }
 
+    // 3b. Node preview (decision 0022): materials only, functions ignore `preview` silently. Whether the node can
+    // be previewed is decided after emission, on its resolved output types (step 7b).
+    let mut preview: Option<&str> = None;
+    if let (AssetKind::Material(_), Some(p)) = (&asset.kind, asset.preview.node.as_deref()) {
+        let ignored = |msg: String| Diagnostic::new(Code::W107, format!("preview ignored: {msg}"));
+        match nodes.get_key_value(p) {
+            None if asset.nodes.contains_key(p) => {
+                diags.push(ignored(format!("node `{p}` cannot be resolved")).at_node(p));
+            }
+            None => diags.push(ignored(format!("node `{p}` does not exist"))),
+            Some((id, n)) if n.def.role() == NodeRole::MaterialOutput => {
+                diags.push(ignored("the material output node cannot be previewed".into()).at_node(*id));
+            }
+            Some((id, _)) => preview = Some(*id),
+        }
+    }
+
     // 4. Cycles (E002).
     let succ: BTreeMap<&str, BTreeSet<&str>> = {
         let mut m: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
@@ -460,6 +489,18 @@ pub fn build_ir(
         }
         live.entry(*stage).or_default().extend(set);
     }
+    // The previewed node and its upstream join the normal Fragment set, so parameters, textures and the
+    // vertex stage are still collected and the generated Rust stays the same (decision 0022).
+    if let Some(p) = &preview {
+        let set = live.entry(Stage::Fragment).or_default();
+        let mut stack = vec![*p];
+        while let Some(n) = stack.pop() {
+            if !set.insert(n) {
+                continue;
+            }
+            stack.extend(edges.iter().filter(|e| e.to.0 == n).map(|e| e.from.0.as_str()));
+        }
+    }
     let all_live: BTreeSet<&str> = live.values().flatten().copied().collect();
     for (id, n) in &nodes {
         let exempt =
@@ -471,6 +512,8 @@ pub fn build_ir(
 
     // 6. Emit stages in topological order.
     let mut stages: BTreeMap<Stage, EmitSink> = BTreeMap::new();
+    let mut fragment_types: HashMap<(&str, String), PinType> = HashMap::new();
+    let mut preview_sig: Option<Signature> = None;
     for (stage, set) in &live {
         let order = topo_order(set, &edges);
         let mut sink = EmitSink::default();
@@ -568,12 +611,18 @@ pub fn build_ir(
                 sink: &mut sink,
             };
             n.def.emit(&mut ctx);
+            if *stage == Stage::Fragment && preview == Some(id) {
+                preview_sig = Some(sig.clone());
+            }
             for out in &sig.outputs {
                 types.insert((id, out.id.clone()), out.ty);
             }
         }
         diags.extend(sink.diagnostics.drain(..));
         stages.insert(*stage, sink);
+        if *stage == Stage::Fragment {
+            fragment_types = types;
+        }
     }
 
     // 7. Collect parameters, imports, signatures.
@@ -604,12 +653,6 @@ pub fn build_ir(
                     .at_node(&p.node),
             );
         }
-        if functions_used.iter().any(|f| f.rsplit('/').next() == Some(p.name.as_str())) {
-            diags.push(
-                Diagnostic::new(Code::E005, format!("parameter `{}` clashes with a function name", p.name))
-                    .at_node(&p.node),
-            );
-        }
     }
     {
         let mut fn_names: BTreeMap<&str, &str> = BTreeMap::new();
@@ -628,8 +671,69 @@ pub fn build_ir(
         AssetKind::Function => Stage::Function,
         AssetKind::Material(_) => Stage::Fragment,
     };
-    let main = stages.get(&main_stage).map(IrStage::from_sink).unwrap_or_default();
-    let vertex = stages.get(&Stage::Vertex).map(IrStage::from_sink);
+    let mut main = stages.get(&main_stage).map(IrStage::from_sink).unwrap_or_default();
+    let mut vertex = stages.get(&Stage::Vertex).map(IrStage::from_sink);
+
+    // 7b. Preview: the previewed node's outputs replace the material output's (decision 0022).
+    let mut ir_preview = None;
+    if let (Some(p), Some(sig), AssetKind::Material(mk)) = (preview, &preview_sig, &asset.kind) {
+        let n = &nodes[p];
+        let dto = n.def.preview_output(sig);
+        let sink = stages.get(&Stage::Fragment);
+        let operand = |pin: &str| -> Option<(&str, PinType)> {
+            let Operand::Value(expr) = sink?.operands.get(&(p.to_string(), pin.to_string()))? else {
+                return None;
+            };
+            Some((expr.as_str(), *fragment_types.get(&(p, pin.to_string()))?))
+        };
+        let albedo =
+            dto.slots.get(&PreviewSlot::Albedo).and_then(|pin| operand(pin)).and_then(|(e, t)| albedo_expr(e, t));
+        let Some(albedo) = albedo else {
+            // Not previewable after all: build the normal IR, so the extra upstream leaves no trace.
+            let mut normal = original.clone();
+            normal.preview.node = None;
+            let mut r = build_ir(&normal, path, registry, functions, curves, consts);
+            let msg = format!("preview ignored: `{}` has no output that converts to a color", n.def.info().name);
+            r.diagnostics.push(Diagnostic::new(Code::W107, msg).at_node(p));
+            return r;
+        };
+        let root = roots.iter().find(|(s, _)| *s == Stage::Fragment).map(|(_, id)| &nodes[id].sig0);
+        main.outputs.clear();
+        for (slot, pin) in &dto.slots {
+            // Alpha is forced to 1 in every mode: an Opacity slot is not mapped, even in `Full` (decision 0022).
+            if *slot == PreviewSlot::Opacity {
+                continue;
+            }
+            let Some(out_pin) = slot.output_pin(mk) else { continue };
+            let v = if *slot == PreviewSlot::Albedo {
+                Some(match mk {
+                    MaterialKind::Sprite2d(_) => format!("vec4<f32>({albedo}, 1.0)"),
+                    _ => albedo.clone(),
+                })
+            } else if asset.preview.mode == PreviewMode::Full {
+                // Other slots only in `Full`, into active output pins of the material output.
+                root.and_then(|sig| sig.input(out_pin)).filter(|d| !d.inactive).and_then(|d| {
+                    let (expr, from) = operand(pin)?;
+                    Some(conversion(from, d.ty)?.apply(expr, from, d.ty))
+                })
+            } else {
+                None
+            };
+            if let Some(v) = v {
+                main.outputs.insert(out_pin.to_string(), v);
+            }
+        }
+        // Keep the vertex stage (the Rust side declares its shader) but drop the offset.
+        if let Some(v) = &mut vertex {
+            v.outputs.insert(WPO_PIN.to_string(), "vec3<f32>(0.0)".to_string());
+        }
+        let msg = format!(
+            "preview active on this node (mode {}); the material output is bypassed",
+            asset.preview.mode.label()
+        );
+        diags.push(Diagnostic::new(Code::W107, msg).at_node(p));
+        ir_preview = Some(IrPreview { node: p.to_string(), mode: asset.preview.mode });
+    }
 
     let function_sig = if asset.kind.is_function() {
         let mut sig = declared_function_sig(asset, path, registry);
@@ -685,6 +789,7 @@ pub fn build_ir(
             custom_fns,
             function_sig,
             uses_normal,
+            preview: ir_preview,
         }),
         diagnostics: diags.into_vec(),
     }

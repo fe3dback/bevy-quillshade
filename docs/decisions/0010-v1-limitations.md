@@ -8,3 +8,4 @@
 - Uniform parameter struct: fields are sorted vec4 → vec3 (+ explicit pad) → vec2 → scalars, the size is a multiple of 16; the layout is computed once in the IR and checked by the generated `min_size` test. Binding 100 is the uniform, textures/samplers are 101/102, 103/104, …
 - The Opacity Mask threshold is 0.3333 (as in UE).
 - The render integration test (spec §15) with PSNR comparison is not automated: sample_game has a `SAMPLE_SCREENSHOT=out` mode that takes two screenshots and exits; CI without a GPU needs software Vulkan (lavapipe).
+- Custom-node and user-node input names cannot be Rust/WGSL keywords (they are used verbatim in user WGSL; decision 0020).

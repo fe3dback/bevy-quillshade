@@ -7,6 +7,7 @@ use bevy::text::EditableText;
 use bevy::ui::ui_transform::UiGlobalTransform;
 use bevy::window::WindowCloseRequested;
 use bevy_noodle::prelude::*;
+use shader_graph_core::{Hotkey, HotkeyKey};
 
 use super::dialog::open_menu;
 use super::palette::Palette;
@@ -19,12 +20,14 @@ pub struct InputPlugin;
 impl Plugin for InputPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<RightPress>()
+            .init_resource::<PreviewKey>()
             .add_systems(Update, (shortcuts.run_if(not_typing), close_requested, draw_minimap))
             .add_observer(remember_right_press)
             .add_observer(middle_pan)
             .add_observer(canvas_click)
             .add_observer(edge_click)
             .add_observer(pin_click)
+            .add_observer(node_click)
             .add_observer(wire_dropped);
     }
 }
@@ -62,6 +65,7 @@ fn shortcuts(
     canvases: Query<(&ComputedNode, &UiGlobalTransform, &CanvasView)>,
     editor: Res<Editor>,
     mut palette: ResMut<Palette>,
+    mut preview: ResMut<PreviewKey>,
     mut actions: ResMut<Actions>,
 ) {
     use KeyCode::*;
@@ -92,6 +96,19 @@ fn shortcuts(
         }
         return;
     }
+    if let Some(key) = pressed_hotkey(&keys) {
+        for a in editor.hotkey_actions(key) {
+            push(a);
+        }
+    }
+    if keys.just_pressed(KeyV) {
+        preview.press();
+    }
+    if keys.just_released(KeyV) && preview.release() {
+        for a in editor.hotkey_actions(Hotkey::plain(HotkeyKey::Letter('v'))) {
+            push(a);
+        }
+    }
     match () {
         _ if keys.just_pressed(Delete) || keys.just_pressed(Backspace) => push(Action::DeleteSelection),
         _ if keys.just_pressed(KeyF) => push(Action::View(ViewRequest::FitSelection)),
@@ -103,6 +120,46 @@ fn shortcuts(
             }
         }
         _ => {}
+    }
+}
+
+/// Hotkey of a node action pressed this frame (decision 0021): the main-row keys need Shift, numpad keys do not.
+fn pressed_hotkey(keys: &ButtonInput<KeyCode>) -> Option<Hotkey> {
+    use KeyCode::*;
+    let shift = keys.any_pressed([ShiftLeft, ShiftRight]);
+    [
+        (Equal, NumpadAdd, HotkeyKey::Plus),
+        (Minus, NumpadSubtract, HotkeyKey::Minus),
+        (Digit8, NumpadMultiply, HotkeyKey::Star),
+        (Slash, NumpadDivide, HotkeyKey::Slash),
+    ]
+    .into_iter()
+    .find(|(main, pad, _)| (shift && keys.just_pressed(*main)) || keys.just_pressed(*pad))
+    .map(|(.., key)| Hotkey::shift(key))
+}
+
+/// `V` toggles the node preview on release, unless `V` + click dropped a `param::Vector` meanwhile
+/// (decision 0021).
+#[derive(Resource, Default)]
+pub(crate) struct PreviewKey {
+    held: bool,
+    placed: bool,
+}
+
+impl PreviewKey {
+    fn press(&mut self) {
+        *self = Self { held: true, placed: false };
+    }
+
+    fn placed(&mut self) {
+        self.placed = self.held;
+    }
+
+    /// True when the release toggles the preview.
+    fn release(&mut self) -> bool {
+        let toggle = self.held && !self.placed;
+        *self = Self::default();
+        toggle
     }
 }
 
@@ -177,6 +234,7 @@ fn canvas_click(
     editor: Res<Editor>,
     right: Res<RightPress>,
     mut palette: ResMut<Palette>,
+    mut preview: ResMut<PreviewKey>,
     mut actions: ResMut<Actions>,
 ) {
     let Some(ec) = ec else { return };
@@ -196,6 +254,9 @@ fn canvas_click(
             if let Some(kind) = hotkey_node(&keys)
                 && editor.asset_kind(&editor.doc().expect("checked").id).is_some()
             {
+                if keys.pressed(KeyCode::KeyV) {
+                    preview.placed();
+                }
                 actions.push(Action::AddNode { kind: kind.into(), pos: (at.x, at.y), link: None, params: Vec::new() });
             }
         }
@@ -231,6 +292,37 @@ fn pin_click(
         }
         _ => {}
     }
+}
+
+/// Right click (not a pan) on a node body opens the node menu (decision 0021); an unselected node is selected
+/// first, so the generic rows (copy, duplicate, delete) act on it.
+#[allow(clippy::too_many_arguments)]
+fn node_click(
+    click: On<PointerClick>,
+    ec: Option<Res<EditorCanvas>>,
+    nodes: Query<&NodeKey>,
+    pins: Query<(), With<PinKey>>,
+    editor: Res<Editor>,
+    right: Res<RightPress>,
+    mut actions: ResMut<Actions>,
+    mut commands: Commands,
+) {
+    let Ok(NodeKey(node)) = nodes.get(click.event_target()) else { return };
+    if pins.contains(click.original_event_target())
+        || click.button != PointerButton::Secondary
+        || !right.is_click(click.pointer.position)
+    {
+        return;
+    }
+    let Some(d) = editor.doc() else { return };
+    if !d.selection.contains(node) {
+        // On the canvas too: `sync_selection` copies the canvas selection into the model every frame.
+        if let Some(ec) = ec {
+            commands.select(ec.canvas, vec![click.event_target()], SelectMode::Replace);
+        }
+        actions.push(Action::Select([node.clone()].into()));
+    }
+    open_menu(&mut commands, click.pointer.position, editor.node_menu(node));
 }
 
 /// Right click (not a pan) or Ctrl+LMB on a wire removes it; double click inserts a reroute point.
@@ -448,5 +540,37 @@ fn look_here<E: EntityEvent + bevy::picking::events::PointerEvent>(
     if let Ok((mut view, canvas)) = views.get_mut(ec.canvas) {
         let size = canvas.size() * canvas.inverse_scale_factor();
         view.pan = size / 2.0 - target * view.zoom;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn keys(pressed: &[KeyCode]) -> ButtonInput<KeyCode> {
+        let mut k = ButtonInput::default();
+        for c in pressed {
+            k.press(*c);
+        }
+        k
+    }
+
+    #[test]
+    fn pressed_hotkey_maps_main_row_with_shift_and_numpad() {
+        use KeyCode::*;
+        assert_eq!(pressed_hotkey(&keys(&[ShiftLeft, Equal])), Some(Hotkey::shift(HotkeyKey::Plus)));
+        assert_eq!(pressed_hotkey(&keys(&[Equal])), None);
+        assert_eq!(pressed_hotkey(&keys(&[NumpadDivide])), Some(Hotkey::shift(HotkeyKey::Slash)));
+    }
+
+    #[test]
+    fn preview_key_toggles_on_release_unless_a_node_was_placed() {
+        let mut k = PreviewKey::default();
+        k.press();
+        assert!(k.release());
+        k.press();
+        k.placed();
+        assert!(!k.release());
+        assert!(!k.release(), "release without press");
     }
 }

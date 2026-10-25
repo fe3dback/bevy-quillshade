@@ -5,8 +5,8 @@ source: crates/shader_project/tests/snapshots.rs
 // bevy 0.20, stdlib v1
 import bevy_pbr::render::forward_io::VertexOutput;
 import bevy_pbr::render::mesh_view_bindings::globals;
-import super::super::curves::common::pulse::sample_curve_catmullrom as sg_curve_common__pulse_catmullrom;
-import super::super::curves::common::steps::sample_curve_simple as sg_curve_common__steps_simple;
+import super::super::curves::dir_common::crv_pulse::sample_curve_catmullrom as sg_curve_common__pulse_catmullrom;
+import super::super::curves::dir_common::crv_steps::sample_curve_simple as sg_curve_common__steps_simple;
 
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {

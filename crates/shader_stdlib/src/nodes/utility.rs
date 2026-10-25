@@ -1,5 +1,6 @@
 //! Utility category: If, logic, shading helpers, FunctionCall, Custom, Reroute, Named Route, Sample Curve.
 
+use shader_graph_core::ident::{function_ident, output_ident};
 use shader_graph_core::registry::{
     Builtin, FUNCTION_CALL_KIND, FUNCTION_PREFIX, NodeRole, Operand, ParamDef, ParamKind, PinDef, ROUTE_PARAM,
     Registry, Signature,
@@ -370,7 +371,7 @@ pub fn parse_custom_inputs(spec: &str) -> Result<Vec<(String, PinType)>, String>
     for part in spec.split(',').map(str::trim).filter(|s| !s.is_empty()) {
         let (name, ty) = part.split_once(':').ok_or_else(|| format!("expected `name: Type`, got `{part}`"))?;
         let name = name.trim().to_string();
-        shader_graph_core::ident::check_ident(&name).map_err(|e| format!("custom input: {e}"))?;
+        shader_graph_core::ident::check_code_ident(&name).map_err(|e| format!("custom input: {e}"))?;
         let ty =
             PinType::ALL_CONCRETE.into_iter().find(|t| t.label().eq_ignore_ascii_case(ty.trim())).ok_or_else(|| {
                 format!("unknown type `{}` (use Float, Float2, Float3, Float4, Color, Bool, Int, Texture2D)", ty.trim())
@@ -422,14 +423,15 @@ fn function_call_emit(c: &mut EmitCtx) {
     for b in &f.builtins {
         args.push(c.builtin(*b));
     }
-    let call = format!("{}({})", f.name, args.join(", "));
+    // Prefixed WESL names (decision 0020): `fun_{name}(..)`, result fields `.out_{port}`.
+    let call = format!("{}({})", function_ident(&f.name), args.join(", "));
     if f.outputs.len() == 1 {
         c.define(&f.outputs[0].name, call);
     } else {
         c.define_typed("ret_", &f.out_struct(), call);
         let r = c.var("ret_");
         for o in &f.outputs {
-            c.alias(&o.name, Operand::Value(format!("{r}.{}", o.name)));
+            c.alias(&o.name, Operand::Value(format!("{r}.{}", output_ident(&o.name))));
         }
     }
 }

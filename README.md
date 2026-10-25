@@ -54,8 +54,15 @@ shaders/                      # graph sources, under VCS
   common/pulse.curve.ron
   common/tuning.consts.ron    # global constants (no generated file of their own)
 assets/shaders/autogen/       # AUTOGEN WESL: stdlib/, functions/, curves/, one file per material
-crates/shaders/               # AUTOGEN Rust crate
+  dir_env/mat_rock_wet.wesl
+  functions/dir_common/fun_wet_mask.wesl
+  curves/dir_common/crv_pulse.wesl
+crates/shaders/               # AUTOGEN Rust crate (src/materials/dir_env/mat_rock_wet.rs, …)
 ```
+
+Generated names are prefixed by kind (decision 0020): directories `dir_`, material files/modules `mat_`, functions
+`fun_` (`fn fun_wet_mask`), curve modules `crv_`, material parameters and function inputs `inp_`, function outputs
+`out_`. So any `snake_case` name works, keywords included (a `type` parameter, a `loop/` directory).
 
 The editor never touches the root `Cargo.toml`. Add the crate yourself (otherwise you get W105 with a hint):
 
@@ -107,7 +114,11 @@ fn setup(
   work as with `StandardMaterial`; `.material()` applies blend mode, two-sided and unlit from the graph.
 - **Unlit3d** — its own `impl Material` (`{Name}Material::new(..)`).
 - **Sprite2d** — `MaterialExtension2d` for `SpriteMaterial`.
-- Parameters are changed with `set_*` setters; `{Name}Params::default()` holds the graph's default values.
+- Parameters are fields, constructor arguments and setters prefixed with `inp_`: the `wetness` parameter is
+  `RockWetParams::inp_wetness`, the `inp_wetness` argument of `new` and `set_inp_wetness(&mut self, v)`; textures are
+  fields of the main type (`RockWetExt::inp_albedo`). `{Name}Params::default()` holds the graph's default values.
+  Type names (`RockWetExt`, `RockWetMaterial`, `RockWetParams`) are re-exported from the crate root, so the module
+  path (`shaders::materials::dir_env::mat_rock_wet`) is rarely needed.
 
 Full example — [`examples/sample_game`](examples/sample_game): one mesh per reference
 material. While the game is running, saving a graph in the editor (Ctrl+S) rewrites the `.wesl`, and
@@ -147,7 +158,19 @@ Values are also edited right on the nodes (UE-style): an unconnected input shows
 range, e.g. Lerp Alpha), a number field, X/Y fields, or a color button (Float3/Float4/Color) that opens a color picker (values are linear;
 exact components are edited in Properties); a wire hides the editor. Constants and parameters edit their value under the
 title (ScalarParameter's slider spans Slider Min..Max). RMB on an input pin: the type of polymorphic inputs
-(Float…Float4, e.g. Lerp A/B), Reset to default, Disconnect.
+(Float…Float4, e.g. Lerp A/B), Reset to default, Disconnect. RMB on a node: its own actions with their hotkeys
+(Add / Subtract / Multiply / Divide: Convert to one of the other three, keeping wires and values), then Exclusive
+preview (materials only), Copy / Duplicate / Delete; an unselected node is selected first. A node action's hotkey works
+on the selected nodes without the menu (decision 0021).
+
+**Exclusive node preview** (decision 0022, like UE's "Start Previewing Node"): `V` on the one selected node (on
+release; `V` + LMB still drops a Vector parameter) or "Exclusive preview" in its menu shows that node's output on the
+material instead of the material output — the running game picks it up through hot reload. The node gets a thick
+orange border and a warning icon, the tab title says `(preview)`; `V` again or "Stop preview" turns it off. Toggling
+(and the mode select in Properties → Preview: `Unlit` / `Lit` / `Full`) is an undoable edit that marks the tab unsaved
+**and** regenerates that material's files from the in-memory graph at once, without saving — including the asset's
+other unsaved edits; closing the tab without saving regenerates them from disk again. Only nodes with an output that converts to a color can be previewed; the
+preview is stored in the `.ron` on save, so `regen` / `check` produce what the editor showed (W107).
 
 **Curves** (`+Curve`) are 1D functions on the unit square: points `(t, value)`, both in `0..1`. A curve tab shows
 the plot with draggable points; the `Catmull-Rom` / `Simple` switch in its header only changes the preview — the file stores just the points. The `Sample Curve` node (Utility) picks a curve of the project in
@@ -182,6 +205,9 @@ those references (the nodes output 1.0 / `true`, W106).
 | Comment frame around the selection | C |
 | Reroute point on a wire / delete a wire | double click / RMB click on the wire |
 | Pin menu: polymorphic type / reset value / disconnect | RMB click on an input pin |
+| Node menu: node actions / copy / duplicate / delete | RMB click on a node |
+| Convert the selected Add / Subtract / Multiply / Divide nodes to Add / Subtract / Multiply / Divide | Shift + `+` / `-` / `*` / `/` (main row or numpad, Shift optional on the numpad) |
+| Exclusive preview of the selected node on / off (materials) | `V` (on release) |
 | Disconnect every wire of a pin / a wire | Ctrl+LMB on the pin / on the wire |
 | Named route: a wire without a visible wire (Named Route + one usage per place) | palette: "Named Route", then "Named Route Usage: {name}" |
 | Auto-layout the selection (or the whole graph) | Ctrl+L |
@@ -223,18 +249,26 @@ Asset(
 
 - Node `kind`: `stdlib::*`, `param::*`, `output::*`, `function::<path>` (function call),
   `user::<id>` (user node).
+- Constant nodes (`stdlib::Constant`, `Constant2Vector`/`3Vector`/`4Vector`) may have an optional `label: "…"` on the
+  node (omitted when empty). It is editor-only: it replaces the value in the node title and never affects generated code.
+- A material may have an optional `preview: Preview(node: Some("n09"), mode: Unlit)` (omitted when no node is
+  previewed and the mode is the default `Unlit`; modes `Unlit`, `Lit`, `Full`). While `node` is set, the outputs of
+  that node replace the material output's in the generated WESL (W107); deleting the node clears it.
 - A function (`*.function.ron`, `kind: Function`) declares inputs with `output::FunctionInput` nodes and
   outputs with `output::FunctionOutput` nodes. Changing a function regenerates the dependent materials.
 - A curve (`*.curve.ron`): `Curve(format_version: 1, name: "pulse", points: [(0.0, 0.0), (0.25, 1.0), (1.0, 0.0)])`
-  — points sorted by `t`, clamped to `0..1`. It is generated into `autogen/curves/<path>.wesl` (a const array of
-  `(t, value, slope)` and `sample_curve_simple` / `sample_curve_catmullrom`); shaders import the one they sample.
-  Materials may not live in `shaders/curves/` (like `stdlib/` and `functions/`).
+  — points sorted by `t`, clamped to `0..1`. It is generated into `autogen/curves/dir_<dir>/crv_<name>.wesl` (a
+  const array of `(t, value, slope)` and `sample_curve_simple` / `sample_curve_catmullrom`); shaders import the one
+  they sample.
 - A global constant table (`*.consts.ron`): `GlobalConsts(format_version: 1, name: "tuning", consts:
   [GlobalConst(name: "glow_amount", ty: F32, value: Float(0.35)), ...])`, `ty` one of `F32`, `Vec2`, `Vec3`,
   `Vec4`, `Bool`, `CompileFlag` (values `Float`, `Float2`…`Float4`, `Bool`). Nodes store only the constant's name.
 - User node (`shaders/.nodes/*.ron`):
   `UserNode(id: "soft_clamp", name: "SoftClamp", category: "User", inputs: [UserPin(name: "x", ty: Float3)], output: Float3, template: "return x / (vec3<f32>(1.0) + abs(x));")`.
-- Asset and parameter names are `snake_case` (`[a-z][a-z0-9_]*`) and not Rust/WGSL keywords.
+- Asset, directory, parameter, function port and global constant names are `snake_case` (`[a-z][a-z0-9_]*`, no
+  `__`, no trailing `_`); keywords are allowed because generated code prefixes them. Input names of Custom nodes
+  and user nodes are the exception: they appear verbatim in your WGSL, so they must not be Rust/WGSL keywords or
+  names of generated code and must not start with `n_`, `b_`, `sg_` or `_`.
 - Autogen files start with the marker `AUTOGENERATED by shader-editor v1 … do not edit`; the editor does not
   overwrite files without the marker (E008). Writes are atomic and happen only when the content changes;
   orphaned files are deleted.
@@ -255,6 +289,8 @@ Asset(
 | E010 | generated WESL failed wesl+naga (`--compile`, saving in the editor) |
 | W101–W105 | dead branch, inactive output pin, mesh attribute may be missing, vector truncation, `crates/shaders` not in `[workspace.members]` |
 | W106 | a Global* node without a constant (outputs 1.0 / `true`) |
+| W107 | node preview active (the material output is bypassed), or the stored preview ignored (missing node, no output that converts to a color) |
+| W108 | node preview changes the generated Rust crate (extra parameters or builtins): rebuild the game, and again after turning preview off |
 
 An error blocks generation only of its own asset; the rest are regenerated.
 
@@ -287,4 +323,5 @@ in `examples/sample_game` renders the scene, saves `out-1.png`/`out-2.png` and e
 WPO is not visible to the prepass/shadows; function outputs of type Texture2D are not supported; user nodes
 have a single output; Static Switch is out of v1; there is no native folder picker (the path is typed in,
 with a list of recent projects); sliders on nodes drag at the wrong speed and the color picker opens off its button when the canvas
-is zoomed (Bevy 0.20 bugs, see decision 0012). Details — [`docs/decisions/0010-v1-limitations.md`](docs/decisions/0010-v1-limitations.md).
+is zoomed (Bevy 0.20 bugs, see decision 0012); Custom-node and user-node input names cannot be keywords (they are
+used unprefixed in the WGSL you write, decision 0020). Details — [`docs/decisions/0010-v1-limitations.md`](docs/decisions/0010-v1-limitations.md).

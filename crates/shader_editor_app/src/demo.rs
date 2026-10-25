@@ -1,8 +1,9 @@
 //! Debug aid: scripted mouse gestures,
-//! `SHADER_EDITOR_INPUT=drag|rmb_click|rmb_pan|mmb_pan|slider|color|pin_rmb|hover|curve_drag|curve_add`
+//! `SHADER_EDITOR_INPUT=drag|rmb_click|rmb_pan|mmb_pan|slider|color|pin_rmb|node_rmb|hover|curve_drag|curve_add`
 //! (with `SHADER_EDITOR_SCREENSHOT` and `SHADER_EDITOR_OPEN`; `SHADER_EDITOR_ZOOM=<f32>` sets the canvas zoom
 //! first). `slider`/`color` act on the first inline slider / color button on a node, `pin_rmb` right-clicks the
-//! first input pin of `SHADER_EDITOR_INPUT_NODE`, `hover` rests on the toolbar's Undo button (its tooltip),
+//! first input pin of `SHADER_EDITOR_INPUT_NODE`, `node_rmb` right-clicks the middle of an unselected node (or of
+//! `SHADER_EDITOR_INPUT_NODE`) to open its menu, `hover` rests on the toolbar's Undo button (its tooltip),
 //! `curve_drag` drags the second point of an open curve, `curve_add` double-clicks below it. The input goes through
 //! the same window messages winit writes,
 //! so picking, bevy_noodle and the editor see a real gesture; the outcome is logged.
@@ -158,6 +159,12 @@ pub fn scripted_input(
                     error!("demo {name}: no input pin");
                     return;
                 };
+                let at = logical(t, c);
+                vec![Step::Move(at), Step::Press(MouseButton::Right), Step::Wait, Step::Release(MouseButton::Right)]
+            }
+            "node_rmb" => {
+                let Some((key, _, t, c)) = unselected else { return };
+                s.node = Some(key.0.clone());
                 let at = logical(t, c);
                 vec![Step::Move(at), Step::Press(MouseButton::Right), Step::Wait, Step::Release(MouseButton::Right)]
             }

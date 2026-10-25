@@ -7,8 +7,8 @@ import bevy_pbr::render::forward_io::VertexOutput;
 import bevy_pbr::render::mesh_view_bindings::globals;
 import super::super::stdlib::uv::sg_flipbook_uv;
 
-@group(constants::MATERIAL_BIND_GROUP) @binding(101) var tex_tex: texture_2d<f32>;
-@group(constants::MATERIAL_BIND_GROUP) @binding(102) var tex_tex_sampler: sampler;
+@group(constants::MATERIAL_BIND_GROUP) @binding(101) var inp_tex_tex: texture_2d<f32>;
+@group(constants::MATERIAL_BIND_GROUP) @binding(102) var inp_tex_tex_sampler: sampler;
 
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
@@ -18,7 +18,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let b_time: f32 = globals.time;
     // --- graph ---
     let n_n02_uv: vec2<f32> = sg_flipbook_uv(b_uv0, 4.0f, 4.0f, fract(b_time));
-    let n_n02_rgba: vec4<f32> = textureSampleGrad(tex_tex, tex_tex_sampler, n_n02_uv, dpdx(b_uv0), dpdy(b_uv0));
+    let n_n02_rgba: vec4<f32> = textureSampleGrad(inp_tex_tex, inp_tex_tex_sampler, n_n02_uv, dpdx(b_uv0), dpdy(b_uv0));
     // --- outputs ---
     let color: vec3<f32> = n_n02_rgba.rgb;
     let alpha: f32 = 1.0;

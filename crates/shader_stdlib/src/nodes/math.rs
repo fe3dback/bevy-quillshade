@@ -1,6 +1,6 @@
 //! Math category: per-component polymorphic operations (spec §8, 7.2).
 
-use shader_graph_core::registry::Registry;
+use shader_graph_core::registry::{Hotkey, HotkeyKey, NodeAction, NodeOp, Registry};
 use shader_graph_core::{PinType, Stage};
 
 use crate::def::{def, dim_fn, pin_in, pin_out, poly_ins, poly_out, sig};
@@ -11,6 +11,14 @@ type Expr2 = fn(&str, &str, PinType) -> String;
 type Expr1 = fn(&str, PinType) -> String;
 /// (id, name, keywords, default a, default b, expression)
 type BinaryOp<'a> = (&'a str, &'a str, &'a [&'a str], f32, f32, Expr2);
+
+/// Arithmetic nodes with their conversion hotkeys, in menu order.
+const ARITH: [(&str, HotkeyKey); 4] = [
+    ("Add", HotkeyKey::Plus),
+    ("Subtract", HotkeyKey::Minus),
+    ("Multiply", HotkeyKey::Star),
+    ("Divide", HotkeyKey::Slash),
+];
 
 pub fn register(r: &mut Registry) {
     let binary: &[BinaryOp] = &[
@@ -32,7 +40,18 @@ pub fn register(r: &mut Registry) {
             "Power" => ("Base", "Exp"),
             _ => ("A", "B"),
         };
-        r.register(def(&format!("stdlib::{id}"), name, CAT).kw(kw).build(
+        let mut d = def(&format!("stdlib::{id}"), name, CAT).kw(kw);
+        // Arithmetic nodes convert into each other (Shift + operator key, decision 0021).
+        if ARITH.iter().any(|a| a.0 == id) {
+            for &(other, key) in ARITH.iter().filter(|a| a.0 != id) {
+                d = d.action(NodeAction {
+                    label: format!("Convert to {other}"),
+                    hotkey: Some(Hotkey::shift(key)),
+                    op: NodeOp::ConvertTo(format!("stdlib::{other}")),
+                });
+            }
+        }
+        r.register(d.build(
             move |c| {
                 let (ins, ty, _) = poly_ins(c, &[("a", la, da), ("b", lb, db)]);
                 sig(ins, vec![poly_out("out", ty)])
@@ -186,5 +205,33 @@ pub fn one(t: PinType) -> String {
     match t {
         PinType::Float => "1.0".into(),
         t => format!("{}(1.0)", t.wesl()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use shader_graph_core::registry::NodeOp;
+
+    #[test]
+    fn arithmetic_nodes_convert_into_each_other() {
+        let r = crate::registry();
+        let a = r.get("stdlib::Add").unwrap().context_actions();
+        let ops: Vec<(&str, String)> = a
+            .iter()
+            .map(|x| match &x.op {
+                NodeOp::ConvertTo(k) => (k.as_str(), x.hotkey.unwrap().label()),
+            })
+            .collect();
+        assert_eq!(
+            ops,
+            vec![
+                ("stdlib::Subtract", "Shift -".to_string()),
+                ("stdlib::Multiply", "Shift *".to_string()),
+                ("stdlib::Divide", "Shift /".to_string()),
+            ]
+        );
+        assert_eq!(a[0].label, "Convert to Subtract");
+        assert_eq!(r.get("stdlib::Divide").unwrap().context_actions().len(), 3);
+        assert!(r.get("stdlib::Power").unwrap().context_actions().is_empty());
     }
 }

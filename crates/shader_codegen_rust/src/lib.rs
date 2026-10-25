@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use shader_codegen_wesl::{header, params_struct, paths};
-use shader_graph_core::ident::to_pascal_case;
+use shader_graph_core::ident::{input_ident, to_pascal_case};
 use shader_graph_core::registry::{Builtin, ParamType};
 use shader_graph_core::value::rust_f32;
 use shader_graph_core::{BlendMode, GENERATOR_VERSION, Ir, MaterialKind, MaterialParam, Shading, UniformTy, Value};
@@ -30,7 +30,7 @@ pub fn type_names(ir: &Ir) -> TypeNames {
     TypeNames { main, material, params: params_struct(&ir.name) }
 }
 
-/// Asset path of the generated WESL (`shaders/autogen/env/rock_wet.wesl`).
+/// Asset path of the generated WESL (`shaders/autogen/dir_env/mat_rock_wet.wesl`).
 pub fn shader_asset_path(ir: &Ir) -> String {
     paths::module_file(&paths::material_module(&ir.path))
 }
@@ -92,9 +92,9 @@ fn alpha_mode_2d(blend: BlendMode) -> String {
     }
 }
 
-/// Doc line for a constructor argument.
+/// Doc line for a constructor argument (named as the argument).
 fn param_doc(p: &MaterialParam) -> String {
-    let mut s = format!("`{}`", p.name);
+    let mut s = format!("`{}`", input_ident(&p.name));
     if !p.group.is_empty() {
         s += &format!(" (group {})", p.group);
     }
@@ -104,7 +104,8 @@ fn param_doc(p: &MaterialParam) -> String {
     s
 }
 
-/// Generates `materials/{sub}/{name}.rs`.
+/// Generates `materials/dir_{sub}/mat_{name}.rs`. Fields, constructor arguments and setters of parameters are
+/// named `inp_{name}` (`set_inp_{name}`), like in WESL (decision 0020).
 pub fn material_module(ir: &Ir, source_file: &str) -> String {
     let kind = *ir.kind.material().expect("material IR");
     let names = type_names(ir);
@@ -224,7 +225,7 @@ pub fn material_module(ir: &Ir, source_file: &str) -> String {
     for (i, p) in ir.texture_params().enumerate() {
         line(&mut o, &format!("    #[texture({})]", 101 + 2 * i));
         line(&mut o, &format!("    #[sampler({})]", 102 + 2 * i));
-        line(&mut o, &format!("    pub {}: Handle<Image>,", p.name));
+        line(&mut o, &format!("    pub {}: Handle<Image>,", input_ident(&p.name)));
     }
     line(&mut o, "}");
     line(&mut o, "");
@@ -328,7 +329,8 @@ pub fn material_module(ir: &Ir, source_file: &str) -> String {
     if ir.params.len() > 7 {
         line(&mut o, "    #[allow(clippy::too_many_arguments)]");
     }
-    let args: Vec<String> = ir.params.iter().map(|p| format!("{}: {}", p.name, rust_arg_type(p.ty))).collect();
+    let args: Vec<String> =
+        ir.params.iter().map(|p| format!("{}: {}", input_ident(&p.name), rust_arg_type(p.ty))).collect();
     line(&mut o, &format!("    pub fn new({}) -> Self {{", args.join(", ")));
     if no_fields {
         line(&mut o, "        Self {}");
@@ -340,8 +342,9 @@ pub fn material_module(ir: &Ir, source_file: &str) -> String {
                 let v = match f.param {
                     Some(i) => {
                         let p = &ir.params[i];
-                        let conv = to_uniform(p.ty, &p.name);
-                        if conv == p.name { p.name.clone() } else { format!("{}: {conv}", f.name) }
+                        let arg = input_ident(&p.name);
+                        let conv = to_uniform(p.ty, &arg);
+                        if conv == arg { arg } else { format!("{}: {conv}", f.name) }
                     }
                     None => format!("{}: 0.0", f.name),
                 };
@@ -350,18 +353,19 @@ pub fn material_module(ir: &Ir, source_file: &str) -> String {
             line(&mut o, "            },");
         }
         for p in ir.texture_params() {
-            line(&mut o, &format!("            {},", p.name));
+            line(&mut o, &format!("            {},", input_ident(&p.name)));
         }
         line(&mut o, "        }");
     }
     line(&mut o, "    }");
     for p in &ir.params {
+        let field = input_ident(&p.name);
         line(&mut o, "");
-        line(&mut o, &format!("    pub fn set_{}(&mut self, v: {}) {{", p.name, rust_arg_type(p.ty)));
+        line(&mut o, &format!("    pub fn set_{field}(&mut self, v: {}) {{", rust_arg_type(p.ty)));
         if p.ty == ParamType::Texture {
-            line(&mut o, &format!("        self.{} = v;", p.name));
+            line(&mut o, &format!("        self.{field} = v;"));
         } else {
-            line(&mut o, &format!("        self.params.{} = {};", p.name, to_uniform(p.ty, "v")));
+            line(&mut o, &format!("        self.params.{field} = {};", to_uniform(p.ty, "v")));
         }
         line(&mut o, "    }");
     }
@@ -447,7 +451,8 @@ pub enum BevyDep {
 }
 
 /// All crate files: relative path (inside `crates/shaders`) → content. Includes `Cargo.toml`,
-/// `src/lib.rs`, every `mod.rs`, and the given material modules.
+/// `src/lib.rs`, every `mod.rs`, and the given material modules (keyed by asset path). Modules are named by
+/// `paths::material_components` (`dir_env::mat_rock_wet`, decision 0020).
 pub fn crate_files(
     entries: &[MaterialEntry],
     modules: &BTreeMap<String, String>,
@@ -460,7 +465,7 @@ pub fn crate_files(
     let mut dirs: BTreeMap<String, (BTreeSet<String>, BTreeSet<String>)> = BTreeMap::new();
     dirs.entry(String::new()).or_default();
     for e in entries {
-        let parts = paths::split(&e.path);
+        let parts = paths::material_components(&e.path);
         let (name, sub) = parts.split_last().expect("non-empty path");
         let mut cur = String::new();
         for s in sub {
@@ -499,7 +504,7 @@ pub fn crate_files(
                 if count[e.main.as_str()] > 1 {
                     continue;
                 }
-                let module = paths::split(&e.path).join("::");
+                let module = paths::material_components(&e.path).join("::");
                 let mut items = vec![e.main.clone()];
                 if e.material != e.main {
                     items.push(e.material.clone());
@@ -526,7 +531,7 @@ pub fn crate_files(
         files.insert(path, o);
     }
     for (path, text) in modules {
-        files.insert(format!("src/materials/{path}.rs"), text.clone());
+        files.insert(format!("src/materials/{}.rs", paths::material_components(path).join("/")), text.clone());
     }
     files.insert("src/lib.rs".to_string(), lib_rs());
     files

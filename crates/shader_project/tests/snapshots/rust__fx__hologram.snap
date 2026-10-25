@@ -10,13 +10,13 @@ use bevy::render::render_resource::{AsBindGroup, ShaderType, RenderPipelineDescr
 use bevy::shader::ShaderRef;
 
 /// Asset path of the generated shader.
-pub const SHADER_PATH: &str = "shaders/autogen/fx/hologram.wesl";
+pub const SHADER_PATH: &str = "shaders/autogen/dir_fx/mat_hologram.wesl";
 
 /// Uniform block at `@binding(100)`; layout matches `HologramParams` in WESL (32 bytes).
 #[derive(ShaderType, Reflect, Debug, Clone, Copy, PartialEq)]
 pub struct HologramParams {
-    pub color: Vec4,
-    pub scan_speed: f32,
+    pub inp_color: Vec4,
+    pub inp_scan_speed: f32,
     pub _pad0: f32,
     pub _pad1: f32,
     pub _pad2: f32,
@@ -26,8 +26,8 @@ impl Default for HologramParams {
     /// Default values from the graph.
     fn default() -> Self {
         Self {
-            color: Vec4::new(0.2, 0.8, 1.0, 1.0),
-            scan_speed: 0.5,
+            inp_color: Vec4::new(0.2, 0.8, 1.0, 1.0),
+            inp_scan_speed: 0.5,
             _pad0: 0.0,
             _pad1: 0.0,
             _pad2: 0.0,
@@ -68,13 +68,13 @@ impl Material for HologramMaterial {
 
 impl HologramMaterial {
     /// All graph parameters are required; order = parameter order in the editor:
-    /// - `color`
-    /// - `scan_speed`, UI range 0.0..1.0
-    pub fn new(color: LinearRgba, scan_speed: f32) -> Self {
+    /// - `inp_color`
+    /// - `inp_scan_speed`, UI range 0.0..1.0
+    pub fn new(inp_color: LinearRgba, inp_scan_speed: f32) -> Self {
         Self {
             params: HologramParams {
-                color: color.to_vec4(),
-                scan_speed,
+                inp_color: inp_color.to_vec4(),
+                inp_scan_speed,
                 _pad0: 0.0,
                 _pad1: 0.0,
                 _pad2: 0.0,
@@ -82,12 +82,12 @@ impl HologramMaterial {
         }
     }
 
-    pub fn set_color(&mut self, v: LinearRgba) {
-        self.params.color = v.to_vec4();
+    pub fn set_inp_color(&mut self, v: LinearRgba) {
+        self.params.inp_color = v.to_vec4();
     }
 
-    pub fn set_scan_speed(&mut self, v: f32) {
-        self.params.scan_speed = v;
+    pub fn set_inp_scan_speed(&mut self, v: f32) {
+        self.params.inp_scan_speed = v;
     }
 }
 

@@ -16,7 +16,7 @@
 
 use serde::Deserialize;
 use shader_graph_core::registry::{NodeDef, NodeInfo, PinDef, Registry, SigCtx, Signature};
-use shader_graph_core::{Code, EmitCtx, PinType, Value, ident::check_ident};
+use shader_graph_core::{Code, EmitCtx, PinType, Value, ident::check_code_ident};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct UserPin {
@@ -54,9 +54,9 @@ impl UserNode {
     /// Parses and validates a `.nodes/*.ron` file.
     pub fn from_ron(text: &str) -> Result<UserNode, String> {
         let n: UserNode = ron::from_str(text).map_err(|e| e.to_string())?;
-        check_ident(&n.id).map_err(|e| format!("user node id: {e}"))?;
+        check_code_ident(&n.id).map_err(|e| format!("user node id: {e}"))?;
         for p in &n.inputs {
-            check_ident(&p.name).map_err(|e| format!("user node input: {e}"))?;
+            check_code_ident(&p.name).map_err(|e| format!("user node input: {e}"))?;
             if p.ty == PinType::Any {
                 return Err("user node inputs must have concrete types".into());
             }
@@ -125,5 +125,28 @@ impl NodeDef for UserDef {
         let body: String = body.lines().map(|l| format!("    {l}\n")).collect();
         c.add_fn(&name, format!("fn {name}({}) -> {} {{\n{body}}}\n", args.join(", "), self.node.output.wesl()));
         c.define("out", format!("{name}({})", call.join(", ")));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Custom-node and user-node input names are embedded verbatim in user WGSL, so unlike graph names they keep
+    /// the keyword check (decision 0020).
+    #[test]
+    fn code_embedded_names_reject_keywords() {
+        let e = crate::nodes::utility::parse_custom_inputs("loop: Float").unwrap_err();
+        assert!(e.contains("reserved"), "{e}");
+        assert!(crate::nodes::utility::parse_custom_inputs("strength: Float").is_ok());
+        let node = |input: &str| {
+            format!(
+                "UserNode(id: \"soft\", name: \"Soft\", inputs: [UserPin(name: \"{input}\", ty: Float)], output: Float, \
+                 template: \"x\")"
+            )
+        };
+        let e = UserNode::from_ron(&node("fn")).unwrap_err();
+        assert!(e.contains("user node input") && e.contains("reserved"), "{e}");
+        assert!(UserNode::from_ron(&node("x")).is_ok());
     }
 }

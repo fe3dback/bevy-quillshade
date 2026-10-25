@@ -40,7 +40,8 @@ Constraints found while researching:
   curve). It is redrawn by its own system when that data changes, not by canvas rebuilds. The IR records used curves
   (`Ir::curves`); `DepGraph` counts them as dependencies, so saving a curve also re-checks its users.
 - **Paths**: `shaders/curves/` is reserved for materials (it would clash with the generated `autogen/curves/`),
-  like `stdlib/` and `functions/`. Renaming a curve rewrites the `curve` parameter of every node that uses it
+  like `stdlib/` and `functions/` (superseded by 0020: material directories are emitted as `dir_curves/`, the
+  reservation is gone). Renaming a curve rewrites the `curve` parameter of every node that uses it
   (`ops::rename`, open documents too); deleting it leaves E006 at its users.
 - **Editor**: `Tab::Curve(CurveDoc)` / `ViewKind::Curve` (decision 0014 lists the steps). `CurveDoc` has the
   same model-level history as graphs (`history::History<T>`, extracted from `Doc`: 200 steps, merged drags).

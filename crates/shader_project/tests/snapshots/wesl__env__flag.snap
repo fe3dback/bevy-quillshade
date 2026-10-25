@@ -12,14 +12,14 @@ import bevy_pbr::render::{forward_io::{VertexOutput, FragmentOutput}, pbr_functi
 import bevy_pbr::render::{mesh_bindings::mesh, mesh_functions, skinning, morph, forward_io::{Vertex, UncompressedVertex, decompress_vertex}, view_transformations::position_world_to_clip};
 import bevy_pbr::render::mesh_view_bindings::globals;
 
-struct FlagParams { color: vec4<f32>, strength: f32, _pad0: f32, _pad1: f32, _pad2: f32 }
+struct FlagParams { inp_color: vec4<f32>, inp_strength: f32, _pad0: f32, _pad1: f32, _pad2: f32 }
 @group(constants::MATERIAL_BIND_GROUP) @binding(100) var<uniform> params: FlagParams;
 
 @fragment
 fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> FragmentOutput {
     var pbr_input = pbr_input_from_standard_material(in, is_front);
     // --- outputs ---
-    pbr_input.material.base_color = vec4<f32>(params.color.rgb, pbr_input.material.base_color.a);
+    pbr_input.material.base_color = vec4<f32>(params.inp_color.rgb, pbr_input.material.base_color.a);
     pbr_input.material.perceptual_roughness = 0.6f;
     pbr_input.material.base_color = alpha_discard(pbr_input.material.flags, pbr_input.material.alpha_cutoff, pbr_input.material.base_color);
     var out: FragmentOutput;
@@ -83,7 +83,7 @@ fn vertex(vertex_no_morph: Vertex) -> VertexOutput {
     let n_n10_out: f32 = (n_n09_out + n_n08_out);
     let n_n11_out: f32 = sin(n_n10_out);
     let n_n12_out: f32 = (n_n11_out * n_n06_x);
-    let n_n13_out: f32 = (n_n12_out * params.strength);
+    let n_n13_out: f32 = (n_n12_out * params.inp_strength);
     let n_n15_out: vec3<f32> = (vec3<f32>(0.0, 0.0, 1.0) * vec3<f32>(n_n13_out));
     // --- world position offset ---
     out.world_position = vec4<f32>(out.world_position.xyz + n_n15_out, 1.0);

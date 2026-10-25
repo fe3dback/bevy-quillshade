@@ -38,6 +38,10 @@ pub enum Code {
     W105,
     /// Global constant node without a constant: outputs 1.0 / `true` (decision 0017).
     W106,
+    /// Node preview active, or the stored preview ignored (decision 0022).
+    W107,
+    /// Node preview changes the generated Rust crate (extra parameters or builtins) (decision 0022).
+    W108,
 }
 
 impl Code {

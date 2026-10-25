@@ -548,6 +548,53 @@ pub fn global_tint() -> Asset {
     g.finish()
 }
 
+/// Function whose name and ports are Rust/WGSL keywords (decision 0020): `out = in * 2`, `let = in`.
+pub fn keyword_fn() -> Asset {
+    let mut g = GraphBuilder::new("fn", AssetKind::Function);
+    let input = g.node_p(
+        "output::FunctionInput",
+        (0.0, 0.0),
+        &[("name", s("in")), ("type", Value::Type(PinType::Float)), ("order", Value::Int(0))],
+    );
+    let twice = g.node("stdlib::Multiply", (200.0, 0.0));
+    g.link((&input, "out"), (&twice, "a"));
+    g.input(&twice, "b", f(2.0));
+    let out = g.node_p(
+        "output::FunctionOutput",
+        (400.0, 0.0),
+        &[("name", s("out")), ("type", Value::Type(PinType::Float)), ("order", Value::Int(0))],
+    );
+    g.link((&twice, "out"), (&out, "value"));
+    let pass = g.node_p(
+        "output::FunctionOutput",
+        (400.0, 120.0),
+        &[("name", s("let")), ("type", Value::Type(PinType::Float)), ("order", Value::Int(1))],
+    );
+    g.link((&input, "out"), (&pass, "value"));
+    g.finish()
+}
+
+/// Unlit material `kw/loop/type` with keyword names everywhere (decision 0020): parameters `self` and `mesh`,
+/// a call of `kw/fn`.
+pub fn keyword_names() -> Asset {
+    let kind = AssetKind::Material(MaterialKind::Unlit3d(UnlitSettings::default()));
+    let mut g = GraphBuilder::new("type", kind);
+    let out = g.node("output::Unlit3d", (800.0, 0.0));
+    let this = g.node_p("param::Scalar", (0.0, 0.0), &[("name", s("self")), ("default", f(0.5))]);
+    let mesh = g.node_p(
+        "param::Color",
+        (0.0, 150.0),
+        &[("name", s("mesh")), ("order", Value::Int(1)), ("default", Value::Color([0.9, 0.4, 0.1, 1.0]))],
+    );
+    let call = g.node("function::kw/fn", (250.0, 0.0));
+    g.link((&this, "out"), (&call, "in"));
+    let color = g.node("stdlib::Multiply", (550.0, 50.0));
+    g.link((&mesh, "rgb"), (&color, "a"));
+    g.link((&call, "out"), (&color, "b"));
+    g.link((&color, "out"), (&out, "color"));
+    g.finish()
+}
+
 /// Global constant table fixtures: (`shaders/`-relative path, table).
 pub fn const_tables() -> Vec<(&'static str, GlobalConsts)> {
     let c = GlobalConst::new;
@@ -602,5 +649,7 @@ pub fn all() -> Vec<(&'static str, bool, Asset)> {
         ("fx/curve_bands", false, curve_bands()),
         ("fx/global_tint", false, global_tint()),
         ("ui/dissolve", false, dissolve()),
+        ("kw/fn", true, keyword_fn()),
+        ("kw/loop/type", false, keyword_names()),
     ]
 }

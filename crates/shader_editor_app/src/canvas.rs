@@ -14,7 +14,7 @@ use bevy::ui::ui_transform::UiGlobalTransform;
 use bevy::ui_widgets::popover::Popover;
 use bevy_noodle::prelude::*;
 use bevy_noodle::style::kit;
-use shader_graph_core::model::{Asset, NodeId};
+use shader_graph_core::model::{Asset, AssetKind, NodeId};
 use shader_graph_core::registry::{FUNCTION_PREFIX, NodeRole, ParamKind, ROUTE_PARAM};
 use shader_graph_core::{Code, PinType, Value};
 use shader_project::AssetId;
@@ -22,8 +22,9 @@ use shader_project::AssetId;
 use crate::doc::{connection_error, node_signature, route_declarations};
 use crate::inline::{Inline, inline_for_param, inline_for_pin, inline_scene};
 use crate::state::{Action, Actions, Editor, Link, PropTarget, ViewRequest, display_value};
+use crate::ui::icons::{IconId, icon};
 use crate::ui::props::PropField;
-use crate::ui::{const_preview, curve_preview};
+use crate::ui::{ACCENT, const_preview, curve_preview};
 
 /// Moves a frame makes to carry the nodes inside it.
 pub const CARRIED: EditOrigin = EditOrigin::Custom(1);
@@ -149,6 +150,14 @@ fn short(v: &Value) -> String {
 }
 
 /// Title shown on a node: kind name, or the parameter/function/constant it stands for.
+/// Constant nodes carry an editor-only label that replaces the value in the title (decision 0021).
+pub fn has_label(kind: &str) -> bool {
+    matches!(
+        kind,
+        "stdlib::Constant" | "stdlib::Constant2Vector" | "stdlib::Constant3Vector" | "stdlib::Constant4Vector"
+    )
+}
+
 pub fn node_title(editor: &Editor, asset: &Asset, id: &str) -> String {
     let Some(n) = asset.nodes.get(id) else { return String::new() };
     let Some(def) = editor.registry.get(&n.kind) else { return format!("? {}", n.kind) };
@@ -168,6 +177,7 @@ pub fn node_title(editor: &Editor, asset: &Asset, id: &str) -> String {
             let path = &n.kind[FUNCTION_PREFIX.len()..];
             format!("fn {}", editor.functions.get(path).map_or(path, |s| s.name.as_str()))
         }
+        _ if has_label(&n.kind) && !n.label.is_empty() => n.label.clone(),
         _ if n.kind.starts_with("stdlib::Constant") => params.get("value").map(short).unwrap_or(name),
         _ => {
             // Sample Curve: the curve's name (decision 0015); Global*: the constant's name (decision 0017).
@@ -235,6 +245,13 @@ fn node_scene(editor: &Editor, asset: &Asset, path: &str, id: &str, canvas: Enti
     let key = NodeKey(id.to_string());
     let def = editor.registry.get(&n.kind);
     let sig = node_signature(asset, id, &editor.registry, &editor.functions, path);
+    // The previewed node: thick accent border, warning icon in the title (decision 0022).
+    let previewed = matches!(asset.kind, AssetKind::Material(_)) && asset.preview.node.as_deref() == Some(id);
+    let (border, outline) = if previewed {
+        (px(3), SelectedBorderColor { normal: ACCENT, selected: Color::WHITE })
+    } else {
+        (px(1.5), SelectedBorderColor::default())
+    };
     if def.is_some_and(|d| d.role() == NodeRole::Reroute) {
         let ty = sig.as_ref().and_then(|s| s.outputs.first()).map_or(PinType::Any, |p| p.ty);
         let c = pin_color(ty);
@@ -244,9 +261,9 @@ fn node_scene(editor: &Editor, asset: &Asset, path: &str, id: &str, canvas: Enti
             GraphNode
             NodePosition(pos)
             key
-            Node { width: px(20), height: px(20), border: UiRect::all(px(1.5)), border_radius: BorderRadius::MAX }
+            Node { width: px(20), height: px(20), border: UiRect::all(border), border_radius: BorderRadius::MAX }
             BackgroundColor(Color::srgb_u8(44, 46, 52))
-            SelectedBorderColor
+            outline
             ChildOf(canvas)
             Children [
                 @kit::port(Port::input(PortType::ANY), c) kin
@@ -308,12 +325,34 @@ fn node_scene(editor: &Editor, asset: &Asset, path: &str, id: &str, canvas: Enti
         ));
     }
     let min_width = if wide { px(250) } else { px(170) };
+    let title: Box<dyn Scene> = if previewed {
+        Box::new(bsn! {
+            // `kit::title` with the icon before the text; the radius follows the thicker border.
+            Node {
+                align_items: AlignItems::Center,
+                column_gap: px(6),
+                padding: UiRect::axes(px(10), px(5)),
+                margin: UiRect::new(px(-10), px(-10), px(0), px(2)),
+                border_radius: BorderRadius::top(px(5)),
+            }
+            BackgroundColor(head)
+            Children [
+                @icon(IconId::Warning, 16.0, ACCENT)
+                --
+                Text(title)
+                TextFont { font_size: FontSize::Px(14.0) }
+            ]
+        })
+    } else {
+        Box::new(bsn! { @kit::title(title) BackgroundColor(head) })
+    };
     Some(Box::new(bsn! {
         @kit::node(pos)
-        Node { min_width: min_width }
+        Node { min_width: min_width, border: UiRect::all(border) }
+        outline
         key
         ChildOf(canvas)
-        Children [ @kit::title(title) BackgroundColor(head) -- {rows} ]
+        Children [ @{title} -- {rows} ]
     }))
 }
 

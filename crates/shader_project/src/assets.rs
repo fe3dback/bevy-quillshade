@@ -175,7 +175,9 @@ pub fn load_consts(project: &Project, id: &AssetId) -> Result<GlobalConsts, Stri
     Ok(table)
 }
 
-/// Checks the asset path (spec §5): snake_case components, no reserved autogen directories.
+/// Checks the asset path (spec §5): snake_case components. Generated modules are prefixed (`dir_`, `mat_`;
+/// decision 0020), so keywords, a material next to a directory of the same name and top-level `stdlib/`,
+/// `functions/`, `curves/` directories are fine.
 pub fn validate_path(id: &AssetId) -> Vec<Diagnostic> {
     let mut out = Vec::new();
     let parts: Vec<&str> = id.path.split('/').collect();
@@ -185,38 +187,7 @@ pub fn validate_path(id: &AssetId) -> Vec<Diagnostic> {
             out.push(Diagnostic::new(Code::E005, format!("{what}: {e}")).in_asset(id.source_rel()));
         }
     }
-    if id.ty == AssetType::Material && parts.len() > 1 && matches!(parts[0], "stdlib" | "functions" | "curves") {
-        out.push(
-            Diagnostic::new(
-                Code::E005,
-                format!("`shaders/{}/` is reserved for generated {}; move the material", parts[0], parts[0]),
-            )
-            .in_asset(id.source_rel()),
-        );
-    }
     out
-}
-
-/// Module-tree conflicts among materials: `env.material.ron` next to an `env/` directory.
-pub fn module_conflicts(materials: &[&AssetId]) -> Vec<Diagnostic> {
-    let mut dirs = std::collections::BTreeSet::new();
-    for m in materials {
-        let parts: Vec<&str> = m.path.split('/').collect();
-        for i in 1..parts.len() {
-            dirs.insert(parts[..i].join("/"));
-        }
-    }
-    materials
-        .iter()
-        .filter(|m| dirs.contains(&m.path))
-        .map(|m| {
-            Diagnostic::new(
-                Code::E005,
-                format!("material `{}` clashes with directory `{}/` (Rust module tree)", m.path, m.path),
-            )
-            .in_asset(m.source_rel())
-        })
-        .collect()
 }
 
 /// Registers user nodes from `shaders/.nodes/*.ron`; returns load problems.

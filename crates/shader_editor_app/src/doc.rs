@@ -32,6 +32,9 @@ pub struct Doc {
     pub selected_frame: Option<String>,
     /// Bumped on every model change; the canvas rebuilds when it differs.
     pub revision: u64,
+    /// The generated files were written from this unsaved document (a preview toggle, decision 0022): closing it
+    /// unsaved regenerates the asset from disk.
+    pub regen_from_memory: bool,
 }
 
 impl Doc {
@@ -45,6 +48,7 @@ impl Doc {
             selection: BTreeSet::new(),
             selected_frame: None,
             revision: 1,
+            regen_from_memory: false,
         }
     }
 
@@ -54,6 +58,7 @@ impl Doc {
 
     pub fn mark_saved(&mut self) {
         self.saved = self.asset.to_ron();
+        self.regen_from_memory = false;
     }
 
     /// Applies `f` as one undoable step; returns its result. No-op edits are not recorded.
@@ -66,6 +71,8 @@ impl Doc {
         let before = self.asset.clone();
         let r = f(&mut self.asset);
         self.asset.normalize();
+        // Deleting the previewed node turns the preview off (decision 0022).
+        self.asset.clear_dangling_preview();
         let changed = self.asset != before;
         self.history.record(changed.then_some(before), key);
         if changed {
@@ -370,6 +377,22 @@ mod tests {
         assert_eq!(d.asset.edges.len(), 1);
         d.mark_saved();
         assert!(!d.is_dirty());
+    }
+
+    #[test]
+    fn deleting_previewed_node_clears_preview() {
+        use shader_graph_core::model::{Preview, PreviewMode};
+        let mut d = doc();
+        let c = d.add_node("stdlib::Constant3Vector", (0.0, 0.0));
+        d.edit(|a| a.preview = Preview { node: Some(c.clone()), mode: PreviewMode::Lit });
+        d.edit(|a| {
+            a.remove_node(&c);
+        });
+        assert_eq!(d.asset.preview, Preview { node: None, mode: PreviewMode::Lit });
+        assert!(d.undo());
+        assert_eq!(d.asset.preview.node.as_deref(), Some(c.as_str()));
+        assert!(d.redo());
+        assert_eq!(d.asset.preview.node, None);
     }
 
     #[test]
