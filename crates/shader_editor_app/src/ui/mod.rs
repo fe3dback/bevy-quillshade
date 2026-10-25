@@ -12,7 +12,7 @@ use bevy::ui::ui_transform::UiGlobalTransform;
 use bevy::ui_widgets::{Activate, ScrollArea};
 use bevy_noodle::style::kit;
 
-use crate::state::{Action, Actions, ConstsAction, Editor, GenFile, Unsaved, ViewRequest};
+use crate::state::{Action, Actions, Editor, GenFile, Unsaved, ViewRequest};
 use crate::tab::{Lang, Tab, ViewKind};
 
 pub mod browser;
@@ -325,12 +325,8 @@ fn view_tools(tab: &Tab) -> Vec<Box<dyn Scene>> {
                 "Delete the selected points (Del)",
             )),
         ],
-        Tab::Consts(_) => vec![Box::new(icon_tool_button(
-            IconId::Plus,
-            "Add",
-            Action::Consts(ConstsAction::Add),
-            "Add the constant of the form",
-        ))],
+        // The add form has its own Add button.
+        Tab::Consts(_) => Vec::new(),
         Tab::Text(t) => {
             let which = match t.lang {
                 Lang::Wesl => GenFile::Wesl,

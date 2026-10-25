@@ -11,12 +11,12 @@ use bevy::feathers::controls::{
 use bevy::input::keyboard::KeyboardInput;
 use bevy::input_focus::{FocusedInput, InputFocus};
 use bevy::prelude::*;
-use bevy::ui_widgets::{SliderPrecision, SliderValue, ValueChange, slider_self_update};
+use bevy::ui_widgets::{SliderPrecision, SliderRange, SliderValue, ValueChange, slider_self_update};
 use shader_graph_core::Value;
 use shader_graph_core::consts::{ConstType, GlobalConst};
 
 use super::icons::IconId;
-use super::props::{PropField, checkbox_w, linear_color, select_w, text_w, vector_fields};
+use super::props::{PropField, checkbox_w, linear_color, number, select_w, text_w, vector_fields};
 use super::{HEADER_BG, TEXT, TEXT_DIM, VIEW_BG, ViewOf, icon_button, icon_tool_button, scroll_column, text};
 use crate::consts_doc::ConstsDoc;
 use crate::state::{Action, Actions, ConstsAction, Editor, PropTarget, display_value};
@@ -115,19 +115,34 @@ fn type_select(target: PropTarget, ty: ConstType) -> Box<dyn Scene> {
     select_w(target, type_labels(), Vec::new(), cur)
 }
 
-/// Editor of a constant's value: `f32` slider `0..1`, `vecN` colour picker + component fields, flags a checkbox.
+/// Range of an `f32` constant's slider: `0..1` for values in it, otherwise the power of ten around the value
+/// (`5` → `0..10`, `-0.5` → `-1..1`, `-250` → `-1000..1000`). Any value can be typed into the number field.
+fn slider_range(v: f32) -> (f32, f32) {
+    let m = if v.abs() <= 1.0 || !v.is_finite() { 1.0 } else { 10f32.powf(v.abs().log10().ceil()) };
+    (if v < 0.0 { -m } else { 0.0 }, m)
+}
+
+/// Editor of a constant's value: `f32` number field + slider, `vecN` colour picker + component fields, flags a
+/// checkbox.
 fn value_editor(c: &GlobalConst) -> Box<dyn Scene> {
     let target = PropTarget::Const(c.name.clone());
     match c.ty {
         ConstType::F32 => {
-            let (field, value) = (PropField { target, ..default() }, c.value.as_f32());
+            let value = c.value.as_f32();
+            let (min, max) = slider_range(value);
+            let (field, input) = (PropField { target: target.clone(), ..default() }, number(target, 0, value, None));
             Box::new(bsn! {
-                @FeathersSlider { @min: 0.0, @max: 1.0 }
-                SliderValue({value})
-                SliderPrecision(3)
-                on(slider_self_update)
-                Node { width: px(260) }
-                field
+                Node { flex_direction: FlexDirection::Row, column_gap: px(6), align_items: AlignItems::Center, max_width: px(460), flex_grow: 1.0 }
+                Children [
+                    Node { width: px(110), flex_shrink: 0.0 } Children [ @{input} ]
+                    --
+                    @FeathersSlider { @min: min, @max: max }
+                    SliderValue({value})
+                    SliderPrecision(3)
+                    on(slider_self_update)
+                    Node { flex_grow: 1.0 }
+                    field
+                ]
             })
         }
         ConstType::Vec2 | ConstType::Vec3 | ConstType::Vec4 => {
@@ -228,12 +243,14 @@ fn redraw(
     }
 }
 
-/// Keeps the number fields and the colour picker of a constant in step with the model (an edit in one of them
-/// changes the others); the field being typed into is left alone.
+/// Keeps the number fields, the slider and the colour picker of a constant in step with the model (an edit in one
+/// of them changes the others; a typed value outside the slider's range widens it); the field being typed into is
+/// left alone.
 fn sync_fields(
     editor: Res<Editor>,
     focus: Option<Res<InputFocus>>,
     numbers: Query<(Entity, &PropField, &NumberInputValue)>,
+    sliders: Query<(Entity, &PropField, &SliderValue, &SliderRange)>,
     pickers: Query<(Entity, &PropField, &ColorInputValue)>,
     parents: Query<&ChildOf>,
     mut commands: Commands,
@@ -250,6 +267,20 @@ fn sync_fields(
         let want = NumberInputValue::F32(display_value(v.floats().get(field.comp).copied().unwrap_or(0.0)));
         if *shown != want {
             commands.entity(e).insert(want);
+        }
+    }
+    for (e, field, shown, range) in &sliders {
+        if !matches!(field.target, PropTarget::Const(_)) {
+            continue;
+        }
+        let Some(v) = editor.current_value(&field.target) else { continue };
+        let v = v.as_f32();
+        if v < range.start() || v > range.end() {
+            let (min, max) = slider_range(v);
+            commands.entity(e).insert(SliderRange::new(min, max));
+        }
+        if shown.0 != v {
+            commands.entity(e).insert(SliderValue(v));
         }
     }
     for (e, field, shown) in &pickers {
@@ -284,5 +315,20 @@ fn add_on_enter(ev: On<FocusedInput<KeyboardInput>>, fields: Query<&PropField>, 
         && fields.get(ev.focused_entity).is_ok_and(|f| f.target == PropTarget::ConstDraftName)
     {
         actions.push(Action::Consts(ConstsAction::Add));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::slider_range;
+
+    #[test]
+    fn slider_range_covers_the_value() {
+        assert_eq!(slider_range(0.5), (0.0, 1.0));
+        assert_eq!(slider_range(1.0), (0.0, 1.0));
+        assert_eq!(slider_range(5.0), (0.0, 10.0));
+        assert_eq!(slider_range(-0.5), (-1.0, 1.0));
+        assert_eq!(slider_range(-250.0), (-1000.0, 1000.0));
+        assert_eq!(slider_range(f32::NAN), (0.0, 1.0));
     }
 }

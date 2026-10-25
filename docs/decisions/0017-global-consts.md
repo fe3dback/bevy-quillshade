@@ -35,7 +35,9 @@ zero, changed to 1.0 — see Nodes).
 - **Editor**: `Tab::Consts(ConstsDoc)` / `ViewKind::Consts` (steps of decision 0014). `ConstsDoc` keeps the table
   with the shared model-level history (`History<GlobalConsts>`) plus the add-form draft (name, type, error; editor
   only, not undoable). The view: a header (path), the form (name field, type select, Add), the table (name, type
-  select, value editor, delete button). Value editors: `f32` — slider `0..1`; `vecN` — colour picker plus R/G(/B/A)
+  select, value editor, delete button; the form's Add is the only one, the toolbar has none). Value editors: `f32` —
+  number field (any value) plus a slider over `0..1`, or the power of ten around the value when it is outside
+  (`5` → `0..10`, `-37.5` → `-100..100`; a typed value widens it); `vecN` — colour picker plus R/G(/B/A)
   number fields (any value can be typed); `bool` / `compileFlag` — checkbox. Edits reuse `PropField` and the
   `SetValue`/`SetComponent` path (`PropTarget::Const*`), so slider drags and picker drags are one undo step each.
   The view is rebuilt only on structural changes (`ConstsDoc::layout`: add, delete, type change, undo/redo, reload),

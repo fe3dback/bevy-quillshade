@@ -157,8 +157,9 @@ its curve (with a line at `T` while `T` is not connected; "n/a" when no curve is
 use it.
 
 **Global constants** (`+Global Consts`, decision 0017) are tables of named values shared by every shader: the tab
-has an add form (name, type, Add or Enter) and the table (type select, value, delete). Types: `f32` (slider `0..1`),
-`vec2`/`vec3`/`vec4` (color picker + R/G/B/A fields, any value can be typed), `bool` (read as `1.0` / `0.0`),
+has an add form (name, type, Add or Enter) and the table (type select, value, delete). Types: `f32` (number field
+taking any value + a slider over `0..1` that widens to a value outside it), `vec2`/`vec3`/`vec4` (color picker +
+R/G/B/A fields, any value can be typed), `bool` (read as `1.0` / `0.0`),
 `compileFlag` (a real `bool`, connects only to logic nodes: If (Bool), And, Or, Not). Names are unique in the whole
 project. The nodes `GlobalConstF32`, `GlobalConstVec2/3/4`, `GlobalBool`, `GlobalCompileFlag` (Constants) pick a
 constant of their type from any table in Properties and show its value read-only (number, color square, green `1` /
