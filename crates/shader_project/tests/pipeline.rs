@@ -130,6 +130,19 @@ fn workspace_warning_w105() {
 }
 
 #[test]
+fn generated_manifest_takes_bevy_from_the_workspace() {
+    let (_d, p) = temp_project();
+    let manifest = p.root.join("crates/shaders/Cargo.toml");
+    regenerate(&p, &RegenOptions::default()).unwrap();
+    assert!(read(&manifest).contains("bevy = { version = \"0.20\", default-features = false"));
+    let root = "[workspace]\nmembers = [\"crates/*\"]\n\n[workspace.dependencies]\nbevy = \"0.20\"\n";
+    std::fs::write(p.root.join("Cargo.toml"), root).unwrap();
+    let report = regenerate(&p, &RegenOptions::default()).unwrap();
+    assert!(report.changes.iter().any(|c| c.path() == manifest), "{:?}", report.changes);
+    assert!(read(&manifest).contains("bevy = { workspace = true, features = [\"std\""), "{}", read(&manifest));
+}
+
+#[test]
 fn named_routes_teleport_wires() {
     use shader_graph_core::consts::NoConsts;
     use shader_graph_core::ir::build_ir;

@@ -68,6 +68,11 @@ bevy = { version = "0.20", features = ["file_watcher"] }   # file_watcher — fo
 shaders = { path = "crates/shaders" }
 ```
 
+The generated `crates/shaders/Cargo.toml` pins `bevy = { version = "0.20", default-features = false, features = [..] }`.
+If the root `Cargo.toml` declares Bevy in `[workspace.dependencies]` (or takes `bevy = { workspace = true }` itself), it
+uses `bevy = { workspace = true, features = [..] }` instead, so the game's Bevy version and features apply. The same
+steps are in the editor under Help → Quick Start.
+
 ```rust
 use bevy::prelude::*;
 use bevy::sprite_render::SpriteMaterial;
@@ -117,7 +122,7 @@ xdg-desktop-portal); cancel it to type or paste the path instead (Browse... reop
 
 The toolbar holds the logo and the main menu — **File** (Open Project, New Project, Close Project, Save, Save All,
 Quit), **Assets** (create a Pbr3d/Unlit3d/Sprite2d material, a function, a curve, a global constant table, a folder;
-Regenerate) and **Help** (Project Page, About: version, link, author, license) — then Undo /
+Regenerate) and **Help** (Quick Start: how to hook a game up; Project Page; About: version, link, author, license) — then Undo /
 Redo and the actions of the active tab (graph: Auto-layout, Comment, Fit; curve: Select all, Delete; constant table:
 Add; generated file: Copy, Source, Open externally).
 
@@ -130,7 +135,8 @@ default values, asset blend mode / two-sided / shading), at the bottom the log (
 The browser is an IDE-style file tree: folders with expand carets, an icon per asset kind (function, Pbr3d,
 Unlit3d, Sprite2d, curve, constant table); the active tab's asset is highlighted, unsaved assets get an orange dot after the name.
 Tabs and menus show icons too; Undo / Redo are icon-only buttons — hover a toolbar button for its name and hotkey.
-RMB on a tab: Close / Close All / Close Others / Close to the Left / Close to the Right / Close Unmodified. The bottom-right corner of the main view shows the open document's type (`pbr3d`, `unlit3d`, `sprite2d`,
+Tabs are compact and wrap onto more rows when there are many; a tab shows the file name only (`rock_wet`), the full
+path when several open tabs share that name, and the full path as its tooltip. RMB on a tab: Close / Close All / Close Others / Close to the Left / Close to the Right / Close Unmodified. The bottom-right corner of the main view shows the open document's type (`pbr3d`, `unlit3d`, `sprite2d`,
 `function`, `curve`, `consts`, or `wesl`/`rust` for a generated file) as a faint watermark over the view.
 Generated-file tabs refresh after every regeneration; Ctrl+C there copies the whole file, and the header has
 "Open in the default application". Icons come from [icon-rs](https://crates.io/crates/icon-rs), plus a few

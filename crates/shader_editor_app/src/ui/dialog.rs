@@ -102,6 +102,11 @@ fn redraw(
         Dialog::About => {
             ("About".into(), vec![Box::new(about())], vec![Box::new(button("OK", Action::CloseDialog, true))])
         }
+        Dialog::QuickStart => (
+            "Quick Start".into(),
+            vec![Box::new(super::welcome::quick_start())],
+            vec![Box::new(button("OK", Action::CloseDialog, true))],
+        ),
     };
     if let Dialog::Input { submit: Submit::OpenProject, .. } = d {
         for p in editor.config.recent_projects.iter().take(6) {
@@ -109,7 +114,11 @@ fn redraw(
             body.push(Box::new(button(format!("Recent: {path}"), Action::OpenProject(p.clone()), false)));
         }
     }
-    let width = px(if matches!(d, Dialog::About) { 540 } else { 460 });
+    let width = px(match d {
+        Dialog::About => 540,
+        Dialog::QuickStart => 640,
+        _ => 460,
+    });
     commands.spawn_scene(bsn! {
         @FeathersDialog {
             @width: width,

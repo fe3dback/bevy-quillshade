@@ -121,6 +121,14 @@ impl Tab {
         }
     }
 
+    /// File name without directories and extensions (`rock_wet`); the tab bar falls back to [`Tab::title`] when
+    /// several tabs share one.
+    pub fn short_title(&self) -> String {
+        let title = self.title();
+        let name = title.rsplit('/').next().unwrap_or(&title);
+        name.split('.').next().unwrap_or(name).to_string()
+    }
+
     pub fn is_dirty(&self) -> bool {
         match self {
             Tab::Graph(d) => d.is_dirty(),
@@ -194,4 +202,13 @@ pub fn parse_config_key(key: &str) -> Option<(AssetId, Option<Lang>)> {
         Some((rel, lang)) => Some((assets::id_from_source_rel(rel)?, Some(Lang::from_label(lang)?))),
         None => Some((assets::id_from_source_rel(key)?, None)),
     }
+}
+
+/// Tab bar labels: [`Tab::short_title`], or the full [`Tab::title`] for every tab whose short title is shared.
+pub fn labels(tabs: &[Tab]) -> Vec<String> {
+    let short: Vec<String> = tabs.iter().map(Tab::short_title).collect();
+    tabs.iter()
+        .zip(&short)
+        .map(|(t, s)| if short.iter().filter(|o| *o == s).count() > 1 { t.title() } else { s.clone() })
+        .collect()
 }

@@ -492,7 +492,7 @@ pub fn regenerate_set(project: &Project, set: &AssetSet, opts: &RegenOptions) ->
         }
     }
     let crate_dir = project.crate_dir();
-    for (rel, text) in shader_codegen_rust::crate_files(&entries, &modules) {
+    for (rel, text) in shader_codegen_rust::crate_files(&entries, &modules, project.bevy_dep()) {
         desired.push((crate_dir.join(rel), text));
     }
 

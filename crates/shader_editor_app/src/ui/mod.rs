@@ -237,7 +237,9 @@ impl MainMenu {
                 items
             }
             MainMenu::Help => vec![
+                (Some(IconId::Help), "Quick Start".into(), Action::QuickStart),
                 (Some(IconId::Link), "Project Page".into(), Action::OpenUrl(crate::PROJECT_URL.into())),
+                menu_separator(),
                 (Some(IconId::Info), "About".into(), Action::About),
             ],
         }
@@ -416,7 +418,15 @@ fn spawn_layout(mut commands: Commands) {
                 Node { flex_grow: 1.0, flex_direction: FlexDirection::Column, min_width: px(0) }
                 Children [
                     tabs::TabsBar
-                    Node { flex_direction: FlexDirection::Row, min_height: px(30), align_items: AlignItems::End, column_gap: px(1), padding: UiRect::left(px(4)) }
+                    Node {
+                        flex_direction: FlexDirection::Row,
+                        flex_wrap: FlexWrap::Wrap,
+                        min_height: px(24),
+                        align_items: AlignItems::End,
+                        column_gap: px(1),
+                        row_gap: px(1),
+                        padding: UiRect::new(px(4), px(4), px(3), px(0)),
+                    }
                     BackgroundColor(HEADER_BG)
                     --
                     DocArea

@@ -22,3 +22,4 @@ Short records in the "context → decision → consequences" format. Numbering i
 | [0016](0016-main-menu-and-ui-revision.md) | Main menu and per-view toolbar, browser double click / dirty dots, tab close menu, Ctrl+LMB disconnect, curve drag modifiers, one accent colour |
 | [0017](0017-global-consts.md) | Global constant tables: `*.consts.ron`, the Global* nodes (values inlined as literals), the table editor, clearing references on type change / delete |
 | [0018](0018-welcome-about-config-location.md) | Welcome screen, Help → About, New project, config in `<OS config dir>/fe3dback/bevy-shader-editor/`, compiled-in logos |
+| [0019](0019-quick-start-workspace-bevy-compact-tabs.md) | Help → Quick Start, `bevy = { workspace = true }` in the generated crate when the game declares Bevy in its workspace, compact wrapping tabs with short names |

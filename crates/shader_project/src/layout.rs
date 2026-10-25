@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use shader_codegen_rust::BevyDep;
 use shader_graph_core::{Code, Diagnostic};
 
 /// Settings file inside `shaders/`.
@@ -119,6 +120,25 @@ impl Project {
         Ok(())
     }
 
+    /// How the generated crate depends on Bevy (decision 0019): through the workspace when the root `Cargo.toml`
+    /// declares `[workspace.dependencies] bevy`, or itself takes `bevy = { workspace = true }` (the game is a member
+    /// of an outer workspace).
+    pub fn bevy_dep(&self) -> BevyDep {
+        let Some(doc) =
+            std::fs::read_to_string(self.root.join("Cargo.toml")).ok().and_then(|t| t.parse::<toml::Table>().ok())
+        else {
+            return BevyDep::Version;
+        };
+        let declared = doc.get("workspace").and_then(|w| w.get("dependencies")).and_then(|d| d.get("bevy")).is_some();
+        let inherited = doc
+            .get("dependencies")
+            .and_then(|d| d.get("bevy"))
+            .and_then(|b| b.get("workspace"))
+            .and_then(|w| w.as_bool())
+            .unwrap_or(false);
+        if declared || inherited { BevyDep::Workspace } else { BevyDep::Version }
+    }
+
     /// W105: `crates/shaders` missing from `[workspace.members]` of the root `Cargo.toml`.
     pub fn workspace_warning(&self) -> Option<Diagnostic> {
         let text = std::fs::read_to_string(self.root.join("Cargo.toml")).ok()?;
@@ -166,6 +186,23 @@ mod tests {
         assert!(glob_match("crates/shaders", "crates/shaders"));
         assert!(!glob_match("crates/*", "crates/shaders/x"));
         assert!(!glob_match("other/*", "crates/shaders"));
+    }
+
+    #[test]
+    fn bevy_dep_follows_the_root_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("assets")).unwrap();
+        let dep = |manifest: &str| {
+            std::fs::write(dir.path().join("Cargo.toml"), manifest).unwrap();
+            Project::open(dir.path()).unwrap().bevy_dep()
+        };
+        assert_eq!(dep("[package]\nname = \"game\"\n[dependencies]\nbevy = \"0.20\"\n"), BevyDep::Version);
+        assert_eq!(dep("[workspace]\n[workspace.dependencies]\nbevy = { version = \"0.20\" }\n"), BevyDep::Workspace);
+        assert_eq!(
+            dep("[package]\nname = \"game\"\n[dependencies]\nbevy = { workspace = true }\n"),
+            BevyDep::Workspace
+        );
+        assert_eq!(dep("not toml ["), BevyDep::Version);
     }
 
     #[test]

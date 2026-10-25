@@ -140,6 +140,8 @@ pub enum Dialog {
     },
     /// Help → About: logo, version, links.
     About,
+    /// Help → Quick Start: how to hook a game up to the editor.
+    QuickStart,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -242,6 +244,7 @@ pub enum Action {
     /// The picker's choice: submits the Open / New project dialog, if it is still open.
     FolderPicked(PathBuf),
     About,
+    QuickStart,
     /// Opens a web page in the default browser.
     OpenUrl(String),
     CloseProject(Unsaved),
@@ -1187,6 +1190,7 @@ impl Editor {
                 Err(e) => self.io_error("Cannot create project", e),
             },
             Action::About => self.dialog = Some(Dialog::About),
+            Action::QuickStart => self.dialog = Some(Dialog::QuickStart),
             Action::OpenUrl(url) => self.external.push(PathBuf::from(url)),
             Action::OpenAsset(id) => self.open_asset(&id),
             Action::ActivateTab(i) => self.activate(i),
@@ -2839,6 +2843,21 @@ mod tests {
 
     fn points(e: &Editor) -> Vec<(f32, f32)> {
         e.curve_doc().unwrap().curve.points.clone()
+    }
+
+    #[test]
+    fn tab_labels_are_short_unless_shared() {
+        let (_dir, mut e) = project();
+        e.regenerate();
+        let rock = AssetId::new(AssetType::Material, "env/rock_wet");
+        e.apply(Action::OpenAsset(rock.clone()));
+        e.apply(Action::OpenAsset(pulse()));
+        assert_eq!(crate::tab::labels(&e.tabs), ["rock_wet", "pulse"]);
+        e.apply(Action::ShowGenerated(rock, Lang::Wesl));
+        assert_eq!(
+            crate::tab::labels(&e.tabs),
+            ["shaders/env/rock_wet.material", "pulse", "assets/shaders/autogen/env/rock_wet.wesl"]
+        );
     }
 
     #[test]

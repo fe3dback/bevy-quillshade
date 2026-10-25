@@ -111,6 +111,41 @@ fn setup_help() -> impl Scene {
     }
 }
 
+/// Help → Quick Start: the steps from an existing Bevy game to a material on screen (README "Hooking it up to a
+/// game").
+pub fn quick_start() -> impl Scene {
+    let step = |s: &'static str| -> Box<dyn Scene> { Box::new(text(s, TEXT, 13.0)) };
+    let note = |s: &'static str| -> Box<dyn Scene> { Box::new(text(s, TEXT_DIM, 12.0)) };
+    let lines: Vec<Box<dyn Scene>> = vec![
+        step(
+            "1. File > New Project... on the game crate (the directory with its Cargo.toml) creates assets/ and shaders/ there; File > Open Project... opens one set up before.",
+        ),
+        step(
+            "2. Create a material with Assets (or a right click in the browser) and save it (Ctrl+S): every save regenerates WESL into assets/shaders/autogen/ and the Rust crate crates/shaders/.",
+        ),
+        step("3. Add the generated crate to the game's Cargo.toml (the editor never edits it):"),
+        Box::new(code(
+            "[workspace]\nmembers = [\"crates/shaders\"]\n\n[dependencies]\n\
+             bevy = { version = \"0.20\", features = [\"file_watcher\"] }\nshaders = { path = \"crates/shaders\" }",
+        )),
+        note(
+            "If Bevy is declared in [workspace.dependencies], crates/shaders takes it with bevy = { workspace = true }.",
+        ),
+        step("4. Register the plugin and use the generated constructors:"),
+        Box::new(code(
+            "App::new().add_plugins((DefaultPlugins, shaders::ShadersPlugin))\n\n\
+             // Pbr3d: {Name}Ext, Unlit3d: {Name}Material, Sprite2d: inside SpriteMaterial(..)\n\
+             let mat = materials.add(RockWetExt::new(/* parameters */).material());\n\
+             commands.spawn((Mesh3d(mesh), MeshMaterial3d(mat)));",
+        )),
+        step("5. Run the game with file_watcher: saving a graph in the editor reloads its shader without a restart."),
+    ];
+    bsn! {
+        Node { flex_direction: FlexDirection::Column, row_gap: px(8) }
+        Children [ {lines} ]
+    }
+}
+
 fn code(s: &'static str) -> impl Scene {
     bsn! {
         Node { padding: UiRect::axes(px(10), px(6)), border_radius: BorderRadius::all(px(4)) }

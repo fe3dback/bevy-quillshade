@@ -225,7 +225,7 @@ fn open_startup_project(mut editor: ResMut<Editor>, startup: Res<StartupProject>
 /// Debug aid: `SHADER_EDITOR_SCREENSHOT=out.png` saves a screenshot after a few seconds and quits;
 /// `SHADER_EDITOR_OPEN=env/rock_wet.material.ron` opens an asset at startup (`…ron#wesl` / `#rust`: its generated
 /// file in a text tab, after the asset's graph).
-/// `SHADER_EDITOR_DEMO=palette|wire|dialog|about|open_project|welcome|menu|tab_menu` additionally opens that popup before the
+/// `SHADER_EDITOR_DEMO=palette|wire|dialog|about|quick_start|open_project|welcome|menu|tab_menu` additionally opens that popup before the
 /// shot (`menu`: the main menu's File; `welcome`: closes the project).
 fn debug_screenshot(
     mut frames: Local<u32>,
@@ -267,6 +267,7 @@ fn debug_screenshot(
             }
             Ok("dialog") => actions.push(Action::NewAssetDialog(state::NewKind::Pbr3d)),
             Ok("about") => actions.push(Action::About),
+            Ok("quick_start") => actions.push(Action::QuickStart),
             Ok("open_project") => actions.push(Action::OpenProjectDialog),
             Ok("welcome") => actions.push(Action::CloseProject(state::Unsaved::Discard)),
             Ok("menu") => ui::dialog::open_icon_menu(&mut commands, Vec2::new(6.0, 30.0), ui::MainMenu::File.items()),
