@@ -1,5 +1,5 @@
 //! Window layout (spec §9): main menu + toolbar, asset browser (left), tabs + canvas + log (center), properties
-//! (right).
+//! (right); the welcome screen covers the panels while no project is open.
 
 use bevy::feathers::constants::size;
 use bevy::feathers::controls::{ButtonVariant, FeathersButton, FeathersToolButton};
@@ -24,11 +24,13 @@ pub mod dialog;
 pub mod icons;
 pub mod input;
 pub mod log;
+pub mod logo;
 pub mod palette;
 pub mod props;
 pub mod tabs;
 pub mod text_view;
 pub mod tooltip;
+pub mod welcome;
 
 use dialog::{menu_separator, open_icon_menu};
 use icons::{IconId, icon};
@@ -101,6 +103,7 @@ impl Plugin for UiPlugin {
             input::InputPlugin,
             tooltip::TooltipPlugin,
         ))
+        .add_plugins((logo::LogoPlugin, welcome::WelcomePlugin))
         .add_systems(Startup, spawn_layout)
         .add_systems(Update, (show_active_view, show_empty_hint, show_doc_kind, show_status, redraw_view_tools))
         .add_observer(activate_action)
@@ -211,6 +214,7 @@ pub enum MainMenu {
     #[default]
     File,
     Assets,
+    Help,
 }
 
 impl MainMenu {
@@ -218,6 +222,7 @@ impl MainMenu {
         match self {
             MainMenu::File => vec![
                 (Some(IconId::FolderOpen), "Open Project...\tCtrl+O".into(), Action::OpenProjectDialog),
+                (Some(IconId::FolderNew), "New Project...".into(), Action::NewProjectDialog),
                 (Some(IconId::Close), "Close Project".into(), Action::CloseProject(Unsaved::Ask)),
                 menu_separator(),
                 (Some(IconId::Save), "Save\tCtrl+S".into(), Action::Save),
@@ -231,6 +236,10 @@ impl MainMenu {
                 items.push((Some(IconId::Regenerate), "Regenerate".into(), Action::RegenAll));
                 items
             }
+            MainMenu::Help => vec![
+                (Some(IconId::Link), "Project Page".into(), Action::OpenUrl(crate::PROJECT_URL.into())),
+                (Some(IconId::Info), "About".into(), Action::About),
+            ],
         }
     }
 }
@@ -256,7 +265,7 @@ fn open_main_menu(
 #[derive(Component, Default, Clone)]
 pub struct ViewTools;
 
-/// Main menu, undo/redo, then the actions of the active view.
+/// Logo, main menu, undo/redo, then the actions of the active view.
 fn toolbar() -> impl Scene {
     bsn! {
         Node {
@@ -269,9 +278,13 @@ fn toolbar() -> impl Scene {
         BackgroundColor(HEADER_BG)
         BorderColor::all(BORDER)
         Children [
+            @logo::logo(20.0) Node { margin: UiRect::axes(px(4), px(0)) }
+            --
             @menu_button("File", MainMenu::File)
             --
             @menu_button("Assets", MainMenu::Assets)
+            --
+            @menu_button("Help", MainMenu::Help)
             --
             @icon_button(IconId::Undo, Action::Undo, "Undo (Ctrl+Z)")
             --
@@ -460,6 +473,8 @@ fn spawn_layout(mut commands: Commands) {
                     --
                     @scroll_column() props::PropsBody Node { padding: UiRect::all(px(8)), row_gap: px(6) }
                 ]
+                --
+                @welcome::welcome()
             ]
         ]
     });

@@ -13,7 +13,7 @@ use bevy::ui_widgets::{Activate, Button, RequestClose};
 
 use super::icons::{IconId, icon};
 use super::{HoverRow, OnActivate, TEXT, TEXT_DIM, button, text};
-use crate::state::{Action, Actions, Dialog, Editor};
+use crate::state::{Action, Actions, Dialog, Editor, Submit};
 
 #[derive(Component, Default, Clone)]
 pub struct DialogRoot;
@@ -78,7 +78,7 @@ fn redraw(
                 .collect();
             (title.clone(), vec![Box::new(text(message.clone(), TEXT, 14.0))], b)
         }
-        Dialog::Input { title, label, initial, .. } => {
+        Dialog::Input { title, label, initial, submit } => {
             let init = InitText(initial.clone());
             let mut body: Vec<Box<dyn Scene>> = vec![Box::new(text(label.clone(), TEXT_DIM, 13.0))];
             body.push(Box::new(bsn! {
@@ -90,18 +90,29 @@ fn redraw(
                 @FeathersButton { @variant: ButtonVariant::Primary, @caption: bsn! { @caption("OK") } }
                 SubmitButton
             };
-            (title.clone(), body, vec![Box::new(button("Cancel", Action::CloseDialog, false)), Box::new(ok)])
+            let mut buttons: Vec<Box<dyn Scene>> = Vec::new();
+            if matches!(submit, Submit::OpenProject | Submit::NewProject) {
+                buttons.push(Box::new(button("Browse...", Action::BrowseFolder, false)));
+                buttons.push(Box::new(bsn! { Node { flex_grow: 1.0 } }));
+            }
+            buttons.push(Box::new(button("Cancel", Action::CloseDialog, false)));
+            buttons.push(Box::new(ok));
+            (title.clone(), body, buttons)
+        }
+        Dialog::About => {
+            ("About".into(), vec![Box::new(about())], vec![Box::new(button("OK", Action::CloseDialog, true))])
         }
     };
-    if let Dialog::Input { submit: crate::state::Submit::OpenProject, .. } = d {
-        for p in editor.config.recent.iter().take(6) {
+    if let Dialog::Input { submit: Submit::OpenProject, .. } = d {
+        for p in editor.config.recent_projects.iter().take(6) {
             let path = p.display().to_string();
             body.push(Box::new(button(format!("Recent: {path}"), Action::OpenProject(p.clone()), false)));
         }
     }
+    let width = px(if matches!(d, Dialog::About) { 540 } else { 460 });
     commands.spawn_scene(bsn! {
         @FeathersDialog {
-            @width: px(460),
+            @width: width,
             @contents: bsn_list! {
                 @FeathersDialogHeader Children [ @caption(title) ]
                 --
@@ -115,6 +126,52 @@ fn redraw(
 }
 
 use bevy::feathers::controls::{ButtonVariant, FeathersButton};
+
+/// Help → About: the logo, then name, version, link, author and license.
+fn about() -> impl Scene {
+    let version = format!("Version {}", crate::EDITOR_VERSION);
+    let (author, license) = (format!("Author: {}", crate::AUTHORS), format!("License: {}", crate::LICENSE));
+    let (act, hover) = (OnActivate(Action::OpenUrl(crate::PROJECT_URL.into())), HoverRow { base: Color::NONE });
+    let tip = super::tooltip::Tooltip("Open in the browser".into());
+    let link = crate::PROJECT_URL.trim_start_matches("https://");
+    bsn! {
+        Node { flex_direction: FlexDirection::Row, column_gap: px(18), align_items: AlignItems::Center }
+        Children [
+            @super::logo::logo(128.0)
+            --
+            Node { flex_direction: FlexDirection::Column, row_gap: px(6), min_width: px(0) }
+            Children [
+                @text("Bevy Shader Editor", TEXT, 20.0)
+                --
+                @text(version, TEXT_DIM, 13.0)
+                --
+                Node {
+                    align_items: AlignItems::Center,
+                    column_gap: px(6),
+                    padding: UiRect::axes(px(4), px(2)),
+                    margin: UiRect::left(px(-4)),
+                    border_radius: BorderRadius::all(px(3)),
+                }
+                BackgroundColor(Color::NONE)
+                Button
+                act
+                hover
+                tip
+                Children [
+                    @icon(IconId::Link, 14.0, super::ACCENT)
+                    --
+                    @text(link, super::ACCENT, 13.0)
+                ]
+                --
+                @text(author, TEXT, 13.0)
+                --
+                @text(license, TEXT, 13.0)
+                --
+                @text(crate::DISCLAIMER, TEXT_DIM, 11.0) Node { margin: UiRect::top(px(6)) }
+            ]
+        ]
+    }
+}
 
 fn init_text(mut q: Query<(&InitText, &mut EditableText), Added<InitText>>) {
     for (init, mut t) in &mut q {

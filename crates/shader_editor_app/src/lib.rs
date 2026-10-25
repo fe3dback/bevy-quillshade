@@ -35,10 +35,19 @@ use canvas::{CanvasPlugin, CanvasSystems, EditorCanvas};
 use config::UserConfig;
 use state::{Action, Actions, Editor};
 
+/// Editor version (Help → About, `--version`); CI sets it on release.
+pub const EDITOR_VERSION: &str = "0.2";
+pub const PROJECT_URL: &str = "https://github.com/fe3dback/bevy-shader-vibe";
+pub const AUTHORS: &str = "claude code / fe3dback";
+pub const LICENSE: &str = "MIT";
+/// Shown small and dimmed on the welcome screen and in About.
+pub const DISCLAIMER: &str = "Unofficial, community-driven editor, not supported by the Bevy developers. It will most \
+     likely be discontinued once the official Bevy editor ships with a built-in material editor.";
+
 /// Seconds of quiet before live validation runs.
 const VALIDATE_DELAY: f32 = 0.25;
 
-/// Project to open at startup (CLI argument, else the most recent one).
+/// Project to open at startup (CLI argument, else the most recent one); without one the welcome screen shows.
 #[derive(Resource, Default)]
 struct StartupProject(Option<PathBuf>);
 
@@ -134,6 +143,48 @@ fn open_externally(mut editor: ResMut<Editor>, errors: Local<OpenErrors>) {
     }
 }
 
+/// Runs the native folder picker the Open / New project dialogs ask for (`Editor::pick_folder`) on its own thread;
+/// a choice submits the dialog, a cancel leaves the dialog's text field for typing / pasting the path.
+fn pick_folder(
+    mut editor: ResMut<Editor>,
+    mut actions: ResMut<Actions>,
+    mut pending: Local<Option<std::sync::mpsc::Receiver<Option<PathBuf>>>>,
+) {
+    if let Some(rx) = pending.as_ref() {
+        match rx.try_recv() {
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                // One picker at a time.
+                if editor.pick_folder {
+                    editor.pick_folder = false;
+                }
+                return;
+            }
+            Ok(Some(path)) => actions.push(Action::FolderPicked(path)),
+            Ok(None) | Err(_) => {}
+        }
+        *pending = None;
+    }
+    if !editor.pick_folder {
+        return;
+    }
+    editor.pick_folder = false;
+    // Screenshot runs are unattended: no system dialog on the desktop.
+    if std::env::var_os("SHADER_EDITOR_SCREENSHOT").is_some() {
+        return;
+    }
+    let start = editor.project.as_ref().map(|p| p.root.clone()).or_else(std::env::home_dir);
+    let (tx, rx) = std::sync::mpsc::channel();
+    *pending = Some(rx);
+    std::thread::spawn(move || {
+        let mut dialog = rfd::AsyncFileDialog::new().set_title("Select the game directory (with Cargo.toml)");
+        if let Some(start) = start {
+            dialog = dialog.set_directory(start);
+        }
+        let picked = bevy::tasks::block_on(dialog.pick_folder());
+        drop(tx.send(picked.map(|h| h.path().to_path_buf())));
+    });
+}
+
 fn copy_to_clipboard(mut editor: ResMut<Editor>, clipboard: Option<ResMut<bevy::clipboard::Clipboard>>) {
     let Some(text) = editor.copy_text.take() else { return };
     match clipboard.map(|mut c| c.set_text(text)) {
@@ -161,15 +212,9 @@ fn remember_window_size(mut resized: MessageReader<WindowResized>, mut editor: R
 }
 
 fn open_startup_project(mut editor: ResMut<Editor>, startup: Res<StartupProject>, mut actions: ResMut<Actions>) {
-    let path = startup.0.clone().or_else(|| editor.config.recent.first().cloned());
-    match path {
-        Some(p) => {
-            if let Err(e) = editor.open_project(&p) {
-                editor.error(format!("cannot open {}: {e}", p.display()));
-                actions.push(Action::OpenProjectDialog);
-            }
-        }
-        None => actions.push(Action::OpenProjectDialog),
+    let path = startup.0.clone().or_else(|| editor.config.recent_projects.first().cloned());
+    if let Some(p) = path {
+        actions.push(Action::OpenProject(p));
     }
     editor.bevy = shader_codegen_wesl::check::BevySources::discover();
     if editor.bevy.is_none() {
@@ -180,8 +225,8 @@ fn open_startup_project(mut editor: ResMut<Editor>, startup: Res<StartupProject>
 /// Debug aid: `SHADER_EDITOR_SCREENSHOT=out.png` saves a screenshot after a few seconds and quits;
 /// `SHADER_EDITOR_OPEN=env/rock_wet.material.ron` opens an asset at startup (`…ron#wesl` / `#rust`: its generated
 /// file in a text tab, after the asset's graph).
-/// `SHADER_EDITOR_DEMO=palette|wire|dialog|menu|tab_menu` additionally opens that popup before the shot (`menu`: the
-/// main menu's File).
+/// `SHADER_EDITOR_DEMO=palette|wire|dialog|about|open_project|welcome|menu|tab_menu` additionally opens that popup before the
+/// shot (`menu`: the main menu's File; `welcome`: closes the project).
 fn debug_screenshot(
     mut frames: Local<u32>,
     mut editor: ResMut<Editor>,
@@ -221,6 +266,9 @@ fn debug_screenshot(
                 palette.show(Vec2::new(520.0, 300.0), Vec2::ZERO, link);
             }
             Ok("dialog") => actions.push(Action::NewAssetDialog(state::NewKind::Pbr3d)),
+            Ok("about") => actions.push(Action::About),
+            Ok("open_project") => actions.push(Action::OpenProjectDialog),
+            Ok("welcome") => actions.push(Action::CloseProject(state::Unsaved::Discard)),
             Ok("menu") => ui::dialog::open_icon_menu(&mut commands, Vec2::new(6.0, 30.0), ui::MainMenu::File.items()),
             Ok("tab_menu") => ui::dialog::open_icon_menu(&mut commands, Vec2::new(260.0, 60.0), ui::tabs::tab_menu(0)),
             _ => {}
@@ -239,6 +287,9 @@ fn debug_screenshot(
 /// Runs the editor window; `project` is opened at startup.
 pub fn run(project: Option<PathBuf>) {
     let config_path = UserConfig::default_path();
+    if let Some(Err(e)) = config_path.as_deref().map(UserConfig::ensure_dir) {
+        eprintln!("warning: cannot create the config directory: {e}");
+    }
     let config = config_path.as_deref().map(UserConfig::load).unwrap_or_default();
     let (w, h) = config.window;
     let window = Window {
@@ -262,7 +313,15 @@ pub fn run(project: Option<PathBuf>) {
         .add_systems(Startup, open_startup_project)
         .add_systems(
             Update,
-            (open_externally, copy_to_clipboard, quit, remember_window_size, debug_screenshot, demo::scripted_input),
+            (
+                open_externally,
+                pick_folder,
+                copy_to_clipboard,
+                quit,
+                remember_window_size,
+                debug_screenshot,
+                demo::scripted_input,
+            ),
         )
         .run();
 }

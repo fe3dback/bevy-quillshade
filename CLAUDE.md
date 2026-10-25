@@ -120,7 +120,9 @@ atomic write. Key facts that span several files:
   a new kind needs). WESL/Rust highlighting is our own lexer (`highlight.rs`).
 - UI is pure Bevy UI + Feathers (`bsn!`); **no egui**. Workarounds for Feathers 0.20 bugs are in `fixes.rs`.
 - `EditorCorePlugin` runs without a window — logic is tested in `state::tests` and `tests/ui_smoke.rs`.
-- User config: `$XDG_CONFIG_HOME/shader-editor/config.ron` (window size, recent projects, open tabs).
+- User config: `<OS config dir>/fe3dback/bevy-shader-editor/config.ron` (window size, recent projects, open tabs;
+  `config::os_config_dir`, decision 0018). Version/URL/author/disclaimer constants (`EDITOR_VERSION`, …) are in
+  `shader_editor_app`'s `lib.rs`; the logos are `assets/logo*.png`, compiled in (`ui::logo`).
 
 ### Icons (decision 0013)
 
@@ -163,7 +165,7 @@ hand-drawn ones, rasterized at runtime with resvg (`crates/shader_editor_app/src
 ### Visual checks (debug env hooks)
 
 - Editor: `SHADER_EDITOR_SCREENSHOT=out.png [SHADER_EDITOR_OPEN=env/rock_wet.material.ron[#wesl|#rust]]
-  [SHADER_EDITOR_SELECT=stdlib::Lerp] [SHADER_EDITOR_DEMO=palette|wire|dialog|menu|tab_menu] cargo run -- examples/sample_game`
+  [SHADER_EDITOR_SELECT=stdlib::Lerp] [SHADER_EDITOR_DEMO=palette|wire|dialog|about|open_project|welcome|menu|tab_menu] cargo run -- examples/sample_game`
   — renders, saves the PNG and exits. `SHADER_EDITOR_INPUT=drag|rmb_click|rmb_pan|mmb_pan|slider|color|pin_rmb|hover|curve_drag|curve_add`
   (+ `SHADER_EDITOR_INPUT_NODE=<id>`, `SHADER_EDITOR_INPUT_TRACE=1`, `SHADER_EDITOR_ZOOM=<f32>`) plays a scripted mouse
   gesture through winit's messages and logs the outcome (`demo` lines; `slider`/`color` also log the edited value).

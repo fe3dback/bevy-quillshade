@@ -22,6 +22,8 @@ pub enum OpenError {
     NoCargoToml(PathBuf),
     #[error("`{0}` is not a project: assets/ directory is missing")]
     NoAssets(PathBuf),
+    #[error("cannot set up `{0}`: {1}")]
+    Io(PathBuf, std::io::Error),
 }
 
 /// Project-level options stored in `shaders/.shader-editor.ron`.
@@ -65,6 +67,19 @@ impl Project {
             .and_then(|t| ron::from_str(&t).ok())
             .unwrap_or_default();
         Ok(Project { root, settings })
+    }
+
+    /// Sets up a game crate as a project ("New project" in the editor): `root` must contain `Cargo.toml`;
+    /// `assets/` and `shaders/` (with default settings) are created if missing.
+    pub fn create(root: impl AsRef<Path>) -> Result<Project, OpenError> {
+        let root = root.as_ref();
+        let io = |e| OpenError::Io(root.to_path_buf(), e);
+        if root.join("Cargo.toml").is_file() {
+            std::fs::create_dir_all(root.join("assets")).map_err(io)?;
+        }
+        let project = Project::open(root)?;
+        project.ensure_shaders_dir().map_err(io)?;
+        Ok(project)
     }
 
     pub fn shaders_dir(&self) -> PathBuf {
@@ -151,5 +166,17 @@ mod tests {
         assert!(glob_match("crates/shaders", "crates/shaders"));
         assert!(!glob_match("crates/*", "crates/shaders/x"));
         assert!(!glob_match("other/*", "crates/shaders"));
+    }
+
+    #[test]
+    fn create_sets_up_a_crate() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(matches!(Project::create(dir.path()), Err(OpenError::NoCargoToml(_))));
+        assert!(!dir.path().join("assets").exists());
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname = \"game\"\n").unwrap();
+        let project = Project::create(dir.path()).unwrap();
+        assert!(project.root.join("assets").is_dir());
+        assert!(project.settings_path().is_file());
+        Project::create(dir.path()).unwrap();
     }
 }

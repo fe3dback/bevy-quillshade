@@ -16,6 +16,7 @@ serde = { workspace = true }
 ron = { workspace = true }
 icon-rs = { workspace = true }
 resvg = { workspace = true }
+rfd = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

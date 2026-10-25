@@ -68,10 +68,12 @@ pub enum IconId {
     Consts,
     Check,
     Plus,
+    Info,
+    Link,
 }
 
 impl IconId {
-    pub const ALL: [IconId; 29] = [
+    pub const ALL: [IconId; 31] = [
         IconId::File,
         IconId::Folder,
         IconId::FolderOpen,
@@ -101,6 +103,8 @@ impl IconId {
         IconId::Consts,
         IconId::Check,
         IconId::Plus,
+        IconId::Info,
+        IconId::Link,
     ];
 
     fn source(self) -> Icon {
@@ -134,6 +138,8 @@ impl IconId {
             IconId::Consts => icon_rs::CUSTOM_TABLE,
             IconId::Check => icon_rs::CHECK,
             IconId::Plus => icon_rs::PLUS,
+            IconId::Info => icon_rs::INFO,
+            IconId::Link => icon_rs::LINK,
         }
     }
 

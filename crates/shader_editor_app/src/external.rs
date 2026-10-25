@@ -1,5 +1,5 @@
 //! Opening files in the user's default application ("Show source", "Open in the default application" of a
-//! generated-file tab; spec §9, decision 0014).
+//! generated-file tab; spec §9, decision 0014) and URLs in the browser (Help → Project Page, decision 0018).
 //!
 //! The child never inherits the editor's stdio: xdg-open 1.2 ignores `Terminal=true` in desktop entries and
 //! simply execs the handler, so a terminal editor (vim, helix — the usual handler of `text/x-csrc`, which is

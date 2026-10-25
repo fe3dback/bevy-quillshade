@@ -118,13 +118,28 @@ pub enum Submit {
     Rename(AssetId),
     MoveTo(AssetId),
     OpenProject,
+    NewProject,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Dialog {
-    Input { title: String, label: String, initial: String, submit: Submit },
-    Confirm { title: String, message: String, buttons: Vec<(String, Action)> },
-    Message { title: String, message: String },
+    Input {
+        title: String,
+        label: String,
+        initial: String,
+        submit: Submit,
+    },
+    Confirm {
+        title: String,
+        message: String,
+        buttons: Vec<(String, Action)>,
+    },
+    Message {
+        title: String,
+        message: String,
+    },
+    /// Help → About: logo, version, links.
+    About,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -219,6 +234,16 @@ pub enum Action {
     None,
     OpenProjectDialog,
     OpenProject(PathBuf),
+    /// Sets up a game crate as a project (asks for its directory).
+    NewProjectDialog,
+    NewProject(PathBuf),
+    /// Opens the native folder picker for the Open / New project dialog.
+    BrowseFolder,
+    /// The picker's choice: submits the Open / New project dialog, if it is still open.
+    FolderPicked(PathBuf),
+    About,
+    /// Opens a web page in the default browser.
+    OpenUrl(String),
     CloseProject(Unsaved),
     OpenAsset(AssetId),
     ActivateTab(usize),
@@ -392,6 +417,8 @@ pub struct Editor {
     pub external: Vec<PathBuf>,
     /// Text for the system clipboard (Ctrl+C in a text tab).
     pub copy_text: Option<String>,
+    /// The native folder picker is requested (Open / New project dialogs); the app runs it and sends
+    /// [`Action::FolderPicked`].
     pub pick_folder: bool,
 }
 
@@ -1136,6 +1163,31 @@ impl Editor {
                     self.io_error("Cannot open project", e);
                 }
             }
+            Action::NewProjectDialog => {
+                self.dialog = Some(Dialog::Input {
+                    title: "New project".into(),
+                    label: "Game directory (a Cargo crate; assets/ and shaders/ are created in it)".into(),
+                    initial: String::new(),
+                    submit: Submit::NewProject,
+                });
+                self.pick_folder = true;
+            }
+            Action::BrowseFolder => self.pick_folder = true,
+            Action::FolderPicked(p) => {
+                let next = match &self.dialog {
+                    Some(Dialog::Input { submit: Submit::OpenProject, .. }) => Action::OpenProject(p),
+                    Some(Dialog::Input { submit: Submit::NewProject, .. }) => Action::NewProject(p),
+                    _ => return,
+                };
+                self.apply(Action::CloseDialog);
+                self.apply(next);
+            }
+            Action::NewProject(p) => match Project::create(&p) {
+                Ok(_) => self.apply(Action::OpenProject(p)),
+                Err(e) => self.io_error("Cannot create project", e),
+            },
+            Action::About => self.dialog = Some(Dialog::About),
+            Action::OpenUrl(url) => self.external.push(PathBuf::from(url)),
             Action::OpenAsset(id) => self.open_asset(&id),
             Action::ActivateTab(i) => self.activate(i),
             Action::CloseTab(i) => self.close_tab(i, false),
@@ -2116,9 +2168,10 @@ impl Editor {
     fn submit(&mut self, text: &str) {
         let Some(Dialog::Input { submit, .. }) = self.dialog.take() else { return };
         self.pick_folder = false;
-        if let Submit::OpenProject = submit {
-            self.apply(Action::OpenProject(PathBuf::from(text)));
-            return;
+        match submit {
+            Submit::OpenProject => return self.apply(Action::OpenProject(PathBuf::from(text))),
+            Submit::NewProject => return self.apply(Action::NewProject(PathBuf::from(text))),
+            _ => {}
         }
         let Some(project) = self.project.clone() else { return };
         let text = text.trim_matches('/');
@@ -2151,7 +2204,7 @@ impl Editor {
             Submit::MoveTo(id) => {
                 self.apply(Action::MoveTo(id, text.to_string()));
             }
-            Submit::OpenProject => {}
+            Submit::OpenProject | Submit::NewProject => {}
         }
     }
 
@@ -2628,6 +2681,37 @@ mod tests {
         let d = e.doc().unwrap();
         assert!(d.asset.edge_into(&out, &edge.to.1).is_none());
         assert_eq!(d.asset.edges.iter().filter(|x| x.to.0 == out).count(), into - 1, "only that pin");
+    }
+
+    #[test]
+    fn picked_folder_submits_the_project_dialog() {
+        let (dir, _) = project();
+        let mut e = Editor::default();
+        e.apply(Action::OpenProjectDialog);
+        assert!(e.pick_folder, "the native picker opens with the dialog");
+        e.apply(Action::CloseDialog);
+        assert!(!e.pick_folder);
+        e.apply(Action::FolderPicked(dir.path().into()));
+        assert!(e.project.is_none(), "dialog closed meanwhile: ignored");
+        e.apply(Action::OpenProjectDialog);
+        e.apply(Action::BrowseFolder);
+        e.apply(Action::FolderPicked(dir.path().into()));
+        assert!(e.project.is_some() && e.dialog.is_none() && !e.pick_folder);
+    }
+
+    #[test]
+    fn new_project_sets_up_a_game_crate() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut e = Editor::default();
+        e.apply(Action::NewProjectDialog);
+        e.apply(Action::Submit(dir.path().display().to_string()));
+        assert!(e.project.is_none(), "no Cargo.toml: refused");
+        assert!(matches!(e.dialog, Some(Dialog::Message { .. })));
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname = \"game\"\n").unwrap();
+        e.apply(Action::NewProject(dir.path().into()));
+        let root = e.project.as_ref().unwrap().root.clone();
+        assert!(root.join("assets").is_dir() && root.join("shaders").is_dir());
+        assert_eq!(e.config.recent_projects, [root]);
     }
 
     #[test]

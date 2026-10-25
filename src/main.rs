@@ -9,7 +9,7 @@ use shader_project::writer::Change;
 use shader_project::{Project, RegenOptions, RegenReport, regenerate};
 
 #[derive(Parser)]
-#[command(name = "shader-editor", version, about = "Node-based shader editor for Bevy 0.20")]
+#[command(name = "shader-editor", version = shader_editor_app::EDITOR_VERSION, about = "Node-based shader editor for Bevy 0.20")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,

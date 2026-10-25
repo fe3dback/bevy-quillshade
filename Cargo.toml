@@ -11,7 +11,8 @@ license = "MIT"
 
 [workspace.dependencies]
 # todo: move dynamic_linking to crate feature (before wide use)
-bevy = { version = "0.20.0", features = ["bevy_feathers", "dynamic_linking"] }
+# system_clipboard: paste from / copy to other applications (without it the clipboard is in-app only)
+bevy = { version = "0.20.0", features = ["bevy_feathers", "system_clipboard", "dynamic_linking"] }
 bevy_noodle = { version = "0.5.0", features = ["default_style", "scene"] }
 wesl = { version = "0.6", features = ["naga-ext"] }
 naga = { version = "30", features = ["wgsl-in"] }
@@ -26,6 +27,7 @@ tempfile = "3"
 toml = "1"
 icon-rs = "=0.4.5"
 resvg = { version = "0.48", default-features = false }
+rfd = "0.17"
 
 shader_graph_core = { path = "crates/shader_graph_core" }
 shader_stdlib = { path = "crates/shader_stdlib" }

@@ -1,4 +1,11 @@
+<p align="center"><img src="assets/logo.png" alt="Bevy Shader Editor logo" width="256"></p>
+
 # shader-editor — a node-based shader editor for Bevy 0.20
+
+> [!WARNING]
+> **Early prototype — use at your own risk.** This is an unofficial, community-driven editor, not supported by the
+> Bevy developers. It will most likely be discontinued once the official Bevy editor ships with a built-in material
+> editor.
 
 A counterpart of the UE5 Material Editor: material and function graphs are stored as RON next to the game
 (`shaders/**`), and the editor generates WESL from them (`assets/shaders/autogen/**`) plus the Rust crate
@@ -103,8 +110,14 @@ Bevy reloads the shader without a restart.
 
 ## Editor
 
-The toolbar holds the main menu — **File** (Open Project, Close Project, Save, Save All, Quit) and **Assets** (create
-a Pbr3d/Unlit3d/Sprite2d material, a function, a curve, a global constant table, a folder; Regenerate) — then Undo /
+Without an open project the window shows the welcome screen: recent projects (click to open), Open Project, New
+Project (sets up an existing game crate — a directory with `Cargo.toml`: creates `assets/` and `shaders/` in it) and
+how to hook the generated crate into the game. Open / New Project show the system folder picker (on Linux through
+xdg-desktop-portal); cancel it to type or paste the path instead (Browse... reopens it).
+
+The toolbar holds the logo and the main menu — **File** (Open Project, New Project, Close Project, Save, Save All,
+Quit), **Assets** (create a Pbr3d/Unlit3d/Sprite2d material, a function, a curve, a global constant table, a folder;
+Regenerate) and **Help** (Project Page, About: version, link, author, license) — then Undo /
 Redo and the actions of the active tab (graph: Auto-layout, Comment, Fit; curve: Select all, Delete; constant table:
 Add; generated file: Copy, Source, Open externally).
 
@@ -178,7 +191,8 @@ those references (the nodes output 1.0 / `true`, W106).
 Pan — drag with the right (or middle) mouse button (an RMB press that does not move is a click), zoom — wheel, box select — LMB on empty space; the minimap
 in the bottom left is clickable. Unsaved tabs are marked with `*` (browser rows with an orange dot); on close and on an external change
 of the file (git checkout) the editor asks what to do. Window size, recent projects and open
-tabs are stored in `~/.config/shader-editor/config.ron`.
+tabs are stored in `<config dir>/fe3dback/bevy-shader-editor/config.ron`, where the config dir is `%APPDATA%` on Windows,
+`~/Library/Application Support` on macOS and `$XDG_CONFIG_HOME` (else `~/.config`) elsewhere (decision 0018).
 
 ## File formats
 
