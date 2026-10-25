@@ -64,6 +64,7 @@ fn redraw(
             let icon = match t {
                 Tab::Graph(d) => IconId::for_asset(Some(d.asset.kind)),
                 Tab::Text(_) => IconId::Code,
+                Tab::Curve(_) => IconId::Curve,
             };
             (t.title(), icon, t.is_dirty(), editor.active == Some(i))
         })

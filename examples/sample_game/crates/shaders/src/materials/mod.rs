@@ -14,5 +14,6 @@ pub use env::flag::{FlagExt, FlagMaterial, FlagParams};
 pub use env::rock_wet::{RockWetExt, RockWetMaterial, RockWetParams};
 pub use env::water::{WaterExt, WaterMaterial, WaterParams};
 pub use fx::coords::CoordsMaterial;
+pub use fx::curve_bands::CurveBandsMaterial;
 pub use fx::hologram::{HologramMaterial, HologramParams};
 pub use ui::dissolve::{DissolveMaterial, DissolveParams};

@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
+use crate::curve::{Interp, curve_fn_alias};
 use crate::diag::{Code, Diagnostic};
 use crate::model::{AssetKind, NodeId};
 use crate::types::PinType;
@@ -34,6 +35,8 @@ pub enum ParamKind {
     PinType(Vec<PinType>),
     /// Node id of a named route declaration in the same asset (stored as `Value::Str`).
     Route,
+    /// Path of a curve asset of the project (`env/falloff`, stored as `Value::Str`; decision 0015).
+    Curve,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -157,6 +160,21 @@ pub enum NodeRole {
 
 /// Parameter of a [`NodeRole::RouteUsage`] node: the node id of its declaration (decision 0011).
 pub const ROUTE_PARAM: &str = "route";
+
+/// Curve paths `asset` refers to through [`ParamKind::Curve`] parameters: `(node id, param id, path)`.
+pub fn curve_refs(asset: &crate::model::Asset, registry: &Registry) -> Vec<(NodeId, String, String)> {
+    let mut out = Vec::new();
+    for (id, n) in &asset.nodes {
+        let Some(def) = registry.get(&n.kind) else { continue };
+        for p in def.params().into_iter().filter(|p| p.kind == ParamKind::Curve) {
+            let path = n.params.get(&p.id).unwrap_or(&p.default).as_str();
+            if !path.is_empty() {
+                out.push((id.clone(), p.id, path.to_string()));
+            }
+        }
+    }
+    out
+}
 
 #[derive(Debug, Clone)]
 pub struct NodeInfo {
@@ -319,12 +337,33 @@ impl FunctionLookup for BTreeMap<String, FunctionSig> {
     }
 }
 
+/// Curve assets of the project that can be sampled (loaded without errors).
+pub trait CurveLookup {
+    fn has_curve(&self, path: &str) -> bool;
+}
+
+/// No project curves (tests, signatures).
+pub struct NoCurves;
+
+impl CurveLookup for NoCurves {
+    fn has_curve(&self, _path: &str) -> bool {
+        false
+    }
+}
+
+impl CurveLookup for BTreeSet<String> {
+    fn has_curve(&self, path: &str) -> bool {
+        self.contains(path)
+    }
+}
+
 /// Graph-wide information available to node definitions.
 pub struct Env<'a> {
     pub asset_kind: AssetKind,
     /// Path of the asset being built (to detect self-recursion).
     pub asset_path: &'a str,
     pub functions: &'a dyn FunctionLookup,
+    pub curves: &'a dyn CurveLookup,
 }
 
 /// Inputs for computing a node signature.
@@ -458,6 +497,8 @@ pub struct EmitSink {
     pub stdlib: BTreeSet<(String, String)>,
     pub builtins: BTreeSet<Builtin>,
     pub functions: BTreeSet<String>,
+    /// Sampled curves (asset path, interpolation).
+    pub curves: BTreeSet<(String, Interp)>,
     pub custom_fns: BTreeMap<String, String>,
     pub params: BTreeMap<NodeId, MaterialParam>,
     /// Sink-node values: material output pins / function outputs, keyed by pin or output name.
@@ -556,6 +597,15 @@ impl EmitCtx<'_> {
         let sig = self.env.functions.function(path)?.clone();
         self.sink.functions.insert(path.into());
         Some(sig)
+    }
+
+    /// Registers sampling of curve `path`; returns the name to call (`None` if the curve is not loadable).
+    pub fn use_curve(&mut self, path: &str, interp: Interp) -> Option<String> {
+        if !self.env.curves.has_curve(path) {
+            return None;
+        }
+        self.sink.curves.insert((path.into(), interp));
+        Some(curve_fn_alias(path, interp))
     }
 
     /// Adds a standalone fn definition (Custom node).

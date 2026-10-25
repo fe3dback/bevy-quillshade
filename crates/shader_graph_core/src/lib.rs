@@ -2,6 +2,7 @@
 //!
 //! Independent from Bevy so the CLI and code generators build fast and run headless.
 
+pub mod curve;
 pub mod diag;
 pub mod ident;
 pub mod ir;
@@ -10,6 +11,7 @@ pub mod registry;
 pub mod types;
 pub mod value;
 
+pub use curve::{Curve, Interp};
 pub use diag::{Code, Diagnostic, Diagnostics};
 pub use ir::{Ir, IrResult, IrStage, UniformField, UniformLayout, UniformTy, build_ir};
 pub use model::{
@@ -17,8 +19,8 @@ pub use model::{
     UnlitSettings,
 };
 pub use registry::{
-    Builtin, EmitCtx, Env, FnPort, FunctionLookup, FunctionSig, MaterialParam, NodeDef, NodeInfo, NodeRole, Operand,
-    ParamDef, ParamKind, ParamType, PinDef, Registry, SigCtx, Signature, Stage,
+    Builtin, CurveLookup, EmitCtx, Env, FnPort, FunctionLookup, FunctionSig, MaterialParam, NodeDef, NodeInfo,
+    NodeRole, Operand, ParamDef, ParamKind, ParamType, PinDef, Registry, SigCtx, Signature, Stage,
 };
 pub use types::{Conversion, PinType, conversion};
 pub use value::Value;

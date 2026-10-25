@@ -12,10 +12,7 @@ fn temp_project() -> (tempfile::TempDir, Project) {
     std::fs::write(dir.path().join("Cargo.toml"), "[workspace]\nmembers = [\"crates/*\"]\n").unwrap();
     std::fs::create_dir_all(dir.path().join("assets")).unwrap();
     let p = Project::open(dir.path()).unwrap();
-    for (path, is_fn, asset) in fixtures::all() {
-        let id = AssetId::new(if is_fn { AssetType::Function } else { AssetType::Material }, path);
-        ops::save(&p, &id, &asset).unwrap();
-    }
+    fixtures::save_all(&p).unwrap();
     (dir, p)
 }
 
@@ -136,7 +133,7 @@ fn workspace_warning_w105() {
 fn named_routes_teleport_wires() {
     use shader_graph_core::ir::build_ir;
     use shader_graph_core::model::{Asset, AssetKind, MaterialKind, Node, PbrSettings};
-    use shader_graph_core::registry::NoFunctions;
+    use shader_graph_core::registry::{NoCurves, NoFunctions};
     use shader_graph_core::{Value, ir::Ir};
 
     let reg = shader_stdlib::registry();
@@ -149,7 +146,7 @@ fn named_routes_teleport_wires() {
         a
     };
     let ir = |a: &Asset| -> (Option<Ir>, Vec<Code>) {
-        let r = build_ir(a, "m", &reg, &NoFunctions);
+        let r = build_ir(a, "m", &reg, &NoFunctions, &NoCurves);
         (r.ir, r.diagnostics.iter().map(|d| d.code).collect())
     };
 
@@ -187,4 +184,71 @@ fn named_routes_teleport_wires() {
     cyclic.connect(("u", "out"), ("m", "a"));
     cyclic.connect(("m", "out"), ("r", "in"));
     assert!(ir(&cyclic).1.contains(&Code::E002));
+}
+
+#[test]
+fn curves_generate_rename_and_report_missing() {
+    let (_d, p) = temp_project();
+    let r = regenerate(&p, &RegenOptions::default()).unwrap();
+    assert!(!r.has_errors(), "{:?}", r.diagnostics().collect::<Vec<_>>());
+    let pulse = p.root.join("assets/shaders/autogen/curves/common/pulse.wesl");
+    assert!(read(&pulse).contains("fn sample_curve_catmullrom(t: f32) -> f32"));
+    let bands = p.root.join("assets/shaders/autogen/fx/curve_bands.wesl");
+    let before = read(&bands);
+
+    // Editing a curve rewrites only its own module.
+    let id = AssetId::new(AssetType::Curve, "common/pulse");
+    let edited = shader_graph_core::Curve::new("pulse", vec![(0.0, 1.0), (1.0, 0.0)]);
+    ops::save_curve(&p, &id, &edited).unwrap();
+    let r = regenerate(&p, &RegenOptions::default()).unwrap();
+    let changed: Vec<String> = r.changes.iter().map(|c| c.path().display().to_string()).collect();
+    assert_eq!(changed.len(), 1, "{changed:?}");
+    assert!(changed[0].contains("curves/common/pulse.wesl"), "{changed:?}");
+    assert_eq!(read(&bands), before);
+
+    // Renaming follows the users; the old module becomes an orphan.
+    ops::rename(&p, &id, "ramps/pulse").unwrap();
+    let r = regenerate(&p, &RegenOptions::default()).unwrap();
+    assert!(!r.has_errors(), "{:?}", r.diagnostics().collect::<Vec<_>>());
+    assert!(read(&bands).contains("import super::super::curves::ramps::pulse::sample_curve_catmullrom as"));
+    assert!(!pulse.exists());
+
+    // A deleted curve leaves E006 at the node that samples it; the rest of the project still generates.
+    ops::delete(&p, &AssetId::new(AssetType::Curve, "ramps/pulse")).unwrap();
+    let r = regenerate(&p, &RegenOptions::default()).unwrap();
+    let errors: Vec<_> = r.diagnostics().filter(|d| d.is_error()).collect();
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert_eq!(errors[0].code, Code::E006);
+    assert_eq!(errors[0].asset.as_deref(), Some("shaders/fx/curve_bands.material.ron"));
+    assert!(errors[0].node.is_some());
+    assert!(bands.exists(), "a broken material keeps its previous output");
+}
+
+#[test]
+fn materials_may_not_live_in_reserved_curves_dir() {
+    let (_d, p) = temp_project();
+    let id = AssetId::new(AssetType::Material, "curves/x");
+    ops::save(&p, &id, &fixtures::curve_bands()).unwrap();
+    let r = regenerate(&p, &RegenOptions { dry_run: true, ..Default::default() }).unwrap();
+    assert!(r.assets[&id].diagnostics.iter().any(|d| d.code == Code::E005));
+}
+
+#[test]
+fn a_curve_named_like_a_broken_function_is_not_that_function() {
+    let (_d, p) = temp_project();
+    // `fx/curve_bands` samples a curve that shares its path with the function `common/wet_mask`.
+    let curve = AssetId::new(AssetType::Curve, "common/wet_mask");
+    ops::save_curve(&p, &curve, &shader_graph_core::Curve::ramp("wet_mask")).unwrap();
+    let bands = AssetId::new(AssetType::Material, "fx/curve_bands");
+    let mut a = fixtures::curve_bands();
+    for n in a.nodes.values_mut().filter(|n| n.kind == "stdlib::SampleCurve") {
+        n.params.insert("curve".into(), shader_graph_core::Value::Str("common/wet_mask".into()));
+    }
+    ops::save(&p, &bands, &a).unwrap();
+    // Break the function.
+    let f = AssetId::new(AssetType::Function, "common/wet_mask");
+    std::fs::write(f.file(&p), "Asset(format_version: 1, kind: Function, name: \"wet_mask\", nodes: {})").unwrap();
+    let r = regenerate(&p, &RegenOptions { dry_run: true, ..Default::default() }).unwrap();
+    let errors: Vec<_> = r.assets[&bands].diagnostics.iter().filter(|d| d.is_error()).collect();
+    assert!(errors.is_empty(), "{errors:?}");
 }

@@ -1,9 +1,14 @@
 //! Reference graphs used by tests, snapshot suites and `examples/sample_game` (spec §15, 17).
 
+use shader_graph_core::curve::Curve;
 use shader_graph_core::model::{
     Asset, AssetKind, BlendMode, MaterialKind, Node, PbrSettings, SpriteSettings, UnlitSettings,
 };
 use shader_graph_core::{PinType, Value};
+
+use crate::assets::{AssetId, AssetType};
+use crate::layout::Project;
+use crate::ops::{self, OpError};
 
 /// Programmatic graph construction with deterministic node ids (`n01`, `n02`, …).
 /// Scale from the sketch coordinates used below to canvas coordinates.
@@ -463,6 +468,59 @@ pub fn coords() -> Asset {
     g.finish()
 }
 
+/// Unlit bands shaped by two curve assets (decision 0015): Catmull-Rom `common/pulse` scrolling over V, Simple
+/// `common/steps` over U.
+pub fn curve_bands() -> Asset {
+    let kind = AssetKind::Material(MaterialKind::Unlit3d(UnlitSettings::default()));
+    let mut g = GraphBuilder::new("curve_bands", kind);
+    let out = g.node("output::Unlit3d", (1000.0, 0.0));
+    let uv = g.node("stdlib::TextureCoordinate", (0.0, 0.0));
+    let br = g.node("stdlib::BreakOutFloat2", (150.0, 0.0));
+    g.link((&uv, "out"), (&br, "v"));
+    let time = g.node("stdlib::Time", (0.0, 150.0));
+    let slow = g.node("stdlib::Multiply", (150.0, 150.0));
+    g.link((&time, "out"), (&slow, "a"));
+    g.input(&slow, "b", f(0.25));
+    let scroll = g.node("stdlib::Add", (300.0, 100.0));
+    g.link((&br, "y"), (&scroll, "a"));
+    g.link((&slow, "out"), (&scroll, "b"));
+    let frac = g.node("stdlib::Frac", (420.0, 100.0));
+    g.link((&scroll, "out"), (&frac, "x"));
+    let pulse = g.node_p("stdlib::SampleCurve", (550.0, 100.0), &[("curve", s("common/pulse"))]);
+    g.link((&frac, "out"), (&pulse, "t"));
+    let steps = g.node_p("stdlib::SampleCurve", (550.0, -50.0), &[("curve", s("common/steps")), ("type", s("Simple"))]);
+    g.link((&br, "x"), (&steps, "t"));
+    let mask = g.node("stdlib::Multiply", (700.0, 50.0));
+    g.link((&pulse, "out"), (&mask, "a"));
+    g.link((&steps, "out"), (&mask, "b"));
+    let lerp = g.node("stdlib::Lerp", (850.0, 0.0));
+    g.input(&lerp, "a", Value::Float3([0.05, 0.02, 0.1]));
+    g.input(&lerp, "b", Value::Float3([1.0, 0.55, 0.1]));
+    g.link((&mask, "out"), (&lerp, "alpha"));
+    g.link((&lerp, "out"), (&out, "color"));
+    g.finish()
+}
+
+/// Curve fixtures: (`shaders/`-relative path, curve).
+pub fn curves() -> Vec<(&'static str, Curve)> {
+    vec![
+        ("common/pulse", Curve::new("pulse", vec![(0.0, 0.0), (0.25, 1.0), (0.5, 0.3), (0.75, 0.1), (1.0, 0.0)])),
+        ("common/steps", Curve::new("steps", vec![(0.0, 0.2), (0.33, 0.2), (0.34, 1.0), (0.66, 1.0), (0.67, 0.5)])),
+    ]
+}
+
+/// Writes every fixture (graphs and curves) into `project`.
+pub fn save_all(project: &Project) -> Result<(), OpError> {
+    for (path, is_fn, asset) in all() {
+        let id = AssetId::new(if is_fn { AssetType::Function } else { AssetType::Material }, path);
+        ops::save(project, &id, &asset)?;
+    }
+    for (path, curve) in curves() {
+        ops::save_curve(project, &AssetId::new(AssetType::Curve, path), &curve)?;
+    }
+    Ok(())
+}
+
 /// All fixture assets: (`shaders/`-relative path, is_function, asset).
 pub fn all() -> Vec<(&'static str, bool, Asset)> {
     vec![
@@ -472,6 +530,7 @@ pub fn all() -> Vec<(&'static str, bool, Asset)> {
         ("env/water", false, water()),
         ("fx/hologram", false, hologram()),
         ("fx/coords", false, coords()),
+        ("fx/curve_bands", false, curve_bands()),
         ("ui/dissolve", false, dissolve()),
     ]
 }

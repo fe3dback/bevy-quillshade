@@ -18,3 +18,4 @@ Short records in the "context → decision → consequences" format. Numbering i
 | [0012](0012-inline-pin-editors.md) | Inline value editors on nodes, RMB pin menu, polymorphic pin type |
 | [0013](0013-ui-icons.md) | UI icons: icon-rs SVGs rasterized at runtime with resvg, own icons drawn by hand |
 | [0014](0014-tab-content-kinds.md) | Tab content kinds (graph, read-only text) and syntax-highlighted generated files |
+| [0015](0015-curve-assets.md) | Curve assets: `*.curve.ron`, per-curve WESL modules, the Sample Curve node, the curve editor |

@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use shader_project::regen::{rust_file, wesl_file};
 use shader_project::{AssetId, Project, assets};
 
+use crate::curve_doc::CurveDoc;
 use crate::doc::Doc;
 
 /// The view that shows a tab's content.
@@ -16,6 +17,8 @@ pub enum ViewKind {
     Graph,
     /// Read-only text with syntax highlighting.
     Text,
+    /// Curve asset editor (decision 0015).
+    Curve,
 }
 
 /// Generated file shown in a text tab.
@@ -82,6 +85,7 @@ impl TextDoc {
 pub enum Tab {
     Graph(Doc),
     Text(TextDoc),
+    Curve(CurveDoc),
 }
 
 impl Tab {
@@ -89,6 +93,7 @@ impl Tab {
         match self {
             Tab::Graph(_) => ViewKind::Graph,
             Tab::Text(_) => ViewKind::Text,
+            Tab::Curve(_) => ViewKind::Curve,
         }
     }
 
@@ -97,18 +102,23 @@ impl Tab {
         match self {
             Tab::Graph(d) => &d.id,
             Tab::Text(t) => &t.source,
+            Tab::Curve(c) => &c.id,
         }
     }
 
     pub fn title(&self) -> String {
         match self {
-            Tab::Graph(d) => d.id.source_rel().trim_end_matches(".ron").to_string(),
+            Tab::Graph(_) | Tab::Curve(_) => self.asset().source_rel().trim_end_matches(".ron").to_string(),
             Tab::Text(t) => t.rel.clone(),
         }
     }
 
     pub fn is_dirty(&self) -> bool {
-        self.graph().is_some_and(Doc::is_dirty)
+        match self {
+            Tab::Graph(d) => d.is_dirty(),
+            Tab::Curve(c) => c.is_dirty(),
+            Tab::Text(_) => false,
+        }
     }
 
     pub fn graph(&self) -> Option<&Doc> {
@@ -132,10 +142,24 @@ impl Tab {
         }
     }
 
+    pub fn curve(&self) -> Option<&CurveDoc> {
+        match self {
+            Tab::Curve(c) => Some(c),
+            _ => None,
+        }
+    }
+
+    pub fn curve_mut(&mut self) -> Option<&mut CurveDoc> {
+        match self {
+            Tab::Curve(c) => Some(c),
+            _ => None,
+        }
+    }
+
     /// Key in the user config: `AssetId::source_rel`, plus `#wesl` / `#rust` for generated files.
     pub fn config_key(&self) -> String {
         match self {
-            Tab::Graph(d) => d.id.source_rel(),
+            Tab::Graph(_) | Tab::Curve(_) => self.asset().source_rel(),
             Tab::Text(t) => format!("{}#{}", t.source.source_rel(), t.lang.label()),
         }
     }

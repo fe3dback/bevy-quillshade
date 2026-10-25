@@ -6,11 +6,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use shader_graph_core::ir::{with_routes, would_create_cycle};
 use shader_graph_core::model::{Asset, Edge, Frame, Node, NodeId, new_node_id};
-use shader_graph_core::registry::{FunctionLookup, NodeRole, ROUTE_PARAM, Registry, SigCtx, Signature};
+use shader_graph_core::registry::{FunctionLookup, NoCurves, NodeRole, ROUTE_PARAM, Registry, SigCtx, Signature};
 use shader_graph_core::{Env, PinType, Value, conversion};
 use shader_project::AssetId;
 
-const HISTORY_LIMIT: usize = 200;
+use crate::history::History;
 
 /// Copied nodes with the edges between them.
 #[derive(Debug, Clone, Default)]
@@ -25,15 +25,12 @@ pub struct Doc {
     pub asset: Asset,
     /// RON text of the last saved state (dirty check).
     pub saved: String,
-    undo: Vec<Asset>,
-    redo: Vec<Asset>,
+    history: History<Asset>,
     pub selection: BTreeSet<NodeId>,
     /// Selected comment frame (frames are not nodes of the model graph).
     pub selected_frame: Option<String>,
     /// Bumped on every model change; the canvas rebuilds when it differs.
     pub revision: u64,
-    /// Key of the last merged edit (number scrubbing, typing): same key = same undo step.
-    merge_key: Option<String>,
 }
 
 impl Doc {
@@ -43,12 +40,10 @@ impl Doc {
             id,
             asset,
             saved,
-            undo: Vec::new(),
-            redo: Vec::new(),
+            history: History::default(),
             selection: BTreeSet::new(),
             selected_frame: None,
             revision: 1,
-            merge_key: None,
         }
     }
 
@@ -70,51 +65,45 @@ impl Doc {
         let before = self.asset.clone();
         let r = f(&mut self.asset);
         self.asset.normalize();
-        if self.asset != before {
-            let merged = key.is_some() && self.merge_key.as_deref() == key && !self.undo.is_empty();
-            if !merged {
-                self.undo.push(before);
-                if self.undo.len() > HISTORY_LIMIT {
-                    self.undo.remove(0);
-                }
-            }
-            self.redo.clear();
+        let changed = self.asset != before;
+        self.history.record(changed.then_some(before), key);
+        if changed {
             self.revision += 1;
             self.selection.retain(|n| self.asset.nodes.contains_key(n));
         }
-        self.merge_key = key.map(str::to_string);
         r
     }
 
     /// Ends the current merge group (e.g. a number drag finished).
     pub fn end_merge(&mut self) {
-        self.merge_key = None;
+        self.history.end_merge();
     }
 
     pub fn can_undo(&self) -> bool {
-        !self.undo.is_empty()
+        self.history.can_undo()
     }
 
     pub fn can_redo(&self) -> bool {
-        !self.redo.is_empty()
+        self.history.can_redo()
     }
 
     pub fn undo(&mut self) -> bool {
-        let Some(prev) = self.undo.pop() else { return false };
-        self.redo.push(std::mem::replace(&mut self.asset, prev));
-        self.after_history();
-        true
+        let done = self.history.undo(&mut self.asset);
+        if done {
+            self.after_history();
+        }
+        done
     }
 
     pub fn redo(&mut self) -> bool {
-        let Some(next) = self.redo.pop() else { return false };
-        self.undo.push(std::mem::replace(&mut self.asset, next));
-        self.after_history();
-        true
+        let done = self.history.redo(&mut self.asset);
+        if done {
+            self.after_history();
+        }
+        done
     }
 
     fn after_history(&mut self) {
-        self.merge_key = None;
         self.revision += 1;
         self.selection.retain(|n| self.asset.nodes.contains_key(n));
     }
@@ -123,8 +112,7 @@ impl Doc {
     pub fn reload(&mut self, asset: Asset) {
         self.asset = asset;
         self.mark_saved();
-        self.undo.clear();
-        self.redo.clear();
+        self.history.clear();
         self.after_history();
     }
 
@@ -266,7 +254,7 @@ pub fn node_signature(
     let def = registry.get(&node.kind)?;
     let params = registry.resolved_params(&node.kind, &node.params);
     let connected = connected_types(asset, id, registry, functions, path, 0);
-    let env = Env { asset_kind: asset.kind, asset_path: path, functions };
+    let env = Env { asset_kind: asset.kind, asset_path: path, functions, curves: &NoCurves };
     Some(def.signature(&SigCtx {
         node_id: id,
         kind: &node.kind,
@@ -311,7 +299,7 @@ fn output_type(
     let def = registry.get(&n.kind)?;
     let params = registry.resolved_params(&n.kind, &n.params);
     let connected = connected_types(asset, node, registry, functions, path, depth);
-    let env = Env { asset_kind: asset.kind, asset_path: path, functions };
+    let env = Env { asset_kind: asset.kind, asset_path: path, functions, curves: &NoCurves };
     let sig = def.signature(&SigCtx {
         node_id: node,
         kind: &n.kind,

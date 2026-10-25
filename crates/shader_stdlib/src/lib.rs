@@ -12,6 +12,7 @@ pub const STDLIB_VERSION: u32 = 1;
 /// Stdlib WESL modules (`autogen/stdlib/{name}.wesl`), regenerated on every project regen.
 pub const MODULES: &[(&str, &str)] = &[
     ("color", include_str!("../wesl/color.wesl")),
+    ("curve", include_str!("../wesl/curve.wesl")),
     ("math", include_str!("../wesl/math.wesl")),
     ("noise", include_str!("../wesl/noise.wesl")),
     ("shading", include_str!("../wesl/shading.wesl")),

@@ -7,6 +7,7 @@ import bevy_pbr::{prepass::io::{VertexOutput, FragmentOutput}, deferred::functio
 import bevy_pbr::render::{forward_io::{VertexOutput, FragmentOutput}, pbr_functions::{apply_pbr_lighting, main_pass_post_lighting_processing}};
 import bevy_pbr::render::mesh_view_bindings::globals;
 import bevy_render::globals::Globals;
+import super::super::curves::common::pulse::sample_curve_catmullrom as sg_curve_common__pulse_catmullrom;
 
 @if(PREPASS_PIPELINE) @group(0) @binding(1) var<uniform> sg_prepass_globals: Globals;
 
@@ -19,7 +20,8 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     // --- graph ---
     let n_01m5r5ggky8sh5r98shtdt02wj_out: f32 = (b_time / 0.21f);
     let n_01m5r5g6kgkb2absme5p6sg4vr_out: f32 = sin(n_01m5r5ggky8sh5r98shtdt02wj_out);
-    let n_01m5r5zf3079k9ak5dgtk5eqwc_out: vec3<f32> = mix(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 1.0, 0.0), n_01m5r5g6kgkb2absme5p6sg4vr_out);
+    let n_01m5sgzbjrntfvax3nwq5776sd_out: f32 = sg_curve_common__pulse_catmullrom(n_01m5r5g6kgkb2absme5p6sg4vr_out);
+    let n_01m5r5zf3079k9ak5dgtk5eqwc_out: vec3<f32> = mix(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 1.0, 0.0), n_01m5sgzbjrntfvax3nwq5776sd_out);
     // --- outputs ---
     pbr_input.material.base_color = vec4<f32>(n_01m5r5zf3079k9ak5dgtk5eqwc_out, pbr_input.material.base_color.a);
     pbr_input.material.base_color = alpha_discard(pbr_input.material.flags, pbr_input.material.alpha_cutoff, pbr_input.material.base_color);

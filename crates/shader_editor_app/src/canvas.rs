@@ -15,13 +15,14 @@ use bevy::ui_widgets::popover::Popover;
 use bevy_noodle::prelude::*;
 use bevy_noodle::style::kit;
 use shader_graph_core::model::{Asset, NodeId};
-use shader_graph_core::registry::{FUNCTION_PREFIX, NodeRole, ROUTE_PARAM};
+use shader_graph_core::registry::{FUNCTION_PREFIX, NodeRole, ParamKind, ROUTE_PARAM};
 use shader_graph_core::{Code, PinType, Value};
 use shader_project::AssetId;
 
 use crate::doc::{connection_error, node_signature, route_declarations};
 use crate::inline::{Inline, inline_for_param, inline_for_pin, inline_scene};
 use crate::state::{Action, Actions, Editor, Link, PropTarget, ViewRequest, display_value};
+use crate::ui::curve_preview;
 use crate::ui::props::PropField;
 
 /// Moves a frame makes to carry the nodes inside it.
@@ -168,7 +169,14 @@ pub fn node_title(editor: &Editor, asset: &Asset, id: &str) -> String {
             format!("fn {}", editor.functions.get(path).map_or(path, |s| s.name.as_str()))
         }
         _ if n.kind.starts_with("stdlib::Constant") => params.get("value").map(short).unwrap_or(name),
-        _ => name,
+        _ => {
+            // Sample Curve: the curve's name (decision 0015).
+            let curve = def.params().into_iter().find(|p| p.kind == ParamKind::Curve).map(|c| p(&c.id));
+            match curve.filter(|c| !c.is_empty()) {
+                Some(path) => format!("{} ({name})", path.rsplit('/').next().unwrap_or(&path)),
+                None => name,
+            }
+        }
     }
 }
 
@@ -250,6 +258,9 @@ fn node_scene(editor: &Editor, asset: &Asset, path: &str, id: &str, canvas: Enti
     // Wide editors (vectors, colors) need a wider node.
     let mut wide = false;
     let params = editor.registry.resolved_params(&n.kind, &n.params);
+    if curve_preview::has_preview(editor, &n.kind) {
+        rows.push(Box::new(curve_preview::node_preview(id)));
+    }
     if let Some((key, inline)) = inline_for_param(&n.kind, &params) {
         wide |= matches!(inline, Inline::Vector(_) | Inline::Color(_));
         let v = params.get(&key).cloned().unwrap_or(Value::Float(0.0));

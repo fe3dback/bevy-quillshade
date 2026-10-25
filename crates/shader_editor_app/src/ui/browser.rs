@@ -100,7 +100,7 @@ fn redraw(
 
     // Folders: explicit directories plus the parents of every asset.
     let mut folders: BTreeSet<String> = editor.folders.iter().cloned().collect();
-    for id in editor.disk.assets.keys() {
+    for id in editor.disk.ids() {
         let mut p = id.path.as_str();
         while let Some((dir, _)) = p.rsplit_once('/') {
             folders.insert(dir.to_string());
@@ -115,14 +115,15 @@ fn redraw(
 
     // Depth-first: each folder, then its assets; root assets last.
     let emit_assets = |dir: &str, depth: usize, commands: &mut Commands| {
-        for (id, _) in
-            editor.disk.assets.iter().filter(|(id, _)| id.path.rsplit_once('/').map_or("", |(d, _)| d) == dir)
-        {
+        let mut ids: Vec<&AssetId> =
+            editor.disk.ids().filter(|id| id.path.rsplit_once('/').map_or("", |(d, _)| d) == dir).collect();
+        ids.sort();
+        for id in ids {
             if hidden(&id.path) {
                 continue;
             }
-            let icons = row_icons(None, IconId::for_asset(editor.asset_kind(id)));
-            let dirty = editor.doc_index(id).is_some_and(|i| editor.tabs[i].is_dirty());
+            let icons = row_icons(None, IconId::for_id(id, editor.asset_kind(id)));
+            let dirty = editor.tabs.iter().any(|t| t.asset() == id && t.is_dirty());
             let label = format!("{}{}", id.name(), if dirty { " *" } else { "" });
             let r = BrowserRow { folder: None, asset: Some(id.clone()) };
             let (is_active, err) = (active.as_ref() == Some(id), errors.contains(id));
@@ -181,7 +182,7 @@ fn click_row(
             open_icon_menu(&mut commands, pos, items);
         }
         (PointerButton::Secondary, _, Some(id)) => {
-            let kind = IconId::for_asset(editor.asset_kind(id));
+            let kind = IconId::for_id(id, editor.asset_kind(id));
             let mut items = vec![
                 (Some(kind), "Open".to_string(), Action::OpenAsset(id.clone())),
                 (Some(IconId::Edit), "Rename...".into(), Action::RenameDialog(id.clone())),

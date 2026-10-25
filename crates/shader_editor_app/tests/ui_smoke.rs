@@ -10,17 +10,14 @@ use shader_editor_app::state::{Action, Actions, Editor, PropTarget};
 use shader_editor_app::tab::Lang;
 use shader_editor_app::ui::EditorCanvasMarker;
 use shader_editor_app::ui::props::PropField;
-use shader_project::{AssetId, AssetType, Project, fixtures, ops};
+use shader_project::{AssetId, AssetType, Project, fixtures};
 
 fn app() -> (tempfile::TempDir, App) {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname = \"g\"\n").unwrap();
     std::fs::create_dir_all(dir.path().join("assets")).unwrap();
     let p = Project::open(dir.path()).unwrap();
-    for (path, is_fn, a) in fixtures::all() {
-        let id = AssetId::new(if is_fn { AssetType::Function } else { AssetType::Material }, path);
-        ops::save(&p, &id, &a).unwrap();
-    }
+    fixtures::save_all(&p).unwrap();
     let mut editor = Editor::default();
     editor.open_project(dir.path()).unwrap();
 

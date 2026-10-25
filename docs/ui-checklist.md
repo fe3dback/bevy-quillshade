@@ -3,7 +3,8 @@
 Automatically covered by `crates/shader_editor_app/tests/ui_smoke.rs` (creating a node, connecting
 through bevy_noodle, rejecting an incompatible connection, undo, save, move) and
 `state::tests` (creating/renaming/moving/deleting assets, auto-connect from the palette,
-the prompt on close). Before a release, walk through by hand on `examples/sample_game`:
+the prompt on close, curve tab edits). `SHADER_EDITOR_INPUT=curve_drag|curve_add` with
+`SHADER_EDITOR_OPEN=common/pulse.curve.ron` plays a point drag / double click on a curve. Before a release, walk through by hand on `examples/sample_game`:
 
 - [+] Without arguments the last project opens; a directory without `Cargo.toml`/`assets/` — a message with the reason.
 - [~] Browser: `+Pbr`, `+Unlit`, `+2D`, `+Fn`, `+Folder` in the selected folder; RMB → Rename / Move / Delete (with confirmation, autogen is deleted); dragging an asset onto a folder moves it; "Show generated WESL/Rust" opens a read-only tab (code icon, `wesl`/`rust` watermark, highlighted, line numbers; wheel / Shift+wheel scroll; Ctrl+C and the Copy button copy the file; "Open in the default application" works; the tab refreshes after Ctrl+S of its asset; switching back to the graph tab keeps its camera).
@@ -23,4 +24,6 @@ the prompt on close). Before a release, walk through by hand on `examples/sample
 - [+] Log: errors/warnings appear live, nodes are outlined; clicking a line opens the asset and focuses the node.
 - [+] Ctrl+S: save and regenerate; with `examples/sample_game` running the picture updates without a restart.
 - [ ] Changing a graph file externally (git checkout): a clean tab reloads, a dirty one asks Reload / Keep mine.
+- [ ] Curves (decision 0015): `+Curve` creates a ramp and opens it (spline icon, `curve` watermark); double click adds a point, drag moves the selection (one Ctrl+Z, points may pass each other), Shift/Ctrl+click toggles, Ctrl+A / Delete / Ctrl+C/V/D / arrows (Shift ×10) work, RMB on a point / empty space opens its menu; the header and Properties switch the preview between Catmull-Rom and Simple without marking the tab dirty; Properties edit the selected point's T / Value; Ctrl+S regenerates `autogen/curves/…` and the running sample game updates `curve_bands`; a clean curve tab reloads on an external change.
+- [ ] Sample Curve node: the Curve select lists the project's curves, "Open curve" opens it, the title shows the curve name; the node's mini plot follows the type, the inline T slider (a vertical line, gone when T is wired) and unsaved edits in the curve tab, and shows "n/a" without a curve; renaming the curve updates the node; deleting it gives E006 on the node.
 - [~] Closing the window with unsaved changes — a prompt; window size and tabs are restored on the next launch.

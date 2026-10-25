@@ -44,7 +44,8 @@ shaders/                      # graph sources, under VCS
   .nodes/*.ron                # user nodes (optional)
   env/rock_wet.material.ron
   common/wet_mask.function.ron
-assets/shaders/autogen/       # AUTOGEN WESL: stdlib/, functions/, one file per material
+  common/pulse.curve.ron
+assets/shaders/autogen/       # AUTOGEN WESL: stdlib/, functions/, curves/, one file per material
 crates/shaders/               # AUTOGEN Rust crate
 ```
 
@@ -102,14 +103,14 @@ Bevy reloads the shader without a restart.
 ## Editor
 
 On the left is the asset browser (the `shaders/` tree: create a Pbr3d/Unlit3d/Sprite2d material, a function,
-a folder; rename, move by dragging onto a folder, delete; RMB → show the
+a curve, a folder; rename, move by dragging onto a folder, delete; RMB → show the
 generated WESL/Rust in a read-only, syntax-highlighted tab), in the center the tabs and the canvas, on the right the properties (node parameters, input
 default values, asset blend mode / two-sided / shading), at the bottom the log (click — focus the node).
 The browser is an IDE-style file tree: folders with expand carets, an icon per asset kind (function, Pbr3d,
-Unlit3d, Sprite2d); tabs, the `+Pbr`/`+Unlit`/`+2D`/`+Fn`/`+Folder` buttons and the browser's RMB menus show icons
+Unlit3d, Sprite2d, curve); tabs, the `+Pbr`/`+Unlit`/`+2D`/`+Fn`/`+Curve`/`+Folder` buttons and the browser's RMB menus show icons
 too. In the toolbar Save / Save all / Undo / Redo are icon-only buttons; hover a toolbar button for its name and
 hotkey. The bottom-right corner of the main view shows the open document's type (`pbr3d`, `unlit3d`, `sprite2d`,
-`function`, or `wesl`/`rust` for a generated file) as a faint watermark over the view.
+`function`, `curve`, or `wesl`/`rust` for a generated file) as a faint watermark over the view.
 Generated-file tabs refresh after every regeneration; Ctrl+C there copies the whole file, and the header has
 "Open in the default application". Icons come from [icon-rs](https://crates.io/crates/icon-rs), plus a few
 drawn by hand in `crates/shader_editor_app/icons/`.
@@ -121,11 +122,20 @@ color picker (values are linear); a wire hides the editor. Constants and paramet
 title (ScalarParameter's slider spans Slider Min..Max). RMB on an input pin: the type of polymorphic inputs
 (Float…Float4, e.g. Lerp A/B), Reset to default, Disconnect.
 
+**Curves** (`+Curve`) are 1D functions on the unit square: points `(t, value)`, both in `0..1`. A curve tab shows
+the plot with draggable points; the `Catmull-Rom` / `Simple` switch in its header (and in Properties) only changes
+the preview — the file stores just the points. The `Sample Curve` node (Utility) picks a curve of the project in
+Properties, has a `Type` (`Catmull-Rom` — smooth, may overshoot between points; `Simple` — linear) and returns the
+value at `T`; outside the first/last point the curve holds the end values. The node shows a small read-only plot of
+its curve (with a line at `T` while `T` is not connected; "n/a" when no curve is selected). Renaming a curve updates the nodes that
+use it.
+
 | Action | Keys |
 | --- | --- |
 | Save (and regenerate) / all | Ctrl+S / Ctrl+Shift+S |
 | Undo / redo | Ctrl+Z / Ctrl+Y, Ctrl+Shift+Z |
 | Copy / cut / paste / duplicate | Ctrl+C / Ctrl+X / Ctrl+V / Ctrl+D (in a generated-file tab Ctrl+C copies the file) |
+| Select all (nodes / curve points) | Ctrl+A |
 | Delete selection | Delete, Backspace |
 | Focus selection / whole graph | F / Home |
 | Node palette (search by name, category, synonyms: `*`, `+`, `lerp`) | Tab, RMB click on the canvas |
@@ -138,6 +148,9 @@ title (ScalarParameter's slider spans Slider Min..Max). RMB on an input pin: the
 | Auto-layout the selection (or the whole graph) | Ctrl+L |
 | Close tab / next tab | Ctrl+W (or MMB on the tab) / Ctrl+Tab |
 | Scroll a generated file horizontally | Shift+wheel |
+| Curve: add a point / move / multi-select | double click on empty space / drag a point / Shift+click (Ctrl+click) |
+| Curve: nudge the selected points | arrow keys (Shift: ×10) |
+| Curve: point menu / plot menu (add point, select all, preview mode) | RMB on a point / on empty space |
 | Open project / quit | Ctrl+O / Ctrl+Q |
 
 Pan — drag with the right (or middle) mouse button (an RMB press that does not move is a click), zoom — wheel, box select — LMB on empty space; the minimap
@@ -169,6 +182,10 @@ Asset(
   `user::<id>` (user node).
 - A function (`*.function.ron`, `kind: Function`) declares inputs with `output::FunctionInput` nodes and
   outputs with `output::FunctionOutput` nodes. Changing a function regenerates the dependent materials.
+- A curve (`*.curve.ron`): `Curve(format_version: 1, name: "pulse", points: [(0.0, 0.0), (0.25, 1.0), (1.0, 0.0)])`
+  — points sorted by `t`, clamped to `0..1`. It is generated into `autogen/curves/<path>.wesl` (a const array of
+  `(t, value, slope)` and `sample_curve_simple` / `sample_curve_catmullrom`); shaders import the one they sample.
+  Materials may not live in `shaders/curves/` (like `stdlib/` and `functions/`).
 - User node (`shaders/.nodes/*.ron`):
   `UserNode(id: "soft_clamp", name: "SoftClamp", category: "User", inputs: [UserPin(name: "x", ty: Float3)], output: Float3, template: "return x / (vec3<f32>(1.0) + abs(x));")`.
 - Asset and parameter names are `snake_case` (`[a-z][a-z0-9_]*`) and not Rust/WGSL keywords.
@@ -183,9 +200,9 @@ Asset(
 | E001 | missing or multiple output nodes |
 | E002 | cycle |
 | E003 | incompatible types (no allowed auto-conversion) |
-| E004 | required input not connected (or a Named Route Usage without its declaration) |
+| E004 | required input not connected (or a Named Route Usage without its declaration, a Sample Curve without a curve) |
 | E005 | invalid or duplicate name |
-| E006 | nonexistent function / recursive functions |
+| E006 | nonexistent function / recursive functions / missing or broken curve |
 | E007 | WESL of a Custom node does not parse |
 | E008 | an autogen file without the marker blocks the write |
 | E009 | unknown node / broken file |

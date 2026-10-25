@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 
 use shader_codegen_wesl::check::BevySources;
 use shader_graph_core::model::{AssetKind, MaterialKind, SpriteSettings, UnlitSettings};
-use shader_graph_core::registry::{FUNCTION_CALL_KIND, NoFunctions, NodeRole, SigCtx};
+use shader_graph_core::registry::{FUNCTION_CALL_KIND, NoCurves, NoFunctions, NodeRole, SigCtx};
 use shader_graph_core::{Asset, Env, PinType, Value, conversion};
 use shader_project::fixtures::{self, GraphBuilder};
 use shader_project::regen::{rust_file, wesl_file};
@@ -19,7 +19,11 @@ use shader_project::{AssetId, AssetType, Project, RegenOptions, ops, regenerate}
 fn node_material(kind: &str) -> Option<(String, Asset)> {
     let reg = shader_stdlib::registry();
     let def = reg.get(kind)?;
-    if kind == FUNCTION_CALL_KIND || !matches!(def.role(), NodeRole::Normal | NodeRole::Parameter | NodeRole::Reroute) {
+    // Sample Curve needs a curve asset: covered by the `fx/curve_bands` fixture.
+    if kind == FUNCTION_CALL_KIND
+        || kind == "stdlib::SampleCurve"
+        || !matches!(def.role(), NodeRole::Normal | NodeRole::Parameter | NodeRole::Reroute)
+    {
         return None;
     }
     let sprite = kind == "stdlib::SpriteTexture";
@@ -36,7 +40,7 @@ fn node_material(kind: &str) -> Option<(String, Asset)> {
 
     let params = reg.resolved_params(kind, &BTreeMap::new());
     let (connected, inputs) = (BTreeMap::new(), BTreeMap::new());
-    let env = Env { asset_kind, asset_path: &name, functions: &NoFunctions };
+    let env = Env { asset_kind, asset_path: &name, functions: &NoFunctions, curves: &NoCurves };
     let sig = def.signature(&SigCtx {
         node_id: &n,
         kind,
@@ -116,18 +120,21 @@ fn every_stdlib_node_generates_and_compiles() {
 #[test]
 fn composite_materials_generate_and_compile() {
     let (_dir, p) = project();
-    let mut ids = Vec::new();
-    for (path, is_fn, asset) in fixtures::all() {
-        let id = AssetId::new(if is_fn { AssetType::Function } else { AssetType::Material }, path);
-        ops::save(&p, &id, &asset).unwrap();
-        ids.push(id);
-    }
+    fixtures::save_all(&p).unwrap();
+    let mut ids: Vec<AssetId> = fixtures::all()
+        .into_iter()
+        .map(|(path, is_fn, _)| AssetId::new(if is_fn { AssetType::Function } else { AssetType::Material }, path))
+        .collect();
+    ids.extend(fixtures::curves().into_iter().map(|(path, _)| AssetId::new(AssetType::Curve, path)));
     let bevy = BevySources::discover();
     let report = regenerate(&p, &RegenOptions { compile_check: bevy.as_ref(), ..Default::default() }).unwrap();
     let errors: Vec<String> = report.diagnostics().filter(|d| d.is_error()).map(|d| d.to_string()).collect();
     assert!(errors.is_empty(), "errors:\n{}", errors.join("\n"));
     for id in &ids {
-        let flat = id.path.replace('/', "__");
+        let flat = match id.ty {
+            AssetType::Curve => format!("curves__{}", id.path.replace('/', "__")),
+            _ => id.path.replace('/', "__"),
+        };
         snapshot(&format!("wesl__{flat}"), &std::fs::read_to_string(wesl_file(&p, id)).unwrap());
         if let Some(rs) = rust_file(&p, id) {
             snapshot(&format!("rust__{flat}"), &std::fs::read_to_string(rs).unwrap());

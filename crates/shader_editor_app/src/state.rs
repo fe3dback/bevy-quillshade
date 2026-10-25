@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use shader_codegen_wesl::check::BevySources;
+use shader_graph_core::curve::{Curve, Interp};
 use shader_graph_core::ir::declared_function_sig;
 use shader_graph_core::model::{
     Asset, AssetKind, BlendMode, MaterialKind, NodeId, PbrSettings, Shading, SpriteSettings, UnlitSettings,
@@ -17,6 +18,7 @@ use shader_project::{AssetId, AssetSet, AssetType, Project, RegenOptions, Scope,
 
 use crate::autolayout;
 use crate::config::{ProjectTabs, UserConfig};
+use crate::curve_doc::CurveDoc;
 use crate::doc::{ClipboardData, Doc, bounds, connection_error, node_signature};
 use crate::search::{self, WireEnd};
 use crate::tab::{Lang, Tab, TextDoc, parse_config_key};
@@ -28,10 +30,12 @@ pub enum NewKind {
     Unlit3d,
     Sprite2d,
     Function,
+    Curve,
 }
 
 impl NewKind {
-    pub const ALL: [NewKind; 4] = [NewKind::Pbr3d, NewKind::Unlit3d, NewKind::Sprite2d, NewKind::Function];
+    pub const ALL: [NewKind; 5] =
+        [NewKind::Pbr3d, NewKind::Unlit3d, NewKind::Sprite2d, NewKind::Function, NewKind::Curve];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -39,6 +43,7 @@ impl NewKind {
             NewKind::Unlit3d => "Material (Unlit3d)",
             NewKind::Sprite2d => "Material (Sprite2d)",
             NewKind::Function => "Function",
+            NewKind::Curve => "Curve",
         }
     }
 
@@ -47,7 +52,16 @@ impl NewKind {
             NewKind::Pbr3d => Some(MaterialKind::Pbr3d(PbrSettings::default())),
             NewKind::Unlit3d => Some(MaterialKind::Unlit3d(UnlitSettings::default())),
             NewKind::Sprite2d => Some(MaterialKind::Sprite2d(SpriteSettings::default())),
-            NewKind::Function => None,
+            NewKind::Function | NewKind::Curve => None,
+        }
+    }
+
+    /// Default name in the "New ..." dialog.
+    fn base_name(self) -> &'static str {
+        match self {
+            NewKind::Function => "new_function",
+            NewKind::Curve => "new_curve",
+            _ => "new_material",
         }
     }
 }
@@ -76,6 +90,10 @@ pub enum PropTarget {
     Shading,
     Description,
     FrameTitle(String),
+    /// `(t, value)` of a point of the active curve, as a `Float2`.
+    CurvePoint(usize),
+    /// Interpolation the active curve view draws (editor-only).
+    CurvePreview,
 }
 
 /// Which text a dialog's input submits to.
@@ -107,6 +125,26 @@ pub enum GenFile {
 pub enum ViewRequest {
     FitAll,
     FitSelection,
+}
+
+/// How far in `t` pasted / duplicated curve points land from the copied ones.
+const CURVE_PASTE_STEP: f32 = 0.05;
+
+/// Edits of the active curve tab (decision 0015).
+#[derive(Debug, Clone, PartialEq)]
+pub enum CurveAction {
+    Select(BTreeSet<usize>),
+    /// Adds a point and selects it.
+    Add((f32, f32)),
+    /// Replaces all points and the selection; `merge`d edits (a drag in progress) are one undo step until
+    /// [`Action::CommitInline`].
+    SetPoints {
+        points: Vec<(f32, f32)>,
+        selection: BTreeSet<usize>,
+        merge: bool,
+    },
+    /// Moves the selected points by `(dt, dvalue)` (arrow keys).
+    Nudge((f32, f32)),
 }
 
 /// A wire end the palette should connect the new node to.
@@ -150,6 +188,8 @@ pub enum Action {
     Paste(Option<(f32, f32)>),
     Duplicate,
     DeleteSelection,
+    /// All nodes of the graph / all points of the curve.
+    SelectAll,
     Select(BTreeSet<NodeId>),
     SelectFrame(Option<String>),
     AddNode {
@@ -195,6 +235,7 @@ pub enum Action {
         node: NodeId,
         pin: String,
     },
+    Curve(CurveAction),
     AutoLayout,
     AddComment(Option<(f32, f32)>),
     AddReroute {
@@ -264,6 +305,8 @@ pub struct Editor {
     pub tabs: Vec<Tab>,
     pub active: Option<usize>,
     pub clipboard: Option<ClipboardData>,
+    /// Copied curve points.
+    pub curve_clipboard: Option<Vec<(f32, f32)>>,
     paste_count: u32,
     /// Declared function signatures (disk, overridden by open documents).
     pub functions: BTreeMap<String, FunctionSig>,
@@ -301,6 +344,7 @@ impl Default for Editor {
             tabs: Vec::new(),
             active: None,
             clipboard: None,
+            curve_clipboard: None,
             paste_count: 0,
             functions: BTreeMap::new(),
             diags: BTreeMap::new(),
@@ -380,6 +424,25 @@ impl Editor {
         self.active.and_then(|i| self.tabs.get_mut(i)).and_then(Tab::graph_mut)
     }
 
+    /// The active tab's curve document.
+    pub fn curve_doc(&self) -> Option<&CurveDoc> {
+        self.tab().and_then(Tab::curve)
+    }
+
+    pub fn curve_doc_mut(&mut self) -> Option<&mut CurveDoc> {
+        self.active.and_then(|i| self.tabs.get_mut(i)).and_then(Tab::curve_mut)
+    }
+
+    /// Tab index of a curve document.
+    pub fn curve_index(&self, id: &AssetId) -> Option<usize> {
+        self.tabs.iter().position(|t| t.curve().is_some_and(|c| c.id == *id))
+    }
+
+    /// Paths of the project's loadable curve assets (choices of a `Curve` parameter).
+    pub fn curve_paths(&self) -> Vec<String> {
+        self.disk.curves.iter().filter(|(_, c)| c.is_ok()).map(|(id, _)| id.path.clone()).collect()
+    }
+
     /// Open graph documents.
     pub fn docs(&self) -> impl Iterator<Item = &Doc> {
         self.tabs.iter().filter_map(Tab::graph)
@@ -438,8 +501,8 @@ impl Editor {
         self.rescan();
         for key in &tabs.open {
             match parse_config_key(key) {
-                Some((id, None)) if self.disk.assets.contains_key(&id) => self.open_asset(&id),
-                Some((id, Some(lang))) if self.disk.assets.contains_key(&id) => self.show_generated(&id, lang),
+                Some((id, None)) if self.disk.contains(&id) => self.open_asset(&id),
+                Some((id, Some(lang))) if self.disk.contains(&id) => self.show_generated(&id, lang),
                 _ => {}
             }
         }
@@ -492,11 +555,21 @@ impl Editor {
     }
 
     pub fn open_asset(&mut self, id: &AssetId) {
-        if let Some(i) = self.doc_index(id) {
+        if let Some(i) = self.doc_index(id).or_else(|| self.curve_index(id)) {
             self.activate(i);
             return;
         }
         let Some(project) = &self.project else { return };
+        if id.ty == AssetType::Curve {
+            match assets::load_curve(project, id) {
+                Ok(c) => {
+                    self.tabs.push(Tab::Curve(CurveDoc::new(id.clone(), c)));
+                    self.activate(self.tabs.len() - 1);
+                }
+                Err(e) => self.io_error(&format!("cannot open {}", id.source_rel()), e),
+            }
+            return;
+        }
         match assets::load(project, id) {
             Ok(a) => {
                 self.tabs.push(Tab::Graph(Doc::new(id.clone(), a)));
@@ -523,7 +596,7 @@ impl Editor {
                 let msg = format!("{} does not exist yet (save the asset to generate it)", t.rel);
                 self.push_msg(Level::Warning, msg);
             }
-            None => self.push_msg(Level::Warning, "functions have no Rust module".into()),
+            None => self.push_msg(Level::Warning, "only materials have a Rust module".into()),
         }
     }
 
@@ -595,6 +668,9 @@ impl Editor {
         let mut set = self.disk.clone();
         for d in self.docs() {
             set.assets.insert(d.id.clone(), Ok(d.asset.clone()));
+        }
+        for c in self.tabs.iter().filter_map(Tab::curve) {
+            set.curves.insert(c.id.clone(), Ok(c.curve.clone()));
         }
         set
     }
@@ -697,14 +773,19 @@ impl Editor {
 
     pub fn save(&mut self, i: usize) -> bool {
         let Some(project) = self.project.clone() else { return false };
-        let Some(d) = self.tabs.get(i).and_then(Tab::graph) else { return false };
-        let (id, asset) = (d.id.clone(), d.asset.clone());
-        if let Err(e) = ops::save(&project, &id, &asset) {
+        let (id, result) = match self.tabs.get(i) {
+            Some(Tab::Graph(d)) => (d.id.clone(), ops::save(&project, &d.id, &d.asset)),
+            Some(Tab::Curve(c)) => (c.id.clone(), ops::save_curve(&project, &c.id, &c.curve)),
+            _ => return false,
+        };
+        if let Err(e) = result {
             self.io_error(&format!("Cannot save {}", id.source_rel()), e);
             return false;
         }
-        if let Some(d) = self.tabs[i].graph_mut() {
-            d.mark_saved();
+        match &mut self.tabs[i] {
+            Tab::Graph(d) => d.mark_saved(),
+            Tab::Curve(c) => c.mark_saved(),
+            Tab::Text(_) => {}
         }
         self.info(format!("Saved {}", id.source_rel()));
         self.ui.tabs += 1;
@@ -741,14 +822,20 @@ impl Editor {
             }
         }
         for i in 0..self.tabs.len() {
-            let Some(d) = self.tabs[i].graph() else { continue };
-            let (id, dirty) = (d.id.clone(), d.is_dirty());
-            let on_disk = match self.disk.assets.get(&id) {
-                Some(Ok(a)) => a.clone(),
-                Some(Err(_)) | None => continue,
+            let (id, dirty) = (self.tabs[i].asset().clone(), self.tabs[i].is_dirty());
+            // Whether the file differs from what the tab last saved/loaded.
+            let changed = match &self.tabs[i] {
+                Tab::Graph(d) => match self.disk.assets.get(&id) {
+                    Some(Ok(a)) => Asset::from_ron(&d.saved).ok().as_ref() != Some(a),
+                    _ => false,
+                },
+                Tab::Curve(c) => match self.disk.curves.get(&id) {
+                    Some(Ok(on_disk)) => Curve::from_ron(&c.saved).ok().as_ref() != Some(on_disk),
+                    _ => false,
+                },
+                Tab::Text(_) => false,
             };
-            let saved = Asset::from_ron(&d.saved).ok();
-            if saved.as_ref() == Some(&on_disk) {
+            if !changed {
                 continue;
             }
             if dirty {
@@ -765,12 +852,28 @@ impl Editor {
                         ],
                     });
                 }
-            } else if let Some(d) = self.tabs[i].graph_mut() {
-                d.reload(on_disk);
+            } else if self.reload_tab(i) {
                 self.info(format!("Reloaded {} (changed on disk)", id.source_rel()));
             }
         }
         self.touch_all();
+    }
+
+    /// Replaces tab `i`'s document with the disk version; `false` when that does not load.
+    fn reload_tab(&mut self, i: usize) -> bool {
+        let id = self.tabs[i].asset().clone();
+        match &mut self.tabs[i] {
+            Tab::Graph(d) => match self.disk.assets.get(&id) {
+                Some(Ok(a)) => d.reload(a.clone()),
+                _ => return false,
+            },
+            Tab::Curve(c) => match self.disk.curves.get(&id) {
+                Some(Ok(on_disk)) => c.reload(on_disk.clone()),
+                _ => return false,
+            },
+            Tab::Text(_) => return false,
+        }
+        true
     }
 
     // ---- commands ----
@@ -839,6 +942,16 @@ impl Editor {
                 self.delete_selection();
             }
             Action::Paste(at) => self.paste(at),
+            Action::Duplicate if self.curve_doc().is_some() => {
+                if let Some(c) = self.curve_doc_mut() {
+                    let copies: Vec<(f32, f32)> =
+                        c.selected_points().into_iter().map(|(t, v)| (t + CURVE_PASTE_STEP, v)).collect();
+                    if !copies.is_empty() {
+                        c.insert_points(&copies);
+                    }
+                }
+                self.ui.props += 1;
+            }
             Action::Duplicate => {
                 let saved = self.clipboard.take();
                 self.copy();
@@ -846,6 +959,18 @@ impl Editor {
                 self.clipboard = saved;
             }
             Action::DeleteSelection => self.delete_selection(),
+            Action::SelectAll => {
+                if let Some(c) = self.curve_doc_mut() {
+                    c.select((0..c.curve.points.len()).collect());
+                } else if let Some(d) = self.doc() {
+                    let all = d.asset.nodes.keys().cloned().collect();
+                    self.apply(Action::Select(all));
+                    if let Some(d) = self.doc_mut() {
+                        d.revision += 1;
+                    }
+                }
+                self.ui.props += 1;
+            }
             Action::Select(sel) => {
                 if let Some(d) = self.doc_mut()
                     && (d.selection != sel || d.selected_frame.is_some())
@@ -893,8 +1018,12 @@ impl Editor {
                 if let Some(d) = self.doc_mut() {
                     d.end_merge();
                 }
+                if let Some(c) = self.curve_doc_mut() {
+                    c.end_merge();
+                }
                 self.ui.props += 1;
             }
+            Action::Curve(a) => self.curve_action(a),
             Action::SetPinType { node, ty } => self.set_pin_type(&node, ty),
             Action::ResetInput { node, pin } => {
                 if let Some(d) = self.doc_mut() {
@@ -933,7 +1062,7 @@ impl Editor {
             Action::View(v) => self.view_requests.push(v),
             Action::NewAssetDialog(kind) => {
                 let dir = self.current_folder.clone();
-                let base = if kind == NewKind::Function { "new_function" } else { "new_material" };
+                let base = kind.base_name();
                 self.dialog = Some(Dialog::Input {
                     title: format!("New {}", kind.label()),
                     label: "Path inside shaders/ (snake_case, `/` for folders)".into(),
@@ -1016,21 +1145,25 @@ impl Editor {
             Action::FocusDiagnostic(diag) => self.focus_diagnostic(&diag),
             Action::Reload(id) => {
                 self.dialog = None;
-                if let (Some(d), Some(Ok(a))) =
-                    (self.doc_index(&id).and_then(|i| self.tabs[i].graph_mut()), self.disk.assets.get(&id).cloned())
+                if let Some(i) = self.doc_index(&id).or_else(|| self.curve_index(&id))
+                    && self.reload_tab(i)
                 {
-                    d.reload(a);
                     self.info(format!("Reloaded {}", id.source_rel()));
                 }
                 self.touch_all();
             }
             Action::KeepMine(id) => {
                 self.dialog = None;
+                // The disk version becomes the "saved" baseline, so the document stays dirty.
                 if let (Some(d), Some(Ok(a))) =
                     (self.doc_index(&id).and_then(|i| self.tabs[i].graph_mut()), self.disk.assets.get(&id))
                 {
-                    // The disk version becomes the "saved" baseline, so the document stays dirty.
                     d.saved = a.to_ron();
+                }
+                if let (Some(c), Some(Ok(on_disk))) =
+                    (self.curve_index(&id).and_then(|i| self.tabs[i].curve_mut()), self.disk.curves.get(&id))
+                {
+                    c.saved = on_disk.to_ron();
                 }
                 self.ui.tabs += 1;
             }
@@ -1075,18 +1208,64 @@ impl Editor {
     }
 
     fn history(&mut self, undo: bool) {
-        if let Some(d) = self.doc_mut() {
-            let done = if undo { d.undo() } else { d.redo() };
-            if done {
-                self.ui.props += 1;
+        let done = match self.active.and_then(|i| self.tabs.get_mut(i)) {
+            Some(Tab::Graph(d)) => {
+                if undo {
+                    d.undo()
+                } else {
+                    d.redo()
+                }
             }
+            Some(Tab::Curve(c)) => {
+                if undo {
+                    c.undo()
+                } else {
+                    c.redo()
+                }
+            }
+            _ => false,
+        };
+        if done {
+            self.ui.props += 1;
+        }
+    }
+
+    fn curve_action(&mut self, action: CurveAction) {
+        let Some(c) = self.curve_doc_mut() else { return };
+        let mut refresh = true;
+        match action {
+            CurveAction::Select(sel) => c.select(sel),
+            CurveAction::Add(p) => c.add_point(p),
+            CurveAction::SetPoints { points, selection, merge } => {
+                c.set_points(points, selection, merge.then_some("drag"));
+                // Properties catch up on CommitInline.
+                refresh = !merge;
+            }
+            CurveAction::Nudge(delta) => {
+                let (points, selection) = CurveDoc::moved(&c.curve.points, &c.selection, delta);
+                c.set_points(points, selection, Some("nudge"));
+            }
+        }
+        if refresh {
+            self.ui.props += 1;
         }
     }
 
     fn copy(&mut self) {
-        if let Some(Tab::Text(t)) = self.tab() {
-            self.copy_text = t.text.clone();
-            return;
+        match self.tab() {
+            Some(Tab::Text(t)) => {
+                self.copy_text = t.text.clone();
+                return;
+            }
+            Some(Tab::Curve(c)) => {
+                let points = c.selected_points();
+                if !points.is_empty() {
+                    self.curve_clipboard = Some(points);
+                    self.paste_count = 0;
+                }
+                return;
+            }
+            _ => {}
         }
         let Some(d) = self.doc() else { return };
         let clip = d.copy(&d.selection, &self.registry);
@@ -1097,6 +1276,19 @@ impl Editor {
     }
 
     fn paste(&mut self, at: Option<(f32, f32)>) {
+        if self.curve_doc().is_some() {
+            if let Some(points) = self.curve_clipboard.clone() {
+                // Shifted in t: a copy on top of the original would be invisible but change the slopes.
+                self.paste_count += 1;
+                let dt = CURVE_PASTE_STEP * self.paste_count as f32;
+                let points: Vec<(f32, f32)> = points.into_iter().map(|(t, v)| (t + dt, v)).collect();
+                if let Some(c) = self.curve_doc_mut() {
+                    c.insert_points(&points);
+                }
+                self.ui.props += 1;
+            }
+            return;
+        }
         let Some(clip) = self.clipboard.clone() else { return };
         self.paste_count += 1;
         let step = 40.0 * self.paste_count as f32;
@@ -1112,6 +1304,11 @@ impl Editor {
     }
 
     fn delete_selection(&mut self) {
+        if let Some(c) = self.curve_doc_mut() {
+            c.delete_selected();
+            self.ui.props += 1;
+            return;
+        }
         let registry = &self.registry;
         let Some(d) = self.active.and_then(|i| self.tabs.get_mut(i)).and_then(Tab::graph_mut) else { return };
         if let Some(f) = d.selected_frame.take() {
@@ -1172,6 +1369,14 @@ impl Editor {
 
     /// Value a property widget shows: the stored one, or the pin's default.
     pub fn current_value(&self, target: &PropTarget) -> Option<Value> {
+        match target {
+            PropTarget::CurvePoint(i) => {
+                let (t, v) = *self.curve_doc()?.curve.points.get(*i)?;
+                return Some(Value::Float2([t, v]));
+            }
+            PropTarget::CurvePreview => return Some(Value::Str(self.curve_doc()?.preview.label().into())),
+            _ => {}
+        }
         let d = self.doc()?;
         match target {
             PropTarget::Param { node, key } => {
@@ -1237,6 +1442,9 @@ impl Editor {
         if is_final && let Some(d) = self.doc_mut() {
             d.end_merge();
         }
+        if is_final && let Some(c) = self.curve_doc_mut() {
+            c.end_merge();
+        }
     }
 
     /// Context menu of an input pin (RMB): type of polymorphic inputs while no poly pin is wired, reset of the
@@ -1295,6 +1503,37 @@ impl Editor {
         }
         let key = format!("{target:?}");
         let key = merge.then_some(key.as_str());
+        match &target {
+            PropTarget::CurvePoint(i) => {
+                if let Some(c) = self.curve_doc_mut() {
+                    let mut points = c.curve.points.clone();
+                    let Some(p) = points.get_mut(*i) else { return };
+                    let f = value.floats();
+                    *p = (f[0], f.get(1).copied().unwrap_or(p.1));
+                    // The point stays selected wherever the re-sort puts it.
+                    let (points, selection) = CurveDoc::moved(&points, &[*i].into(), (0.0, 0.0));
+                    let moved = selection != BTreeSet::from([*i]);
+                    c.set_points(points, selection, key);
+                    if moved {
+                        // The fields are bound to the old index: rebind them, and the next edit is a new step.
+                        c.end_merge();
+                        self.ui.props += 1;
+                    }
+                }
+                if !merge {
+                    self.ui.props += 1;
+                }
+                return;
+            }
+            PropTarget::CurvePreview => {
+                if let (Some(c), Some(interp)) = (self.curve_doc_mut(), Interp::from_label(value.as_str())) {
+                    c.set_preview(interp);
+                }
+                self.ui.props += 1;
+                return;
+            }
+            _ => {}
+        }
         let Some(d) = self.doc_mut() else { return };
         let mut refresh = !merge;
         match &target {
@@ -1354,6 +1593,7 @@ impl Editor {
                 });
                 refresh = false;
             }
+            PropTarget::CurvePoint(_) | PropTarget::CurvePreview => {}
         }
         if refresh {
             self.ui.props += 1;
@@ -1394,9 +1634,10 @@ impl Editor {
         let text = text.trim_matches('/');
         match submit {
             Submit::Create(kind) => {
-                let r = match kind.material() {
-                    Some(m) => ops::create_material(&project, text, m),
-                    None => ops::create_function(&project, text),
+                let r = match (kind, kind.material()) {
+                    (_, Some(m)) => ops::create_material(&project, text, m),
+                    (NewKind::Curve, None) => ops::create_curve(&project, text),
+                    (_, None) => ops::create_function(&project, text),
                 };
                 match r {
                     Ok(id) => {
@@ -1427,7 +1668,7 @@ impl Editor {
     fn rename(&mut self, id: &AssetId, new_path: &str) {
         self.dialog = None;
         let Some(project) = self.project.clone() else { return };
-        if let Some(i) = self.doc_index(id)
+        if let Some(i) = self.doc_index(id).or_else(|| self.curve_index(id))
             && self.tabs[i].is_dirty()
             && !self.save(i)
         {
@@ -1446,6 +1687,12 @@ impl Editor {
             d.asset.name = new_id.name().to_string();
             d.mark_saved();
             d.revision += 1;
+        }
+        if let Some(c) = self.curve_index(id).and_then(|i| self.tabs[i].curve_mut()) {
+            c.id = new_id.clone();
+            c.curve.name = new_id.name().to_string();
+            c.mark_saved();
+            c.revision += 1;
         }
         // Generated files follow the asset (regeneration below fills them).
         for t in &mut self.tabs {
@@ -1469,6 +1716,20 @@ impl Editor {
                             n.kind = new_kind.clone();
                         }
                     });
+                } else if let Some(Ok(a)) = self.disk.assets.get(&d.id) {
+                    d.reload(a.clone());
+                }
+            }
+        }
+        if id.ty == AssetType::Curve {
+            // `ops::rename` updated the files; open documents follow (unsaved edits stay unsaved).
+            let registry = &self.registry;
+            for d in self.tabs.iter_mut().filter_map(Tab::graph_mut) {
+                if !shader_graph_core::registry::curve_refs(&d.asset, registry).iter().any(|r| r.2 == id.path) {
+                    continue;
+                }
+                if d.is_dirty() {
+                    d.edit(|a| ops::rename_curve_refs(a, registry, &id.path, &new_id.path));
                 } else if let Some(Ok(a)) = self.disk.assets.get(&d.id) {
                     d.reload(a.clone());
                 }
@@ -1513,7 +1774,7 @@ impl Editor {
 
     fn focus_diagnostic(&mut self, diag: &Diagnostic) {
         let Some(id) = diag.asset.as_deref().and_then(assets::id_from_source_rel) else { return };
-        if self.disk.assets.contains_key(&id) {
+        if self.disk.contains(&id) {
             self.open_asset(&id);
         }
         if let (Some(node), Some(d)) = (&diag.node, self.doc_mut())
@@ -1554,10 +1815,7 @@ mod tests {
         std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname = \"g\"\n").unwrap();
         std::fs::create_dir_all(dir.path().join("assets")).unwrap();
         let p = Project::open(dir.path()).unwrap();
-        for (path, is_fn, a) in fixtures::all() {
-            let id = AssetId::new(if is_fn { AssetType::Function } else { AssetType::Material }, path);
-            ops::save(&p, &id, &a).unwrap();
-        }
+        fixtures::save_all(&p).unwrap();
         let mut e = Editor::default();
         e.open_project(dir.path()).unwrap();
         (dir, e)
@@ -1874,5 +2132,173 @@ mod tests {
         let d = e.doc().unwrap();
         let copy = d.selection.first().unwrap();
         assert_eq!(d.asset.nodes[copy].params["route"], Value::Str(decl));
+    }
+
+    fn pulse() -> AssetId {
+        AssetId::new(AssetType::Curve, "common/pulse")
+    }
+
+    fn points(e: &Editor) -> Vec<(f32, f32)> {
+        e.curve_doc().unwrap().curve.points.clone()
+    }
+
+    #[test]
+    fn curve_tab_edits_undo_clipboard_and_save() {
+        let (dir, mut e) = project();
+        e.apply(Action::OpenAsset(pulse()));
+        assert!(e.doc().is_none(), "graph commands must not reach a curve tab");
+        assert_eq!(e.tab().unwrap().title(), "shaders/common/pulse.curve");
+        let n = points(&e).len();
+
+        e.apply(Action::Curve(CurveAction::Add((0.6, 0.9))));
+        assert_eq!(points(&e).len(), n + 1);
+        assert!(e.is_dirty());
+        e.apply(Action::Undo);
+        assert_eq!(points(&e).len(), n);
+        assert!(!e.is_dirty());
+        e.apply(Action::Redo);
+
+        // Copy the new point, paste it twice, then select all and delete everything.
+        e.apply(Action::Copy);
+        e.apply(Action::Paste(None));
+        assert_eq!(points(&e).len(), n + 2);
+        assert_eq!(e.curve_doc().unwrap().selection.len(), 1, "the pasted point is selected");
+        e.apply(Action::SelectAll);
+        assert_eq!(e.curve_doc().unwrap().selection.len(), n + 2);
+        e.apply(Action::DeleteSelection);
+        assert!(points(&e).is_empty());
+        e.apply(Action::Undo);
+        assert_eq!(points(&e).len(), n + 2);
+
+        // Properties edit the selected point; the preview switch does not touch the file.
+        e.apply(Action::Curve(CurveAction::Select([0].into())));
+        let target = PropTarget::CurvePoint(0);
+        e.apply(Action::SetComponent { target: target.clone(), comp: 1, value: 0.5, is_final: true });
+        assert_eq!(points(&e)[0], (0.0, 0.5));
+        let saved_rev = e.curve_doc().unwrap().saved.clone();
+        e.apply(Action::SetValue {
+            target: PropTarget::CurvePreview,
+            value: Value::Str("Simple".into()),
+            merge: false,
+        });
+        assert_eq!(e.curve_doc().unwrap().preview, Interp::Simple);
+        assert_eq!(e.curve_doc().unwrap().saved, saved_rev);
+
+        e.apply(Action::Save);
+        assert!(!e.is_dirty());
+        let wesl = std::fs::read_to_string(dir.path().join("assets/shaders/autogen/curves/common/pulse.wesl")).unwrap();
+        assert!(wesl.contains("vec3<f32>(0.0, 0.5, "), "{wesl}");
+        let on_disk = assets::load_curve(e.project.as_ref().unwrap(), &pulse()).unwrap();
+        assert_eq!(on_disk.points, points(&e));
+    }
+
+    #[test]
+    fn nudges_merge_until_the_selection_changes() {
+        let (_dir, mut e) = project();
+        e.apply(Action::OpenAsset(pulse()));
+        let start = points(&e);
+        e.apply(Action::Curve(CurveAction::Select([1].into())));
+        e.apply(Action::Curve(CurveAction::Nudge((0.0, -0.1))));
+        e.apply(Action::Curve(CurveAction::Nudge((0.0, -0.1))));
+        e.apply(Action::Curve(CurveAction::Select([2].into())));
+        e.apply(Action::Curve(CurveAction::Nudge((0.0, 0.1))));
+        e.apply(Action::Undo);
+        assert!((points(&e)[1].1 - (start[1].1 - 0.2)).abs() < 1e-6);
+        assert_eq!(points(&e)[2], start[2]);
+        e.apply(Action::Undo);
+        assert_eq!(points(&e), start);
+    }
+
+    #[test]
+    fn new_and_renamed_curves_follow_their_users() {
+        let (dir, mut e) = project();
+        e.apply(Action::NewAssetDialog(NewKind::Curve));
+        e.apply(Action::Submit("ramps/fade".into()));
+        let fade = AssetId::new(AssetType::Curve, "ramps/fade");
+        assert_eq!(e.curve_index(&fade), e.active);
+        assert!(dir.path().join("assets/shaders/autogen/curves/ramps/fade.wesl").is_file());
+        assert!(e.curve_paths().contains(&"ramps/fade".to_string()));
+
+        // A material using `common/pulse` is open; renaming the curve updates the node, the file and the tab.
+        let bands = AssetId::new(AssetType::Material, "fx/curve_bands");
+        e.apply(Action::OpenAsset(bands.clone()));
+        e.apply(Action::OpenAsset(pulse()));
+        e.apply(Action::RenameDialog(pulse()));
+        e.apply(Action::Submit("ramps/pulse".into()));
+        let moved = AssetId::new(AssetType::Curve, "ramps/pulse");
+        assert!(e.curve_index(&moved).is_some());
+        let d = e.tabs[e.doc_index(&bands).unwrap()].graph().unwrap();
+        assert!(!d.is_dirty());
+        let refs = shader_graph_core::registry::curve_refs(&d.asset, &e.registry);
+        assert!(refs.iter().any(|r| r.2 == "ramps/pulse"), "{refs:?}");
+        let node = refs.iter().find(|r| r.2 == "ramps/pulse").unwrap().0.clone();
+        assert_eq!(crate::canvas::node_title(&e, &d.asset, &node), "pulse (Sample Curve)");
+        e.validate();
+        assert!(!e.all_diagnostics().iter().any(Diagnostic::is_error), "{:?}", e.all_diagnostics());
+    }
+
+    #[test]
+    fn curve_tabs_are_restored_on_next_launch() {
+        let (dir, mut e) = project();
+        let config = dir.path().join("config/config.ron");
+        e.config_path = Some(config.clone());
+        e.apply(Action::OpenAsset(pulse()));
+        e.apply(Action::Quit);
+        let mut next = Editor::with_config(UserConfig::load(&config), Some(config));
+        next.open_project(dir.path()).unwrap();
+        assert_eq!(next.curve_doc().map(|c| &c.id), Some(&pulse()));
+    }
+
+    #[test]
+    fn curve_review_regressions() {
+        let (_dir, mut e) = project();
+        e.apply(Action::OpenAsset(pulse()));
+        let start = points(&e);
+
+        // Typing a T that moves the point past a neighbour rebinds the fields to its new index.
+        e.apply(Action::Curve(CurveAction::Select([1].into())));
+        let props = e.ui.props;
+        e.apply(Action::SetComponent { target: PropTarget::CurvePoint(1), comp: 0, value: 0.6, is_final: true });
+        assert_eq!(e.curve_doc().unwrap().selection, [2].into());
+        assert!(e.ui.props > props);
+        assert_eq!(points(&e)[2], (0.6, 1.0));
+        e.apply(Action::SetComponent { target: PropTarget::CurvePoint(2), comp: 1, value: 0.9, is_final: true });
+        assert_eq!(points(&e)[2], (0.6, 0.9));
+        // Two typed edits, two undo steps.
+        e.apply(Action::Undo);
+        assert_eq!(points(&e)[2], (0.6, 1.0));
+        e.apply(Action::Undo);
+        assert_eq!(points(&e), start);
+
+        // A clamped (no-op) drag does not glue the next real drag to the previous step.
+        e.apply(Action::Curve(CurveAction::Add((0.9, 0.5))));
+        let added = points(&e);
+        let last = added.len() - 1;
+        let drag = |e: &mut Editor, delta| {
+            let (points, selection) = CurveDoc::moved(&added, &[last].into(), delta);
+            e.apply(Action::Curve(CurveAction::SetPoints { points, selection, merge: true }));
+        };
+        drag(&mut e, (0.5, 0.5));
+        drag(&mut e, (0.0, -0.5));
+        e.apply(Action::CommitInline);
+        e.apply(Action::Undo);
+        assert_eq!(points(&e), added);
+
+        // Paste and Ctrl+D place copies beside the originals; Ctrl+D keeps the clipboard.
+        e.apply(Action::Curve(CurveAction::Select([2].into())));
+        e.apply(Action::Copy);
+        let copied = e.curve_clipboard.clone();
+        e.apply(Action::Paste(None));
+        e.apply(Action::Duplicate);
+        assert_eq!(e.curve_clipboard, copied);
+        let p = points(&e);
+        assert_eq!(p.len(), added.len() + 2);
+        let (t, v) = added[2];
+        assert!(
+            p.iter()
+                .filter(|q| q.1 == v)
+                .all(|q| q.0 == t || (q.0 - t - 0.05).abs() < 1e-6 || (q.0 - t - 0.1).abs() < 1e-6)
+        );
+        assert_eq!(p.iter().filter(|q| **q == (t, v)).count(), 1, "no copy on top of the original");
     }
 }

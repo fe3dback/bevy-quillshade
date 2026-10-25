@@ -14,6 +14,7 @@ use bevy::window::PrimaryWindow;
 use icon_rs::{Icon, Kind, Palette};
 use resvg::{tiny_skia, usvg};
 use shader_graph_core::model::{AssetKind, MaterialKind};
+use shader_project::{AssetId, AssetType};
 
 use crate::state::NewKind;
 
@@ -60,10 +61,11 @@ pub enum IconId {
     Fit,
     Copy,
     OpenExternal,
+    Curve,
 }
 
 impl IconId {
-    pub const ALL: [IconId; 24] = [
+    pub const ALL: [IconId; 25] = [
         IconId::File,
         IconId::Folder,
         IconId::FolderOpen,
@@ -88,6 +90,7 @@ impl IconId {
         IconId::Fit,
         IconId::Copy,
         IconId::OpenExternal,
+        IconId::Curve,
     ];
 
     fn source(self) -> Icon {
@@ -116,6 +119,7 @@ impl IconId {
             IconId::Fit => FIT,
             IconId::Copy => icon_rs::COPY,
             IconId::OpenExternal => icon_rs::OPEN_EXTERNAL,
+            IconId::Curve => icon_rs::SPLINE,
         }
     }
 
@@ -130,6 +134,11 @@ impl IconId {
         }
     }
 
+    /// The icon of asset `id`; `kind` is its graph kind when it is a loaded graph.
+    pub fn for_id(id: &AssetId, kind: Option<AssetKind>) -> IconId {
+        if id.ty == AssetType::Curve { IconId::Curve } else { IconId::for_asset(kind) }
+    }
+
     /// The icon of the asset `kind` creates.
     pub fn for_new(kind: NewKind) -> IconId {
         match kind {
@@ -137,6 +146,7 @@ impl IconId {
             NewKind::Unlit3d => IconId::Unlit,
             NewKind::Sprite2d => IconId::Sprite,
             NewKind::Function => IconId::Function,
+            NewKind::Curve => IconId::Curve,
         }
     }
 

@@ -1,7 +1,10 @@
-//! Debug aid: scripted mouse gestures, `SHADER_EDITOR_INPUT=drag|rmb_click|rmb_pan|mmb_pan|slider|color|pin_rmb|hover`
+//! Debug aid: scripted mouse gestures,
+//! `SHADER_EDITOR_INPUT=drag|rmb_click|rmb_pan|mmb_pan|slider|color|pin_rmb|hover|curve_drag|curve_add`
 //! (with `SHADER_EDITOR_SCREENSHOT` and `SHADER_EDITOR_OPEN`; `SHADER_EDITOR_ZOOM=<f32>` sets the canvas zoom
 //! first). `slider`/`color` act on the first inline slider / color button on a node, `pin_rmb` right-clicks the
-//! first input pin of `SHADER_EDITOR_INPUT_NODE`, `hover` rests on the toolbar's Save button (its tooltip). The input goes through the same window messages winit writes,
+//! first input pin of `SHADER_EDITOR_INPUT_NODE`, `hover` rests on the toolbar's Save button (its tooltip),
+//! `curve_drag` drags the second point of an open curve, `curve_add` double-clicks below it. The input goes through
+//! the same window messages winit writes,
 //! so picking, bevy_noodle and the editor see a real gesture; the outcome is logged.
 
 use bevy::feathers::controls::{FeathersColorInput, FeathersColorWheel, FeathersSlider};
@@ -14,6 +17,7 @@ use bevy_noodle::prelude::*;
 
 use crate::canvas::{EditorCanvas, NodeKey, PinKey};
 use crate::state::{Editor, PropTarget};
+use crate::ui::curve_view::CurveHandle;
 use crate::ui::palette::Palette;
 use crate::ui::props::PropField;
 use crate::ui::tooltip::Tooltip;
@@ -70,6 +74,7 @@ pub fn scripted_input(
     ports: Query<(&PinKey, &UiGlobalTransform, &ComputedNode)>,
     wheels: Query<(&UiGlobalTransform, &ComputedNode), With<FeathersColorWheel>>,
     tips: Query<(&Tooltip, &UiGlobalTransform, &ComputedNode)>,
+    handles: Query<(&CurveHandle, &UiGlobalTransform, &ComputedNode)>,
     mut events: MessageWriter<WindowEvent>,
     mut moved: MessageWriter<CursorMoved>,
     mut buttons: MessageWriter<MouseButtonInput>,
@@ -97,6 +102,10 @@ pub fn scripted_input(
         };
         let focus_or_popup = palette.open;
         let rev = d.map(|d| d.revision);
+        if let Some(c) = editor.curve_doc() {
+            info!("demo {name} f{} curve {:?} selection {:?}", s.frame, c.curve.points, c.selection);
+            return;
+        }
         info!(
             "demo {name} f{} rev {rev:?} shown {:?}: node {:?} model {model:?} canvas {shown:?} selection {selection:?} pan {} palette {focus_or_popup} target {:?} = {value:?}",
             s.frame,
@@ -162,6 +171,20 @@ pub fn scripted_input(
                     return;
                 };
                 vec![Step::Move(logical(t, c))]
+            }
+            "curve_drag" | "curve_add" => {
+                let Some((_, t, c)) = handles.iter().find(|h| h.0.index() == 1) else {
+                    error!("demo {name}: no curve point");
+                    return;
+                };
+                let at = logical(t, c);
+                if name == "curve_drag" {
+                    drag(at, MouseButton::Left, Vec2::new(80.0, 60.0))
+                } else {
+                    let at = at + Vec2::new(0.0, 120.0);
+                    let click = || [Step::Press(MouseButton::Left), Step::Wait, Step::Release(MouseButton::Left)];
+                    [Step::Move(at)].into_iter().chain(click()).chain([Step::Wait]).chain(click()).collect()
+                }
             }
             "rmb_pan" => drag(canvas_min + 20.0, MouseButton::Right, Vec2::new(150.0, 80.0)),
             "mmb_pan" => drag(canvas_min + 20.0, MouseButton::Middle, Vec2::new(150.0, 80.0)),

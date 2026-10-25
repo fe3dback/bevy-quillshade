@@ -11,13 +11,14 @@ use bevy::text::{EditableText, TextEditChange};
 use bevy::ui::Checked;
 use bevy::ui_widgets::ValueChange;
 use bevy_noodle::prelude::GraphQuery;
-use shader_graph_core::model::NodeId;
 use shader_graph_core::model::{AssetKind, BlendMode, MaterialKind, Shading};
 use shader_graph_core::registry::{NodeRole, ParamKind};
-use shader_graph_core::{PinType, Value};
+use shader_graph_core::{Interp, PinType, Value};
+use shader_project::{AssetId, AssetType};
 
 use super::dialog::InitText;
 use super::{TEXT, TEXT_DIM, button, text};
+use crate::curve_doc::CurveDoc;
 use crate::doc::{node_signature, route_declarations};
 use crate::state::{Action, Actions, Editor, GenFile, PropTarget, display_value};
 use crate::tab::{Lang, Tab, TextDoc};
@@ -180,21 +181,30 @@ fn text_w(target: PropTarget, v: String, multiline: bool) -> Box<dyn Scene> {
     }
 }
 
-/// Select of a named route declaration: shows names, stores node ids (`(none)` = empty).
-fn route_select(target: PropTarget, routes: &[(NodeId, String)], current: &str) -> Box<dyn Scene> {
+/// Select of `(stored value, label)` choices with a leading `(none)` (= empty string): named route declarations
+/// (node ids), curve assets (paths).
+fn keyed_select(target: PropTarget, choices: &[(String, String)], current: &str) -> Box<dyn Scene> {
     let options: Vec<String> =
-        std::iter::once("(none)".to_string()).chain(routes.iter().map(|r| r.1.clone())).collect();
-    let values: Vec<String> = std::iter::once(String::new()).chain(routes.iter().map(|r| r.0.clone())).collect();
+        std::iter::once("(none)".to_string()).chain(choices.iter().map(|r| r.1.clone())).collect();
+    let values: Vec<String> = std::iter::once(String::new()).chain(choices.iter().map(|r| r.0.clone())).collect();
     let cur = values.iter().position(|v| v == current).unwrap_or(0);
     let rows = list_rows_from_strings(options.clone(), Some(cur));
     let field = PropField { target, options, values, ..Default::default() };
     Box::new(bsn! { @FeathersSelect { @options: rows, @max_visible: 10 } Node { flex_grow: 1.0 } field })
 }
 
-/// Widget editing a value of `kind`; `routes` are the named route declarations of the asset.
-fn value_widget(target: PropTarget, kind: &ParamKind, v: &Value, routes: &[(NodeId, String)]) -> Box<dyn Scene> {
+/// Choices of reference parameters: named route declarations of the asset, curve assets of the project.
+#[derive(Default)]
+struct Choices {
+    routes: Vec<(String, String)>,
+    curves: Vec<(String, String)>,
+}
+
+/// Widget editing a value of `kind`.
+fn value_widget(target: PropTarget, kind: &ParamKind, v: &Value, choices: &Choices) -> Box<dyn Scene> {
     match kind {
-        ParamKind::Route => route_select(target, routes, v.as_str()),
+        ParamKind::Route => keyed_select(target, &choices.routes, v.as_str()),
+        ParamKind::Curve => keyed_select(target, &choices.curves, v.as_str()),
         ParamKind::Float { .. } => number(target, 0, v.as_f32(), None),
         ParamKind::Float2 => vector(target, &v.coerce(PinType::Float2).floats(), false),
         ParamKind::Float3 => vector(target, &v.coerce(PinType::Float3).floats(), false),
@@ -242,6 +252,48 @@ fn text_rows(t: &TextDoc, out: &mut Vec<Box<dyn Scene>>) {
     }
     out.push(Box::new(button("Open source graph", Action::OpenAsset(t.source.clone()), true)));
     out.push(Box::new(button("Open in default application", Action::ShowFile(t.source.clone(), which), false)));
+}
+
+/// A curve tab: preview mode, the selected point, actions.
+fn curve_rows(c: &CurveDoc, out: &mut Vec<Box<dyn Scene>>) {
+    out.push(Box::new(text(c.id.source_rel(), TEXT, 15.0)));
+    out.push(Box::new(text(format!("Type: Curve, {} point(s)", c.curve.points.len()), TEXT_DIM, 12.0)));
+    out.push(Box::new(section("Preview")));
+    let labels: Vec<String> = Interp::ALL.iter().map(|i| i.label().to_string()).collect();
+    let cur = Interp::ALL.iter().position(|i| *i == c.preview).unwrap_or(0);
+    out.push(Box::new(labeled("Interpolation".into(), select_w(PropTarget::CurvePreview, labels, Vec::new(), cur))));
+    out.push(Box::new(text(
+        "Only the preview: each Sample Curve node picks its own type; the file stores just the points.",
+        TEXT_DIM,
+        12.0,
+    )));
+    match c.selection.len() {
+        0 => {}
+        1 => {
+            let i = *c.selection.first().expect("one");
+            if let Some((t, v)) = c.curve.points.get(i) {
+                out.push(Box::new(section(format!("Point {}", i + 1))));
+                let target = PropTarget::CurvePoint(i);
+                out.push(Box::new(labeled("T".into(), number(target.clone(), 0, *t, None))));
+                out.push(Box::new(labeled("Value".into(), number(target, 1, *v, None))));
+            }
+        }
+        n => {
+            out.push(Box::new(section("Selection")));
+            out.push(Box::new(text(format!("{n} points selected"), TEXT, 13.0)));
+        }
+    }
+    if !c.selection.is_empty() {
+        out.push(Box::new(button("Delete selected (Del)", Action::DeleteSelection, false)));
+    }
+    out.push(Box::new(section("Curve")));
+    out.push(Box::new(button("Show generated WESL", Action::ShowGenerated(c.id.clone(), Lang::Wesl), false)));
+    out.push(Box::new(text(
+        "Double-click: add a point | Drag: move | Shift+click: multi-select | Del: delete | Ctrl+A: select all | \
+         Arrows: nudge (Shift: x10) | Right-click: menu",
+        TEXT_DIM,
+        12.0,
+    )));
 }
 
 fn asset_rows(editor: &Editor, out: &mut Vec<Box<dyn Scene>>) {
@@ -310,7 +362,10 @@ fn node_rows(editor: &Editor, id: &str, out: &mut Vec<Box<dyn Scene>>) {
         out.push(Box::new(text(info.description.clone(), TEXT_DIM, 12.0)));
     }
     let params = editor.registry.resolved_params(&n.kind, &n.params);
-    let routes = route_declarations(&d.asset, &editor.registry);
+    let choices = Choices {
+        routes: route_declarations(&d.asset, &editor.registry),
+        curves: editor.curve_paths().into_iter().map(|p| (p.clone(), p)).collect(),
+    };
     let defs = def.params();
     if !defs.is_empty() {
         out.push(Box::new(section("Parameters")));
@@ -318,7 +373,19 @@ fn node_rows(editor: &Editor, id: &str, out: &mut Vec<Box<dyn Scene>>) {
     for p in &defs {
         let v = params.get(&p.id).cloned().unwrap_or_else(|| p.default.clone());
         let target = PropTarget::Param { node: id.to_string(), key: p.id.clone() };
-        out.push(Box::new(labeled(p.label.clone(), value_widget(target, &p.kind, &v, &routes))));
+        // A deleted or broken curve stays visible as the current choice (the node reports E006).
+        let mut choices_here = None;
+        if p.kind == ParamKind::Curve && !v.as_str().is_empty() && !choices.curves.iter().any(|c| c.0 == v.as_str()) {
+            let mut c = Choices { routes: Vec::new(), curves: choices.curves.clone() };
+            c.curves.push((v.as_str().to_string(), format!("{} (missing)", v.as_str())));
+            choices_here = Some(c);
+        }
+        let choices = choices_here.as_ref().unwrap_or(&choices);
+        out.push(Box::new(labeled(p.label.clone(), value_widget(target, &p.kind, &v, choices))));
+        if p.kind == ParamKind::Curve && !v.as_str().is_empty() {
+            let open = Action::OpenAsset(AssetId::new(AssetType::Curve, v.as_str()));
+            out.push(Box::new(button("Open curve", open, false)));
+        }
     }
     let Some(sig) = node_signature(&d.asset, id, &editor.registry, &editor.functions, &d.id.path) else { return };
     let mut header = false;
@@ -336,7 +403,7 @@ fn node_rows(editor: &Editor, id: &str, out: &mut Vec<Box<dyn Scene>>) {
         let v = n.inputs.get(&pin.id).cloned().unwrap_or_else(|| pin.default.coerce(pin.ty));
         let target = PropTarget::Input { node: id.to_string(), pin: pin.id.clone() };
         let label = if pin.label.is_empty() { pin.id.clone() } else { pin.label.clone() };
-        out.push(Box::new(labeled(label, value_widget(target, &kind, &v, &[]))));
+        out.push(Box::new(labeled(label, value_widget(target, &kind, &v, &Choices::default()))));
     }
     let diags = editor.node_diags();
     if let Some(list) = diags.get(id) {
@@ -365,6 +432,7 @@ fn redraw(
     match editor.tab() {
         None => rows.push(Box::new(text("Nothing open.", TEXT_DIM, 13.0))),
         Some(Tab::Text(t)) => text_rows(t, &mut rows),
+        Some(Tab::Curve(c)) => curve_rows(c, &mut rows),
         Some(Tab::Graph(d)) => {
             if let Some(f) = d.selected_frame.as_ref().and_then(|f| d.asset.comments.iter().find(|c| c.id == *f)) {
                 rows.push(Box::new(text("Comment", TEXT, 15.0)));

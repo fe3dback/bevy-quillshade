@@ -5,6 +5,7 @@ pub mod paths;
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use shader_graph_core::curve::{Curve, Interp, curve_fn_alias};
 use shader_graph_core::ident::to_pascal_case;
 use shader_graph_core::registry::{Builtin, FunctionSig, ParamType};
 use shader_graph_core::{BlendMode, GENERATOR_VERSION, Ir, IrStage, MaterialKind, NodeId, PinType};
@@ -109,6 +110,10 @@ fn graph_imports(ir: &Ir, extra_stdlib: &[(&str, &str)], this: &[String], ctx: &
         } else {
             imports.add(&paths::relative(this, &paths::stdlib_module(module)), func);
         }
+    }
+    for (path, interp) in &ir.curves {
+        let m = paths::relative(this, &paths::curve_module(path));
+        imports.add(&m, &format!("{} as {}", interp.wesl_fn(), curve_fn_alias(path, *interp)));
     }
     for path in &ir.functions {
         let Some(sig) = ctx.functions.get(path) else { continue };
@@ -577,6 +582,55 @@ pub fn function(ir: &Ir, ctx: &GenCtx) -> Generated {
     }
     w.line("}");
     w.finish()
+}
+
+/// Generates the WESL module of a curve asset at `path` (decision 0015): the points as a const array of
+/// `(t, value, slope)` and one sampling function per [`Interp`].
+pub fn curve(c: &Curve, path: &str, source_file: &str) -> String {
+    let this = paths::curve_module(path);
+    let mut w = Writer::default();
+    w.line(header(source_file));
+    w.line(format!("// stdlib v{}", shader_stdlib::STDLIB_VERSION));
+    let n = c.points.len();
+    if n >= 2 {
+        let m = paths::relative(&this, &paths::stdlib_module("curve"));
+        w.line(format!("import {m}::{{sg_curve_hermite, sg_curve_linear}};"));
+        w.blank();
+        let f = shader_graph_core::value::wesl_f32;
+        w.line("// (t, value, slope) per point, sorted by t.");
+        w.line(format!("const POINTS: array<vec3<f32>, {n}> = array<vec3<f32>, {n}>("));
+        for ((t, v), s) in c.points.iter().zip(c.slopes()) {
+            w.line(format!("    vec3<f32>({}, {}, {}),", f(*t), f(*v), f(s)));
+        }
+        w.line(");");
+        w.blank();
+        w.line("// Index of the segment [POINTS[i], POINTS[i + 1]] containing `x`.");
+        w.line("fn segment(x: f32) -> u32 {");
+        w.line("    var i = 0u;");
+        w.line(format!("    for (var k = 1u; k < {}u; k++) {{", n - 1));
+        w.line("        if x >= POINTS[k].x {");
+        w.line("            i = k;");
+        w.line("        }");
+        w.line("    }");
+        w.line("    return i;");
+        w.line("}");
+    }
+    for interp in [Interp::Simple, Interp::CatmullRom] {
+        w.blank();
+        w.line(format!("fn {}(t: f32) -> f32 {{", interp.wesl_fn()));
+        match n {
+            0 => w.line("    return 0.0f;"),
+            1 => w.line(format!("    return {};", shader_graph_core::value::wesl_scalar(c.points[0].1))),
+            _ => {
+                let helper = if interp == Interp::Simple { "sg_curve_linear" } else { "sg_curve_hermite" };
+                w.line(format!("    let x = clamp(t, POINTS[0].x, POINTS[{}].x);", n - 1));
+                w.line("    let i = segment(x);");
+                w.line(format!("    return {helper}(POINTS[i], POINTS[i + 1u], x);"));
+            }
+        }
+        w.line("}");
+    }
+    w.finish().text
 }
 
 /// `autogen/stdlib/{name}.wesl` content.

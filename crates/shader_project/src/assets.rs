@@ -1,8 +1,9 @@
-//! Editor asset discovery and loading (`shaders/**/*.{material,function}.ron`).
+//! Editor asset discovery and loading (`shaders/**/*.{material,function,curve}.ron`).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use shader_graph_core::curve::Curve;
 use shader_graph_core::ident::check_ident;
 use shader_graph_core::model::{Asset, AssetKind};
 use shader_graph_core::{Code, Diagnostic, Registry};
@@ -12,6 +13,8 @@ use crate::layout::{Project, USER_NODES_DIR};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum AssetType {
+    /// Curve asset (decision 0015), not a node graph.
+    Curve,
     Function,
     Material,
 }
@@ -21,7 +24,13 @@ impl AssetType {
         match self {
             AssetType::Material => "material",
             AssetType::Function => "function",
+            AssetType::Curve => "curve",
         }
+    }
+
+    /// Node graph assets (materials, functions), stored as [`Asset`].
+    pub fn is_graph(self) -> bool {
+        self != AssetType::Curve
     }
 
     pub fn of(kind: &AssetKind) -> Self {
@@ -64,11 +73,9 @@ impl std::fmt::Display for AssetId {
 /// Parses `shaders/`-relative file path into an asset id.
 pub fn id_from_rel(rel: &str) -> Option<AssetId> {
     let rel = rel.replace('\\', "/");
-    if let Some(p) = rel.strip_suffix(".material.ron") {
-        Some(AssetId::new(AssetType::Material, p))
-    } else {
-        rel.strip_suffix(".function.ron").map(|p| AssetId::new(AssetType::Function, p))
-    }
+    [AssetType::Material, AssetType::Function, AssetType::Curve]
+        .into_iter()
+        .find_map(|ty| rel.strip_suffix(&format!(".{}.ron", ty.suffix())).map(|p| AssetId::new(ty, p)))
 }
 
 /// Inverse of [`AssetId::source_rel`]: `shaders/env/rock_wet.material.ron` (relative to the project root).
@@ -123,8 +130,11 @@ pub fn scan_dirs(project: &Project) -> Vec<String> {
     out
 }
 
-/// Loads an asset file; the file name wins over the `name` stored inside.
+/// Loads a graph asset file; the file name wins over the `name` stored inside.
 pub fn load(project: &Project, id: &AssetId) -> Result<Asset, String> {
+    if !id.ty.is_graph() {
+        return Err(format!("{} is not a node graph", id.source_rel()));
+    }
     let text = std::fs::read_to_string(id.file(project)).map_err(|e| e.to_string())?;
     let mut asset = Asset::from_ron(&text).map_err(|e| e.to_string())?;
     asset.name = id.name().to_string();
@@ -132,6 +142,17 @@ pub fn load(project: &Project, id: &AssetId) -> Result<Asset, String> {
         return Err(format!("file suffix `.{}.ron` does not match asset kind", id.ty.suffix()));
     }
     Ok(asset)
+}
+
+/// Loads a curve file; the file name wins over the `name` stored inside.
+pub fn load_curve(project: &Project, id: &AssetId) -> Result<Curve, String> {
+    if id.ty != AssetType::Curve {
+        return Err(format!("{} is not a curve", id.source_rel()));
+    }
+    let text = std::fs::read_to_string(id.file(project)).map_err(|e| e.to_string())?;
+    let mut curve = Curve::from_ron(&text).map_err(|e| e.to_string())?;
+    curve.name = id.name().to_string();
+    Ok(curve)
 }
 
 /// Checks the asset path (spec §5): snake_case components, no reserved autogen directories.
@@ -144,7 +165,7 @@ pub fn validate_path(id: &AssetId) -> Vec<Diagnostic> {
             out.push(Diagnostic::new(Code::E005, format!("{what}: {e}")).in_asset(id.source_rel()));
         }
     }
-    if id.ty == AssetType::Material && parts.len() > 1 && matches!(parts[0], "stdlib" | "functions") {
+    if id.ty == AssetType::Material && parts.len() > 1 && matches!(parts[0], "stdlib" | "functions" | "curves") {
         out.push(
             Diagnostic::new(
                 Code::E005,
@@ -199,20 +220,41 @@ pub fn load_user_nodes(project: &Project, registry: &mut Registry) -> Vec<Diagno
 /// Loaded project assets.
 #[derive(Default, Clone)]
 pub struct AssetSet {
+    /// Node graphs (materials, functions).
     pub assets: BTreeMap<AssetId, Result<Asset, String>>,
+    pub curves: BTreeMap<AssetId, Result<Curve, String>>,
 }
 
 impl AssetSet {
     pub fn load_all(project: &Project) -> AssetSet {
-        let assets = scan(project).into_iter().map(|id| {
-            let a = load(project, &id);
-            (id, a)
-        });
-        AssetSet { assets: assets.collect() }
+        let mut set = AssetSet::default();
+        for id in scan(project) {
+            if id.ty.is_graph() {
+                let a = load(project, &id);
+                set.assets.insert(id, a);
+            } else {
+                let c = load_curve(project, &id);
+                set.curves.insert(id, c);
+            }
+        }
+        set
     }
 
+    /// Every asset, graphs and curves (sorted within each kind).
     pub fn ids(&self) -> impl Iterator<Item = &AssetId> {
-        self.assets.keys()
+        self.assets.keys().chain(self.curves.keys())
+    }
+
+    pub fn contains(&self, id: &AssetId) -> bool {
+        self.assets.contains_key(id) || self.curves.contains_key(id)
+    }
+
+    pub fn len(&self) -> usize {
+        self.assets.len() + self.curves.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 }
 

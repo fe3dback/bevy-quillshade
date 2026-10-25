@@ -3,12 +3,13 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
+use crate::curve::Interp;
 use crate::diag::{Code, Diagnostic, Diagnostics};
 use crate::ident::check_ident;
 use crate::model::{Asset, AssetKind, Edge, NodeId};
 use crate::registry::{
-    Builtin, EmitCtx, EmitSink, Env, FnPort, FunctionLookup, FunctionSig, IrLine, MaterialParam, NodeDef, NodeRole,
-    Operand, ParamType, ROUTE_PARAM, Registry, SigCtx, Signature, Stage,
+    Builtin, CurveLookup, EmitCtx, EmitSink, Env, FnPort, FunctionLookup, FunctionSig, IrLine, MaterialParam, NodeDef,
+    NodeRole, Operand, ParamType, ROUTE_PARAM, Registry, SigCtx, Signature, Stage,
 };
 use crate::types::{PinType, conversion};
 use crate::value::Value;
@@ -152,6 +153,8 @@ pub struct Ir {
     pub stdlib: BTreeSet<(String, String)>,
     /// Project functions called (paths).
     pub functions: BTreeSet<String>,
+    /// Curves sampled (asset path, interpolation).
+    pub curves: BTreeSet<(String, Interp)>,
     /// Standalone fns of Custom nodes (name → full definition).
     pub custom_fns: BTreeMap<String, String>,
     /// Function assets: callable signature (with hidden builtins).
@@ -256,11 +259,17 @@ pub fn with_routes<'a>(asset: &'a Asset, registry: &Registry) -> Cow<'a, Asset> 
 }
 
 /// Builds the IR of `asset` located at `path` (`{sub}/{name}` without suffix).
-pub fn build_ir(asset: &Asset, path: &str, registry: &Registry, functions: &dyn FunctionLookup) -> IrResult {
+pub fn build_ir(
+    asset: &Asset,
+    path: &str,
+    registry: &Registry,
+    functions: &dyn FunctionLookup,
+    curves: &dyn CurveLookup,
+) -> IrResult {
     let routed = with_routes(asset, registry);
     let asset = routed.as_ref();
     let mut diags = Diagnostics::default();
-    let env = Env { asset_kind: asset.kind, asset_path: path, functions };
+    let env = Env { asset_kind: asset.kind, asset_path: path, functions, curves };
 
     if let Err(e) = check_ident(&asset.name) {
         diags.push(Diagnostic::new(Code::E005, format!("asset name: {e}")));
@@ -568,11 +577,13 @@ pub fn build_ir(asset: &Asset, path: &str, registry: &Registry, functions: &dyn 
     // 7. Collect parameters, imports, signatures.
     let mut stdlib = BTreeSet::new();
     let mut functions_used = BTreeSet::new();
+    let mut curves_used = BTreeSet::new();
     let mut custom_fns = BTreeMap::new();
     let mut params_by_node: BTreeMap<NodeId, MaterialParam> = BTreeMap::new();
     for sink in stages.values() {
         stdlib.extend(sink.stdlib.iter().cloned());
         functions_used.extend(sink.functions.iter().cloned());
+        curves_used.extend(sink.curves.iter().cloned());
         custom_fns.extend(sink.custom_fns.iter().map(|(k, v)| (k.clone(), v.clone())));
         params_by_node.extend(sink.params.iter().map(|(k, v)| (k.clone(), v.clone())));
     }
@@ -668,6 +679,7 @@ pub fn build_ir(asset: &Asset, path: &str, registry: &Registry, functions: &dyn 
             uniform,
             stdlib,
             functions: functions_used,
+            curves: curves_used,
             custom_fns,
             function_sig,
             uses_normal,

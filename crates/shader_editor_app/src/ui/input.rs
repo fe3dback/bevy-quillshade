@@ -60,13 +60,15 @@ fn shortcuts(
     window: Query<&Window>,
     ec: Option<Res<EditorCanvas>>,
     canvases: Query<(&ComputedNode, &UiGlobalTransform, &CanvasView)>,
+    editor: Res<Editor>,
     mut palette: ResMut<Palette>,
     mut actions: ResMut<Actions>,
 ) {
     use KeyCode::*;
     let ctrl = keys.any_pressed([ControlLeft, ControlRight, SuperLeft, SuperRight]);
     let shift = keys.any_pressed([ShiftLeft, ShiftRight]);
-    let at = ec.as_ref().and_then(|ec| cursor_graph(&window, ec, &canvases));
+    // The (hidden) graph canvas has the same rect as the other views: only a graph tab has a graph position.
+    let at = ec.as_ref().filter(|_| editor.doc().is_some()).and_then(|ec| cursor_graph(&window, ec, &canvases));
     let mut push = |a: Action| actions.push(a);
     if ctrl {
         match () {
@@ -77,6 +79,7 @@ fn shortcuts(
             _ if keys.just_pressed(KeyX) => push(Action::Cut),
             _ if keys.just_pressed(KeyV) => push(Action::Paste(at.map(|(_, g)| (g.x, g.y)))),
             _ if keys.just_pressed(KeyD) => push(Action::Duplicate),
+            _ if keys.just_pressed(KeyA) => push(Action::SelectAll),
             _ if keys.just_pressed(KeyW) => {
                 // Resolved against the active tab when applied.
                 push(Action::CloseTab(usize::MAX));

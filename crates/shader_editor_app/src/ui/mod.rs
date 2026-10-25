@@ -14,6 +14,8 @@ use crate::state::{Action, Actions, Editor, NewKind, ViewRequest};
 use crate::tab::{Tab, ViewKind};
 
 pub mod browser;
+pub mod curve_preview;
+pub mod curve_view;
 pub mod dialog;
 pub mod icons;
 pub mod input;
@@ -78,6 +80,8 @@ impl Plugin for UiPlugin {
             browser::BrowserPlugin,
             tabs::TabsPlugin,
             text_view::TextViewPlugin,
+            curve_view::CurveViewPlugin,
+            curve_preview::CurvePreviewPlugin,
             props::PropsPlugin,
             log::LogPlugin,
             dialog::DialogPlugin,
@@ -256,6 +260,7 @@ fn spawn_layout(mut commands: Commands) {
                 NewKind::Unlit3d => "+Unlit",
                 NewKind::Sprite2d => "+2D",
                 NewKind::Function => "+Fn",
+                NewKind::Curve => "+Curve",
             };
             let tip = format!("New {}...", k.label());
             Box::new(icon_tool_button(IconId::for_new(*k), short, Action::NewAssetDialog(*k), tip))
@@ -297,10 +302,12 @@ fn spawn_layout(mut commands: Commands) {
                         --
                         @text_view::text_view()
                         --
+                        @curve_view::curve_view()
+                        --
                         EmptyHint
                         Node { position_type: PositionType::Absolute, left: px(24), top: px(24) }
                         Pickable::IGNORE
-                        Children [ @text("Open an asset from the browser (or create one with +Pbr / +Unlit / +2D / +Fn).", TEXT_DIM, 14.0) ]
+                        Children [ @text("Open an asset from the browser (or create one with +Pbr / +Unlit / +2D / +Fn / +Curve).", TEXT_DIM, 14.0) ]
                         --
                         // Over the active view, whatever kind it is.
                         DocKindText
@@ -369,6 +376,7 @@ fn doc_kind_label(tab: &Tab) -> &'static str {
             AssetKind::Material(MaterialKind::Sprite2d(_)) => "sprite2d",
         },
         Tab::Text(t) => t.lang.label(),
+        Tab::Curve(_) => "curve",
     }
 }
 
@@ -388,7 +396,7 @@ fn show_status(editor: Res<Editor>, mut q: Query<&mut Text, With<StatusText>>, m
     let status = match &editor.project {
         Some(p) => {
             let errors = editor.all_diagnostics().iter().filter(|d| d.is_error()).count();
-            format!("{}  |  {} asset(s)  |  {} error(s)", p.root.display(), editor.disk.assets.len(), errors)
+            format!("{}  |  {} asset(s)  |  {} error(s)", p.root.display(), editor.disk.len(), errors)
         }
         None => "No project".into(),
     };

@@ -79,6 +79,11 @@ atomic write. Key facts that span several files:
   `crates/shader_stdlib/wesl/*.wesl`, embedded via `include_str!` (`MODULES` in `lib.rs`) and always written to
   `autogen/stdlib/`. User nodes (`shaders/.nodes/*.ron`, kind `user::<id>`) go through the same trait
   (`shader_stdlib::user`).
+- **Curves** (`shaders/**/*.curve.ron`, decision 0015) are not graphs: `shader_graph_core::curve::Curve`,
+  `AssetType::Curve`, kept in `AssetSet::curves` (not `assets`). Each becomes its own module
+  `autogen/curves/<path>.wesl`; the `stdlib::SampleCurve` node (param of `ParamKind::Curve`) imports
+  `sample_curve_simple`/`sample_curve_catmullrom` from it under a per-curve alias (`curve_fn_alias`).
+  `curve_refs` finds the nodes referring to a curve (deps, rename). `Curve::sample` is the reference math.
 - **Node kinds** are string paths: `stdlib::*`, `param::*`, `output::*`, `function::<sub/name>`, `user::<id>`.
 - **Type conversions** (broadcast, truncation, Color↔Float4, Int→Float) are applied in codegen on the edge, not as
   inserted nodes (`shader_graph_core::types::conversion`); truncation emits W104.
@@ -104,8 +109,9 @@ atomic write. Key facts that span several files:
   bevy_noodle's scene history.
 - Connection validity is decided by `doc::connection_error` via a custom `ConnectionCheck` (bevy_noodle ports are all
   `PortType::ANY`).
-- Tabs are `tab::Tab` (graph `Doc` or read-only `TextDoc` of a generated file); `Editor::doc()` is `None` on a
-  non-graph tab. Each content kind has a view in `ui::DocArea` tagged `ViewOf(ViewKind)` (decision 0014 lists what
+- Tabs are `tab::Tab` (graph `Doc`, read-only `TextDoc` of a generated file, `CurveDoc`); `Editor::doc()` is
+  `None` on a non-graph tab, `Editor::curve_doc()` gives the curve one. Both document kinds share
+  `history::History<T>`. Each content kind has a view in `ui::DocArea` tagged `ViewOf(ViewKind)` (decision 0014 lists what
   a new kind needs). WESL/Rust highlighting is our own lexer (`highlight.rs`).
 - UI is pure Bevy UI + Feathers (`bsn!`); **no egui**. Workarounds for Feathers 0.20 bugs are in `fixes.rs`.
 - `EditorCorePlugin` runs without a window — logic is tested in `state::tests` and `tests/ui_smoke.rs`.
@@ -153,13 +159,13 @@ hand-drawn ones, rasterized at runtime with resvg (`crates/shader_editor_app/src
 
 - Editor: `SHADER_EDITOR_SCREENSHOT=out.png [SHADER_EDITOR_OPEN=env/rock_wet.material.ron[#wesl|#rust]]
   [SHADER_EDITOR_SELECT=stdlib::Lerp] [SHADER_EDITOR_DEMO=palette|wire|dialog|menu] cargo run -- examples/sample_game`
-  — renders, saves the PNG and exits. `SHADER_EDITOR_INPUT=drag|rmb_click|rmb_pan|mmb_pan|slider|color|pin_rmb|hover`
+  — renders, saves the PNG and exits. `SHADER_EDITOR_INPUT=drag|rmb_click|rmb_pan|mmb_pan|slider|color|pin_rmb|hover|curve_drag|curve_add`
   (+ `SHADER_EDITOR_INPUT_NODE=<id>`, `SHADER_EDITOR_INPUT_TRACE=1`, `SHADER_EDITOR_ZOOM=<f32>`) plays a scripted mouse
   gesture through winit's messages and logs the outcome (`demo` lines; `slider`/`color` also log the edited value).
 - Sample game: `cd examples/sample_game && SAMPLE_SCREENSHOT=out cargo run` → `out-1.png`, `out-2.png` (used to verify
   hot reload). Render comparison (PSNR) is not automated.
 
-## File format (`*.material.ron` / `*.function.ron`)
+## File format (`*.material.ron` / `*.function.ron`; curves: decision 0015)
 
 Serialized `Asset { format_version, kind, name, nodes, edges, comments, meta }` with struct names, 2-space indent,
 nodes in a `BTreeMap` by id. Asset name comes from the file name (file wins over the `name` field); names must be

@@ -23,6 +23,13 @@ pub fn function_module(path: &str) -> Vec<String> {
     m
 }
 
+pub fn curve_module(path: &str) -> Vec<String> {
+    let mut m: Vec<String> = AUTOGEN.iter().map(|s| s.to_string()).collect();
+    m.push("curves".into());
+    m.extend(split(path));
+    m
+}
+
 pub fn stdlib_module(name: &str) -> Vec<String> {
     let mut m: Vec<String> = AUTOGEN.iter().map(|s| s.to_string()).collect();
     m.push("stdlib".into());

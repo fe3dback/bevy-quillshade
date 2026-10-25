@@ -1,9 +1,10 @@
 //! Asset file operations used by the asset browser and tests (regenerate afterwards).
 
 use shader_graph_core::Value;
+use shader_graph_core::curve::Curve;
 use shader_graph_core::ident::check_ident;
 use shader_graph_core::model::{Asset, AssetKind, MaterialKind, Node};
-use shader_graph_core::registry::FUNCTION_PREFIX;
+use shader_graph_core::registry::{FUNCTION_PREFIX, Registry, curve_refs};
 
 use crate::assets::{self, AssetId, AssetType};
 use crate::layout::Project;
@@ -44,15 +45,24 @@ fn check_path(path: &str) -> Result<(), OpError> {
     Ok(())
 }
 
-/// Writes an asset file (creating `shaders/` and parent directories).
+/// Writes a graph asset file (creating `shaders/` and parent directories).
 pub fn save(project: &Project, id: &AssetId, asset: &Asset) -> Result<(), OpError> {
+    write_source(project, id, &asset.to_ron())
+}
+
+/// Writes a curve file (creating `shaders/` and parent directories).
+pub fn save_curve(project: &Project, id: &AssetId, curve: &Curve) -> Result<(), OpError> {
+    write_source(project, id, &curve.to_ron())
+}
+
+fn write_source(project: &Project, id: &AssetId, text: &str) -> Result<(), OpError> {
     project.ensure_shaders_dir()?;
     let file = id.file(project);
     if let Some(dir) = file.parent() {
         std::fs::create_dir_all(dir)?;
     }
     let tmp = file.with_extension("ron.tmp");
-    std::fs::write(&tmp, asset.to_ron())?;
+    std::fs::write(&tmp, text)?;
     std::fs::rename(&tmp, &file)?;
     Ok(())
 }
@@ -63,6 +73,17 @@ pub fn create_material(project: &Project, path: &str, kind: MaterialKind) -> Res
 
 pub fn create_function(project: &Project, path: &str) -> Result<AssetId, OpError> {
     create(project, path, AssetKind::Function)
+}
+
+/// New curve asset: a straight ramp from (0, 0) to (1, 1).
+pub fn create_curve(project: &Project, path: &str) -> Result<AssetId, OpError> {
+    check_path(path)?;
+    let id = AssetId::new(AssetType::Curve, path);
+    if id.file(project).exists() {
+        return Err(OpError::Exists(id.source_rel()));
+    }
+    save_curve(project, &id, &Curve::ramp(id.name()))?;
+    Ok(id)
 }
 
 fn create(project: &Project, path: &str, kind: AssetKind) -> Result<AssetId, OpError> {
@@ -82,7 +103,7 @@ pub fn create_folder(project: &Project, path: &str) -> Result<(), OpError> {
     Ok(())
 }
 
-/// Renames/moves an asset; function references in other assets are updated.
+/// Renames/moves an asset; function and curve references in other assets are updated.
 pub fn rename(project: &Project, id: &AssetId, new_path: &str) -> Result<AssetId, OpError> {
     check_path(new_path)?;
     let new_id = AssetId::new(id.ty, new_path);
@@ -92,13 +113,28 @@ pub fn rename(project: &Project, id: &AssetId, new_path: &str) -> Result<AssetId
     if new_id.file(project).exists() {
         return Err(OpError::Exists(new_id.source_rel()));
     }
-    let mut asset = assets::load(project, id).map_err(OpError::Invalid)?;
-    asset.name = new_id.name().to_string();
-    save(project, &new_id, &asset)?;
+    if id.ty == AssetType::Curve {
+        let mut curve = assets::load_curve(project, id).map_err(OpError::Invalid)?;
+        curve.name = new_id.name().to_string();
+        save_curve(project, &new_id, &curve)?;
+    } else {
+        let mut asset = assets::load(project, id).map_err(OpError::Invalid)?;
+        asset.name = new_id.name().to_string();
+        save(project, &new_id, &asset)?;
+    }
     std::fs::remove_file(id.file(project))?;
+    if id.ty == AssetType::Curve {
+        let (registry, _) = crate::regen::project_registry(project);
+        for other in assets::scan(project).into_iter().filter(|o| o.ty.is_graph()) {
+            let Ok(mut a) = assets::load(project, &other) else { continue };
+            if rename_curve_refs(&mut a, &registry, &id.path, new_path) {
+                save(project, &other, &a)?;
+            }
+        }
+    }
     if id.ty == AssetType::Function {
         let (old_kind, new_kind) = (format!("{FUNCTION_PREFIX}{}", id.path), format!("{FUNCTION_PREFIX}{new_path}"));
-        for other in assets::scan(project) {
+        for other in assets::scan(project).into_iter().filter(|o| o.ty.is_graph()) {
             let Ok(mut a) = assets::load(project, &other) else { continue };
             let mut changed = false;
             for n in a.nodes.values_mut() {
@@ -113,6 +149,18 @@ pub fn rename(project: &Project, id: &AssetId, new_path: &str) -> Result<AssetId
         }
     }
     Ok(new_id)
+}
+
+/// Points every node of `asset` that samples curve `old` to `new`; returns whether anything changed.
+pub fn rename_curve_refs(asset: &mut Asset, registry: &Registry, old: &str, new: &str) -> bool {
+    let refs: Vec<(String, String)> =
+        curve_refs(asset, registry).into_iter().filter(|r| r.2 == old).map(|(n, p, _)| (n, p)).collect();
+    for (node, param) in &refs {
+        if let Some(n) = asset.nodes.get_mut(node) {
+            n.params.insert(param.clone(), Value::Str(new.to_string()));
+        }
+    }
+    !refs.is_empty()
 }
 
 /// Moves an asset into directory `dir` (`""` = shaders root).

@@ -1,10 +1,10 @@
-//! Utility category: If, logic, shading helpers, FunctionCall, Custom, Reroute, Named Route.
+//! Utility category: If, logic, shading helpers, FunctionCall, Custom, Reroute, Named Route, Sample Curve.
 
 use shader_graph_core::registry::{
     Builtin, FUNCTION_CALL_KIND, FUNCTION_PREFIX, NodeRole, Operand, ParamDef, ParamKind, PinDef, ROUTE_PARAM,
     Registry, Signature,
 };
-use shader_graph_core::{Code, EmitCtx, PinType, SigCtx, Value};
+use shader_graph_core::{Code, EmitCtx, Interp, PinType, SigCtx, Value};
 
 use crate::def::{def, pin_in, pin_out, poly_ins, poly_out, sig};
 
@@ -306,6 +306,42 @@ pub fn register(r: &mut Registry) {
             .role(NodeRole::RouteUsage)
             .param(ParamDef::new(ROUTE_PARAM, "Route", ParamKind::Route, Value::Str(String::new())))
             .build(pass_through_sig, pass_through),
+    );
+    // Curve assets (decision 0015): the data is baked into the curve's own WESL module.
+    let interps: Vec<String> = Interp::ALL.iter().map(|i| i.label().to_string()).collect();
+    r.register(
+        def("stdlib::SampleCurve", "Sample Curve", CAT)
+            .kw(&["curve", "float curve", "ramp", "falloff", "easing", "spline", "catmull"])
+            .desc("Value of a curve asset at T (0..1). Simple: linear between points; Catmull-Rom: smooth.")
+            .param(ParamDef::new("curve", "Curve", ParamKind::Curve, Value::Str(String::new())))
+            .param(ParamDef::new(
+                "type",
+                "Type",
+                ParamKind::Enum(interps),
+                Value::Str(Interp::CatmullRom.label().into()),
+            ))
+            .build(
+                |_| {
+                    sig(
+                        vec![pin_in("t", "T", PinType::Float, 0.0).range(0.0, 1.0)],
+                        vec![pin_out("out", "", PinType::Float)],
+                    )
+                },
+                |c| {
+                    let path = c.param("curve").as_str().to_string();
+                    let interp = Interp::from_label(c.param("type").as_str()).unwrap_or_default();
+                    if path.is_empty() {
+                        c.diag(Code::E004, "no curve selected");
+                        return;
+                    }
+                    let Some(f) = c.use_curve(&path, interp) else {
+                        c.diag(Code::E006, format!("curve `{path}` does not exist or cannot be loaded"));
+                        return;
+                    };
+                    let t = c.input("t");
+                    c.define("out", format!("{f}({t})"));
+                },
+            ),
     );
 }
 
