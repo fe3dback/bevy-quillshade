@@ -24,6 +24,8 @@ clap = { version = "4", features = ["derive"] }
 insta = "1"
 tempfile = "3"
 toml = "1"
+icon-rs = "=0.4.5"
+resvg = { version = "0.48", default-features = false }
 
 shader_graph_core = { path = "crates/shader_graph_core" }
 shader_stdlib = { path = "crates/shader_stdlib" }

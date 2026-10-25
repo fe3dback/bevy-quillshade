@@ -11,6 +11,7 @@ use bevy::prelude::*;
 use bevy::text::{EditableText, TextEdit};
 use bevy::ui_widgets::{Activate, Button, RequestClose};
 
+use super::icons::{IconId, icon};
 use super::{HoverRow, OnActivate, TEXT, TEXT_DIM, button, text};
 use crate::state::{Action, Actions, Dialog, Editor};
 
@@ -168,18 +169,34 @@ fn submit_on_enter(
 
 /// Opens a context menu at `pos` (window logical px).
 pub fn open_menu(commands: &mut Commands, pos: Vec2, items: Vec<(String, Action)>) {
+    open_icon_menu(commands, pos, items.into_iter().map(|(label, action)| (None, label, action)).collect());
+}
+
+/// [`open_menu`] with an icon before each label; items without one keep the icon's space when any item has one.
+pub fn open_icon_menu(commands: &mut Commands, pos: Vec2, items: Vec<(Option<IconId>, String, Action)>) {
+    let with_icons = items.iter().any(|(i, ..)| i.is_some());
     let rows: Vec<Box<dyn Scene>> = items
         .into_iter()
-        .map(|(label, action)| -> Box<dyn Scene> {
+        .map(|(id, label, action)| -> Box<dyn Scene> {
             let (act, hover) = (OnActivate(action), HoverRow { base: Color::NONE });
+            let lead: Vec<Box<dyn Scene>> = match id {
+                Some(id) => vec![Box::new(icon(id, 16.0, TEXT))],
+                None if with_icons => vec![Box::new(bsn! { Node { width: px(16), flex_shrink: 0.0 } })],
+                None => Vec::new(),
+            };
             Box::new(bsn! {
-                Node { padding: UiRect::axes(px(10), px(4)), border_radius: BorderRadius::all(px(3)) }
+                Node {
+                    align_items: AlignItems::Center,
+                    column_gap: px(8),
+                    padding: UiRect::axes(px(10), px(4)),
+                    border_radius: BorderRadius::all(px(3)),
+                }
                 BackgroundColor(Color::NONE)
                 Button
                 MenuItem
                 act
                 hover
-                Children [ @text(label, TEXT, 13.0) ]
+                Children [ {lead} -- @text(label, TEXT, 13.0) ]
             })
         })
         .collect();

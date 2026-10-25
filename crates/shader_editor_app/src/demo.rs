@@ -1,7 +1,7 @@
-//! Debug aid: scripted mouse gestures, `SHADER_EDITOR_INPUT=drag|rmb_click|rmb_pan|mmb_pan|slider|color|pin_rmb`
+//! Debug aid: scripted mouse gestures, `SHADER_EDITOR_INPUT=drag|rmb_click|rmb_pan|mmb_pan|slider|color|pin_rmb|hover`
 //! (with `SHADER_EDITOR_SCREENSHOT` and `SHADER_EDITOR_OPEN`; `SHADER_EDITOR_ZOOM=<f32>` sets the canvas zoom
 //! first). `slider`/`color` act on the first inline slider / color button on a node, `pin_rmb` right-clicks the
-//! first input pin of `SHADER_EDITOR_INPUT_NODE`. The input goes through the same window messages winit writes,
+//! first input pin of `SHADER_EDITOR_INPUT_NODE`, `hover` rests on the toolbar's Save button (its tooltip). The input goes through the same window messages winit writes,
 //! so picking, bevy_noodle and the editor see a real gesture; the outcome is logged.
 
 use bevy::feathers::controls::{FeathersColorInput, FeathersColorWheel, FeathersSlider};
@@ -16,6 +16,7 @@ use crate::canvas::{EditorCanvas, NodeKey, PinKey};
 use crate::state::{Editor, PropTarget};
 use crate::ui::palette::Palette;
 use crate::ui::props::PropField;
+use crate::ui::tooltip::Tooltip;
 
 /// First frame of the gesture (the asset opens on frame 2, the screenshot is taken on frame 240).
 const START: u32 = 160;
@@ -68,6 +69,7 @@ pub fn scripted_input(
     widgets: Widgets,
     ports: Query<(&PinKey, &UiGlobalTransform, &ComputedNode)>,
     wheels: Query<(&UiGlobalTransform, &ComputedNode), With<FeathersColorWheel>>,
+    tips: Query<(&Tooltip, &UiGlobalTransform, &ComputedNode)>,
     mut events: MessageWriter<WindowEvent>,
     mut moved: MessageWriter<CursorMoved>,
     mut buttons: MessageWriter<MouseButtonInput>,
@@ -154,6 +156,13 @@ pub fn scripted_input(
                 .into_iter()
                 .chain([Step::Release(MouseButton::Right)])
                 .collect(),
+            "hover" => {
+                let Some((_, t, c)) = tips.iter().find(|t| t.0.0.starts_with("Save (")) else {
+                    error!("demo {name}: no Save button");
+                    return;
+                };
+                vec![Step::Move(logical(t, c))]
+            }
             "rmb_pan" => drag(canvas_min + 20.0, MouseButton::Right, Vec2::new(150.0, 80.0)),
             "mmb_pan" => drag(canvas_min + 20.0, MouseButton::Middle, Vec2::new(150.0, 80.0)),
             other => {

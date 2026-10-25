@@ -108,6 +108,32 @@ atomic write. Key facts that span several files:
 - `EditorCorePlugin` runs without a window — logic is tested in `state::tests` and `tests/ui_smoke.rs`.
 - User config: `$XDG_CONFIG_HOME/shader-editor/config.ron` (window size, recent projects, open tabs).
 
+### Icons (decision 0013)
+
+Icons are SVG from the `icon-rs` crate (pinned `=0.4.5`, browse at https://rvdende.github.io/icon-rs/) plus our own
+hand-drawn ones, rasterized at runtime with resvg (`crates/shader_editor_app/src/ui/icons.rs`). Never add PNG icons,
+`ImageNode`s with asset paths or Feathers' `icon()` for this.
+
+- **Use**: `@icon(IconId::X, 16.0, TEXT)` inside `bsn!` (16 px is the UI standard; the color tints line/glyph icons
+  and only sets the alpha of solid/sketch ones). Ready-made widgets in `ui/mod.rs`: `icon_tool_button(id, label,
+  action, tip)`, icon-only `icon_button(id, action, tip)` (always give a tooltip naming the action + hotkey);
+  context menus: `dialog::open_icon_menu` with `(Option<IconId>, label, action)` items. Any widget gets a hover hint
+  with the `ui::tooltip::Tooltip("…")` component. Asset-kind icons: `IconId::for_asset` / `IconId::for_new`.
+- **Add an icon-rs icon**: add an `IconId` variant, map it in `IconId::source()` to the constant (`icon_rs::FOLDER`,
+  never `icon_rs::get("…")`), and append it to `IconId::ALL` (bump the array length) — the tests rasterize every
+  entry. To find a name: `grep '=> (' ~/.cargo/registry/src/*/icon-rs-0.4.5/src/generated.rs`; SVGs are in that
+  crate's `icons/`. Prefer icon-rs; draw only what it lacks. Don't fork icon-rs or copy its `xtask` generator.
+- **Draw our own**: put `name.svg` in `crates/shader_editor_app/icons/` (rules in its `README.md`), copying the root
+  `<svg>` element of a similar icon-rs icon: 24x24 viewBox, `fill="none" stroke="#262626"
+  stroke-linejoin="round" stroke-linecap="round"`, `stroke-width` 1.75 for line icons / 1.1 for solid ones, drawing
+  inside 1.5..22.5. Colors only from `Palette::LIGHT`: ink `#262626`; faces `#ffffff #d4d4d4 #a4a4a4 #747474` (solid
+  only); accent `#2563eb` for the one modifier detail (the plus, the arrow), single marks stay ink-only. No `id`s, no
+  gradients/`<defs>`. Then add `const X: Icon = custom("name", Kind::Line, include_str!("../../icons/name.svg"));`,
+  the `IconId` variant, and the const to the `custom_icons_use_only_palette_colours` test list.
+- **Review a new icon** before using it: render it at 16 and 32 px on the dark panel color, e.g. with a scratch crate
+  using `icon-rs` + `resvg` (`icon.recolor(&Palette::DARK)` → `usvg::Tree` → `resvg::render`), next to a neighbouring
+  icon-rs icon to compare weight; then check it in the real UI with `SHADER_EDITOR_SCREENSHOT` (see Visual checks).
+
 ## Testing notes
 
 - `crates/shader_project/tests/snapshots.rs` auto-generates one material per registered stdlib node plus the composite
@@ -124,7 +150,7 @@ atomic write. Key facts that span several files:
 
 - Editor: `SHADER_EDITOR_SCREENSHOT=out.png [SHADER_EDITOR_OPEN=env/rock_wet.material.ron]
   [SHADER_EDITOR_SELECT=stdlib::Lerp] [SHADER_EDITOR_DEMO=palette|wire|dialog|menu] cargo run -- examples/sample_game`
-  — renders, saves the PNG and exits. `SHADER_EDITOR_INPUT=drag|rmb_click|rmb_pan|mmb_pan|slider|color|pin_rmb`
+  — renders, saves the PNG and exits. `SHADER_EDITOR_INPUT=drag|rmb_click|rmb_pan|mmb_pan|slider|color|pin_rmb|hover`
   (+ `SHADER_EDITOR_INPUT_NODE=<id>`, `SHADER_EDITOR_INPUT_TRACE=1`, `SHADER_EDITOR_ZOOM=<f32>`) plays a scripted mouse
   gesture through winit's messages and logs the outcome (`demo` lines; `slider`/`color` also log the edited value).
 - Sample game: `cd examples/sample_game && SAMPLE_SCREENSHOT=out cargo run` → `out-1.png`, `out-2.png` (used to verify

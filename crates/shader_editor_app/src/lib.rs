@@ -201,13 +201,14 @@ fn debug_screenshot(
                 palette.show(Vec2::new(520.0, 300.0), Vec2::ZERO, link);
             }
             Ok("dialog") => actions.push(Action::NewAssetDialog(state::NewKind::Pbr3d)),
-            Ok("menu") => ui::dialog::open_menu(
+            Ok("menu") => ui::dialog::open_icon_menu(
                 &mut commands,
                 Vec2::new(120.0, 250.0),
                 vec![
-                    ("Open".into(), Action::None),
-                    ("Rename...".into(), Action::None),
-                    ("Delete...".into(), Action::None),
+                    (Some(ui::icons::IconId::Pbr), "Open".into(), Action::None),
+                    (Some(ui::icons::IconId::Edit), "Rename...".into(), Action::None),
+                    (Some(ui::icons::IconId::Delete), "Delete...".into(), Action::None),
+                    (None, "No icon".into(), Action::None),
                 ],
             ),
             _ => {}

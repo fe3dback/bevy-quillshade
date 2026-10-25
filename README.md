@@ -105,6 +105,12 @@ On the left is the asset browser (the `shaders/` tree: create a Pbr3d/Unlit3d/Sp
 a folder; rename, move by dragging onto a folder, delete; RMB → show the
 generated WESL/Rust), in the center the tabs and the canvas, on the right the properties (node parameters, input
 default values, asset blend mode / two-sided / shading), at the bottom the log (click — focus the node).
+The browser is an IDE-style file tree: folders with expand carets, an icon per asset kind (function, Pbr3d,
+Unlit3d, Sprite2d); tabs, the `+Pbr`/`+Unlit`/`+2D`/`+Fn`/`+Folder` buttons and the browser's RMB menus show icons
+too. In the toolbar Save / Save all / Undo / Redo are icon-only buttons; hover a toolbar button for its name and
+hotkey. The bottom-left corner of the main view shows the open document's type (`pbr3d`, `unlit3d`, `sprite2d`,
+`function`) as a faint watermark over the graph. Icons come from [icon-rs](https://crates.io/crates/icon-rs), plus a few
+drawn by hand in `crates/shader_editor_app/icons/`.
 Validation runs live: nodes with errors are outlined in red, with warnings — in yellow.
 
 Values are also edited right on the nodes (UE-style): an unconnected input shows a slider (inputs with a known

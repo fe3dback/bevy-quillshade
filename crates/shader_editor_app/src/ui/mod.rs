@@ -14,11 +14,17 @@ use crate::state::{Action, Actions, Editor, NewKind, ViewRequest};
 
 pub mod browser;
 pub mod dialog;
+pub mod icons;
 pub mod input;
 pub mod log;
 pub mod palette;
 pub mod props;
 pub mod tabs;
+pub mod tooltip;
+
+use icons::{IconId, icon};
+use shader_graph_core::model::{AssetKind, MaterialKind};
+use tooltip::Tooltip;
 
 /// Pushes its action when the widget is activated (buttons, menu items).
 #[derive(Component, Default, Clone)]
@@ -35,6 +41,10 @@ pub struct EmptyHint;
 
 #[derive(Component, Default, Clone)]
 pub struct StatusText;
+
+/// Watermark in the main view's bottom-left corner naming the open document's type.
+#[derive(Component, Default, Clone)]
+pub struct DocKindText;
 
 pub const TEXT: Color = Color::srgb(0.86, 0.87, 0.90);
 pub const TEXT_DIM: Color = Color::srgb(0.55, 0.57, 0.62);
@@ -54,11 +64,13 @@ impl Plugin for UiPlugin {
             props::PropsPlugin,
             log::LogPlugin,
             dialog::DialogPlugin,
+            icons::IconsPlugin,
             palette::PalettePlugin,
             input::InputPlugin,
+            tooltip::TooltipPlugin,
         ))
         .add_systems(Startup, spawn_layout)
-        .add_systems(Update, (show_empty_hint, show_status))
+        .add_systems(Update, (show_empty_hint, show_doc_kind, show_status))
         .add_observer(activate_action)
         .add_observer(row_hover_on)
         .add_observer(row_hover_off);
@@ -101,6 +113,30 @@ pub fn tool_button(label: impl Into<String>, action: Action) -> impl Scene {
     }
 }
 
+/// [`tool_button`] with an icon before the label and a hover tooltip.
+pub fn icon_tool_button(id: IconId, label: impl Into<String>, action: Action, tip: impl Into<String>) -> impl Scene {
+    let (label, tip) = (label.into(), Tooltip(tip.into()));
+    let act = OnActivate(action);
+    bsn! {
+        @FeathersToolButton {
+            @variant: ButtonVariant::Plain,
+            @caption: bsn_list! { @icon(id, 16.0, TEXT) Node { margin: UiRect::right(px(4)) } -- @caption(label) },
+        }
+        act
+        tip
+    }
+}
+
+/// Icon-only tool button; `tip` names the action (and its hotkey).
+pub fn icon_button(id: IconId, action: Action, tip: impl Into<String>) -> impl Scene {
+    let (act, tip) = (OnActivate(action), Tooltip(tip.into()));
+    bsn! {
+        @FeathersToolButton { @variant: ButtonVariant::Plain, @caption: bsn! { @icon(id, 16.0, TEXT) } }
+        act
+        tip
+    }
+}
+
 pub fn button(label: impl Into<String>, action: Action, primary: bool) -> impl Scene {
     let label = label.into();
     let act = OnActivate(action);
@@ -138,17 +174,17 @@ fn header(title: &'static str) -> impl Scene {
 
 fn toolbar() -> impl Scene {
     let buttons: Vec<Box<dyn Scene>> = vec![
-        Box::new(tool_button("Open...", Action::OpenProjectDialog)),
-        Box::new(tool_button("Save", Action::Save)),
-        Box::new(tool_button("Save all", Action::SaveAll)),
-        Box::new(tool_button("Regenerate", Action::RegenAll)),
+        Box::new(icon_tool_button(IconId::FolderOpen, "Open...", Action::OpenProjectDialog, "Open project (Ctrl+O)")),
+        Box::new(icon_button(IconId::Save, Action::Save, "Save (Ctrl+S)")),
+        Box::new(icon_button(IconId::SaveAll, Action::SaveAll, "Save all (Ctrl+Shift+S)")),
+        Box::new(icon_tool_button(IconId::Regenerate, "Regenerate", Action::RegenAll, "Regenerate the whole project")),
         Box::new(sep()),
-        Box::new(tool_button("Undo", Action::Undo)),
-        Box::new(tool_button("Redo", Action::Redo)),
+        Box::new(icon_button(IconId::Undo, Action::Undo, "Undo (Ctrl+Z)")),
+        Box::new(icon_button(IconId::Redo, Action::Redo, "Redo (Ctrl+Shift+Z, Ctrl+Y)")),
         Box::new(sep()),
-        Box::new(tool_button("Auto-layout", Action::AutoLayout)),
-        Box::new(tool_button("Comment", Action::AddComment(None))),
-        Box::new(tool_button("Fit", Action::View(ViewRequest::FitAll))),
+        Box::new(icon_tool_button(IconId::AutoLayout, "Auto-layout", Action::AutoLayout, "Auto-layout (Ctrl+L)")),
+        Box::new(icon_tool_button(IconId::Comment, "Comment", Action::AddComment(None), "Add a comment frame (C)")),
+        Box::new(icon_tool_button(IconId::Fit, "Fit", Action::View(ViewRequest::FitAll), "Fit the graph (Home)")),
     ];
     bsn! {
         Node {
@@ -204,7 +240,8 @@ fn spawn_layout(mut commands: Commands) {
                 NewKind::Sprite2d => "+2D",
                 NewKind::Function => "+Fn",
             };
-            Box::new(tool_button(short, Action::NewAssetDialog(*k)))
+            let tip = format!("New {}...", k.label());
+            Box::new(icon_tool_button(IconId::for_new(*k), short, Action::NewAssetDialog(*k), tip))
         })
         .collect();
     commands.spawn_scene(bsn! {
@@ -224,7 +261,7 @@ fn spawn_layout(mut commands: Commands) {
                     @header("Assets")
                     --
                     Node { flex_direction: FlexDirection::Row, flex_wrap: FlexWrap::Wrap, padding: UiRect::all(px(3)), column_gap: px(2) }
-                    Children [ {new_buttons} -- @tool_button("+Folder", Action::NewFolderDialog) ]
+                    Children [ {new_buttons} -- @icon_tool_button(IconId::FolderNew, "+Folder", Action::NewFolderDialog, "New folder...") ]
                     --
                     @scroll_column() browser::BrowserBody
                 ]
@@ -245,6 +282,14 @@ fn spawn_layout(mut commands: Commands) {
                         Node { position_type: PositionType::Absolute, left: px(24), top: px(24) }
                         Pickable::IGNORE
                         Children [ @text("Open an asset from the browser (or create one with +Pbr / +Unlit / +2D / +Fn).", TEXT_DIM, 14.0) ]
+                        --
+                        // Over the document's view (the graph canvas today), whatever view the type gets.
+                        DocKindText
+                        Text("")
+                        TextFont { font_size: FontSize::Px(72.0), weight: FontWeight::BOLD }
+                        TextColor(Color::srgba(1.0, 1.0, 1.0, 0.1))
+                        Node { position_type: PositionType::Absolute, left: px(20), bottom: px(8) }
+                        Pickable::IGNORE
                         --
                         @crate::ui::input::minimap()
                     ]
@@ -285,6 +330,25 @@ fn show_empty_hint(editor: Res<Editor>, mut q: Query<&mut Visibility, With<Empty
     let want = if editor.doc().is_none() { Visibility::Inherited } else { Visibility::Hidden };
     for mut v in &mut q {
         v.set_if_neq(want);
+    }
+}
+
+/// Watermark text for a document type.
+fn doc_kind_label(kind: AssetKind) -> &'static str {
+    match kind {
+        AssetKind::Function => "function",
+        AssetKind::Material(MaterialKind::Pbr3d(_)) => "pbr3d",
+        AssetKind::Material(MaterialKind::Unlit3d(_)) => "unlit3d",
+        AssetKind::Material(MaterialKind::Sprite2d(_)) => "sprite2d",
+    }
+}
+
+fn show_doc_kind(editor: Res<Editor>, mut q: Query<&mut Text, With<DocKindText>>) {
+    let label = editor.doc().map_or("", |d| doc_kind_label(d.asset.kind));
+    for mut t in &mut q {
+        if t.0 != label {
+            t.0 = label.into();
+        }
     }
 }
 

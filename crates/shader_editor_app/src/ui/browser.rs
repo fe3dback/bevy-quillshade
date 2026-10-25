@@ -3,10 +3,10 @@
 use std::collections::BTreeSet;
 
 use bevy::prelude::*;
-use shader_graph_core::model::{AssetKind, MaterialKind};
 use shader_project::{AssetId, AssetType};
 
-use super::dialog::open_menu;
+use super::dialog::open_icon_menu;
+use super::icons::{IconId, icon};
 use super::{HoverRow, ROW_ACTIVE, TEXT, TEXT_DIM, text};
 use crate::state::{Action, Actions, Editor, GenFile, NewKind};
 
@@ -28,17 +28,25 @@ impl Plugin for BrowserPlugin {
     }
 }
 
-fn kind_tag(kind: Option<AssetKind>) -> &'static str {
-    match kind {
-        Some(AssetKind::Function) => "fn",
-        Some(AssetKind::Material(MaterialKind::Pbr3d(_))) => "pbr",
-        Some(AssetKind::Material(MaterialKind::Unlit3d(_))) => "unlit",
-        Some(AssetKind::Material(MaterialKind::Sprite2d(_))) => "2d",
-        None => "?",
-    }
+const ICON: f32 = 16.0;
+
+/// A row's leading icons: the folder caret (or as much space, to keep icons aligned) and the item's icon.
+fn row_icons(caret: Option<IconId>, item: IconId) -> Vec<Box<dyn Scene>> {
+    let caret: Box<dyn Scene> = match caret {
+        Some(c) => Box::new(icon(c, ICON, TEXT_DIM)),
+        None => Box::new(bsn! { Node { width: px(ICON), flex_shrink: 0.0 } }),
+    };
+    vec![caret, Box::new(icon(item, ICON, TEXT))]
 }
 
-fn row(label: String, tag: String, depth: usize, row: BrowserRow, active: bool, error: bool) -> impl Scene {
+fn row(
+    label: String,
+    icons: Vec<Box<dyn Scene>>,
+    depth: usize,
+    row: BrowserRow,
+    active: bool,
+    error: bool,
+) -> impl Scene {
     let base = if active { ROW_ACTIVE } else { Color::NONE };
     let hover = HoverRow { base };
     let pad = px(6.0 + depth as f32 * 14.0);
@@ -49,18 +57,16 @@ fn row(label: String, tag: String, depth: usize, row: BrowserRow, active: bool, 
             align_items: AlignItems::Center,
             min_height: px(22),
             padding: UiRect::new(pad, px(6), px(1), px(1)),
-            column_gap: px(6),
+            column_gap: px(4),
             border_radius: BorderRadius::all(px(3)),
         }
         BackgroundColor(base)
         hover
         row
         Children [
+            {icons}
+            --
             @text(label, color, 13.0)
-            --
-            Node { flex_grow: 1.0 }
-            --
-            @text(tag, TEXT_DIM, 11.0)
         ]
     }
 }
@@ -103,8 +109,8 @@ fn redraw(
     let hidden = |path: &str| editor.collapsed.iter().any(|c| path.starts_with(&format!("{c}/")));
     let root_row = BrowserRow { folder: Some(String::new()), asset: None };
     let root_active = editor.current_folder.is_empty();
-    commands
-        .spawn_scene(bsn! { @row("shaders/".into(), String::new(), 0, root_row, root_active, false) ChildOf(body) });
+    let root_icons = row_icons(None, IconId::FolderOpen);
+    commands.spawn_scene(bsn! { @row("shaders".into(), root_icons, 0, root_row, root_active, false) ChildOf(body) });
 
     // Depth-first: each folder, then its assets; root assets last.
     let emit_assets = |dir: &str, depth: usize, commands: &mut Commands| {
@@ -114,12 +120,12 @@ fn redraw(
             if hidden(&id.path) {
                 continue;
             }
-            let tag = kind_tag(editor.asset_kind(id)).to_string();
+            let icons = row_icons(None, IconId::for_asset(editor.asset_kind(id)));
             let dirty = editor.doc_index(id).is_some_and(|i| editor.docs[i].is_dirty());
             let label = format!("{}{}", id.name(), if dirty { " *" } else { "" });
             let r = BrowserRow { folder: None, asset: Some(id.clone()) };
             let (is_active, err) = (active.as_ref() == Some(id), errors.contains(id));
-            commands.spawn_scene(bsn! { @row(label, tag, depth, r, is_active, err) ChildOf(body) });
+            commands.spawn_scene(bsn! { @row(label, icons, depth, r, is_active, err) ChildOf(body) });
         }
     };
     for f in &folders {
@@ -128,20 +134,29 @@ fn redraw(
         }
         let depth = f.matches('/').count() + 1;
         let name = f.rsplit('/').next().unwrap_or(f);
-        let arrow = if editor.collapsed.contains(f) { ">" } else { "v" };
+        let collapsed = editor.collapsed.contains(f);
+        let icons = if collapsed {
+            row_icons(Some(IconId::CaretRight), IconId::Folder)
+        } else {
+            row_icons(Some(IconId::CaretDown), IconId::FolderOpen)
+        };
         let r = BrowserRow { folder: Some(f.clone()), asset: None };
         let is_current = editor.current_folder == *f;
-        commands.spawn_scene(
-            bsn! { @row(format!("{arrow} {name}/"), String::new(), depth, r, is_current, false) ChildOf(body) },
-        );
-        if !editor.collapsed.contains(f) {
+        commands.spawn_scene(bsn! { @row(name.to_string(), icons, depth, r, is_current, false) ChildOf(body) });
+        if !collapsed {
             emit_assets(f, depth + 1, &mut commands);
         }
     }
     emit_assets("", 1, &mut commands);
 }
 
-fn click_row(ev: On<PointerClick>, rows: Query<&BrowserRow>, mut actions: ResMut<Actions>, mut commands: Commands) {
+fn click_row(
+    ev: On<PointerClick>,
+    rows: Query<&BrowserRow>,
+    editor: Res<Editor>,
+    mut actions: ResMut<Actions>,
+    mut commands: Commands,
+) {
     let Ok(row) = rows.get(ev.event_target()) else { return };
     let pos = ev.pointer.position;
     match (ev.button, &row.folder, &row.asset) {
@@ -153,28 +168,39 @@ fn click_row(ev: On<PointerClick>, rows: Query<&BrowserRow>, mut actions: ResMut
         }
         (PointerButton::Primary, _, Some(id)) => actions.push(Action::OpenAsset(id.clone())),
         (PointerButton::Secondary, Some(f), _) => {
-            let mut items: Vec<(String, Action)> =
-                NewKind::ALL.iter().map(|k| (format!("New {}...", k.label()), Action::NewAssetDialog(*k))).collect();
-            items.push(("New folder...".into(), Action::NewFolderDialog));
+            let mut items: Vec<(Option<IconId>, String, Action)> = NewKind::ALL
+                .iter()
+                .map(|k| (Some(IconId::for_new(*k)), format!("New {}...", k.label()), Action::NewAssetDialog(*k)))
+                .collect();
+            items.push((Some(IconId::FolderNew), "New folder...".into(), Action::NewFolderDialog));
             if !f.is_empty() {
-                items.push(("Delete folder...".into(), Action::DeleteFolderDialog(f.clone())));
+                items.push((Some(IconId::Delete), "Delete folder...".into(), Action::DeleteFolderDialog(f.clone())));
             }
             actions.push(Action::SelectFolder(f.clone()));
-            open_menu(&mut commands, pos, items);
+            open_icon_menu(&mut commands, pos, items);
         }
         (PointerButton::Secondary, _, Some(id)) => {
+            let kind = IconId::for_asset(editor.asset_kind(id));
             let mut items = vec![
-                ("Open".to_string(), Action::OpenAsset(id.clone())),
-                ("Rename...".into(), Action::RenameDialog(id.clone())),
-                ("Move to...".into(), Action::MoveDialog(id.clone())),
-                ("Delete...".into(), Action::DeleteDialog(id.clone())),
-                ("Show generated WESL".into(), Action::ShowFile(id.clone(), GenFile::Wesl)),
+                (Some(kind), "Open".to_string(), Action::OpenAsset(id.clone())),
+                (Some(IconId::Edit), "Rename...".into(), Action::RenameDialog(id.clone())),
+                (Some(IconId::MoveToFolder), "Move to...".into(), Action::MoveDialog(id.clone())),
+                (Some(IconId::Delete), "Delete...".into(), Action::DeleteDialog(id.clone())),
+                (Some(IconId::Code), "Show generated WESL".into(), Action::ShowFile(id.clone(), GenFile::Wesl)),
             ];
             if id.ty == AssetType::Material {
-                items.push(("Show generated Rust".into(), Action::ShowFile(id.clone(), GenFile::Rust)));
+                items.push((
+                    Some(IconId::Code),
+                    "Show generated Rust".into(),
+                    Action::ShowFile(id.clone(), GenFile::Rust),
+                ));
             }
-            items.push(("Show source (.ron)".into(), Action::ShowFile(id.clone(), GenFile::Source)));
-            open_menu(&mut commands, pos, items);
+            items.push((
+                Some(IconId::File),
+                "Show source (.ron)".into(),
+                Action::ShowFile(id.clone(), GenFile::Source),
+            ));
+            open_icon_menu(&mut commands, pos, items);
         }
         _ => {}
     }

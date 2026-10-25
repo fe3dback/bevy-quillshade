@@ -16,3 +16,4 @@ Short records in the "context → decision → consequences" format. Numbering i
 | [0010](0010-v1-limitations.md) | v1 limitations and additional diagnostic codes |
 | [0011](0011-named-routes.md) | Named routes (UE-like named reroutes): usages reference the declaration by node id |
 | [0012](0012-inline-pin-editors.md) | Inline value editors on nodes, RMB pin menu, polymorphic pin type |
+| [0013](0013-ui-icons.md) | UI icons: icon-rs SVGs rasterized at runtime with resvg, own icons drawn by hand |
