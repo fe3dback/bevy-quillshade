@@ -1,0 +1,21 @@
+[package]
+name = "shader_project"
+version = { workspace = true }
+edition = { workspace = true }
+rust-version = { workspace = true }
+license = { workspace = true }
+
+[dependencies]
+shader_graph_core = { workspace = true }
+shader_stdlib = { workspace = true }
+shader_codegen_wesl = { workspace = true }
+shader_codegen_rust = { workspace = true }
+serde = { workspace = true }
+ron = { workspace = true }
+thiserror = { workspace = true }
+notify = { workspace = true }
+toml = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+insta = { workspace = true }

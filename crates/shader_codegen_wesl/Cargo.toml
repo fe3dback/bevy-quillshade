@@ -1,0 +1,15 @@
+[package]
+name = "shader_codegen_wesl"
+version = { workspace = true }
+edition = { workspace = true }
+rust-version = { workspace = true }
+license = { workspace = true }
+
+[dependencies]
+shader_graph_core = { workspace = true }
+shader_stdlib = { workspace = true }
+wesl = { workspace = true }
+naga = { workspace = true }
+
+[dev-dependencies]
+insta = { workspace = true }

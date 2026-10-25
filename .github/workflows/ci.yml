@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97.1"
+          components: clippy, rustfmt
+      - name: Linux dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev libasound2-dev libwayland-dev libxkbcommon-dev
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      # Unit, pipeline, snapshot (+ WESL compile against Bevy 0.20 sources) and UI smoke tests.
+      - name: Test
+        run: cargo test --workspace
+      - name: CLI check of the sample project (headless, compile-checks WESL)
+        run: cargo run -- check examples/sample_game --compile
+      - name: Generated crate is up to date
+        shell: bash
+        run: |
+          cargo run -- regen examples/sample_game
+          git diff --exit-code -- examples/sample_game
+      - name: Generated crate builds and is clippy-clean
+        working-directory: examples/sample_game
+        run: cargo clippy --workspace --all-targets -- -D warnings

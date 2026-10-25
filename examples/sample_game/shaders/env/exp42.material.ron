@@ -1,0 +1,92 @@
+Asset(
+  format_version: 1,
+  kind: Material(Pbr3d(PbrSettings(
+    blend: Opaque,
+    two_sided: false,
+    shading: Lit,
+  ))),
+  name: "exp42",
+  nodes: {
+    "01m5r4tbwgbt53z0q87wj6tc76": Node(
+      kind: "output::Pbr3d",
+      pos: (668.57416, -143.72652),
+      params: {},
+    ),
+    "01m5r4whtv0wryfpt5qhs1z45g": Node(
+      kind: "stdlib::Constant3Vector",
+      pos: (232.34378, -156.49605),
+      params: {
+        "value": Float3((1.0, 0.0, 0.0)),
+      },
+    ),
+    "01m5r5fvg5nwsw7f4nfzekr156": Node(
+      kind: "stdlib::Time",
+      pos: (-145.13283, 80.24603),
+      params: {},
+    ),
+    "01m5r5g6kgkb2absme5p6sg4vr": Node(
+      kind: "stdlib::Sin",
+      pos: (258.47266, 143.55862),
+      params: {},
+    ),
+    "01m5r5g9zxwajrgwe3sqpe956g": Node(
+      kind: "stdlib::Constant",
+      pos: (-142.91403, 197.53522),
+      params: {
+        "value": Float(0.21),
+      },
+    ),
+    "01m5r5ggky8sh5r98shtdt02wj": Node(
+      kind: "stdlib::Divide",
+      pos: (62.867188, 135.12112),
+      params: {},
+    ),
+    "01m5r5hmmfr7r8v7m2s50k4z9y": Node(
+      kind: "stdlib::Constant3Vector",
+      pos: (231.87503, -46.195282),
+      params: {
+        "value": Float3((0.0, 1.0, 0.0)),
+      },
+    ),
+    "01m5r5zf3079k9ak5dgtk5eqwc": Node(
+      kind: "stdlib::Lerp",
+      pos: (456.51532, -93.216354),
+      params: {},
+    ),
+  },
+  edges: [
+    Edge(
+      from: ("01m5r5zf3079k9ak5dgtk5eqwc", "out"),
+      to: ("01m5r4tbwgbt53z0q87wj6tc76", "base_color"),
+    ),
+    Edge(
+      from: ("01m5r5ggky8sh5r98shtdt02wj", "out"),
+      to: ("01m5r5g6kgkb2absme5p6sg4vr", "x"),
+    ),
+    Edge(
+      from: ("01m5r5fvg5nwsw7f4nfzekr156", "out"),
+      to: ("01m5r5ggky8sh5r98shtdt02wj", "a"),
+    ),
+    Edge(
+      from: ("01m5r5g9zxwajrgwe3sqpe956g", "out"),
+      to: ("01m5r5ggky8sh5r98shtdt02wj", "b"),
+    ),
+    Edge(
+      from: ("01m5r4whtv0wryfpt5qhs1z45g", "out"),
+      to: ("01m5r5zf3079k9ak5dgtk5eqwc", "a"),
+    ),
+    Edge(
+      from: ("01m5r5g6kgkb2absme5p6sg4vr", "out"),
+      to: ("01m5r5zf3079k9ak5dgtk5eqwc", "alpha"),
+    ),
+    Edge(
+      from: ("01m5r5hmmfr7r8v7m2s50k4z9y", "out"),
+      to: ("01m5r5zf3079k9ak5dgtk5eqwc", "b"),
+    ),
+  ],
+  comments: [],
+  meta: Meta(
+    description: "",
+    tags: [],
+  ),
+)

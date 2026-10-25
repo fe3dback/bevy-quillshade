@@ -1,34 +1,54 @@
 [workspace]
-resolver = "2"
-members = [
-    # "crates/*",
-]
+resolver = "3"
+members = ["crates/*"]
+exclude = ["examples/sample_game"]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.97.1"
+license = "MIT"
 
 [workspace.dependencies]
 # todo: move dynamic_linking to crate feature (before wide use)
-bevy = { version = "0.19.1", features = ["bevy_feathers", "dynamic_linking"] }
-bevy_macro_utils = "0.19.1"
-bevy-inspector-egui = "0.37.0"
-bevy_egui = { version = "0.40", features = ["bevy_ui"] }
-proc-macro2 = "1.0"
-syn = { version = "3.0", features = ["full"] }
-quote = "1.0"
+bevy = { version = "0.20.0", features = ["bevy_feathers", "dynamic_linking"] }
+bevy_noodle = { version = "0.5.0", features = ["default_style", "scene"] }
+wesl = { version = "0.6", features = ["naga-ext"] }
+naga = { version = "30", features = ["wgsl-in"] }
+serde = { version = "1", features = ["derive"] }
+ron = "0.12"
+thiserror = "2"
+ulid = "1"
+notify = "8"
+clap = { version = "4", features = ["derive"] }
+insta = "1"
+tempfile = "3"
+toml = "1"
+
+shader_graph_core = { path = "crates/shader_graph_core" }
+shader_stdlib = { path = "crates/shader_stdlib" }
+shader_codegen_wesl = { path = "crates/shader_codegen_wesl" }
+shader_codegen_rust = { path = "crates/shader_codegen_rust" }
+shader_project = { path = "crates/shader_project" }
+shader_editor_app = { path = "crates/shader_editor_app" }
 
 [package]
 name = "bevy-shader-vibe"
 version = { workspace = true }
 edition = { workspace = true }
+rust-version = { workspace = true }
 description = "Shader graph editor"
 license = "MIT"
 
+[[bin]]
+name = "shader-editor"
+path = "src/main.rs"
+
 [dependencies]
-bevy = { workspace = true }
-bevy-inspector-egui = { workspace = true }
-bevy_egui = { workspace = true }
+clap = { workspace = true }
+shader_project = { workspace = true }
+shader_codegen_wesl = { workspace = true }
+shader_editor_app = { workspace = true }
 
 [profile.dev]
 debug = "line-tables-only"

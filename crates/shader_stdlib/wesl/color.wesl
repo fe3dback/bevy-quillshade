@@ -1,0 +1,38 @@
+fn sg_blend_overlay(base: vec3<f32>, blend: vec3<f32>) -> vec3<f32> {
+    let lo = 2.0 * base * blend;
+    let hi = vec3<f32>(1.0) - 2.0 * (vec3<f32>(1.0) - base) * (vec3<f32>(1.0) - blend);
+    return select(hi, lo, base < vec3<f32>(0.5));
+}
+
+fn sg_blend_screen(base: vec3<f32>, blend: vec3<f32>) -> vec3<f32> {
+    return vec3<f32>(1.0) - (vec3<f32>(1.0) - base) * (vec3<f32>(1.0) - blend);
+}
+
+fn sg_blend_multiply(base: vec3<f32>, blend: vec3<f32>) -> vec3<f32> {
+    return base * blend;
+}
+
+// Pegtop soft light.
+fn sg_blend_soft_light(base: vec3<f32>, blend: vec3<f32>) -> vec3<f32> {
+    return (vec3<f32>(1.0) - 2.0 * blend) * base * base + 2.0 * blend * base;
+}
+
+// Approximate black body color for a temperature in Kelvin (linear RGB, 0..1).
+fn sg_blackbody(temp: f32) -> vec3<f32> {
+    let t = clamp(temp, 1000.0, 40000.0) / 100.0;
+    var r: f32 = 1.0;
+    var g: f32;
+    var b: f32 = 1.0;
+    if (t <= 66.0) {
+        g = 0.3900815787 * log(t) - 0.6318414437;
+    } else {
+        r = 1.2929361860 * pow(t - 60.0, -0.1332047592);
+        g = 1.1298908608 * pow(t - 60.0, -0.0755148492);
+    }
+    if (t <= 19.0) {
+        b = 0.0;
+    } else if (t < 66.0) {
+        b = 0.5432067891 * log(t - 10.0) - 1.1962540891;
+    }
+    return pow(saturate(vec3<f32>(r, g, b)), vec3<f32>(2.2));
+}

@@ -1,0 +1,209 @@
+Asset(
+  format_version: 1,
+  kind: Material(Pbr3d(PbrSettings(
+    blend: Mask,
+    two_sided: false,
+    shading: Lit,
+  ))),
+  name: "rock_wet",
+  nodes: {
+    "n01": Node(
+      kind: "output::Pbr3d",
+      pos: (1196.1108, -248.78018),
+      params: {},
+    ),
+    "n02": Node(
+      kind: "param::TextureSample2D",
+      pos: (-50.048824, -151.64087),
+      params: {
+        "default": Str("textures/rock_albedo.png"),
+        "name": Str("albedo"),
+        "order": Int(0),
+      },
+    ),
+    "n03": Node(
+      kind: "param::TextureSample2D",
+      pos: (855.98663, 179.86032),
+      params: {
+        "default": Str("textures/rock_normal.png"),
+        "name": Str("normal_map"),
+        "order": Int(1),
+        "sampler_type": Str("Normal"),
+      },
+    ),
+    "n04": Node(
+      kind: "param::Color",
+      pos: (34.87904, 146.30609),
+      params: {
+        "default": Color((0.9, 0.85, 0.8, 1.0)),
+        "name": Str("tint"),
+        "order": Int(2),
+      },
+    ),
+    "n05": Node(
+      kind: "param::Scalar",
+      pos: (396.2767, -333.18182),
+      params: {
+        "default": Float(0.3),
+        "group": Str("Surface"),
+        "max": Float(1.0),
+        "min": Float(0.0),
+        "name": Str("wetness"),
+        "order": Int(3),
+      },
+    ),
+    "n06": Node(
+      kind: "param::Scalar",
+      pos: (68.706894, 880.155),
+      params: {
+        "default": Float(1.0),
+        "max": Float(10.0),
+        "min": Float(0.0),
+        "name": Str("speed"),
+        "order": Int(4),
+      },
+    ),
+    "n07": Node(
+      kind: "stdlib::Multiply",
+      pos: (300.7288, -132.75888),
+      params: {},
+    ),
+    "n08": Node(
+      kind: "function::common/wet_mask",
+      pos: (662.6636, -216.85233),
+      params: {},
+    ),
+    "n09": Node(
+      kind: "stdlib::Lerp",
+      pos: (911.3215, -345.67108),
+      params: {},
+      inputs: {
+        "a": Float(0.9),
+        "b": Float(0.15),
+      },
+    ),
+    "n10": Node(
+      kind: "stdlib::Time",
+      pos: (350.0, 810.0),
+      params: {},
+    ),
+    "n11": Node(
+      kind: "stdlib::Multiply",
+      pos: (560.0, 837.0),
+      params: {},
+    ),
+    "n12": Node(
+      kind: "stdlib::Sin",
+      pos: (770.0, 837.0),
+      params: {},
+    ),
+    "n13": Node(
+      kind: "stdlib::Saturate",
+      pos: (952.0, 837.0),
+      params: {},
+    ),
+    "n14": Node(
+      kind: "stdlib::Constant3Vector",
+      pos: (883.29083, 981.73956),
+      params: {
+        "value": Float3((0.0, 0.05, 0.1)),
+      },
+    ),
+    "n15": Node(
+      kind: "stdlib::Multiply",
+      pos: (1146.3973, 837.1386),
+      params: {},
+    ),
+    "n16": Node(
+      kind: "stdlib::Multiply",
+      pos: (932.42194, -115.084724),
+      params: {},
+    ),
+  },
+  edges: [
+    Edge(
+      from: ("n08", "tint"),
+      to: ("n01", "base_color"),
+    ),
+    Edge(
+      from: ("n16", "out"),
+      to: ("n01", "emissive"),
+    ),
+    Edge(
+      from: ("n03", "rgb"),
+      to: ("n01", "normal"),
+    ),
+    Edge(
+      from: ("n02", "a"),
+      to: ("n01", "opacity_mask"),
+    ),
+    Edge(
+      from: ("n09", "out"),
+      to: ("n01", "roughness"),
+    ),
+    Edge(
+      from: ("n02", "rgb"),
+      to: ("n07", "a"),
+    ),
+    Edge(
+      from: ("n04", "rgb"),
+      to: ("n07", "b"),
+    ),
+    Edge(
+      from: ("n07", "out"),
+      to: ("n08", "base_color"),
+    ),
+    Edge(
+      from: ("n05", "out"),
+      to: ("n08", "wetness"),
+    ),
+    Edge(
+      from: ("n08", "mask"),
+      to: ("n09", "alpha"),
+    ),
+    Edge(
+      from: ("n10", "out"),
+      to: ("n11", "a"),
+    ),
+    Edge(
+      from: ("n06", "out"),
+      to: ("n11", "b"),
+    ),
+    Edge(
+      from: ("n11", "out"),
+      to: ("n12", "x"),
+    ),
+    Edge(
+      from: ("n12", "out"),
+      to: ("n13", "x"),
+    ),
+    Edge(
+      from: ("n13", "out"),
+      to: ("n15", "a"),
+    ),
+    Edge(
+      from: ("n14", "out"),
+      to: ("n15", "b"),
+    ),
+    Edge(
+      from: ("n15", "out"),
+      to: ("n16", "a"),
+    ),
+    Edge(
+      from: ("n08", "mask"),
+      to: ("n16", "b"),
+    ),
+  ],
+  comments: [
+    Frame(
+      id: "c01",
+      title: "Emissive pulse",
+      rect: (322.0, 756.0, 1008.0, 351.0),
+      nodes: [],
+    ),
+  ],
+  meta: Meta(
+    description: "",
+    tags: [],
+  ),
+)
