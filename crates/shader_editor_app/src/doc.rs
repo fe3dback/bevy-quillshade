@@ -336,7 +336,26 @@ pub fn connection_error(
     let from_ty = output_type(asset, from.0, from.1, registry, functions, path, 0)?;
     let sig = node_signature(asset, to.0, registry, functions, path)?;
     let pin = sig.input(to.1)?;
-    let target = if pin.poly {
+    let target = if pin.poly && pin.attributes {
+        // Inputs that also take attributes (Lerp `a`/`b`, decision 0023): attributes and numbers never mix. Only
+        // the node's other such inputs count; an edge into `to` itself is replaced by the new one.
+        let attrs = PinType::MaterialAttributesPbr;
+        let others: Vec<PinType> = sig
+            .inputs
+            .iter()
+            .filter(|p| p.attributes && p.id != to.1)
+            .filter_map(|p| asset.edge_into(to.0, &p.id))
+            .filter_map(|e| output_type(asset, &e.from.0, &e.from.1, registry, functions, path, 0))
+            .collect();
+        let clash = if from_ty == attrs {
+            others.into_iter().find(|t| *t != attrs)
+        } else if from_ty.is_numeric() {
+            others.into_iter().find(|t| *t == attrs)
+        } else {
+            Some(pin.ty)
+        };
+        clash?
+    } else if pin.poly {
         // Polymorphic inputs accept any float-like value; the node resolves its type afterwards.
         if from_ty.is_numeric() { return None } else { pin.ty }
     } else {
@@ -448,5 +467,94 @@ mod tests {
         assert_eq!(d.asset.edges.len(), 2);
         assert_eq!(d.delete_nodes(&sel, &reg), 2);
         assert!(d.asset.nodes.contains_key(&out));
+    }
+
+    const MAKE: &str = "stdlib::MakeMaterialAttributesPbr";
+
+    /// Decision 0023: attributes connect to Lerp `a`/`b` only; Add and If refuse them.
+    #[test]
+    fn attributes_connect_to_lerp_only() {
+        let reg = shader_stdlib::registry();
+        let mut d = doc();
+        let make = d.add_node(MAKE, (0.0, 0.0));
+        let lerp = d.add_node("stdlib::Lerp", (100.0, 0.0));
+        let add = d.add_node("stdlib::Add", (100.0, 0.0));
+        let iff = d.add_node("stdlib::If", (100.0, 0.0));
+        let err =
+            |d: &Doc, to: (&str, &str)| connection_error(&d.asset, (&make, "attributes"), to, &reg, &NoFunctions, "m");
+        assert_eq!(err(&d, (&lerp, "a")), None);
+        assert_eq!(err(&d, (&lerp, "b")), None);
+        assert!(err(&d, (&lerp, "alpha")).unwrap().contains("E003"));
+        assert!(err(&d, (&add, "a")).unwrap().contains("E003"));
+        assert!(err(&d, (&iff, "gt")).unwrap().contains("E003"));
+        assert!(err(&d, (&iff, "a")).unwrap().contains("E003"));
+    }
+
+    #[test]
+    fn lerp_mixed_refused_both_orders() {
+        let reg = shader_stdlib::registry();
+        let mut d = doc();
+        let make = d.add_node(MAKE, (0.0, 0.0));
+        let v3 = d.add_node("stdlib::Constant3Vector", (0.0, 0.0));
+        let lerp = d.add_node("stdlib::Lerp", (100.0, 0.0));
+        d.edit(|m| m.connect((&make, "attributes"), (&lerp, "a")));
+        let e = connection_error(&d.asset, (&v3, "out"), (&lerp, "b"), &reg, &NoFunctions, "m");
+        assert!(e.unwrap().contains("E003"));
+        d.edit(|m| m.disconnect_input((&lerp, "a")));
+        d.edit(|m| m.connect((&v3, "out"), (&lerp, "a")));
+        let e = connection_error(&d.asset, (&make, "attributes"), (&lerp, "b"), &reg, &NoFunctions, "m");
+        assert!(e.unwrap().contains("E003"));
+        // A Lerp of attributes feeds only attribute inputs.
+        let make2 = d.add_node(MAKE, (0.0, 0.0));
+        d.edit(|m| m.connect((&make2, "attributes"), (&lerp, "a")));
+        let add = d.add_node("stdlib::Add", (200.0, 0.0));
+        assert!(connection_error(&d.asset, (&lerp, "out"), (&add, "a"), &reg, &NoFunctions, "m").is_some());
+    }
+
+    #[test]
+    fn lerp_reconnect_same_pin() {
+        let reg = shader_stdlib::registry();
+        let mut d = doc();
+        let make = d.add_node(MAKE, (0.0, 0.0));
+        let make2 = d.add_node(MAKE, (0.0, 0.0));
+        let v3 = d.add_node("stdlib::Constant3Vector", (0.0, 0.0));
+        let lerp = d.add_node("stdlib::Lerp", (100.0, 0.0));
+        d.edit(|m| m.connect((&make, "attributes"), (&lerp, "a")));
+        // The new edge replaces the old one, so `a` itself does not count.
+        assert_eq!(connection_error(&d.asset, (&v3, "out"), (&lerp, "a"), &reg, &NoFunctions, "m"), None);
+        assert_eq!(connection_error(&d.asset, (&make2, "attributes"), (&lerp, "b"), &reg, &NoFunctions, "m"), None);
+    }
+
+    /// Attributes pass through reroutes and named routes (spec goal of decision 0023).
+    #[test]
+    fn attributes_pass_through_routes() {
+        use shader_graph_core::registry::ROUTE_PARAM;
+        let reg = shader_stdlib::registry();
+        let mut d = doc();
+        let err = |d: &Doc, from: (&str, &str), to: (&str, &str)| {
+            connection_error(&d.asset, from, to, &reg, &NoFunctions, "m")
+        };
+        let make = d.add_node(MAKE, (0.0, 0.0));
+        let reroute = d.add_node("stdlib::Reroute", (100.0, 0.0));
+        let lerp = d.add_node("stdlib::Lerp", (200.0, 0.0));
+        assert_eq!(err(&d, (&make, "attributes"), (&reroute, "in")), None);
+        d.edit(|m| m.connect((&make, "attributes"), (&reroute, "in")));
+        assert_eq!(err(&d, (&reroute, "out"), (&lerp, "a")), None);
+        let add = d.add_node("stdlib::Add", (200.0, 0.0));
+        assert!(err(&d, (&reroute, "out"), (&add, "a")).unwrap().contains("E003"));
+
+        let decl = d.add_node("stdlib::NamedRoute", (100.0, 200.0));
+        let usage = d.add_node_with(
+            "stdlib::NamedRouteUsage",
+            (300.0, 200.0),
+            &[(ROUTE_PARAM.into(), Value::Str(decl.clone()))],
+        );
+        assert_eq!(err(&d, (&make, "attributes"), (&decl, "in")), None);
+        d.edit(|m| m.connect((&make, "attributes"), (&decl, "in")));
+        assert_eq!(err(&d, (&usage, "out"), (&lerp, "b")), None);
+        // Numbers still pass, textures still do not reach a numeric reroute.
+        let v3 = d.add_node("stdlib::Constant3Vector", (0.0, 0.0));
+        let reroute2 = d.add_node("stdlib::Reroute", (100.0, 0.0));
+        assert_eq!(err(&d, (&v3, "out"), (&reroute2, "in")), None);
     }
 }

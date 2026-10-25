@@ -11,10 +11,10 @@ use bevy::text::{EditableText, TextEditChange};
 use bevy::ui::Checked;
 use bevy::ui_widgets::ValueChange;
 use bevy_noodle::prelude::GraphQuery;
-use shader_graph_core::model::{AssetKind, BlendMode, MaterialKind, PreviewMode, Shading};
+use shader_graph_core::model::{AssetKind, BlendMode, MaterialKind, PbrOutputMode, PreviewMode, Shading};
 use shader_graph_core::registry::{NodeRole, ParamKind};
 use shader_graph_core::{PinType, Value};
-use shader_project::{AssetId, AssetType};
+use shader_project::AssetType;
 
 use super::dialog::InitText;
 use super::{TEXT, TEXT_DIM, button, text};
@@ -243,7 +243,7 @@ fn pin_kind(t: PinType) -> Option<ParamKind> {
         PinType::Color => ParamKind::Color,
         PinType::Bool => ParamKind::Bool,
         PinType::Int => ParamKind::Int { min: None, max: None },
-        PinType::Texture2D | PinType::Any => return None,
+        PinType::Texture2D | PinType::MaterialAttributesPbr | PinType::Any => return None,
     })
 }
 
@@ -377,6 +377,10 @@ fn asset_rows(editor: &Editor, out: &mut Vec<Box<dyn Scene>>) {
                 "Shading".into(),
                 select_w(PropTarget::Shading, vec!["Lit".into(), "Unlit".into()], Vec::new(), cur),
             )));
+            // Decision 0023: one `Material Attributes` input (+ WPO) instead of one pin per attribute.
+            let modes: Vec<String> = PbrOutputMode::ALL.iter().map(|m| m.label().to_string()).collect();
+            let cur = PbrOutputMode::ALL.iter().position(|m| *m == s.output).unwrap_or(0);
+            out.push(Box::new(labeled("Output".into(), select_w(PropTarget::OutputMode, modes, Vec::new(), cur))));
         }
         // Exclusive node preview (decision 0022): the mode is kept even while no node is previewed.
         out.push(Box::new(section("Preview")));
@@ -459,13 +463,16 @@ fn node_rows(editor: &Editor, id: &str, out: &mut Vec<Box<dyn Scene>>) {
         }
         let choices = choices_here.as_ref().unwrap_or(&choices);
         out.push(Box::new(labeled(p.label.clone(), value_widget(target, &p.kind, &v, choices))));
-        if p.kind == ParamKind::Curve && !v.as_str().is_empty() {
-            let open = Action::OpenAsset(AssetId::new(AssetType::Curve, v.as_str()));
-            out.push(Box::new(button("Open curve", open, false)));
-        }
-        if let (ParamKind::GlobalConst(_), Some((table, _))) = (&p.kind, global_consts.get(v.as_str())) {
-            out.push(Box::new(button("Open constant table", Action::OpenAsset(table.clone()), false)));
-        }
+    }
+    // The file the node refers to; double-clicking the node opens it too (decision 0023).
+    if let Some(target) = editor.referenced_asset(id) {
+        let label = match target.ty {
+            AssetType::Function => "Open function",
+            AssetType::Curve => "Open curve",
+            AssetType::Consts => "Open constant table",
+            AssetType::Material => "Open material",
+        };
+        out.push(Box::new(button(label, Action::OpenAsset(target), false)));
     }
     let Some(sig) = node_signature(&d.asset, id, &editor.registry, &editor.functions, &d.id.path) else { return };
     let mut header = false;

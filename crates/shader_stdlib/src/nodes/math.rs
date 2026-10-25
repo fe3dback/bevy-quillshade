@@ -1,7 +1,7 @@
 //! Math category: per-component polymorphic operations (spec §8, 7.2).
 
-use shader_graph_core::registry::{Hotkey, HotkeyKey, NodeAction, NodeOp, Registry};
-use shader_graph_core::{PinType, Stage};
+use shader_graph_core::registry::{Hotkey, HotkeyKey, NodeAction, NodeOp, PinDef, Registry};
+use shader_graph_core::{PinType, Stage, attributes};
 
 use crate::def::{def, dim_fn, pin_in, pin_out, poly_ins, poly_out, sig};
 
@@ -143,7 +143,19 @@ pub fn register(r: &mut Registry) {
 
     r.register(def("stdlib::Lerp", "Lerp", CAT).kw(&["l", "mix", "linear interpolate", "blend"]).build(
         |c| {
-            let (mut ins, ty, _) = poly_ins(c, &[("a", "A", 0.0), ("b", "B", 1.0)]);
+            // Material attributes on either side make the whole node a per-field lerp with a scalar alpha
+            // (decision 0023); the other side must then be attributes too (E003 otherwise).
+            let attrs = PinType::MaterialAttributesPbr;
+            if ["a", "b"].iter().any(|p| c.connected.get(*p) == Some(&attrs)) {
+                let ins = vec![
+                    PinDef::new("a", "A", attrs).poly().accepts_attributes(),
+                    PinDef::new("b", "B", attrs).poly().accepts_attributes(),
+                    pin_in("alpha", "Alpha", PinType::Float, 0.5).range(0.0, 1.0),
+                ];
+                return sig(ins, vec![poly_out("out", attrs)]);
+            }
+            let (ins, ty, _) = poly_ins(c, &[("a", "A", 0.0), ("b", "B", 1.0)]);
+            let mut ins: Vec<PinDef> = ins.into_iter().map(PinDef::accepts_attributes).collect();
             // Alpha may be a scalar or match A/B.
             let alpha_ty = match c.connected.get("alpha") {
                 Some(t) if t.dim().unwrap_or(1) > 1 => ty,
@@ -153,7 +165,13 @@ pub fn register(r: &mut Registry) {
             sig(ins, vec![poly_out("out", ty)])
         },
         |c| {
-            let e = format!("mix({}, {}, {})", c.input("a"), c.input("b"), c.input("alpha"));
+            let (a, b, t) = (c.input("a"), c.input("b"), c.input("alpha"));
+            let e = if c.out_type("out") == PinType::MaterialAttributesPbr {
+                let f = c.stdlib(attributes::MODULE, attributes::LERP_FN);
+                format!("{f}({a}, {b}, {t})")
+            } else {
+                format!("mix({a}, {b}, {t})")
+            };
             c.define("out", e);
         },
     ));

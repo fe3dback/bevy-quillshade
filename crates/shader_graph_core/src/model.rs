@@ -52,6 +52,9 @@ pub struct PbrSettings {
     pub blend: BlendMode,
     pub two_sided: bool,
     pub shading: Shading,
+    /// Pin layout of the output node (decision 0023); omitted from the file when `Default`.
+    #[serde(default, skip_serializing_if = "PbrOutputMode::is_default")]
+    pub output: PbrOutputMode,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,7 +70,12 @@ pub struct SpriteSettings {
 
 impl Default for PbrSettings {
     fn default() -> Self {
-        PbrSettings { blend: BlendMode::Opaque, two_sided: false, shading: Shading::Lit }
+        PbrSettings {
+            blend: BlendMode::Opaque,
+            two_sided: false,
+            shading: Shading::Lit,
+            output: PbrOutputMode::Default,
+        }
     }
 }
 
@@ -113,6 +121,29 @@ impl BlendMode {
 pub enum Shading {
     Lit,
     Unlit,
+}
+
+/// Inputs of the Pbr3d output node: one pin per attribute, or one `MaterialAttributes (PBR)` pin + WPO.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub enum PbrOutputMode {
+    #[default]
+    Default,
+    Wrapped,
+}
+
+impl PbrOutputMode {
+    pub const ALL: [PbrOutputMode; 2] = [PbrOutputMode::Default, PbrOutputMode::Wrapped];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            PbrOutputMode::Default => "Default",
+            PbrOutputMode::Wrapped => "Wrapped",
+        }
+    }
+
+    pub fn is_default(&self) -> bool {
+        *self == PbrOutputMode::Default
+    }
 }
 
 impl MaterialKind {
@@ -450,6 +481,23 @@ mod tests {
         a.preview = Preview { node: Some("zzz".into()), mode: PreviewMode::Full };
         let b = Asset::from_ron(&a.to_ron()).unwrap();
         assert_eq!(b.preview, a.preview);
+    }
+
+    #[test]
+    fn pbr_default_output_mode_not_serialized() {
+        let mut a = Asset::new("rock", AssetKind::Material(MaterialKind::Pbr3d(PbrSettings::default())));
+        assert!(!a.to_ron().contains("output"), "{}", a.to_ron());
+        a.kind = AssetKind::Material(MaterialKind::Pbr3d(PbrSettings {
+            output: PbrOutputMode::Wrapped,
+            ..Default::default()
+        }));
+        let text = a.to_ron();
+        assert!(text.contains("output: Wrapped"), "{text}");
+        assert_eq!(Asset::from_ron(&text).unwrap(), a);
+        let legacy = "Asset(format_version: 1, kind: Material(Pbr3d(PbrSettings(blend: Opaque, two_sided: false, \
+                      shading: Lit))), name: \"x\")";
+        let b = Asset::from_ron(legacy).unwrap();
+        assert!(matches!(b.kind, AssetKind::Material(MaterialKind::Pbr3d(s)) if s.output == PbrOutputMode::Default));
     }
 
     #[test]

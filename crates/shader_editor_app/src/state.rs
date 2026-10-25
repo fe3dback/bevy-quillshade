@@ -10,9 +10,12 @@ use shader_graph_core::curve::{Curve, Interp};
 use shader_graph_core::ident::check_ident;
 use shader_graph_core::ir::declared_function_sig;
 use shader_graph_core::model::{
-    Asset, AssetKind, BlendMode, MaterialKind, NodeId, PbrSettings, PreviewMode, Shading, SpriteSettings, UnlitSettings,
+    Asset, AssetKind, BlendMode, MaterialKind, NodeId, PbrOutputMode, PbrSettings, PreviewMode, Shading,
+    SpriteSettings, UnlitSettings,
 };
-use shader_graph_core::registry::{FUNCTION_PREFIX, Hotkey, HotkeyKey, NodeAction, NodeOp, NodeRole, const_refs};
+use shader_graph_core::registry::{
+    FUNCTION_PREFIX, Hotkey, HotkeyKey, NodeAction, NodeOp, NodeRole, ParamKind, const_refs,
+};
 use shader_graph_core::{Code, Diagnostic, FunctionSig, PinType, Registry, Value};
 use shader_project::regen::{project_registry, rust_file, wesl_file};
 use shader_project::watch::ShadersWatcher;
@@ -94,6 +97,8 @@ pub enum PropTarget {
     Blend,
     TwoSided,
     Shading,
+    /// Pin layout of the Pbr3d output node (decision 0023).
+    OutputMode,
     Description,
     /// Preview mode of the active material (decision 0022).
     PreviewMode,
@@ -2018,6 +2023,10 @@ impl Editor {
         }
         let d = self.doc()?;
         match target {
+            PropTarget::OutputMode => match d.asset.kind {
+                AssetKind::Material(MaterialKind::Pbr3d(s)) => Some(Value::Str(s.output.label().into())),
+                _ => None,
+            },
             PropTarget::Param { node, key } => {
                 let n = d.asset.nodes.get(node)?;
                 Some(self.registry.resolved_params(&n.kind, &n.params).get(key).cloned().unwrap_or(Value::Float(0.0)))
@@ -2238,6 +2247,59 @@ impl Editor {
         self.ui.props += 1;
     }
 
+    /// The editor asset node `node` of the active graph refers to (decision 0023): a function call's function, a
+    /// Sample Curve's curve, a `Global*` node's constant table. `None` for user nodes, unset params and dangling
+    /// targets. Drives node double-click and the props panel's "Open …" button.
+    pub fn referenced_asset(&self, node: &str) -> Option<AssetId> {
+        let n = self.doc()?.asset.nodes.get(node)?;
+        if let Some(path) = n.kind.strip_prefix(FUNCTION_PREFIX) {
+            return self.functions.contains_key(path).then(|| AssetId::new(AssetType::Function, path));
+        }
+        let def = self.registry.get(&n.kind)?;
+        let params = self.registry.resolved_params(&n.kind, &n.params);
+        for p in def.params() {
+            let v = params.get(&p.id).map(Value::as_str).unwrap_or_default();
+            match p.kind {
+                ParamKind::Curve if self.curve_paths().iter().any(|c| c == v) => {
+                    return Some(AssetId::new(AssetType::Curve, v));
+                }
+                ParamKind::GlobalConst(_) => {
+                    if let Some((table, _)) = self.global_consts().remove(v) {
+                        return Some(table);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// Switches the Pbr3d output layout (decision 0023) in one undo step. Like [`Self::convert_nodes`], wires and
+    /// inline values of material output pins the new layout lacks are dropped; undo brings them back.
+    fn set_pbr_output_mode(&mut self, mode: PbrOutputMode) {
+        let Some(d) = self.doc() else { return };
+        let mut asset = d.asset.clone();
+        let AssetKind::Material(MaterialKind::Pbr3d(s)) = &mut asset.kind else { return };
+        s.output = mode;
+        let outputs: Vec<NodeId> = asset
+            .nodes
+            .iter()
+            .filter(|(_, n)| self.registry.get(&n.kind).is_some_and(|def| def.role() == NodeRole::MaterialOutput))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &outputs {
+            let Some(sig) = node_signature(&asset, id, &self.registry, &self.functions, &d.id.path) else { continue };
+            asset.edges.retain(|e| e.to.0 != *id || sig.input(&e.to.1).is_some());
+            if let Some(n) = asset.nodes.get_mut(id) {
+                n.inputs.retain(|pin, _| sig.input(pin).is_some());
+            }
+        }
+        if let Some(d) = self.doc_mut() {
+            d.edit(|a| *a = asset);
+        }
+        self.ui.props += 1;
+    }
+
     /// Rewrites every unconnected polymorphic input of `node` to `ty`: they resolve to one common type
     /// (the widest), so changing only one pin could not narrow it.
     fn set_pin_type(&mut self, node: &str, ty: PinType) {
@@ -2322,6 +2384,12 @@ impl Editor {
                 }
                 return;
             }
+            PropTarget::OutputMode => {
+                if let Some(mode) = PbrOutputMode::ALL.into_iter().find(|m| m.label() == value.as_str()) {
+                    self.set_pbr_output_mode(mode);
+                }
+                return;
+            }
             _ => {}
         }
         let Some(d) = self.doc_mut() else { return };
@@ -2397,6 +2465,7 @@ impl Editor {
                 refresh = false;
             }
             PropTarget::CurvePoint(_)
+            | PropTarget::OutputMode
             | PropTarget::CurvePreview
             | PropTarget::Const(_)
             | PropTarget::ConstType(_)
@@ -2635,6 +2704,7 @@ impl Editor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use shader_graph_core::ir::WPO_PIN;
     use shader_project::fixtures;
 
     fn project() -> (tempfile::TempDir, Editor) {
@@ -2796,6 +2866,144 @@ mod tests {
         assert!(d.asset.edge_into(&lerp, "a").is_some());
         e.apply(Action::Undo);
         assert_eq!(e.doc().unwrap().asset.nodes[&add].kind, "stdlib::Add");
+    }
+
+    fn output_node(e: &Editor) -> NodeId {
+        e.doc().unwrap().asset.nodes.iter().find(|(_, n)| n.kind == "output::Pbr3d").unwrap().0.clone()
+    }
+
+    fn output_mode(e: &Editor) -> PbrOutputMode {
+        match e.doc().unwrap().asset.kind {
+            AssetKind::Material(MaterialKind::Pbr3d(s)) => s.output,
+            _ => panic!("not a Pbr3d material"),
+        }
+    }
+
+    fn add(e: &mut Editor, kind: &str) -> NodeId {
+        let before: BTreeSet<NodeId> = e.doc().unwrap().asset.nodes.keys().cloned().collect();
+        e.apply(Action::AddNode { kind: kind.into(), pos: (-900.0, 0.0), link: None, params: Vec::new() });
+        e.doc().unwrap().asset.nodes.keys().find(|k| !before.contains(*k)).unwrap().clone()
+    }
+
+    fn set_output_mode(e: &mut Editor, mode: &str) {
+        e.apply(Action::SetValue { target: PropTarget::OutputMode, value: Value::Str(mode.into()), merge: false });
+    }
+
+    fn pins_into(e: &Editor, node: &str) -> BTreeSet<String> {
+        e.doc().unwrap().asset.edges.iter().filter(|x| x.to.0 == node).map(|x| x.to.1.clone()).collect()
+    }
+
+    /// Decision 0023: switching the Pbr3d output mode drops wires into pins the new layout lacks, in one undo step.
+    #[test]
+    fn output_mode_switch_prunes_edges_and_undoes() {
+        let (_dir, mut e) = project();
+        e.apply(Action::OpenAsset(AssetId::new(AssetType::Material, "env/rock_wet")));
+        let out = output_node(&e);
+        let (v3, k) = (add(&mut e, "stdlib::Constant3Vector"), add(&mut e, "stdlib::Constant"));
+        e.apply(Action::Connect { from: (v3, "out".into()), to: (out.clone(), "base_color".into()) });
+        e.apply(Action::Connect { from: (k, "out".into()), to: (out.clone(), "roughness".into()) });
+        e.apply(Action::SetValue {
+            target: PropTarget::Input { node: out.clone(), pin: "specular".into() },
+            value: Value::Float(0.3),
+            merge: false,
+        });
+        let make = add(&mut e, "stdlib::MakeMaterialAttributesPbr");
+        let before = pins_into(&e, &out);
+        assert!(before.contains("base_color") && before.contains("roughness"), "{before:?}");
+
+        set_output_mode(&mut e, "Wrapped");
+        assert_eq!(output_mode(&e), PbrOutputMode::Wrapped);
+        assert!(pins_into(&e, &out).iter().all(|p| p == WPO_PIN), "{:?}", pins_into(&e, &out));
+        assert!(e.doc().unwrap().asset.nodes[&out].inputs.is_empty());
+        e.apply(Action::Connect { from: (make, "attributes".into()), to: (out.clone(), "attributes".into()) });
+        assert!(pins_into(&e, &out).contains("attributes"));
+
+        set_output_mode(&mut e, "Default");
+        assert_eq!(output_mode(&e), PbrOutputMode::Default);
+        assert!(!pins_into(&e, &out).contains("attributes"));
+
+        e.apply(Action::Undo);
+        assert_eq!(output_mode(&e), PbrOutputMode::Wrapped);
+        assert!(pins_into(&e, &out).contains("attributes"));
+        e.apply(Action::Undo); // the attributes wire
+        e.apply(Action::Undo); // the switch to `Wrapped`
+        assert_eq!(output_mode(&e), PbrOutputMode::Default);
+        assert_eq!(pins_into(&e, &out), before);
+        assert_eq!(e.doc().unwrap().asset.nodes[&out].inputs.get("specular"), Some(&Value::Float(0.3)));
+    }
+
+    #[test]
+    fn wpo_edge_survives_mode_switch() {
+        let (_dir, mut e) = project();
+        e.apply(Action::OpenAsset(AssetId::new(AssetType::Material, "env/rock_wet")));
+        let out = output_node(&e);
+        let v3 = add(&mut e, "stdlib::Constant3Vector");
+        e.apply(Action::Connect { from: (v3.clone(), "out".into()), to: (out.clone(), WPO_PIN.into()) });
+        set_output_mode(&mut e, "Wrapped");
+        assert!(pins_into(&e, &out).contains(WPO_PIN));
+        set_output_mode(&mut e, "Default");
+        assert!(pins_into(&e, &out).contains(WPO_PIN));
+        assert_eq!(e.current_value(&PropTarget::OutputMode), Some(Value::Str("Default".into())));
+    }
+
+    fn node_of(e: &Editor, kind: &str) -> NodeId {
+        e.doc().unwrap().asset.nodes.iter().find(|(_, n)| n.kind == kind).unwrap().0.clone()
+    }
+
+    fn active_asset(e: &Editor) -> AssetId {
+        e.tabs[e.active.unwrap()].asset().clone()
+    }
+
+    /// Decision 0023: the file a node refers to (double-click, props "Open" button).
+    #[test]
+    fn referenced_asset_resolves_targets() {
+        let (_dir, mut e) = project();
+        e.apply(Action::OpenAsset(AssetId::new(AssetType::Material, "env/rock_wet")));
+        let call = node_of(&e, "function::common/wet_mask");
+        assert_eq!(e.referenced_asset(&call), Some(AssetId::new(AssetType::Function, "common/wet_mask")));
+        e.apply(Action::OpenAsset(AssetId::new(AssetType::Material, "fx/curve_bands")));
+        let curve = node_of(&e, "stdlib::SampleCurve");
+        let path = e.doc().unwrap().asset.nodes[&curve].params["curve"].as_str().to_string();
+        assert_eq!(e.referenced_asset(&curve), Some(AssetId::new(AssetType::Curve, path)));
+        e.apply(Action::OpenAsset(AssetId::new(AssetType::Material, "fx/global_tint")));
+        let global = node_of(&e, "stdlib::GlobalConstF32");
+        assert_eq!(e.referenced_asset(&global), Some(AssetId::new(AssetType::Consts, "common/tuning")));
+    }
+
+    #[test]
+    fn referenced_asset_none() {
+        let (_dir, mut e) = project();
+        e.apply(Action::OpenAsset(AssetId::new(AssetType::Material, "env/rock_wet")));
+        let sum = add(&mut e, "stdlib::Add");
+        assert_eq!(e.referenced_asset(&sum), None);
+        let curve = add(&mut e, "stdlib::SampleCurve");
+        assert_eq!(e.referenced_asset(&curve), None, "no curve picked");
+        let global = add(&mut e, "stdlib::GlobalConstF32");
+        assert_eq!(e.referenced_asset(&global), None, "no constant picked");
+        let user = shader_graph_core::Node::new("user::soft_clamp", (0.0, 0.0));
+        let dangling = shader_graph_core::Node::new("function::common/missing", (0.0, 0.0));
+        e.doc_mut().unwrap().edit(|a| {
+            a.nodes.insert("dangling".into(), dangling);
+            a.nodes.insert("user".into(), user);
+        });
+        assert_eq!(e.referenced_asset("dangling"), None, "dangling function");
+        assert_eq!(e.referenced_asset("user"), None, "user nodes are not editor assets");
+        assert_eq!(e.referenced_asset("zzz"), None);
+    }
+
+    #[test]
+    fn open_referenced_twice_reuses_tab() {
+        let (_dir, mut e) = project();
+        e.apply(Action::OpenAsset(AssetId::new(AssetType::Material, "env/rock_wet")));
+        let call = node_of(&e, "function::common/wet_mask");
+        let target = e.referenced_asset(&call).unwrap();
+        let tabs = e.tabs.len();
+        e.apply(Action::OpenAsset(target.clone()));
+        assert_eq!(active_asset(&e), target);
+        e.apply(Action::OpenAsset(AssetId::new(AssetType::Material, "env/rock_wet")));
+        e.apply(Action::OpenAsset(target.clone()));
+        assert_eq!(e.tabs.len(), tabs + 1);
+        assert_eq!(active_asset(&e), target);
     }
 
     #[test]

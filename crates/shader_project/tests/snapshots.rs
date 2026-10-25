@@ -70,6 +70,11 @@ fn node_material(kind: &str) -> Option<(String, Asset)> {
             g.link((&n, &first.id), (&s, "cond"));
             g.link((&s, "out"), (&out, color));
         }
+        PinType::MaterialAttributesPbr => {
+            let s = g.node("stdlib::BreakMaterialAttributesPbr", (400.0, 0.0));
+            g.link((&n, &first.id), (&s, "attributes"));
+            g.link((&s, "base_color"), (&out, color));
+        }
         t if conversion(t, target).is_some() => g.link((&n, &first.id), (&out, color)),
         _ => {
             let s = g.node("stdlib::AppendVector", (400.0, 0.0));
@@ -213,4 +218,67 @@ fn preview_modes_generate_and_compile() {
         let text = std::fs::read_to_string(rust_file(&p, id).unwrap()).unwrap();
         assert_eq!(rust[id], text, "{id:?}: the Rust module changed with preview");
     }
+}
+
+/// Pbr3d `Wrapped` output (decision 0023): Make → `attributes`, plus World Position Offset.
+#[test]
+fn wrapped_output_generates_and_compiles() {
+    use shader_graph_core::model::{PbrOutputMode, PbrSettings};
+    let (_dir, p) = project();
+    let mat = MaterialKind::Pbr3d(PbrSettings { output: PbrOutputMode::Wrapped, ..Default::default() });
+    let mut g = GraphBuilder::new("pbr3d", AssetKind::Material(mat));
+    let out = g.node(mat.output_node_kind(), (600.0, 0.0));
+    let tint = g.node_p("param::Color", (0.0, 0.0), &[("name", Value::Str("tint".into()))]);
+    let make = g.node("stdlib::MakeMaterialAttributesPbr", (300.0, 0.0));
+    let wpo = g.node_p("stdlib::Constant3Vector", (300.0, 300.0), &[("value", Value::Float3([0.0, 0.1, 0.0]))]);
+    g.link((&tint, "rgb"), (&make, "base_color"));
+    g.link((&make, "attributes"), (&out, "attributes"));
+    g.link((&wpo, "out"), (&out, shader_graph_core::ir::WPO_PIN));
+    let id = AssetId::new(AssetType::Material, "wrapped/pbr3d");
+    ops::save(&p, &id, &g.finish()).unwrap();
+    let bevy = BevySources::discover();
+    if bevy.is_none() {
+        eprintln!("warning: Bevy 0.20 sources not in the cargo registry; WESL compile check skipped");
+    }
+    let report = regenerate(&p, &RegenOptions { compile_check: bevy.as_ref(), ..Default::default() }).unwrap();
+    let errors: Vec<String> = report.diagnostics().filter(|d| d.is_error()).map(|d| d.to_string()).collect();
+    assert!(errors.is_empty(), "errors:\n{}", errors.join("\n"));
+    let text = std::fs::read_to_string(wesl_file(&p, &id).unwrap()).unwrap();
+    snapshot("wesl__wrapped__pbr3d", &text);
+}
+
+/// Preview of a Make node in `full` mode (decision 0023): every attribute field feeds its slot.
+#[test]
+fn preview_attributes_generates_and_compiles() {
+    use shader_graph_core::model::{PbrSettings, Preview, PreviewMode};
+    let (_dir, p) = project();
+    let mat = MaterialKind::Pbr3d(PbrSettings::default());
+    let mut g = GraphBuilder::new("pbr3d_attributes_full", AssetKind::Material(mat));
+    let out = g.node(mat.output_node_kind(), (600.0, 0.0));
+    let rough = g.node_p("param::Scalar", (300.0, 200.0), &[("name", Value::Str("rough".into()))]);
+    g.link((&rough, "out"), (&out, "roughness"));
+    let make = g.node("stdlib::MakeMaterialAttributesPbr", (300.0, 0.0));
+    g.input(&make, "base_color", Value::Float3([0.2, 0.4, 0.6]));
+    g.input(&make, "roughness", Value::Float(0.8));
+    let mut asset = g.finish();
+    asset.preview = Preview { node: Some(make), mode: PreviewMode::Full };
+    let id = AssetId::new(AssetType::Material, "preview/pbr3d_attributes_full");
+    ops::save(&p, &id, &asset).unwrap();
+    let bevy = BevySources::discover();
+    if bevy.is_none() {
+        eprintln!("warning: Bevy 0.20 sources not in the cargo registry; WESL compile check skipped");
+    }
+    let report = regenerate(&p, &RegenOptions { compile_check: bevy.as_ref(), ..Default::default() }).unwrap();
+    let errors: Vec<String> = report.diagnostics().filter(|d| d.is_error()).map(|d| d.to_string()).collect();
+    assert!(errors.is_empty(), "errors:\n{}", errors.join("\n"));
+    assert!(report.assets[&id].ir.as_ref().is_some_and(|ir| ir.preview.is_some()), "preview ignored");
+    let text = std::fs::read_to_string(wesl_file(&p, &id).unwrap()).unwrap();
+    snapshot("wesl__preview__pbr3d_attributes_full", &text);
+    let rust = std::fs::read_to_string(rust_file(&p, &id).unwrap()).unwrap();
+
+    // Preview off: the Rust module does not change.
+    asset.preview.node = None;
+    ops::save(&p, &id, &asset).unwrap();
+    assert!(!regenerate(&p, &RegenOptions::default()).unwrap().has_errors());
+    assert_eq!(rust, std::fs::read_to_string(rust_file(&p, &id).unwrap()).unwrap());
 }

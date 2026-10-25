@@ -1,9 +1,10 @@
 //! Debug aid: scripted mouse gestures,
-//! `SHADER_EDITOR_INPUT=drag|rmb_click|rmb_pan|mmb_pan|slider|color|pin_rmb|node_rmb|hover|curve_drag|curve_add`
+//! `SHADER_EDITOR_INPUT=drag|rmb_click|rmb_pan|mmb_pan|slider|color|pin_rmb|node_rmb|node_dblclick|hover|curve_drag|curve_add`
 //! (with `SHADER_EDITOR_SCREENSHOT` and `SHADER_EDITOR_OPEN`; `SHADER_EDITOR_ZOOM=<f32>` sets the canvas zoom
 //! first). `slider`/`color` act on the first inline slider / color button on a node, `pin_rmb` right-clicks the
 //! first input pin of `SHADER_EDITOR_INPUT_NODE`, `node_rmb` right-clicks the middle of an unselected node (or of
-//! `SHADER_EDITOR_INPUT_NODE`) to open its menu, `hover` rests on the toolbar's Undo button (its tooltip),
+//! `SHADER_EDITOR_INPUT_NODE`) to open its menu, `node_dblclick` double-clicks the middle of that node (opens the
+//! file it refers to; the active tab is logged), `hover` rests on the toolbar's Undo button (its tooltip),
 //! `curve_drag` drags the second point of an open curve, `curve_add` double-clicks below it. The input goes through
 //! the same window messages winit writes,
 //! so picking, bevy_noodle and the editor see a real gesture; the outcome is logged.
@@ -168,6 +169,12 @@ pub fn scripted_input(
                 let at = logical(t, c);
                 vec![Step::Move(at), Step::Press(MouseButton::Right), Step::Wait, Step::Release(MouseButton::Right)]
             }
+            "node_dblclick" => {
+                let Some((key, _, t, c)) = unselected else { return };
+                s.node = Some(key.0.clone());
+                let click = || [Step::Press(MouseButton::Left), Step::Wait, Step::Release(MouseButton::Left)];
+                [Step::Move(logical(t, c))].into_iter().chain(click()).chain([Step::Wait]).chain(click()).collect()
+            }
             "rmb_click" => vec![Step::Move(canvas_min + 20.0), Step::Press(MouseButton::Right), Step::Wait, Step::Wait]
                 .into_iter()
                 .chain([Step::Release(MouseButton::Right)])
@@ -233,6 +240,10 @@ pub fn scripted_input(
                 events.write(e.into());
             }
             Some(Step::Wait) => {}
+            None if s.frame == START + 40 && name == "node_dblclick" => {
+                let tab = editor.active.map(|i| editor.tabs[i].asset().source_rel());
+                info!("demo node_dblclick: active tab {}", tab.unwrap_or_default());
+            }
             None if s.frame == START + 40 => report(&s),
             None => {}
         }

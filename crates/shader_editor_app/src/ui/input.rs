@@ -11,6 +11,7 @@ use shader_graph_core::{Hotkey, HotkeyKey};
 
 use super::dialog::open_menu;
 use super::palette::Palette;
+use super::props::PropField;
 use crate::canvas::{EditorCanvas, NodeKey, PinKey, link_of, window_to_graph};
 use crate::doc::connection_error;
 use crate::state::{Action, Actions, Editor, ViewRequest};
@@ -295,23 +296,37 @@ fn pin_click(
 }
 
 /// Right click (not a pan) on a node body opens the node menu (decision 0021); an unselected node is selected
-/// first, so the generic rows (copy, duplicate, delete) act on it.
+/// first, so the generic rows (copy, duplicate, delete) act on it. A double click on the body opens the file the
+/// node refers to (function, curve, constant table; decision 0023).
 #[allow(clippy::too_many_arguments)]
 fn node_click(
     click: On<PointerClick>,
     ec: Option<Res<EditorCanvas>>,
     nodes: Query<&NodeKey>,
     pins: Query<(), With<PinKey>>,
+    fields: Query<(), With<PropField>>,
+    parents: Query<&ChildOf>,
     editor: Res<Editor>,
     right: Res<RightPress>,
     mut actions: ResMut<Actions>,
     mut commands: Commands,
 ) {
     let Ok(NodeKey(node)) = nodes.get(click.event_target()) else { return };
-    if pins.contains(click.original_event_target())
-        || click.button != PointerButton::Secondary
-        || !right.is_click(click.pointer.position)
-    {
+    if pins.contains(click.original_event_target()) {
+        return;
+    }
+    if click.button == PointerButton::Primary && click.count >= 2 {
+        // Inline editors inside the node keep their own clicks.
+        let on_field = std::iter::once(click.original_event_target())
+            .chain(parents.iter_ancestors(click.original_event_target()))
+            .take_while(|e| *e != click.event_target())
+            .any(|e| fields.contains(e));
+        if !on_field && let Some(id) = editor.referenced_asset(node) {
+            actions.push(Action::OpenAsset(id));
+        }
+        return;
+    }
+    if click.button != PointerButton::Secondary || !right.is_click(click.pointer.position) {
         return;
     }
     let Some(d) = editor.doc() else { return };

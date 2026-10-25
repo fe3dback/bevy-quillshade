@@ -5,7 +5,7 @@
 
 use bevy::prelude::*;
 use bevy::sprite_render::SpriteMaterial;
-use shaders::{CoordsMaterial, CurveBandsMaterial, DissolveMaterial, GlobalTintMaterial, Exp42Ext, Exp42Material, FlagExt, FlagMaterial, HologramMaterial, RockWetExt, RockWetMaterial, WaterExt, WaterMaterial};
+use shaders::{CoordsMaterial, CurveBandsMaterial, DissolveMaterial, GlobalTintMaterial, Exp42Ext, Exp42Material, FlagExt, FlagMaterial, HologramMaterial, RockWetExt, RockWetMaterial, TerrainLayersExt, TerrainLayersMaterial, WaterExt, WaterMaterial};
 
 fn main() {
     App::new()
@@ -52,6 +52,7 @@ fn setup(
     mut dissolve: ResMut<Assets<DissolveMaterial>>,
     mut curve_bands: ResMut<Assets<CurveBandsMaterial>>,
     mut global_tint: ResMut<Assets<GlobalTintMaterial>>,
+    mut terrain: ResMut<Assets<TerrainLayersMaterial>>,
 ) {
     commands.spawn((Camera3d::default(), Transform::from_xyz(0.0, 3.0, 9.0).looking_at(Vec3::new(0.0, 0.5, 0.0), Vec3::Y)));
     commands.spawn((
@@ -75,6 +76,12 @@ fn setup(
 
     commands.spawn((Mesh3d(sphere.clone()), MeshMaterial3d(rock.add(rock_mat.material())), Transform::from_xyz(-3.5, 1.0, 0.0), Spin));
     commands.spawn((Mesh3d(sphere.clone()), MeshMaterial3d(exp.add(exp_mat.material())), Transform::from_xyz(0.0, 1.0, 0.0), Spin));
+    // Grass on top, rock on the slopes: two `MaterialAttributes (PBR)` layers blended by `WorldAlignedBlend`.
+    commands.spawn((
+        Mesh3d(sphere.clone()),
+        MeshMaterial3d(terrain.add(TerrainLayersExt::new().material())),
+        Transform::from_xyz(2.0, 0.8, 2.5).with_scale(Vec3::splat(0.8)),
+    ));
 
     let plane = meshes.add(Plane3d::default().mesh().size(4.0, 4.0).build().with_generated_tangents().expect("tangents"));
     let water_mat = WaterExt::new(assets.load("textures/water_normal.png"), LinearRgba::rgb(0.0, 0.15, 0.3));

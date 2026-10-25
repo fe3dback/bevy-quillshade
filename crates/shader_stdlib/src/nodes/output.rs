@@ -1,8 +1,10 @@
 //! Output category: MaterialOutput per asset type, FunctionInput, FunctionOutput.
 
+use shader_graph_core::attributes::{pbr_field_active, pbr_fields};
 use shader_graph_core::ident::input_ident;
+use shader_graph_core::ir::WPO_PIN;
 use shader_graph_core::registry::{NodeRole, Operand, ParamDef, ParamKind, PinDef, Registry};
-use shader_graph_core::{AssetKind, BlendMode, Code, MaterialKind, PinType, Shading, SigCtx, Value};
+use shader_graph_core::{AssetKind, BlendMode, Code, MaterialKind, PbrOutputMode, PbrSettings, PinType, SigCtx, Value};
 
 use crate::def::{def, pin_out, sig};
 
@@ -14,6 +16,13 @@ fn out_pin(id: &str, label: &str, ty: PinType, implicit: &str) -> PinDef {
 
 fn blend(c: &SigCtx) -> BlendMode {
     c.material_kind().map(|m| m.blend()).unwrap_or(BlendMode::Opaque)
+}
+
+fn pbr_settings(c: &SigCtx) -> PbrSettings {
+    match c.material_kind() {
+        Some(MaterialKind::Pbr3d(s)) => *s,
+        _ => PbrSettings::default(),
+    }
 }
 
 fn opacity_inactive(b: BlendMode) -> bool {
@@ -38,25 +47,52 @@ pub fn register(r: &mut Registry) {
             .role(NodeRole::MaterialOutput)
             .build(
                 |c| {
-                    let b = blend(c);
-                    let unlit = matches!(c.material_kind(), Some(MaterialKind::Pbr3d(s)) if s.shading == Shading::Unlit);
+                    let s = pbr_settings(c);
+                    let wpo = out_pin(WPO_PIN, "World Position Offset", PinType::Float3, "0");
+                    if s.output == PbrOutputMode::Wrapped {
+                        let attrs = out_pin("attributes", "Material Attributes", PinType::MaterialAttributesPbr, "StandardMaterial");
+                        return sig(vec![attrs, wpo], vec![]);
+                    }
+                    let field = |id: &str, label: &str, ty: PinType, implicit: &str| {
+                        out_pin(id, label, ty, implicit).inactive(!pbr_field_active(id, &s))
+                    };
                     sig(
                         vec![
-                            out_pin("base_color", "Base Color", PinType::Float3, "StandardMaterial"),
-                            out_pin("metallic", "Metallic", PinType::Float, "StandardMaterial").inactive(unlit),
-                            out_pin("specular", "Specular", PinType::Float, "0.5").inactive(unlit),
-                            out_pin("roughness", "Roughness", PinType::Float, "StandardMaterial").inactive(unlit),
-                            out_pin("emissive", "Emissive Color", PinType::Float3, "0"),
-                            out_pin("opacity", "Opacity", PinType::Float, "1.0").inactive(opacity_inactive(b)),
-                            out_pin("opacity_mask", "Opacity Mask", PinType::Float, "1.0").inactive(b != BlendMode::Mask),
-                            out_pin("normal", "Normal", PinType::Float3, "vertex normal").inactive(unlit),
-                            out_pin(shader_graph_core::ir::WPO_PIN, "World Position Offset", PinType::Float3, "0"),
-                            out_pin("ambient_occlusion", "Ambient Occlusion", PinType::Float, "1.0").inactive(unlit),
+                            field("base_color", "Base Color", PinType::Float3, "StandardMaterial"),
+                            field("metallic", "Metallic", PinType::Float, "StandardMaterial"),
+                            field("specular", "Specular", PinType::Float, "0.5"),
+                            field("roughness", "Roughness", PinType::Float, "StandardMaterial"),
+                            field("emissive", "Emissive Color", PinType::Float3, "0"),
+                            field("opacity", "Opacity", PinType::Float, "1.0"),
+                            field("opacity_mask", "Opacity Mask", PinType::Float, "1.0"),
+                            field("normal", "Normal", PinType::Float3, "vertex normal"),
+                            wpo,
+                            field("ambient_occlusion", "Ambient Occlusion", PinType::Float, "1.0"),
                         ],
                         vec![],
                     )
                 },
                 |c| {
+                    let s = match c.env.asset_kind.material() {
+                        Some(MaterialKind::Pbr3d(s)) => *s,
+                        _ => PbrSettings::default(),
+                    };
+                    if s.output == PbrOutputMode::Wrapped {
+                        // The struct expands into the per-field keys of `Default` mode, so the templates and the
+                        // preview stay unchanged. Unconnected = nothing written (decision 0023); no W103 here,
+                        // the normal is always written.
+                        if c.is_connected("attributes") {
+                            let v = c.input("attributes");
+                            for f in pbr_fields().iter().filter(|f| pbr_field_active(f.id, &s)) {
+                                c.set_output(f.id, format!("{v}.{}", f.id));
+                            }
+                        }
+                        if c.is_connected(WPO_PIN) {
+                            let v = c.input(WPO_PIN);
+                            c.set_output(WPO_PIN, v);
+                        }
+                        return;
+                    }
                     if c.is_connected("normal") {
                         c.diag_pin(
                             Code::W103,
@@ -82,7 +118,7 @@ pub fn register(r: &mut Registry) {
                             out_pin("opacity", "Opacity", PinType::Float, "1.0").inactive(opacity_inactive(b)),
                             out_pin("opacity_mask", "Opacity Mask", PinType::Float, "1.0")
                                 .inactive(b != BlendMode::Mask),
-                            out_pin(shader_graph_core::ir::WPO_PIN, "World Position Offset", PinType::Float3, "0"),
+                            out_pin(WPO_PIN, "World Position Offset", PinType::Float3, "0"),
                         ],
                         vec![],
                     )

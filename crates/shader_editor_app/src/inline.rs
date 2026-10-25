@@ -41,7 +41,7 @@ pub fn inline_for_pin(ty: PinType, range: Option<(f32, f32)>) -> Option<Inline> 
         PinType::Float3 => Inline::Color(3),
         PinType::Float4 | PinType::Color => Inline::Color(4),
         PinType::Bool => Inline::Check,
-        PinType::Texture2D | PinType::Any => return None,
+        PinType::Texture2D | PinType::MaterialAttributesPbr | PinType::Any => return None,
     })
 }
 

@@ -21,8 +21,8 @@ editor part is in the "Editor" section at the end.
   Emissive, Opacity, Normal, AmbientOcclusion) to an output pin id of the previewed node. `NodeDef::preview_output`
   builds it from the node's *resolved* signature (types of polymorphic pins follow the connected inputs); the default
   `ShaderOutputDto::main_output` puts the first output into Albedo when `converts_to_albedo(ty)`, otherwise the DTO
-  is empty and the node is not previewable. Nodes may override it to fill more slots; a future PBR struct pin maps
-  1:1 onto the slots without changing the trait. World Position Offset and UV slots are intentionally not
+  is empty and the node is not previewable. Nodes may override it to fill more slots; the PBR struct pin maps
+  1:1 onto the slots without changing the trait (decision 0023: a slot names `PreviewSource { pin, field }`). World Position Offset and UV slots are intentionally not
   `PreviewSlot`s: a preview only replaces fragment outputs (the vertex stage keeps existing with a zero offset). `PreviewSlot::output_pin(kind)` names the material output pin of a
   slot: Pbr3d has all of them (`base_color` for Albedo), Unlit3d `color` / `opacity`, Sprite2d only `color`.
 - **Albedo conversion** (`preview::albedo_expr`, spec §5): Float → `(v, v, v)`, Float2 → `vec3<f32>(xy, 0.0)`,

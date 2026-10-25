@@ -90,6 +90,12 @@ atomic write. Key facts that span several files:
   `Env::consts`; `regen::collect_consts` resolves names (unique project-wide), `const_refs` finds readers (deps,
   clearing on type change / delete). `regen::wesl_file` / `module_of` are `None` for tables.
 - **Node kinds** are string paths: `stdlib::*`, `param::*`, `output::*`, `function::<sub/name>`, `user::<id>`.
+- **Material Attributes** (decision 0023): `PinType::MaterialAttributesPbr` is the WESL struct of the stdlib module
+  `material.wesl`; field ids / defaults / activity live in `shader_graph_core::attributes` (shared by Make/Break, the
+  output node and `build_ir`). Any module naming the struct imports it — registered only in `EmitCtx::define_typed`,
+  `build_ir` step 6 (unconnected struct input → default constructor) and step 7 (a function signature using it). Pbr3d
+  `PbrSettings::output` = `Wrapped` turns `output::Pbr3d` into `attributes` + WPO, expanded into the same per-field
+  output keys as `Default`. Only `Lerp` (`PinDef::attributes`) accepts the struct among polymorphic nodes.
 - **Node context actions** (decision 0021) are data on `NodeDef` (node RMB menu, `Shift + - * /` convert, `V`). A material
   can store a **node preview** (`Asset::preview`, decision 0022): the node's output replaces the material output in the
   generated WESL (W107/W108); `Node::label` is an optional title for Constant nodes.
@@ -169,7 +175,7 @@ hand-drawn ones, rasterized at runtime with resvg (`crates/shader_editor_app/src
 
 - Editor: `SHADER_EDITOR_SCREENSHOT=out.png [SHADER_EDITOR_OPEN=env/rock_wet.material.ron[#wesl|#rust]]
   [SHADER_EDITOR_SELECT=stdlib::Lerp] [SHADER_EDITOR_DEMO=palette|wire|dialog|about|quick_start|open_project|welcome|menu|tab_menu] cargo run -- examples/sample_game`
-  — renders, saves the PNG and exits. `SHADER_EDITOR_INPUT=drag|rmb_click|rmb_pan|mmb_pan|slider|color|pin_rmb|node_rmb|hover|curve_drag|curve_add`
+  — renders, saves the PNG and exits. `SHADER_EDITOR_INPUT=drag|rmb_click|rmb_pan|mmb_pan|slider|color|pin_rmb|node_rmb|node_dblclick|hover|curve_drag|curve_add`
   (+ `SHADER_EDITOR_INPUT_NODE=<id>`, `SHADER_EDITOR_INPUT_TRACE=1`, `SHADER_EDITOR_ZOOM=<f32>`) plays a scripted mouse
   gesture through winit's messages and logs the outcome (`demo` lines; `slider`/`color` also log the edited value).
 - Sample game: `cd examples/sample_game && SAMPLE_SCREENSHOT=out cargo run` → `out-1.png`, `out-2.png` (used to verify

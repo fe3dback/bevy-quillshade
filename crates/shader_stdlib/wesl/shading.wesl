@@ -3,3 +3,15 @@ fn sg_fresnel(n: vec3<f32>, v: vec3<f32>, exponent: f32, base: f32) -> f32 {
     let ndv = saturate(dot(normalize(n), normalize(v)));
     return base + (1.0 - base) * pow(1.0 - ndv, exponent);
 }
+
+// World-aligned blend mask (UE's WorldAlignedBlend, approximated; decision 0023): with d = N.Up, 1 where
+// d >= -bias, falling to 0 over 1 / sharpness. Both vectors are normalized here (the vertex-stage normal is not).
+fn sg_world_aligned_blend(n: vec3<f32>, up: vec3<f32>, sharpness: f32, bias: f32) -> f32 {
+    let d = dot(normalize(n), normalize(up));
+    return saturate((d + bias) * sharpness + 1.0);
+}
+
+// Angle between the normal and Up in degrees: 0 = facing up, 90 = wall.
+fn sg_slope_angle(n: vec3<f32>, up: vec3<f32>) -> f32 {
+    return degrees(acos(clamp(dot(normalize(n), normalize(up)), -1.0, 1.0)));
+}

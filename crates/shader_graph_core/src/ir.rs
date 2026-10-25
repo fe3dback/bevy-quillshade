@@ -7,8 +7,8 @@ use crate::consts::ConstLookup;
 use crate::curve::Interp;
 use crate::diag::{Code, Diagnostic, Diagnostics};
 use crate::ident::{check_ident, input_ident};
-use crate::model::{Asset, AssetKind, Edge, MaterialKind, NodeId, PreviewMode};
-use crate::preview::{PreviewSlot, albedo_expr};
+use crate::model::{Asset, AssetKind, Edge, MaterialKind, NodeId, PbrOutputMode, PreviewMode};
+use crate::preview::{PreviewSlot, PreviewSource, albedo_expr};
 use crate::registry::{
     Builtin, CurveLookup, EmitCtx, EmitSink, Env, FnPort, FunctionLookup, FunctionSig, IrLine, MaterialParam, NodeDef,
     NodeRole, Operand, ParamType, ROUTE_PARAM, Registry, SigCtx, Signature, Stage,
@@ -593,6 +593,11 @@ pub fn build_ir(
                             .at_pin(&pin.id),
                     ),
                     None if pin.ty == PinType::Texture2D => {}
+                    None if pin.ty == PinType::MaterialAttributesPbr => {
+                        // The default constructor names the struct (decision 0023).
+                        sink.stdlib.insert(crate::attributes::import());
+                        inputs.insert(pin.id.clone(), Operand::Value(crate::attributes::pbr_default_literal()));
+                    }
                     None => {
                         let v = node.inputs.get(&pin.id).unwrap_or(&pin.default);
                         inputs.insert(pin.id.clone(), Operand::Value(v.wesl_literal(pin.ty)));
@@ -638,6 +643,13 @@ pub fn build_ir(
         custom_fns.extend(sink.custom_fns.iter().map(|(k, v)| (k.clone(), v.clone())));
         params_by_node.extend(sink.params.iter().map(|(k, v)| (k.clone(), v.clone())));
     }
+    // A function's own signature may name the struct (argument / return type), decision 0023.
+    if asset.kind.is_function() {
+        let sig = declared_function_sig(asset, path, registry);
+        if sig.inputs.iter().chain(&sig.outputs).any(|p| p.ty == PinType::MaterialAttributesPbr) {
+            stdlib.insert(crate::attributes::import());
+        }
+    }
     let mut params: Vec<MaterialParam> = params_by_node.into_values().collect();
     params.sort_by(|a, b| (a.order, &a.node).cmp(&(b.order, &b.node)));
     let mut names = BTreeSet::new();
@@ -680,14 +692,18 @@ pub fn build_ir(
         let n = &nodes[p];
         let dto = n.def.preview_output(sig);
         let sink = stages.get(&Stage::Fragment);
-        let operand = |pin: &str| -> Option<(&str, PinType)> {
-            let Operand::Value(expr) = sink?.operands.get(&(p.to_string(), pin.to_string()))? else {
+        let operand = |src: &PreviewSource| -> Option<(String, PinType)> {
+            let Operand::Value(expr) = sink?.operands.get(&(p.to_string(), src.pin.clone()))? else {
                 return None;
             };
-            Some((expr.as_str(), *fragment_types.get(&(p, pin.to_string()))?))
+            let ty = *fragment_types.get(&(p, src.pin.clone()))?;
+            match src.field {
+                // A field of a `MaterialAttributesPbr` output (decision 0023).
+                Some(f) => Some((format!("{expr}.{f}"), crate::attributes::pbr_field_type(f)?)),
+                None => Some((expr.clone(), ty)),
+            }
         };
-        let albedo =
-            dto.slots.get(&PreviewSlot::Albedo).and_then(|pin| operand(pin)).and_then(|(e, t)| albedo_expr(e, t));
+        let albedo = dto.slots.get(&PreviewSlot::Albedo).and_then(operand).and_then(|(e, t)| albedo_expr(&e, t));
         let Some(albedo) = albedo else {
             // Not previewable after all: build the normal IR, so the extra upstream leaves no trace.
             let mut normal = original.clone();
@@ -699,7 +715,7 @@ pub fn build_ir(
         };
         let root = roots.iter().find(|(s, _)| *s == Stage::Fragment).map(|(_, id)| &nodes[id].sig0);
         main.outputs.clear();
-        for (slot, pin) in &dto.slots {
+        for (slot, src) in &dto.slots {
             // Alpha is forced to 1 in every mode: an Opacity slot is not mapped, even in `Full` (decision 0022).
             if *slot == PreviewSlot::Opacity {
                 continue;
@@ -711,10 +727,21 @@ pub fn build_ir(
                     _ => albedo.clone(),
                 })
             } else if asset.preview.mode == PreviewMode::Full {
-                // Other slots only in `Full`, into active output pins of the material output.
-                root.and_then(|sig| sig.input(out_pin)).filter(|d| !d.inactive).and_then(|d| {
-                    let (expr, from) = operand(pin)?;
-                    Some(conversion(from, d.ty)?.apply(expr, from, d.ty))
+                // Other slots only in `Full`, into active output pins of the material output. A `Wrapped` root has
+                // no such pins: its active attribute fields stand in for them (decision 0023).
+                let target = match root.and_then(|sig| sig.input(out_pin)) {
+                    Some(d) => (!d.inactive).then_some(d.ty),
+                    None => match mk {
+                        MaterialKind::Pbr3d(s) if s.output == PbrOutputMode::Wrapped => {
+                            crate::attributes::pbr_field_type(out_pin)
+                                .filter(|_| crate::attributes::pbr_field_active(out_pin, s))
+                        }
+                        _ => None,
+                    },
+                };
+                target.and_then(|to| {
+                    let (expr, from) = operand(src)?;
+                    Some(conversion(from, to)?.apply(&expr, from, to))
                 })
             } else {
                 None

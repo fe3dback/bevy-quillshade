@@ -213,7 +213,8 @@ impl shader_graph_core::registry::NodeDef for OpaqueSlotMul {
         sig: &shader_graph_core::registry::Signature,
     ) -> shader_graph_core::preview::ShaderOutputDto {
         let mut dto = shader_graph_core::preview::ShaderOutputDto::main_output(sig);
-        dto.slots.insert(shader_graph_core::preview::PreviewSlot::Opacity, "out".into());
+        let src = shader_graph_core::preview::PreviewSource::pin("out");
+        dto.slots.insert(shader_graph_core::preview::PreviewSlot::Opacity, src);
         dto
     }
 }
@@ -233,4 +234,67 @@ fn full_preview_forces_alpha_over_an_opacity_slot() {
     let ir = r.ir.expect("ir");
     assert!(ir.preview.is_some(), "{:?}", r.diagnostics);
     assert_eq!(ir.main.outputs.keys().collect::<Vec<_>>(), ["base_color"], "alpha stays 1 (decision 0022)");
+}
+
+const MAKE: &str = "stdlib::MakeMaterialAttributesPbr";
+
+/// Pbr3d with a Make (base_color inline) that feeds nothing; `settings` picks the output mode.
+fn attributes_graph(settings: PbrSettings) -> Asset {
+    let mut a = Asset::new("mat", AssetKind::Material(MaterialKind::Pbr3d(settings)));
+    node(&mut a, "out", "output::Pbr3d", &[]);
+    node(&mut a, "make", MAKE, &[]);
+    a.nodes.get_mut("make").unwrap().inputs.insert("base_color".into(), Value::Float3([0.2, 0.4, 0.6]));
+    a
+}
+
+const LIT_OPAQUE_FIELDS: [&str; 7] =
+    ["ambient_occlusion", "base_color", "emissive", "metallic", "normal", "roughness", "specular"];
+
+#[test]
+fn preview_attributes_unlit_albedo_only() {
+    let mut a = attributes_graph(PbrSettings::default());
+    a.preview = Preview { node: Some("make".into()), mode: PreviewMode::Unlit };
+    let (ir, _) = build(&a);
+    assert_eq!(ir.main.outputs.keys().collect::<Vec<_>>(), ["base_color"]);
+    assert!(ir.main.outputs["base_color"].contains("n_make_attributes.base_color"), "{:?}", ir.main.outputs);
+    assert!(ir.preview.is_some());
+}
+
+#[test]
+fn preview_attributes_full_maps_fields() {
+    let mut a = attributes_graph(PbrSettings::default());
+    a.preview = Preview { node: Some("make".into()), mode: PreviewMode::Full };
+    let (ir, _) = build(&a);
+    assert_eq!(ir.main.outputs.keys().map(String::as_str).collect::<Vec<_>>(), LIT_OPAQUE_FIELDS);
+    for (k, v) in &ir.main.outputs {
+        assert_eq!(v, &format!("n_make_attributes.{k}"));
+    }
+}
+
+#[test]
+fn preview_attributes_full_in_wrapped_mode() {
+    use shader_graph_core::model::PbrOutputMode;
+    let mut a = attributes_graph(PbrSettings { output: PbrOutputMode::Wrapped, ..Default::default() });
+    a.connect(("make", "attributes"), ("out", "attributes"));
+    node(&mut a, "make2", MAKE, &[]);
+    a.preview = Preview { node: Some("make2".into()), mode: PreviewMode::Full };
+    let (ir, _) = build(&a);
+    assert_eq!(ir.main.outputs.keys().map(String::as_str).collect::<Vec<_>>(), LIT_OPAQUE_FIELDS);
+    for (k, v) in &ir.main.outputs {
+        assert_eq!(v, &format!("n_make2_attributes.{k}"));
+    }
+}
+
+#[test]
+fn preview_lerp_of_attributes() {
+    let mut a = attributes_graph(PbrSettings::default());
+    node(&mut a, "make2", MAKE, &[]);
+    node(&mut a, "lerp", "stdlib::Lerp", &[]);
+    a.connect(("make", "attributes"), ("lerp", "a"));
+    a.connect(("make2", "attributes"), ("lerp", "b"));
+    a.preview = Preview { node: Some("lerp".into()), mode: PreviewMode::Lit };
+    let (ir, diags) = build(&a);
+    assert!(ir.preview.is_some(), "{diags:?}");
+    assert!(!diags.iter().any(|d| d.code == Code::W107 && d.message.starts_with("preview ignored")), "{diags:?}");
+    assert_eq!(ir.main.outputs["base_color"], "n_lerp_out.base_color");
 }

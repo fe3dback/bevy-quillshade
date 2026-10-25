@@ -13,6 +13,7 @@ pub const STDLIB_VERSION: u32 = 1;
 pub const MODULES: &[(&str, &str)] = &[
     ("color", include_str!("../wesl/color.wesl")),
     ("curve", include_str!("../wesl/curve.wesl")),
+    ("material", include_str!("../wesl/material.wesl")),
     ("math", include_str!("../wesl/math.wesl")),
     ("noise", include_str!("../wesl/noise.wesl")),
     ("shading", include_str!("../wesl/shading.wesl")),

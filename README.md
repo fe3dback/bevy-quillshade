@@ -142,7 +142,7 @@ space below the tree creates a Pbr3d/Unlit3d/Sprite2d material, a function, a cu
 folder; RMB on an asset:
 rename, move (also by dragging onto a folder), delete, show the generated WESL/Rust in a read-only,
 syntax-highlighted tab), in the center the tabs and the canvas, on the right the properties (node parameters, input
-default values, asset blend mode / two-sided / shading), at the bottom the log (click — focus the node).
+default values, asset blend mode / two-sided / shading / output), at the bottom the log (click — focus the node).
 The browser is an IDE-style file tree: folders with expand carets, an icon per asset kind (function, Pbr3d,
 Unlit3d, Sprite2d, curve, constant table); the active tab's asset is highlighted, unsaved assets get an orange dot after the name.
 Tabs and menus show icons too; Undo / Redo are icon-only buttons — hover a toolbar button for its name and hotkey.
@@ -191,6 +191,33 @@ regenerates the shaders that read it. New constants start at 1.0 (`true`). Chang
 (also by undo / redo, or by deleting the table file), when nodes read it, asks first, then saves the table and clears
 those references (the nodes output 1.0 / `true`, W106).
 
+**Material Attributes (PBR)** (decision 0023, like UE's Material Attributes) pack a whole PBR layer into one pin of
+type `MaterialAttributes (PBR)` — fields Base Color, Metallic, Specular, Roughness, Emissive Color, Opacity, Opacity
+Mask, Normal (tangent space), Ambient Occlusion; World Position Offset is not part of it. `MakeMaterialAttributes
+(PBR)` builds one (unconnected fields use fixed defaults — white, metallic 0, specular / roughness 0.5, normal
+`(0, 0, 1)`, opacity / AO 1 — not the game's `StandardMaterial` values), `BreakMaterialAttributes (PBR)` splits one
+(category Material Attributes). The ordinary `Lerp` blends two of them field by field with a scalar Alpha; mixing
+attributes with a vector on the other side, or wiring them into Add / Multiply / If / …, is refused. Functions take
+and return them (FunctionInput / FunctionOutput type `MaterialAttributes (PBR)`; an unconnected one means all
+defaults), and reroutes / named routes pass them through. The struct lives in the stdlib module
+`autogen/stdlib/material.wesl`. Pbr3d materials get an **Output** setting in Properties: `Default` (one pin per
+attribute) or `Wrapped` — the output node then has a single `Material Attributes` input plus World Position Offset.
+Switching drops the wires (and inline values) of pins that disappear, in one undo step. In `Wrapped` mode a connected
+`attributes` writes every field active for the Shading / Blend settings, overriding `StandardMaterial`'s base color,
+metallic and roughness; left unconnected it writes nothing. The Normal is always written there (no W103). Nodes that
+output attributes (Make, a Lerp of them, a function returning them) can be previewed: `unlit` / `lit` show their Base
+Color, `full` every field.
+
+**WorldAlignedBlend** (Utility) blends by slope, like UE's node: `Mask` is 1 on surfaces facing `Up` (default
+`(0, 1, 0)`) and 0 on steep ones — with the defaults (Blend Sharpness 10, Blend Bias -0.7) up to about 45° is 1 and
+beyond about 53° is 0 — and `Angle` is the slope in degrees (0 = flat, 90 = wall). Normal defaults to the vertex
+normal; wire a perturbed normal in for "pixel normals". `examples/sample_game` has a two-layer terrain
+(`env/terrain_layers`, rock from the `common/rock_layer` function on the slopes, grass on top).
+
+**Double click on a node** that refers to another file — a function call, Sample Curve, a Global* node — opens that
+function / curve / constant table (or switches to its tab); Properties shows the same as an "Open …" button. User
+nodes are not editor assets and do nothing.
+
 | Action | Keys |
 | --- | --- |
 | Save (and regenerate) / all | Ctrl+S / Ctrl+Shift+S |
@@ -214,6 +241,7 @@ those references (the nodes output 1.0 / `true`, W106).
 | Close tab / next tab | Ctrl+W (or MMB on the tab) / Ctrl+Tab |
 | Close several tabs (all, others, left/right, unmodified) | RMB on a tab |
 | Open an asset | double click in the browser |
+| Open the function / curve / constant table a node refers to | double click on the node |
 | Scroll a generated file horizontally | Shift+wheel |
 | Curve: add a point / move / multi-select | double click on empty space / drag a point / Shift+click |
 | Curve drag: lock to the T / value axis, snap to the 0.1 grid | hold X / Y, hold Shift |
@@ -251,6 +279,8 @@ Asset(
   `user::<id>` (user node).
 - Constant nodes (`stdlib::Constant`, `Constant2Vector`/`3Vector`/`4Vector`) may have an optional `label: "…"` on the
   node (omitted when empty). It is editor-only: it replaces the value in the node title and never affects generated code.
+- Pbr3d settings may end with `output: Wrapped` (`PbrSettings(blend: Opaque, two_sided: false, shading: Lit, output:
+  Wrapped)`): the output node takes one `MaterialAttributes (PBR)` input plus WPO. Omitted for the default `Default`.
 - A material may have an optional `preview: Preview(node: Some("n09"), mode: Unlit)` (omitted when no node is
   previewed and the mode is the default `Unlit`; modes `Unlit`, `Lit`, `Full`). While `node` is set, the outputs of
   that node replace the material output's in the generated WESL (W107); deleting the node clears it.
@@ -324,4 +354,5 @@ WPO is not visible to the prepass/shadows; function outputs of type Texture2D ar
 have a single output; Static Switch is out of v1; there is no native folder picker (the path is typed in,
 with a list of recent projects); sliders on nodes drag at the wrong speed and the color picker opens off its button when the canvas
 is zoomed (Bevy 0.20 bugs, see decision 0012); Custom-node and user-node input names cannot be keywords (they are
-used unprefixed in the WGSL you write, decision 0020). Details — [`docs/decisions/0010-v1-limitations.md`](docs/decisions/0010-v1-limitations.md).
+used unprefixed in the WGSL you write, decision 0020); `MaterialAttributes (PBR)` cannot be used by Custom nodes, user
+nodes or parameters, and only Pbr3d has the `Wrapped` output (decision 0023). Details — [`docs/decisions/0010-v1-limitations.md`](docs/decisions/0010-v1-limitations.md).

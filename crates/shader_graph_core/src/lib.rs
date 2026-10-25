@@ -2,6 +2,7 @@
 //!
 //! Independent from Bevy so the CLI and code generators build fast and run headless.
 
+pub mod attributes;
 pub mod consts;
 pub mod curve;
 pub mod diag;
@@ -18,10 +19,10 @@ pub use curve::{Curve, Interp};
 pub use diag::{Code, Diagnostic, Diagnostics};
 pub use ir::{Ir, IrPreview, IrResult, IrStage, UniformField, UniformLayout, UniformTy, build_ir};
 pub use model::{
-    Asset, AssetKind, BlendMode, Edge, Frame, MaterialKind, Meta, Node, NodeId, PbrSettings, Preview, PreviewMode,
-    Shading, SpriteSettings, UnlitSettings,
+    Asset, AssetKind, BlendMode, Edge, Frame, MaterialKind, Meta, Node, NodeId, PbrOutputMode, PbrSettings, Preview,
+    PreviewMode, Shading, SpriteSettings, UnlitSettings,
 };
-pub use preview::{PreviewSlot, ShaderOutputDto, albedo_expr, converts_to_albedo};
+pub use preview::{PreviewSlot, PreviewSource, ShaderOutputDto, albedo_expr, converts_to_albedo};
 pub use registry::{
     Builtin, CurveLookup, EmitCtx, Env, FnPort, FunctionLookup, FunctionSig, Hotkey, HotkeyKey, MaterialParam,
     NodeAction, NodeDef, NodeInfo, NodeOp, NodeRole, Operand, ParamDef, ParamKind, ParamType, PinDef, Registry, SigCtx,

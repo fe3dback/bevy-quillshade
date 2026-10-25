@@ -14,12 +14,14 @@ pub enum PinType {
     Bool,
     Int,
     Texture2D,
+    /// Struct of PBR material attributes (decision 0023); only `Lerp` and Make/Break accept it.
+    MaterialAttributesPbr,
     /// Polymorphic pin; only used for display, signatures always resolve to a concrete type.
     Any,
 }
 
 impl PinType {
-    pub const ALL_CONCRETE: [PinType; 8] = [
+    pub const ALL_CONCRETE: [PinType; 9] = [
         PinType::Float,
         PinType::Float2,
         PinType::Float3,
@@ -28,6 +30,7 @@ impl PinType {
         PinType::Bool,
         PinType::Int,
         PinType::Texture2D,
+        PinType::MaterialAttributesPbr,
     ];
 
     /// WESL type name. Texture2D has no value type (it is a texture + sampler pair).
@@ -40,6 +43,7 @@ impl PinType {
             PinType::Bool => "bool",
             PinType::Int => "i32",
             PinType::Texture2D => "texture_2d<f32>",
+            PinType::MaterialAttributesPbr => crate::attributes::PBR_STRUCT,
             PinType::Any => "f32",
         }
     }
@@ -79,6 +83,7 @@ impl PinType {
             PinType::Bool => "Bool",
             PinType::Int => "Int",
             PinType::Texture2D => "Texture2D",
+            PinType::MaterialAttributesPbr => "MaterialAttributes (PBR)",
             PinType::Any => "Any",
         }
     }
@@ -94,6 +99,7 @@ impl PinType {
             PinType::Bool => [0.90, 0.25, 0.25],
             PinType::Int => [0.40, 0.85, 0.95],
             PinType::Texture2D => [0.30, 0.45, 0.95],
+            PinType::MaterialAttributesPbr => [0.55, 0.35, 0.95],
             PinType::Any => [0.95, 0.95, 0.95],
         }
     }
@@ -165,6 +171,7 @@ pub fn conversion(from: PinType, to: PinType) -> Option<Conversion> {
     match (from, to) {
         (Any, _) | (_, Any) => None,
         (Texture2D, _) | (_, Texture2D) => None,
+        (MaterialAttributesPbr, _) | (_, MaterialAttributesPbr) => None,
         (Bool, _) | (_, Bool) => None,
         (Int, Int) => Some(Conversion::Identity),
         (Int, t) if t.dim().is_some() => Some(Conversion::IntToFloat),
@@ -199,6 +206,11 @@ mod tests {
         assert_eq!(conversion(Bool, Bool), Some(Conversion::Identity));
         assert_eq!(conversion(Texture2D, Texture2D), Some(Conversion::Identity));
         assert_eq!(conversion(Texture2D, Float4), None);
+        assert_eq!(conversion(MaterialAttributesPbr, MaterialAttributesPbr), Some(Conversion::Identity));
+        assert_eq!(conversion(Float3, MaterialAttributesPbr), None);
+        assert_eq!(conversion(Float, MaterialAttributesPbr), None);
+        assert_eq!(conversion(MaterialAttributesPbr, Float3), None);
+        assert!(!MaterialAttributesPbr.is_numeric());
     }
 
     #[test]

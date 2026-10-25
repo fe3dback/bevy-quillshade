@@ -60,6 +60,12 @@ impl UserNode {
             if p.ty == PinType::Any {
                 return Err("user node inputs must have concrete types".into());
             }
+            if p.ty == PinType::MaterialAttributesPbr {
+                return Err(format!("user node input `{}`: type {} is not supported", p.name, p.ty.label()));
+            }
+        }
+        if n.output == PinType::MaterialAttributesPbr {
+            return Err(format!("user node output: type {} is not supported", n.output.label()));
         }
         if matches!(n.output, PinType::Any | PinType::Texture2D) {
             return Err("user node output must be a value type".into());
@@ -148,5 +154,20 @@ mod tests {
         let e = UserNode::from_ron(&node("fn")).unwrap_err();
         assert!(e.contains("user node input") && e.contains("reserved"), "{e}");
         assert!(UserNode::from_ron(&node("x")).is_ok());
+    }
+
+    /// Struct pins are not available to user code (decision 0023).
+    #[test]
+    fn attributes_type_rejected() {
+        let input = "UserNode(id: \"soft\", name: \"Soft\", inputs: [UserPin(name: \"x\", ty: MaterialAttributesPbr)], \
+                     output: Float, template: \"x\")";
+        let e = UserNode::from_ron(input).unwrap_err();
+        assert!(e.contains("MaterialAttributes (PBR)"), "{e}");
+        let output =
+            "UserNode(id: \"soft\", name: \"Soft\", inputs: [], output: MaterialAttributesPbr, template: \"x\")";
+        let e = UserNode::from_ron(output).unwrap_err();
+        assert!(e.contains("MaterialAttributes (PBR)"), "{e}");
+        let e = crate::nodes::utility::parse_custom_inputs("a: MaterialAttributes (PBR)").unwrap_err();
+        assert!(e.starts_with("unknown type") && e.ends_with("Int, Texture2D)"), "{e}");
     }
 }

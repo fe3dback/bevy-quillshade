@@ -122,6 +122,34 @@ pub fn register(r: &mut Registry) {
     ));
 
     r.register(
+        def("stdlib::WorldAlignedBlend", "WorldAlignedBlend", CAT)
+            .kw(&["slope", "angle", "world aligned", "terrain"])
+            .desc("Mask of surfaces facing Up (1) vs steep ones (0), and the slope angle in degrees.")
+            .build(
+                |_| {
+                    sig(
+                        vec![
+                            pin_in("sharpness", "Blend Sharpness", PinType::Float, 10.0),
+                            pin_in("bias", "Blend Bias", PinType::Float, -0.7),
+                            pin_in("normal", "Normal", PinType::Float3, 0.0).implicit("vertex normal"),
+                            PinDef::new("up", "Up", PinType::Float3).default(Value::Float3([0.0, 1.0, 0.0])),
+                        ],
+                        vec![pin_out("mask", "Mask", PinType::Float), pin_out("angle", "Angle", PinType::Float)],
+                    )
+                },
+                |c| {
+                    // Formula and the omitted "w/ Pixel Normals" output: decision 0023.
+                    let n = if c.is_connected("normal") { c.input("normal") } else { c.builtin(Builtin::WorldNormal) };
+                    let up = c.input("up");
+                    let f = c.stdlib("shading", "sg_world_aligned_blend");
+                    c.define("mask", format!("{f}({n}, {up}, {}, {})", c.input("sharpness"), c.input("bias")));
+                    let f = c.stdlib("shading", "sg_slope_angle");
+                    c.define("angle", format!("{f}({n}, {up})"));
+                },
+            ),
+    );
+
+    r.register(
         def("stdlib::Desaturation", "Desaturation", CAT)
             .kw(&["grayscale", "greyscale", "saturation", "luminance"])
             .param(ParamDef::new("luminance", "Luminance Factors", ParamKind::Float3, Value::Float3([0.3, 0.59, 0.11])))
@@ -346,13 +374,15 @@ pub fn register(r: &mut Registry) {
     );
 }
 
-/// `in` → `out` of the connected type (Float while unconnected).
+/// `in` → `out` of the connected type (Float while unconnected; it then also takes material attributes, decision
+/// 0023).
 fn pass_through_sig(c: &SigCtx) -> Signature {
     let ty = c.connected.get("in").copied().unwrap_or(PinType::Float);
     let resolved = c.connected.contains_key("in");
     let mut i = PinDef::new("in", "", ty);
     let mut o = PinDef::new("out", "", ty);
     i.poly = !resolved;
+    i.attributes = !resolved;
     o.poly = !resolved;
     sig(vec![i], vec![o])
 }
@@ -372,8 +402,11 @@ pub fn parse_custom_inputs(spec: &str) -> Result<Vec<(String, PinType)>, String>
         let (name, ty) = part.split_once(':').ok_or_else(|| format!("expected `name: Type`, got `{part}`"))?;
         let name = name.trim().to_string();
         shader_graph_core::ident::check_code_ident(&name).map_err(|e| format!("custom input: {e}"))?;
-        let ty =
-            PinType::ALL_CONCRETE.into_iter().find(|t| t.label().eq_ignore_ascii_case(ty.trim())).ok_or_else(|| {
+        let ty = PinType::ALL_CONCRETE
+            .into_iter()
+            .filter(|t| *t != PinType::MaterialAttributesPbr)
+            .find(|t| t.label().eq_ignore_ascii_case(ty.trim()))
+            .ok_or_else(|| {
                 format!("unknown type `{}` (use Float, Float2, Float3, Float4, Color, Bool, Int, Texture2D)", ty.trim())
             })?;
         if out.iter().any(|(n, _)| *n == name) {

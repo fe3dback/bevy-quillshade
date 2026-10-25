@@ -74,6 +74,9 @@ pub struct PinDef {
     pub implicit: Option<String>,
     /// Sensible value range of a scalar input (inline slider bounds in the editor; not enforced in codegen).
     pub range: Option<(f32, f32)>,
+    /// Polymorphic input that may also take `MaterialAttributes (PBR)` (Lerp `a`/`b`, unconnected reroutes and named
+    /// routes; decision 0023).
+    pub attributes: bool,
 }
 
 impl PinDef {
@@ -88,11 +91,18 @@ impl PinDef {
             inactive: false,
             implicit: None,
             range: None,
+            attributes: false,
         }
     }
 
     pub fn poly(mut self) -> Self {
         self.poly = true;
+        self
+    }
+
+    /// This polymorphic input may also take `MaterialAttributes (PBR)` (decision 0023).
+    pub fn accepts_attributes(mut self) -> Self {
+        self.attributes = true;
         self
     }
 
@@ -586,6 +596,10 @@ impl EmitCtx<'_> {
 
     /// Like [`define`](Self::define) with an explicit WESL type (e.g. a function result struct).
     pub fn define_typed(&mut self, pin: &str, ty: &str, expr: impl Into<String>) {
+        // A typed `let` names the struct, so the module must import it (decision 0023).
+        if ty == crate::attributes::PBR_STRUCT {
+            self.sink.stdlib.insert(crate::attributes::import());
+        }
         let name = self.var(pin);
         self.sink.lines.push(IrLine {
             node: self.node_id.into(),
@@ -674,7 +688,8 @@ pub trait NodeDef: Send + Sync {
         Vec::new()
     }
 
-    /// Pins for the given params and connected input types. Pin ids must depend on params only.
+    /// Pins for the given params and connected input types. Pin ids must depend on params only, except for the
+    /// material output node, whose pin ids also depend on the material settings (Pbr3d output mode, decision 0023).
     fn signature(&self, ctx: &SigCtx) -> Signature;
 
     /// Emits WESL for the node. Errors are reported through `ctx.diag`.

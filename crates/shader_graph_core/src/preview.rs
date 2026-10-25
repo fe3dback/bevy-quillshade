@@ -35,6 +35,32 @@ pub enum PreviewSlot {
 }
 
 impl PreviewSlot {
+    pub const ALL: [PreviewSlot; 8] = [
+        PreviewSlot::Albedo,
+        PreviewSlot::Metallic,
+        PreviewSlot::Specular,
+        PreviewSlot::Roughness,
+        PreviewSlot::Emissive,
+        PreviewSlot::Opacity,
+        PreviewSlot::Normal,
+        PreviewSlot::AmbientOcclusion,
+    ];
+
+    /// Field of `MaterialAttributesPbr` shown in this slot (decision 0023).
+    pub fn attributes_field(self) -> &'static str {
+        use PreviewSlot::*;
+        match self {
+            Albedo => "base_color",
+            Metallic => "metallic",
+            Specular => "specular",
+            Roughness => "roughness",
+            Emissive => "emissive",
+            Opacity => "opacity",
+            Normal => "normal",
+            AmbientOcclusion => "ambient_occlusion",
+        }
+    }
+
     /// Input pin of the material output node for this slot (`base_color` / `color` for Albedo), if the kind has it.
     pub fn output_pin(self, kind: &MaterialKind) -> Option<&'static str> {
         use PreviewSlot::*;
@@ -59,20 +85,40 @@ impl PreviewSlot {
     }
 }
 
-/// What a previewed node feeds: slot → the node's own output pin id.
+/// Value shown in a preview slot: one of the node's output pins, or a field of a `MaterialAttributesPbr` output
+/// (decision 0023).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreviewSource {
+    pub pin: String,
+    pub field: Option<&'static str>,
+}
+
+impl PreviewSource {
+    /// The whole output pin `pin`.
+    pub fn pin(pin: impl Into<String>) -> Self {
+        PreviewSource { pin: pin.into(), field: None }
+    }
+}
+
+/// What a previewed node feeds: slot → the node's own output (pin, optional struct field).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ShaderOutputDto {
-    pub slots: BTreeMap<PreviewSlot, String>,
+    pub slots: BTreeMap<PreviewSlot, PreviewSource>,
 }
 
 impl ShaderOutputDto {
-    /// Default: the first output → Albedo, if [`converts_to_albedo`]; otherwise empty (not previewable).
+    /// Default: the first output → Albedo, if [`converts_to_albedo`]; a first output of material attributes maps
+    /// every slot onto its field (decision 0023); otherwise empty (not previewable).
     pub fn main_output(sig: &Signature) -> Self {
         let mut dto = ShaderOutputDto::default();
-        if let Some(first) = sig.outputs.first()
-            && converts_to_albedo(first.ty)
-        {
-            dto.slots.insert(PreviewSlot::Albedo, first.id.clone());
+        let Some(first) = sig.outputs.first() else { return dto };
+        if first.ty == PinType::MaterialAttributesPbr {
+            for slot in PreviewSlot::ALL {
+                let src = PreviewSource { pin: first.id.clone(), field: Some(slot.attributes_field()) };
+                dto.slots.insert(slot, src);
+            }
+        } else if converts_to_albedo(first.ty) {
+            dto.slots.insert(PreviewSlot::Albedo, PreviewSource::pin(first.id.clone()));
         }
         dto
     }
@@ -95,14 +141,28 @@ mod tests {
     #[test]
     fn preview_main_output_takes_first_output_as_albedo() {
         let dto = ShaderOutputDto::main_output(&outputs(&[("rgb", PinType::Float3), ("r", PinType::Float)]));
-        assert_eq!(dto.slots, BTreeMap::from([(PreviewSlot::Albedo, "rgb".to_string())]));
+        assert_eq!(dto.slots, BTreeMap::from([(PreviewSlot::Albedo, PreviewSource::pin("rgb"))]));
         assert!(!dto.is_empty());
+    }
+
+    #[test]
+    fn preview_attributes_map_every_slot_to_a_field() {
+        let dto = ShaderOutputDto::main_output(&outputs(&[("attributes", PinType::MaterialAttributesPbr)]));
+        assert_eq!(dto.slots.len(), PreviewSlot::ALL.len());
+        for slot in PreviewSlot::ALL {
+            let src = &dto.slots[&slot];
+            assert_eq!(src.pin, "attributes");
+            assert_eq!(src.field, Some(slot.attributes_field()));
+            assert!(crate::attributes::pbr_field_type(slot.attributes_field()).is_some(), "{slot:?}");
+        }
+        assert_eq!(PreviewSlot::Albedo.attributes_field(), "base_color");
+        assert_eq!(PreviewSlot::Emissive.attributes_field(), "emissive");
     }
 
     #[test]
     fn preview_float2_main_output_is_previewable() {
         let dto = ShaderOutputDto::main_output(&outputs(&[("uv", PinType::Float2)]));
-        assert_eq!(dto.slots, BTreeMap::from([(PreviewSlot::Albedo, "uv".to_string())]));
+        assert_eq!(dto.slots, BTreeMap::from([(PreviewSlot::Albedo, PreviewSource::pin("uv"))]));
     }
 
     #[test]

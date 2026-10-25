@@ -154,13 +154,16 @@ pub fn search_indices(entries: &[Entry], query: &str) -> Vec<usize> {
     hits.into_iter().map(|(_, i)| i).collect()
 }
 
+/// Input pin of a fresh node: id, type, polymorphic, also takes material attributes (decision 0023).
+pub type FreshPin = (String, PinType, bool, bool);
+
 /// Signature of a freshly created node of `kind` (default params, nothing connected).
 pub fn fresh_pins(
     registry: &Registry,
     functions: &dyn FunctionLookup,
     asset_kind: AssetKind,
     kind: &str,
-) -> Option<(Vec<(String, PinType, bool)>, Vec<(String, PinType)>)> {
+) -> Option<(Vec<FreshPin>, Vec<(String, PinType)>)> {
     let def = registry.get(kind)?;
     let params = registry.resolved_params(kind, &BTreeMap::new());
     let connected = BTreeMap::new();
@@ -175,7 +178,7 @@ pub fn fresh_pins(
         env: &env,
     });
     Some((
-        sig.inputs.iter().filter(|p| !p.inactive).map(|p| (p.id.clone(), p.ty, p.poly)).collect(),
+        sig.inputs.iter().filter(|p| !p.inactive).map(|p| (p.id.clone(), p.ty, p.poly, p.attributes)).collect(),
         sig.outputs.iter().map(|p| (p.id.clone(), p.ty)).collect(),
     ))
 }
@@ -191,7 +194,11 @@ pub fn compatible_pin(
     let (ins, outs) = fresh_pins(registry, functions, asset_kind, kind)?;
     match end {
         WireEnd::FromOutput(t) => {
-            ins.into_iter().find(|(_, ty, poly)| (*poly && t.is_numeric()) || conversion(t, *ty).is_some()).map(|p| p.0)
+            let poly_ok =
+                |poly: bool, attrs: bool| poly && (t.is_numeric() || (attrs && t == PinType::MaterialAttributesPbr));
+            ins.into_iter()
+                .find(|(_, ty, poly, attrs)| poly_ok(*poly, *attrs) || conversion(t, *ty).is_some())
+                .map(|p| p.0)
         }
         WireEnd::FromInput(t) => outs.into_iter().find(|(_, ty)| conversion(*ty, t).is_some()).map(|p| p.0),
     }
@@ -248,5 +255,20 @@ mod tests {
             Some("tex")
         );
         assert!(compatible_pin(&reg, &NoFunctions, k, "stdlib::Time", WireEnd::FromInput(PinType::Float)).is_some());
+    }
+
+    #[test]
+    fn wire_filter_attributes() {
+        let reg = shader_stdlib::registry();
+        let k = AssetKind::Material(MaterialKind::Pbr3d(PbrSettings::default()));
+        let from = WireEnd::FromOutput(PinType::MaterialAttributesPbr);
+        assert_eq!(compatible_pin(&reg, &NoFunctions, k, "stdlib::Lerp", from).as_deref(), Some("a"));
+        assert_eq!(compatible_pin(&reg, &NoFunctions, k, "stdlib::Add", from), None);
+        assert_eq!(compatible_pin(&reg, &NoFunctions, k, "stdlib::If", from), None);
+        assert_eq!(
+            compatible_pin(&reg, &NoFunctions, k, "stdlib::BreakMaterialAttributesPbr", from).as_deref(),
+            Some("attributes")
+        );
+        assert_eq!(compatible_pin(&reg, &NoFunctions, k, "stdlib::Reroute", from).as_deref(), Some("in"));
     }
 }

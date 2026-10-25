@@ -419,3 +419,59 @@ fn preview_needing_extra_param_warns_w108() {
     assert!(!r.assets[&id].diagnostics.iter().any(|d| d.code == Code::W108), "{:?}", r.assets[&id].diagnostics);
     assert!(!read(&rs).contains("inp_extra"), "{}", read(&rs));
 }
+
+/// Decision 0023: a function passes `MaterialAttributesPbr` through, and a caller leaves that input unconnected. Both
+/// modules name the struct (argument / return type, default constructor), so both import it.
+#[test]
+fn function_with_attributes_compiles() {
+    use shader_graph_core::model::{Asset, AssetKind, MaterialKind, PbrSettings};
+    use shader_graph_core::{Node, PinType, Value};
+    let (_d, p) = temp_project();
+    let s = |v: &str| Value::Str(v.into());
+    let attrs = Value::Type(PinType::MaterialAttributesPbr);
+
+    let mut f = Asset::new("layer", AssetKind::Function);
+    let base = f.add_node(
+        Node::new("output::FunctionInput", (0.0, 0.0)).with_param("name", s("base")).with_param("type", attrs.clone()),
+    );
+    let glow = f.add_node(
+        Node::new("output::FunctionInput", (0.0, 100.0))
+            .with_param("name", s("glow"))
+            .with_param("type", Value::Type(PinType::Float3))
+            .with_param("order", Value::Int(1)),
+    );
+    let brk = f.add_node(Node::new("stdlib::BreakMaterialAttributesPbr", (200.0, 0.0)));
+    let make = f.add_node(Node::new("stdlib::MakeMaterialAttributesPbr", (400.0, 0.0)));
+    let fout = f.add_node(
+        Node::new("output::FunctionOutput", (600.0, 0.0)).with_param("name", s("out")).with_param("type", attrs),
+    );
+    f.connect((&base, "out"), (&brk, "attributes"));
+    for field in ["base_color", "metallic", "roughness", "normal"] {
+        f.connect((&brk, field), (&make, field));
+    }
+    f.connect((&glow, "out"), (&make, "emissive"));
+    f.connect((&make, "attributes"), (&fout, "value"));
+    ops::save(&p, &AssetId::new(AssetType::Function, "common/layer"), &f).unwrap();
+
+    let mut m = Asset::new("m", AssetKind::Material(MaterialKind::Pbr3d(PbrSettings::default())));
+    let out = m.add_node(Node::new("output::Pbr3d", (600.0, 0.0)));
+    let call = m.add_node(Node::new("function::common/layer", (0.0, 0.0)));
+    let brk = m.add_node(Node::new("stdlib::BreakMaterialAttributesPbr", (300.0, 0.0)));
+    m.connect((&call, "out"), (&brk, "attributes"));
+    m.connect((&brk, "base_color"), (&out, "base_color"));
+    ops::save(&p, &AssetId::new(AssetType::Material, "env/m"), &m).unwrap();
+
+    let bevy = BevySources::discover();
+    if bevy.is_none() {
+        eprintln!("warning: Bevy sources not found in ~/.cargo/registry; WESL compile check skipped");
+    }
+    let r = regenerate(&p, &RegenOptions { compile_check: bevy.as_ref(), ..Default::default() }).unwrap();
+    let errors: Vec<_> = r.diagnostics().filter(|d| d.is_error()).collect();
+    assert!(errors.is_empty(), "{errors:?}");
+    let fun = read(&p.root.join("assets/shaders/autogen/functions/dir_common/fun_layer.wesl"));
+    assert!(fun.contains("stdlib::material::MaterialAttributesPbr"), "{fun}");
+    let mat = read(&p.root.join("assets/shaders/autogen/dir_env/mat_m.wesl"));
+    assert!(mat.contains("stdlib::material::MaterialAttributesPbr"), "{mat}");
+    assert!(mat.contains("fun_layer(MaterialAttributesPbr("), "{mat}");
+    assert!(p.root.join("assets/shaders/autogen/stdlib/material.wesl").exists());
+}

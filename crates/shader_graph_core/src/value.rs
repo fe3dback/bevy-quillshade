@@ -28,7 +28,7 @@ impl Value {
             PinType::Color => Value::Color([0.0, 0.0, 0.0, 1.0]),
             PinType::Bool => Value::Bool(false),
             PinType::Int => Value::Int(0),
-            PinType::Texture2D => Value::Str(String::new()),
+            PinType::Texture2D | PinType::MaterialAttributesPbr => Value::Str(String::new()),
         }
     }
 
@@ -92,7 +92,7 @@ impl Value {
 
     /// Converts the value to the shape of `ty` (broadcasting / truncating components).
     pub fn coerce(&self, ty: PinType) -> Value {
-        if let (Value::Str(_), PinType::Texture2D) = (self, ty) {
+        if let (Value::Str(_), PinType::Texture2D | PinType::MaterialAttributesPbr) = (self, ty) {
             return self.clone();
         }
         let f = self.floats();
@@ -108,12 +108,16 @@ impl Value {
             }
             PinType::Bool => Value::Bool(self.as_bool()),
             PinType::Int => Value::Int(self.as_i32()),
-            PinType::Texture2D => Value::Str(String::new()),
+            PinType::Texture2D | PinType::MaterialAttributesPbr => Value::Str(String::new()),
         }
     }
 
     /// WESL literal of this value interpreted as `ty`.
     pub fn wesl_literal(&self, ty: PinType) -> String {
+        // The struct has no literal of its own: every value means "all fields at their defaults" (decision 0023).
+        if ty == PinType::MaterialAttributesPbr {
+            return crate::attributes::pbr_default_literal();
+        }
         let v = self.coerce(ty);
         let list = |xs: &[f32]| xs.iter().map(|x| wesl_f32(*x)).collect::<Vec<_>>().join(", ");
         match v {
@@ -163,5 +167,9 @@ mod tests {
         assert_eq!(Value::Float(0.5).wesl_literal(PinType::Float), "0.5f");
         assert_eq!(Value::Float3([1.0, 0.5, 0.0]).wesl_literal(PinType::Color), "vec4<f32>(1.0, 0.5, 0.0, 1.0)");
         assert_eq!(Value::Int(3).wesl_literal(PinType::Int), "3i");
+        let attrs = Value::zero(PinType::MaterialAttributesPbr);
+        assert_eq!(attrs, Value::Str(String::new()));
+        assert_eq!(attrs.coerce(PinType::MaterialAttributesPbr), attrs);
+        assert!(attrs.wesl_literal(PinType::MaterialAttributesPbr).starts_with("MaterialAttributesPbr(vec3<f32>(1.0"));
     }
 }

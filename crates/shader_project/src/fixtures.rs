@@ -3,7 +3,7 @@
 use shader_graph_core::consts::{ConstType, GlobalConst, GlobalConsts};
 use shader_graph_core::curve::Curve;
 use shader_graph_core::model::{
-    Asset, AssetKind, BlendMode, MaterialKind, Node, PbrSettings, SpriteSettings, UnlitSettings,
+    Asset, AssetKind, BlendMode, MaterialKind, Node, PbrOutputMode, PbrSettings, SpriteSettings, UnlitSettings,
 };
 use shader_graph_core::{PinType, Value};
 
@@ -548,6 +548,58 @@ pub fn global_tint() -> Asset {
     g.finish()
 }
 
+/// Function returning a whole PBR layer as `MaterialAttributes (PBR)` (decision 0023): a tinted rough rock.
+pub fn rock_layer() -> Asset {
+    let mut g = GraphBuilder::new("rock_layer", AssetKind::Function);
+    let tint = g.node_p(
+        "output::FunctionInput",
+        (0.0, 0.0),
+        &[
+            ("name", s("tint")),
+            ("type", Value::Type(PinType::Float3)),
+            ("default", Value::Float4([0.45; 4])),
+            ("order", Value::Int(0)),
+        ],
+    );
+    let make = g.node("stdlib::MakeMaterialAttributesPbr", (250.0, 0.0));
+    g.link((&tint, "out"), (&make, "base_color"));
+    g.input(&make, "roughness", f(0.9));
+    g.input(&make, "normal", Value::Float3([0.1, 0.0, 1.0]));
+    let out = g.node_p(
+        "output::FunctionOutput",
+        (500.0, 0.0),
+        &[("name", s("layer")), ("type", Value::Type(PinType::MaterialAttributesPbr)), ("order", Value::Int(0))],
+    );
+    g.link((&make, "attributes"), (&out, "value"));
+    g.finish()
+}
+
+/// Layered terrain (decision 0023): Pbr3d `Wrapped`, grass on flat ground and the `common/rock_layer` function on
+/// slopes, blended by `WorldAlignedBlend` through one `Lerp` of material attributes; WPO lifts the surface a bit.
+pub fn terrain_layers() -> Asset {
+    let kind =
+        AssetKind::Material(MaterialKind::Pbr3d(PbrSettings { output: PbrOutputMode::Wrapped, ..Default::default() }));
+    let mut g = GraphBuilder::new("terrain_layers", kind);
+    let out = g.node("output::Pbr3d", (900.0, 0.0));
+    let grass_color =
+        g.node_p("stdlib::Constant3Vector", (0.0, -150.0), &[("value", Value::Float3([0.15, 0.45, 0.1]))]);
+    let grass = g.node("stdlib::MakeMaterialAttributesPbr", (250.0, -150.0));
+    g.link((&grass_color, "out"), (&grass, "base_color"));
+    g.input(&grass, "roughness", f(0.7));
+    let rock_color = g.node_p("stdlib::Constant3Vector", (0.0, 100.0), &[("value", Value::Float3([0.4, 0.38, 0.35]))]);
+    let rock = g.node("function::common/rock_layer", (250.0, 100.0));
+    g.link((&rock_color, "out"), (&rock, "tint"));
+    let slope = g.node("stdlib::WorldAlignedBlend", (250.0, 300.0));
+    let blend = g.node("stdlib::Lerp", (600.0, 0.0));
+    g.link((&rock, "layer"), (&blend, "a"));
+    g.link((&grass, "attributes"), (&blend, "b"));
+    g.link((&slope, "mask"), (&blend, "alpha"));
+    g.link((&blend, "out"), (&out, "attributes"));
+    let lift = g.node_p("stdlib::Constant3Vector", (600.0, 250.0), &[("value", Value::Float3([0.0, 0.02, 0.0]))]);
+    g.link((&lift, "out"), (&out, shader_graph_core::ir::WPO_PIN));
+    g.finish()
+}
+
 /// Function whose name and ports are Rust/WGSL keywords (decision 0020): `out = in * 2`, `let = in`.
 pub fn keyword_fn() -> Asset {
     let mut g = GraphBuilder::new("fn", AssetKind::Function);
@@ -641,9 +693,11 @@ pub fn save_all(project: &Project) -> Result<(), OpError> {
 pub fn all() -> Vec<(&'static str, bool, Asset)> {
     vec![
         ("common/wet_mask", true, wet_mask()),
+        ("common/rock_layer", true, rock_layer()),
         ("env/rock_wet", false, rock_wet()),
         ("env/flag", false, flag()),
         ("env/water", false, water()),
+        ("env/terrain_layers", false, terrain_layers()),
         ("fx/hologram", false, hologram()),
         ("fx/coords", false, coords()),
         ("fx/curve_bands", false, curve_bands()),
