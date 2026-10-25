@@ -172,12 +172,28 @@ pub fn open_menu(commands: &mut Commands, pos: Vec2, items: Vec<(String, Action)
     open_icon_menu(commands, pos, items.into_iter().map(|(label, action)| (None, label, action)).collect());
 }
 
+/// A menu item that draws a separator line.
+pub fn menu_separator() -> (Option<IconId>, String, Action) {
+    (None, String::new(), Action::None)
+}
+
 /// [`open_menu`] with an icon before each label; items without one keep the icon's space when any item has one.
+/// A label `"Save\tCtrl+S"` shows its hotkey on the right; an empty label is a separator ([`menu_separator`]).
 pub fn open_icon_menu(commands: &mut Commands, pos: Vec2, items: Vec<(Option<IconId>, String, Action)>) {
     let with_icons = items.iter().any(|(i, ..)| i.is_some());
     let rows: Vec<Box<dyn Scene>> = items
         .into_iter()
         .map(|(id, label, action)| -> Box<dyn Scene> {
+            if label.is_empty() {
+                return Box::new(bsn! {
+                    Node { height: px(1), margin: UiRect::axes(px(6), px(4)) }
+                    BackgroundColor(Color::srgb_u8(70, 72, 80))
+                });
+            }
+            let (label, hotkey) = match label.split_once('\t') {
+                Some((l, h)) => (l.to_string(), h.to_string()),
+                None => (label, String::new()),
+            };
             let (act, hover) = (OnActivate(action), HoverRow { base: Color::NONE });
             let lead: Vec<Box<dyn Scene>> = match id {
                 Some(id) => vec![Box::new(icon(id, 16.0, TEXT))],
@@ -196,7 +212,15 @@ pub fn open_icon_menu(commands: &mut Commands, pos: Vec2, items: Vec<(Option<Ico
                 MenuItem
                 act
                 hover
-                Children [ {lead} -- @text(label, TEXT, 13.0) ]
+                Children [
+                    {lead}
+                    --
+                    @text(label, TEXT, 13.0)
+                    --
+                    Node { flex_grow: 1.0, min_width: px(24) }
+                    --
+                    @text(hotkey, TEXT_DIM, 12.0)
+                ]
             })
         })
         .collect();

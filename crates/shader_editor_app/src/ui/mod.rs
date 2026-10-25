@@ -1,4 +1,5 @@
-//! Window layout (spec §9): toolbar, asset browser (left), tabs + canvas + log (center), properties (right).
+//! Window layout (spec §9): main menu + toolbar, asset browser (left), tabs + canvas + log (center), properties
+//! (right).
 
 use bevy::feathers::constants::size;
 use bevy::feathers::controls::{ButtonVariant, FeathersButton, FeathersToolButton};
@@ -7,11 +8,12 @@ use bevy::feathers::theme::ThemeBackgroundColor;
 use bevy::feathers::tokens;
 use bevy::input_focus::tab_navigation::TabGroup;
 use bevy::prelude::*;
+use bevy::ui::ui_transform::UiGlobalTransform;
 use bevy::ui_widgets::{Activate, ScrollArea};
 use bevy_noodle::style::kit;
 
-use crate::state::{Action, Actions, Editor, NewKind, ViewRequest};
-use crate::tab::{Tab, ViewKind};
+use crate::state::{Action, Actions, Editor, GenFile, Unsaved, ViewRequest};
+use crate::tab::{Lang, Tab, ViewKind};
 
 pub mod browser;
 pub mod curve_preview;
@@ -26,6 +28,7 @@ pub mod tabs;
 pub mod text_view;
 pub mod tooltip;
 
+use dialog::{menu_separator, open_icon_menu};
 use icons::{IconId, icon};
 use shader_graph_core::model::{AssetKind, MaterialKind};
 use tooltip::Tooltip;
@@ -62,6 +65,10 @@ pub struct StatusText;
 #[derive(Component, Default, Clone)]
 pub struct DocKindText;
 
+/// The UI accent (orange): the accent detail of icons, markers of unsaved changes. The only definition of it
+/// (`icons` builds its icon palette from [`ACCENT_RGB`]).
+pub const ACCENT_RGB: [u8; 3] = [0xfb, 0x92, 0x3c];
+pub const ACCENT: Color = Color::srgb_u8(ACCENT_RGB[0], ACCENT_RGB[1], ACCENT_RGB[2]);
 pub const TEXT: Color = Color::srgb(0.86, 0.87, 0.90);
 pub const TEXT_DIM: Color = Color::srgb(0.55, 0.57, 0.62);
 pub const ROW_HOVER: Color = Color::srgba(1.0, 1.0, 1.0, 0.06);
@@ -91,8 +98,9 @@ impl Plugin for UiPlugin {
             tooltip::TooltipPlugin,
         ))
         .add_systems(Startup, spawn_layout)
-        .add_systems(Update, (show_active_view, show_empty_hint, show_doc_kind, show_status))
+        .add_systems(Update, (show_active_view, show_empty_hint, show_doc_kind, show_status, redraw_view_tools))
         .add_observer(activate_action)
+        .add_observer(open_main_menu)
         .add_observer(row_hover_on)
         .add_observer(row_hover_off);
     }
@@ -193,20 +201,59 @@ fn header(title: &'static str) -> impl Scene {
     }
 }
 
+/// A main menu button; activating it opens the menu below it.
+#[derive(Component, Default, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MainMenu {
+    #[default]
+    File,
+    Assets,
+}
+
+impl MainMenu {
+    pub fn items(self) -> Vec<(Option<IconId>, String, Action)> {
+        match self {
+            MainMenu::File => vec![
+                (Some(IconId::FolderOpen), "Open Project...\tCtrl+O".into(), Action::OpenProjectDialog),
+                (Some(IconId::Close), "Close Project".into(), Action::CloseProject(Unsaved::Ask)),
+                menu_separator(),
+                (Some(IconId::Save), "Save\tCtrl+S".into(), Action::Save),
+                (Some(IconId::SaveAll), "Save All\tCtrl+Shift+S".into(), Action::SaveAll),
+                menu_separator(),
+                (None, "Quit\tCtrl+Q".into(), Action::Quit),
+            ],
+            MainMenu::Assets => {
+                let mut items = browser::create_items();
+                items.push(menu_separator());
+                items.push((Some(IconId::Regenerate), "Regenerate".into(), Action::RegenAll));
+                items
+            }
+        }
+    }
+}
+
+fn menu_button(label: &'static str, menu: MainMenu) -> impl Scene {
+    bsn! {
+        @FeathersToolButton { @variant: ButtonVariant::Plain, @caption: bsn! { @caption(label) } }
+        menu
+    }
+}
+
+fn open_main_menu(
+    ev: On<Activate>,
+    buttons: Query<(&MainMenu, &ComputedNode, &UiGlobalTransform)>,
+    mut commands: Commands,
+) {
+    let Ok((menu, node, t)) = buttons.get(ev.event_target()) else { return };
+    let (center, size) = (t.translation * node.inverse_scale_factor(), node.size() * node.inverse_scale_factor());
+    open_icon_menu(&mut commands, center + Vec2::new(-size.x, size.y) / 2.0 + Vec2::Y * 2.0, menu.items());
+}
+
+/// The toolbar part with the actions of the active tab's view (filled by [`redraw_view_tools`]).
+#[derive(Component, Default, Clone)]
+pub struct ViewTools;
+
+/// Main menu, undo/redo, then the actions of the active view.
 fn toolbar() -> impl Scene {
-    let buttons: Vec<Box<dyn Scene>> = vec![
-        Box::new(icon_tool_button(IconId::FolderOpen, "Open...", Action::OpenProjectDialog, "Open project (Ctrl+O)")),
-        Box::new(icon_button(IconId::Save, Action::Save, "Save (Ctrl+S)")),
-        Box::new(icon_button(IconId::SaveAll, Action::SaveAll, "Save all (Ctrl+Shift+S)")),
-        Box::new(icon_tool_button(IconId::Regenerate, "Regenerate", Action::RegenAll, "Regenerate the whole project")),
-        Box::new(sep()),
-        Box::new(icon_button(IconId::Undo, Action::Undo, "Undo (Ctrl+Z)")),
-        Box::new(icon_button(IconId::Redo, Action::Redo, "Redo (Ctrl+Shift+Z, Ctrl+Y)")),
-        Box::new(sep()),
-        Box::new(icon_tool_button(IconId::AutoLayout, "Auto-layout", Action::AutoLayout, "Auto-layout (Ctrl+L)")),
-        Box::new(icon_tool_button(IconId::Comment, "Comment", Action::AddComment(None), "Add a comment frame (C)")),
-        Box::new(icon_tool_button(IconId::Fit, "Fit", Action::View(ViewRequest::FitAll), "Fit the graph (Home)")),
-    ];
     bsn! {
         Node {
             flex_direction: FlexDirection::Row,
@@ -218,7 +265,18 @@ fn toolbar() -> impl Scene {
         BackgroundColor(HEADER_BG)
         BorderColor::all(BORDER)
         Children [
-            {buttons}
+            @menu_button("File", MainMenu::File)
+            --
+            @menu_button("Assets", MainMenu::Assets)
+            --
+            @icon_button(IconId::Undo, Action::Undo, "Undo (Ctrl+Z)")
+            --
+            @icon_button(IconId::Redo, Action::Redo, "Redo (Ctrl+Shift+Z, Ctrl+Y)")
+            --
+            @sep()
+            --
+            ViewTools
+            Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(2) }
             --
             Node { flex_grow: 1.0 }
             --
@@ -228,6 +286,66 @@ fn toolbar() -> impl Scene {
             TextColor(TEXT_DIM)
             Node { margin: UiRect::right(px(6)) }
         ]
+    }
+}
+
+/// Toolbar actions of the active tab's view.
+fn view_tools(tab: &Tab) -> Vec<Box<dyn Scene>> {
+    match tab {
+        Tab::Graph(_) => vec![
+            Box::new(icon_tool_button(IconId::AutoLayout, "Auto-layout", Action::AutoLayout, "Auto-layout (Ctrl+L)")),
+            Box::new(icon_tool_button(IconId::Comment, "Comment", Action::AddComment(None), "Add a comment frame (C)")),
+            Box::new(icon_tool_button(IconId::Fit, "Fit", Action::View(ViewRequest::FitAll), "Fit the graph (Home)")),
+        ],
+        Tab::Curve(_) => vec![
+            Box::new(tool_button("Select all", Action::SelectAll)),
+            Box::new(icon_tool_button(
+                IconId::Delete,
+                "Delete",
+                Action::DeleteSelection,
+                "Delete the selected points (Del)",
+            )),
+        ],
+        Tab::Text(t) => {
+            let which = match t.lang {
+                Lang::Wesl => GenFile::Wesl,
+                Lang::Rust => GenFile::Rust,
+            };
+            vec![
+                Box::new(icon_tool_button(IconId::Copy, "Copy", Action::Copy, "Copy the whole file (Ctrl+C)")),
+                Box::new(icon_tool_button(
+                    IconId::for_id(&t.source, None),
+                    "Source",
+                    Action::OpenAsset(t.source.clone()),
+                    "Open the source graph",
+                )),
+                Box::new(icon_tool_button(
+                    IconId::OpenExternal,
+                    "Open externally",
+                    Action::ShowFile(t.source.clone(), which),
+                    "Open in the default application",
+                )),
+            ]
+        }
+    }
+}
+
+fn redraw_view_tools(
+    editor: Res<Editor>,
+    tools: Query<Entity, With<ViewTools>>,
+    mut last: Local<Option<Option<String>>>,
+    mut commands: Commands,
+) {
+    // A text tab's buttons name its source: rebuilt per tab, not per view kind.
+    let key = editor.tab().map(Tab::config_key);
+    if last.as_ref() == Some(&key) {
+        return;
+    }
+    let Ok(tools) = tools.single() else { return };
+    *last = Some(key);
+    commands.entity(tools).despawn_children();
+    for b in editor.tab().map(view_tools).unwrap_or_default() {
+        commands.spawn_scene(bsn! { @{b} ChildOf(tools) });
     }
 }
 
@@ -252,20 +370,6 @@ pub fn scroll_column() -> impl Scene {
 
 fn spawn_layout(mut commands: Commands) {
     commands.spawn(Camera2d);
-    let new_buttons: Vec<Box<dyn Scene>> = NewKind::ALL
-        .iter()
-        .map(|k| -> Box<dyn Scene> {
-            let short = match k {
-                NewKind::Pbr3d => "+Pbr",
-                NewKind::Unlit3d => "+Unlit",
-                NewKind::Sprite2d => "+2D",
-                NewKind::Function => "+Fn",
-                NewKind::Curve => "+Curve",
-            };
-            let tip = format!("New {}...", k.label());
-            Box::new(icon_tool_button(IconId::for_new(*k), short, Action::NewAssetDialog(*k), tip))
-        })
-        .collect();
     commands.spawn_scene(bsn! {
         Node { width: percent(100), height: percent(100), flex_direction: FlexDirection::Column }
         ThemeBackgroundColor(tokens::WINDOW_BG)
@@ -281,9 +385,6 @@ fn spawn_layout(mut commands: Commands) {
                 BorderColor::all(BORDER)
                 Children [
                     @header("Assets")
-                    --
-                    Node { flex_direction: FlexDirection::Row, flex_wrap: FlexWrap::Wrap, padding: UiRect::all(px(3)), column_gap: px(2) }
-                    Children [ {new_buttons} -- @icon_tool_button(IconId::FolderNew, "+Folder", Action::NewFolderDialog, "New folder...") ]
                     --
                     @scroll_column() browser::BrowserBody
                 ]
@@ -307,7 +408,7 @@ fn spawn_layout(mut commands: Commands) {
                         EmptyHint
                         Node { position_type: PositionType::Absolute, left: px(24), top: px(24) }
                         Pickable::IGNORE
-                        Children [ @text("Open an asset from the browser (or create one with +Pbr / +Unlit / +2D / +Fn / +Curve).", TEXT_DIM, 14.0) ]
+                        Children [ @text("Double-click an asset in the browser to open it (create one with Assets or a right click in the browser).", TEXT_DIM, 14.0) ]
                         --
                         // Over the active view, whatever kind it is.
                         DocKindText

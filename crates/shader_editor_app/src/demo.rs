@@ -2,7 +2,7 @@
 //! `SHADER_EDITOR_INPUT=drag|rmb_click|rmb_pan|mmb_pan|slider|color|pin_rmb|hover|curve_drag|curve_add`
 //! (with `SHADER_EDITOR_SCREENSHOT` and `SHADER_EDITOR_OPEN`; `SHADER_EDITOR_ZOOM=<f32>` sets the canvas zoom
 //! first). `slider`/`color` act on the first inline slider / color button on a node, `pin_rmb` right-clicks the
-//! first input pin of `SHADER_EDITOR_INPUT_NODE`, `hover` rests on the toolbar's Save button (its tooltip),
+//! first input pin of `SHADER_EDITOR_INPUT_NODE`, `hover` rests on the toolbar's Undo button (its tooltip),
 //! `curve_drag` drags the second point of an open curve, `curve_add` double-clicks below it. The input goes through
 //! the same window messages winit writes,
 //! so picking, bevy_noodle and the editor see a real gesture; the outcome is logged.
@@ -166,8 +166,8 @@ pub fn scripted_input(
                 .chain([Step::Release(MouseButton::Right)])
                 .collect(),
             "hover" => {
-                let Some((_, t, c)) = tips.iter().find(|t| t.0.0.starts_with("Save (")) else {
-                    error!("demo {name}: no Save button");
+                let Some((_, t, c)) = tips.iter().find(|t| t.0.0.starts_with("Undo (")) else {
+                    error!("demo {name}: no Undo button");
                     return;
                 };
                 vec![Step::Move(logical(t, c))]

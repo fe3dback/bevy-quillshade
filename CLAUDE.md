@@ -136,7 +136,7 @@ hand-drawn ones, rasterized at runtime with resvg (`crates/shader_editor_app/src
   `<svg>` element of a similar icon-rs icon: 24x24 viewBox, `fill="none" stroke="#262626"
   stroke-linejoin="round" stroke-linecap="round"`, `stroke-width` 1.75 for line icons / 1.1 for solid ones, drawing
   inside 1.5..22.5. Colors only from `Palette::LIGHT`: ink `#262626`; faces `#ffffff #d4d4d4 #a4a4a4 #747474` (solid
-  only); accent `#2563eb` for the one modifier detail (the plus, the arrow), single marks stay ink-only. No `id`s, no
+  only); accent `#2563eb` (the accent slot, rendered in `ui::ACCENT`) for the one modifier detail (the plus, the arrow), single marks stay ink-only. No `id`s, no
   gradients/`<defs>`. Then add `const X: Icon = custom("name", Kind::Line, include_str!("../../icons/name.svg"));`,
   the `IconId` variant, and the const to the `custom_icons_use_only_palette_colours` test list.
 - **Review a new icon** before using it: render it at 16 and 32 px on the dark panel color, e.g. with a scratch crate
@@ -158,7 +158,7 @@ hand-drawn ones, rasterized at runtime with resvg (`crates/shader_editor_app/src
 ### Visual checks (debug env hooks)
 
 - Editor: `SHADER_EDITOR_SCREENSHOT=out.png [SHADER_EDITOR_OPEN=env/rock_wet.material.ron[#wesl|#rust]]
-  [SHADER_EDITOR_SELECT=stdlib::Lerp] [SHADER_EDITOR_DEMO=palette|wire|dialog|menu] cargo run -- examples/sample_game`
+  [SHADER_EDITOR_SELECT=stdlib::Lerp] [SHADER_EDITOR_DEMO=palette|wire|dialog|menu|tab_menu] cargo run -- examples/sample_game`
   — renders, saves the PNG and exits. `SHADER_EDITOR_INPUT=drag|rmb_click|rmb_pan|mmb_pan|slider|color|pin_rmb|hover|curve_drag|curve_add`
   (+ `SHADER_EDITOR_INPUT_NODE=<id>`, `SHADER_EDITOR_INPUT_TRACE=1`, `SHADER_EDITOR_ZOOM=<f32>`) plays a scripted mouse
   gesture through winit's messages and logs the outcome (`demo` lines; `slider`/`color` also log the edited value).

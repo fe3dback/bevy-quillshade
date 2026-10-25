@@ -24,7 +24,7 @@ pub enum Inline {
     Integer,
     /// Number fields per component.
     Vector(usize),
-    /// Color picker plus number fields per component.
+    /// Color picker only (the Properties panel has the per-component fields).
     Color(usize),
     Check,
 }
@@ -94,18 +94,13 @@ pub fn inline_scene(target: PropTarget, inline: Inline, v: &Value) -> Box<dyn Sc
         }
         Inline::Color(n) => {
             floats.resize(n, 1.0);
-            let (field, color) = (PropField { target: target.clone(), ..default() }, linear_color(&floats));
-            let mut items = vector_fields(&target, &floats, true);
-            items.insert(
-                0,
-                Box::new(bsn! {
-                    @FeathersColorInput
-                    ColorInputValue(color)
-                    on(color_input_self_update)
-                    field
-                }),
-            );
-            row(items)
+            let (field, color) = (PropField { target, ..default() }, linear_color(&floats));
+            row(vec![Box::new(bsn! {
+                @FeathersColorInput
+                ColorInputValue(color)
+                on(color_input_self_update)
+                field
+            })])
         }
     }
 }

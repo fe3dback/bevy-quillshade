@@ -266,14 +266,14 @@ fn inline_fields_follow_the_model_while_rebuild_waits() {
     act(&mut app, Action::OpenAsset(AssetId::new(AssetType::Material, "env/rock_wet")));
     act(&mut app, Action::AddNode { kind: "stdlib::Lerp".into(), pos: (-600.0, 0.0), link: None, params: Vec::new() });
     let lerp = added(&app, "stdlib::Lerp", (-600.0, 0.0));
-    act(&mut app, Action::SetPinType { node: lerp.clone(), ty: shader_graph_core::PinType::Float3 });
+    act(&mut app, Action::SetPinType { node: lerp.clone(), ty: shader_graph_core::PinType::Float2 });
     let a = PropTarget::Input { node: lerp.clone(), pin: "a".into() };
     let field = |app: &mut App, comp: usize| {
         let w = app.world_mut();
         let mut q = w.query_filtered::<(Entity, &PropField), With<bevy::feathers::controls::FeathersNumberInput>>();
         q.iter(w).find(|(_, f)| f.target == a && f.comp == comp).map(|(e, _)| e).unwrap()
     };
-    // Typing into R defers the rebuild; G still shows what the model has.
+    // Typing into X defers the rebuild; Y still shows what the model has.
     let r = field(&mut app, 0);
     let text = text_in(&mut app, r);
     focus(&mut app, text);

@@ -1,17 +1,18 @@
-//! Open asset tabs with dirty markers (spec §9 "State").
+//! Open asset tabs with dirty markers (spec §9 "State"). MMB closes a tab, RMB opens its close menu.
 
 use bevy::prelude::*;
 use bevy::ui_widgets::Button;
 
+use super::dialog::open_icon_menu;
 use super::icons::{IconId, icon};
 use super::{HoverRow, OnActivate, TEXT, TEXT_DIM, text, tool_button};
-use crate::state::{Action, Actions, Editor};
+use crate::state::{Action, Actions, CloseTabs, Editor, Unsaved};
 use crate::tab::Tab;
 
 #[derive(Component, Default, Clone)]
 pub struct TabsBar;
 
-/// Tab index on a tab entity (middle click closes).
+/// Tab index on a tab entity (middle click closes, right click opens the menu).
 #[derive(Component, Default, Clone)]
 pub struct TabIndexOf(pub usize);
 
@@ -19,7 +20,7 @@ pub struct TabsPlugin;
 
 impl Plugin for TabsPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, redraw).add_observer(middle_click_closes);
+        app.add_systems(Update, redraw).add_observer(tab_click);
     }
 }
 
@@ -81,10 +82,24 @@ fn redraw(
     }
 }
 
-fn middle_click_closes(ev: On<PointerClick>, tabs: Query<&TabIndexOf>, mut actions: ResMut<Actions>) {
-    if ev.button == PointerButton::Middle
-        && let Ok(t) = tabs.get(ev.event_target())
-    {
-        actions.push(Action::CloseTab(t.0));
+fn tab_click(ev: On<PointerClick>, tabs: Query<&TabIndexOf>, mut actions: ResMut<Actions>, mut commands: Commands) {
+    let Ok(&TabIndexOf(i)) = tabs.get(ev.event_target()) else { return };
+    match ev.button {
+        PointerButton::Middle => actions.push(Action::CloseTab(i)),
+        PointerButton::Secondary => open_icon_menu(&mut commands, ev.pointer.position, tab_menu(i)),
+        PointerButton::Primary => {}
     }
+}
+
+/// The close menu of tab `i`.
+pub fn tab_menu(i: usize) -> Vec<(Option<IconId>, String, Action)> {
+    let close = |which| Action::CloseTabs { which, at: i, unsaved: Unsaved::Ask };
+    vec![
+        (Some(IconId::Close), "Close\tCtrl+W".into(), Action::CloseTab(i)),
+        (None, "Close All".into(), close(CloseTabs::All)),
+        (None, "Close Others".into(), close(CloseTabs::Others)),
+        (None, "Close to the Left".into(), close(CloseTabs::Left)),
+        (None, "Close to the Right".into(), close(CloseTabs::Right)),
+        (None, "Close Unmodified".into(), close(CloseTabs::Unmodified)),
+    ]
 }

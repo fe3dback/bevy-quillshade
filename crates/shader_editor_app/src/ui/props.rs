@@ -13,7 +13,7 @@ use bevy::ui_widgets::ValueChange;
 use bevy_noodle::prelude::GraphQuery;
 use shader_graph_core::model::{AssetKind, BlendMode, MaterialKind, Shading};
 use shader_graph_core::registry::{NodeRole, ParamKind};
-use shader_graph_core::{Interp, PinType, Value};
+use shader_graph_core::{PinType, Value};
 use shader_project::{AssetId, AssetType};
 
 use super::dialog::InitText;
@@ -254,19 +254,45 @@ fn text_rows(t: &TextDoc, out: &mut Vec<Box<dyn Scene>>) {
     out.push(Box::new(button("Open in default application", Action::ShowFile(t.source.clone(), which), false)));
 }
 
-/// A curve tab: preview mode, the selected point, actions.
+/// Hotkeys of the curve view, shown in its Properties.
+const CURVE_HOTKEYS: [(&str, &str); 12] = [
+    ("Double-click", "Add a point"),
+    ("Drag", "Move selection"),
+    ("X (held)", "Only along T"),
+    ("Y (held)", "Only along value"),
+    ("Shift (held)", "Snap to 0.1 grid"),
+    ("Shift+click", "Toggle selection"),
+    ("Arrows", "Nudge (Shift: x10)"),
+    ("Del", "Delete selection"),
+    ("Ctrl+A", "Select all"),
+    ("Ctrl+C / V", "Copy / paste"),
+    ("Ctrl+D", "Duplicate"),
+    ("Right-click", "Menu"),
+];
+
+/// One hotkey row: the keys as a key cap, then what they do.
+fn hotkey_row(keys: &'static str, what: &'static str) -> impl Scene {
+    bsn! {
+        Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(8), min_height: px(22) }
+        Children [
+            Node { width: px(100), flex_shrink: 0.0 }
+            Children [
+                Node { padding: UiRect::axes(px(5), px(1)), border: UiRect::all(px(1)), border_radius: BorderRadius::all(px(3)) }
+                BackgroundColor(Color::srgb_u8(44, 46, 53))
+                BorderColor::all(Color::srgb_u8(66, 68, 77))
+                Children [ @text(keys, TEXT, 12.0) ]
+            ]
+            --
+            Node { flex_grow: 1.0 } Children [ @text(what, TEXT_DIM, 12.0) ]
+        ]
+    }
+}
+
+/// A curve tab: the selected point and the hotkeys (preview mode and generated WESL are in the view's header, select
+/// all / delete in the toolbar).
 fn curve_rows(c: &CurveDoc, out: &mut Vec<Box<dyn Scene>>) {
     out.push(Box::new(text(c.id.source_rel(), TEXT, 15.0)));
     out.push(Box::new(text(format!("Type: Curve, {} point(s)", c.curve.points.len()), TEXT_DIM, 12.0)));
-    out.push(Box::new(section("Preview")));
-    let labels: Vec<String> = Interp::ALL.iter().map(|i| i.label().to_string()).collect();
-    let cur = Interp::ALL.iter().position(|i| *i == c.preview).unwrap_or(0);
-    out.push(Box::new(labeled("Interpolation".into(), select_w(PropTarget::CurvePreview, labels, Vec::new(), cur))));
-    out.push(Box::new(text(
-        "Only the preview: each Sample Curve node picks its own type; the file stores just the points.",
-        TEXT_DIM,
-        12.0,
-    )));
     match c.selection.len() {
         0 => {}
         1 => {
@@ -283,17 +309,10 @@ fn curve_rows(c: &CurveDoc, out: &mut Vec<Box<dyn Scene>>) {
             out.push(Box::new(text(format!("{n} points selected"), TEXT, 13.0)));
         }
     }
-    if !c.selection.is_empty() {
-        out.push(Box::new(button("Delete selected (Del)", Action::DeleteSelection, false)));
+    out.push(Box::new(section("Hotkeys")));
+    for (keys, what) in CURVE_HOTKEYS {
+        out.push(Box::new(hotkey_row(keys, what)));
     }
-    out.push(Box::new(section("Curve")));
-    out.push(Box::new(button("Show generated WESL", Action::ShowGenerated(c.id.clone(), Lang::Wesl), false)));
-    out.push(Box::new(text(
-        "Double-click: add a point | Drag: move | Shift+click: multi-select | Del: delete | Ctrl+A: select all | \
-         Arrows: nudge (Shift: x10) | Right-click: menu",
-        TEXT_DIM,
-        12.0,
-    )));
 }
 
 fn asset_rows(editor: &Editor, out: &mut Vec<Box<dyn Scene>>) {

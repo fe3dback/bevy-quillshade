@@ -46,11 +46,11 @@ Constraints found while researching:
   same model-level history as graphs (`history::History<T>`, extracted from `Doc`: 200 steps, merged drags).
   The view rasterizes grid and curve with tiny-skia into an `Image` (re-rendered on revision, preview mode or size
   change); points are absolutely positioned UI nodes, so picking, hover and drags come from `bevy_picking`.
-  Interactions: click selects (Shift/Ctrl toggles), drag moves the selection (one undo step, `t` and value clamped
+  Interactions: click selects (Shift/Ctrl toggles; since decision 0016 Shift only), drag moves the selection (one undo step, `t` and value clamped
   to `0..1`, points may pass each other and are re-sorted), double click on empty space adds a point, RMB opens a
   menu (add / delete point). Hotkeys are the graph ones: Ctrl+Z/Y, Ctrl+S, Ctrl+C/X/V/D, Delete, Ctrl+A (select
   all, also on graphs), Ctrl+W. Pasted / duplicated points land 0.05 further in `t` (a copy on top of its
-  original would be invisible but change the Catmull-Rom slopes). The `Simple` / `Catmull-Rom` switch in the view header and Properties only changes
+  original would be invisible but change the Catmull-Rom slopes). The `Simple` / `Catmull-Rom` switch in the view header (and, before decision 0016, Properties) only changes
   the preview (`CurveDoc::preview`, default Catmull-Rom); it is not stored in the file. Properties show the selected
   point's `t` / value as number fields.
 

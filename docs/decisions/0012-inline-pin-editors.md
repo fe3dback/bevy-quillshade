@@ -8,7 +8,7 @@ input from the pin's context menu. bevy_noodle nodes can hold any Bevy UI, so Fe
 - Every unconnected, non-`required`, non-`implicit` input shows an editor in its pin row; a wire hides it. The editor
   follows the pin type (`inline::inline_for_pin`): Float with a range → `FeathersSlider`; Float without one / Int →
   number field; Float2 → X/Y fields; Float3/Float4/Color → `FeathersColorInput` (button + popup picker with wheel,
-  RGB/HSL, alpha, recent colors) plus R/G/B(/A) fields; Bool → checkbox. Constants and parameters edit their value
+  RGB/HSL, alpha, recent colors) plus R/G/B(/A) fields (since decision 0016: the picker only); Bool → checkbox. Constants and parameters edit their value
   under the title (`inline_for_param`); ScalarParameter's slider uses its `Slider Min/Max`.
 - Ranges are a new optional `PinDef::range` (editor-only, not enforced in codegen). Set on Lerp `alpha`,
   Fresnel `base`, Desaturation `fraction`. Output-node pins have built-in fallbacks (`implicit`) and no editor.

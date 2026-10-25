@@ -14,8 +14,9 @@ with `recolor`/`tinted`), but no rasterizer; its `bevy_color` feature targets be
   `PostUpdate` from a cache keyed by (icon, layer, physical px): rasterized at `size × scale_factor × UiScale`, and
   re-resolved when that scale changes, so icons are sharp on HiDPI screens instead of a scaled bitmap.
 - Layers (after cadrs, the icon-rs author's Bevy app): glyph/line icons are rendered white and tinted via
-  `ImageNode::color`; their accent detail is a child image in `icons::ACCENT`, so tinting doesn't darken the accent.
-  Solid/sketch icons are rendered in `Palette::DARK` (= icon-rs's `svg_dark`) and only faded by the tint's alpha.
+  `ImageNode::color`; their accent detail is a child image in `ui::ACCENT`, so tinting doesn't darken the accent.
+  Solid/sketch icons are rendered in `Palette::DARK` (= icon-rs's `svg_dark`) with the accent replaced by
+  `ui::ACCENT_RGB` and only faded by the tint's alpha. (The accent became orange in decision 0016.)
   tiny-skia's premultiplied pixels are demultiplied (Bevy expects straight alpha).
 - Icons icon-rs lacks (`folder-open`, `material-unlit`: Pbr3d's sphere-on-plate but flat grey — "no lighting") are
   drawn by hand in `crates/shader_editor_app/icons/*.svg` following icon-rs's rules (24x24, its root attributes and

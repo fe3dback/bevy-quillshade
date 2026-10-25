@@ -1,9 +1,10 @@
 //! Curve asset editor (decision 0015): grid and curve rasterized with tiny-skia into an image, points as
 //! absolutely positioned UI nodes (so picking, hover and drags come from `bevy_picking`).
 //!
-//! Click selects (Shift/Ctrl toggles), drag moves the selection (one undo step), double click on empty space adds
-//! a point, right click opens a menu, arrow keys nudge. Undo, copy/paste, delete and select-all are the global
-//! shortcuts (`ui::input`), routed to the curve by [`Editor`].
+//! Click selects (Shift toggles), drag moves the selection (one undo step; X / Y held: along that axis only, Shift
+//! held: the grabbed point snaps to the 0.1 grid), double click on empty space adds a point, right click opens a
+//! menu, arrow keys nudge. Undo, copy/paste, delete and select-all are the global shortcuts (`ui::input`), routed
+//! to the curve by [`Editor`].
 
 use std::collections::BTreeSet;
 
@@ -31,6 +32,8 @@ pub(super) const CURVE_COLOR: Color = Color::srgb_u8(250, 204, 92);
 const POINT_COLOR: Color = Color::srgb(0.86, 0.87, 0.90);
 /// Arrow-key step in curve units (Shift: ten times).
 const NUDGE: f32 = 0.01;
+/// Grid cells per unit: a Shift-drag snaps to the plot's grid lines (0.1).
+const GRID: f32 = 10.0;
 
 /// Header row (path, preview switch), rebuilt with the tab or the preview mode.
 #[derive(Component, Default, Clone)]
@@ -61,9 +64,9 @@ impl CurveHandle {
 #[derive(Component)]
 struct AxisLabel(bool, f32);
 
-/// The drag in progress: points and selection when it started.
+/// The drag in progress: points and selection when it started, and the grabbed point.
 #[derive(Resource, Default)]
-struct CurveDrag(Option<(Vec<(f32, f32)>, BTreeSet<usize>)>);
+struct CurveDrag(Option<(Vec<(f32, f32)>, BTreeSet<usize>, usize)>);
 
 pub struct CurveViewPlugin;
 
@@ -377,7 +380,7 @@ fn place_handles(
     }
 }
 
-/// LMB on a point: select it (Shift/Ctrl: toggle). RMB: its menu.
+/// LMB on a point: select it (Shift: toggle). RMB: its menu.
 fn handle_press(
     mut ev: On<PointerPress>,
     handles: Query<&CurveHandle>,
@@ -389,8 +392,7 @@ fn handle_press(
     let Ok(h) = handles.get(ev.event_target()) else { return };
     ev.propagate(false);
     let Some(c) = active_curve(&editor) else { return };
-    let toggle =
-        keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight, KeyCode::ControlLeft, KeyCode::ControlRight]);
+    let toggle = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
     let mut sel = c.selection.clone();
     match ev.button {
         PointerButton::Primary if toggle => {
@@ -426,13 +428,70 @@ fn handle_drag_start(
     }
     // The press that started the drag may not be applied yet.
     let sel = if c.selection.contains(&h.index) { c.selection.clone() } else { [h.index].into() };
-    drag.0 = Some((c.curve.points.clone(), sel));
+    drag.0 = Some((c.curve.points.clone(), sel, h.index));
+}
+
+/// Keys that constrain a point drag (read on every drag step, so they can be pressed mid-drag).
+#[derive(Clone, Copy, Default)]
+struct DragKeys {
+    /// X held: only `t` changes.
+    x_only: bool,
+    /// Y held: only the value changes.
+    y_only: bool,
+    /// Shift held: the grabbed point lands on the grid.
+    snap: bool,
+}
+
+impl DragKeys {
+    fn read(keys: &ButtonInput<KeyCode>) -> DragKeys {
+        let (x, y) = (keys.pressed(KeyCode::KeyX), keys.pressed(KeyCode::KeyY));
+        let snap = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
+        DragKeys { x_only: x && !y, y_only: y && !x, snap }
+    }
+}
+
+/// Points of a drag: `from` (the points when it started) with the selection moved by the pointer's `raw` delta,
+/// constrained by `keys`; snapping moves the selection so that the `grabbed` point lands on the grid.
+fn dragged(
+    from: &[(f32, f32)],
+    selected: &BTreeSet<usize>,
+    grabbed: usize,
+    raw: (f32, f32),
+    keys: DragKeys,
+) -> (Vec<(f32, f32)>, BTreeSet<usize>) {
+    let on_grid = |x: f32| (x * GRID).round() / GRID;
+    let (snap_t, snap_v) = (keys.snap && !keys.y_only, keys.snap && !keys.x_only);
+    let (mut dt, mut dv) = raw;
+    if keys.x_only {
+        dv = 0.0;
+    }
+    if keys.y_only {
+        dt = 0.0;
+    }
+    let anchor = from.get(grabbed).copied().unwrap_or_default();
+    if snap_t {
+        dt = on_grid(anchor.0 + dt) - anchor.0;
+    }
+    if snap_v {
+        dv = on_grid(anchor.1 + dv) - anchor.1;
+    }
+    let (mut points, selection) = CurveDoc::moved(from, selected, (dt, dv));
+    // `anchor + (grid - anchor)` may miss the grid value by an ulp: what landed on the grid is put exactly on it.
+    for (_, p) in points.iter_mut().enumerate().filter(|(i, _)| selection.contains(i)) {
+        for (x, snapped) in [(&mut p.0, snap_t), (&mut p.1, snap_v)] {
+            if snapped && (on_grid(*x) - *x).abs() < 1e-4 {
+                *x = on_grid(*x);
+            }
+        }
+    }
+    (points, selection)
 }
 
 fn handle_drag(
     mut ev: On<PointerDrag>,
     handles: Query<(), With<CurveHandle>>,
     canvas: Query<&ComputedNode, With<CurveCanvas>>,
+    keys: Res<ButtonInput<KeyCode>>,
     drag: Res<CurveDrag>,
     mut actions: ResMut<Actions>,
 ) {
@@ -443,9 +502,9 @@ fn handle_drag(
     if ev.button != PointerButton::Primary {
         return;
     }
-    let (Some((from, sel)), Ok(node)) = (&drag.0, canvas.single()) else { return };
-    let delta = Plot::new(logical_size(node)).delta(ev.distance);
-    let (points, selection) = CurveDoc::moved(from, sel, delta);
+    let (Some((from, sel, grabbed)), Ok(node)) = (&drag.0, canvas.single()) else { return };
+    let raw = Plot::new(logical_size(node)).delta(ev.distance);
+    let (points, selection) = dragged(from, sel, *grabbed, raw, DragKeys::read(&keys));
     actions.push(Action::Curve(CurveAction::SetPoints { points, selection, merge: true }));
 }
 
@@ -486,8 +545,7 @@ fn canvas_click(
     let Some(c) = active_curve(&editor) else { return };
     let Some(local) = local_pos(node, t, ev.pointer.position) else { return };
     let at = Plot::new(logical_size(node)).to_curve(local);
-    let shift =
-        keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight, KeyCode::ControlLeft, KeyCode::ControlRight]);
+    let shift = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
     match ev.button {
         PointerButton::Primary if ev.count >= 2 => actions.push(Action::Curve(CurveAction::Add(at))),
         PointerButton::Primary if !shift => actions.push(Action::Curve(CurveAction::Select(BTreeSet::new()))),
@@ -527,5 +585,36 @@ fn nudge_keys(keys: Res<ButtonInput<KeyCode>>, editor: Res<Editor>, mut actions:
     .find(|(k, _)| keys.just_pressed(*k));
     if let Some((_, d)) = delta {
         actions.push(Action::Curve(CurveAction::Nudge(d)));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const FROM: [(f32, f32); 3] = [(0.0, 0.0), (0.37, 0.52), (1.0, 1.0)];
+
+    fn drag(keys: DragKeys) -> Vec<(f32, f32)> {
+        dragged(&FROM, &[1].into(), 1, (0.12, -0.2), keys).0
+    }
+
+    #[test]
+    fn held_keys_constrain_point_drags() {
+        let free = drag(DragKeys::default());
+        assert!((free[1].0 - 0.49).abs() < 1e-6 && (free[1].1 - 0.32).abs() < 1e-6, "{free:?}");
+        assert_eq!(drag(DragKeys { x_only: true, ..default() })[1].1, 0.52, "X: the value stays");
+        assert_eq!(drag(DragKeys { y_only: true, ..default() })[1].0, 0.37, "Y: t stays");
+        assert_eq!(drag(DragKeys { snap: true, ..default() })[1], (0.5, 0.3), "exactly on the grid");
+        assert_eq!(drag(DragKeys { snap: true, x_only: true, ..default() })[1], (0.5, 0.52));
+        assert_eq!(drag(DragKeys { snap: true, y_only: true, ..default() })[1], (0.37, 0.3));
+    }
+
+    #[test]
+    fn snapping_moves_the_whole_selection_by_the_grabbed_point() {
+        let from = [(0.21, 0.5), (0.43, 0.5)];
+        let keys = DragKeys { snap: true, x_only: true, ..default() };
+        let (points, _) = dragged(&from, &[0, 1].into(), 0, (0.05, 0.0), keys);
+        assert_eq!(points[0].0, 0.3);
+        assert!((points[1].0 - 0.52).abs() < 1e-6, "{points:?}");
     }
 }

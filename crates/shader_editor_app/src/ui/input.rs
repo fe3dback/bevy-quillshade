@@ -203,31 +203,45 @@ fn canvas_click(
     }
 }
 
-/// Right click (not a pan) on an input pin opens its menu (type of polymorphic inputs, reset, disconnect).
+fn ctrl_held(keys: &ButtonInput<KeyCode>) -> bool {
+    keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight])
+}
+
+/// Right click (not a pan) on an input pin opens its menu (type of polymorphic inputs, reset, disconnect);
+/// Ctrl+LMB on any pin removes its wires.
 fn pin_click(
     click: On<PointerClick>,
-    keys: Query<&PinKey>,
+    pins: Query<&PinKey>,
+    keys: Res<ButtonInput<KeyCode>>,
     editor: Res<Editor>,
     right: Res<RightPress>,
+    mut actions: ResMut<Actions>,
     mut commands: Commands,
 ) {
-    let Ok(key) = keys.get(click.event_target()) else { return };
-    if key.output || click.button != PointerButton::Secondary || !right.is_click(click.pointer.position) {
-        return;
-    }
-    let items = editor.pin_menu(&key.node, &key.pin);
-    if !items.is_empty() {
-        open_menu(&mut commands, click.pointer.position, items);
+    let Ok(key) = pins.get(click.event_target()) else { return };
+    match click.button {
+        PointerButton::Primary if ctrl_held(&keys) => {
+            actions.push(Action::DisconnectPin { node: key.node.clone(), pin: key.pin.clone(), output: key.output })
+        }
+        PointerButton::Secondary if !key.output && right.is_click(click.pointer.position) => {
+            let items = editor.pin_menu(&key.node, &key.pin);
+            if !items.is_empty() {
+                open_menu(&mut commands, click.pointer.position, items);
+            }
+        }
+        _ => {}
     }
 }
 
-/// Right click (not a pan) on a wire removes it; double click inserts a reroute point.
+/// Right click (not a pan) or Ctrl+LMB on a wire removes it; double click inserts a reroute point.
+#[allow(clippy::too_many_arguments)]
 fn edge_click(
     click: On<PointerClick>,
     ec: Option<Res<EditorCanvas>>,
     graph: GraphQuery,
     keys_q: Query<&PinKey>,
     canvases: Query<(&ComputedNode, &UiGlobalTransform, &CanvasView)>,
+    keys: Res<ButtonInput<KeyCode>>,
     right: Res<RightPress>,
     mut actions: ResMut<Actions>,
 ) {
@@ -238,10 +252,13 @@ fn edge_click(
         return;
     }
     let (Ok(a), Ok(b)) = (keys_q.get(ports.output), keys_q.get(ports.input)) else { return };
+    let remove = match click.button {
+        PointerButton::Secondary => right.is_click(click.pointer.position),
+        PointerButton::Primary => ctrl_held(&keys),
+        PointerButton::Middle => false,
+    };
     match click.button {
-        PointerButton::Secondary if right.is_click(click.pointer.position) => {
-            actions.push(Action::Disconnect { to: (b.node.clone(), b.pin.clone()) })
-        }
+        _ if remove => actions.push(Action::Disconnect { to: (b.node.clone(), b.pin.clone()) }),
         PointerButton::Primary if click.count >= 2 => {
             let Ok((c, t, v)) = canvases.get(ec.canvas) else { return };
             if let Some(at) = window_to_graph(click.pointer.position, c, t, v) {

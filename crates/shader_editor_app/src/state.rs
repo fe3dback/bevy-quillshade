@@ -147,6 +147,26 @@ pub enum CurveAction {
     Nudge((f32, f32)),
 }
 
+/// Which tabs the tab context menu closes, relative to the tab it was opened on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CloseTabs {
+    All,
+    Others,
+    Left,
+    Right,
+    /// Every tab without unsaved changes.
+    Unmodified,
+}
+
+/// What happens to unsaved changes of tabs being closed (or of the project).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unsaved {
+    /// Ask first (a dialog that answers with `Discard` or `Save`).
+    Ask,
+    Discard,
+    Save,
+}
+
 /// A wire end the palette should connect the new node to.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Link {
@@ -172,9 +192,16 @@ pub enum Action {
     None,
     OpenProjectDialog,
     OpenProject(PathBuf),
+    CloseProject(Unsaved),
     OpenAsset(AssetId),
     ActivateTab(usize),
     CloseTab(usize),
+    /// Several tabs at once (tab context menu).
+    CloseTabs {
+        which: CloseTabs,
+        at: usize,
+        unsaved: Unsaved,
+    },
     DiscardTab(usize),
     SaveAndCloseTab(usize),
     NextTab,
@@ -205,6 +232,12 @@ pub enum Action {
     },
     Disconnect {
         to: (NodeId, String),
+    },
+    /// Removes every wire at a pin (Ctrl+LMB on it).
+    DisconnectPin {
+        node: NodeId,
+        pin: String,
+        output: bool,
     },
     /// Final node/frame positions after a drag (one undo step).
     Moved {
@@ -649,17 +682,126 @@ impl Editor {
             });
             return;
         }
-        self.tabs.remove(i);
+        let close: Vec<bool> = (0..self.tabs.len()).map(|j| j == i).collect();
+        self.remove_tabs(&close);
+    }
+
+    /// Closes the tabs `which` names relative to tab `at` (tab context menu).
+    pub fn close_tabs(&mut self, which: CloseTabs, at: usize, unsaved: Unsaved) {
+        if at >= self.tabs.len() {
+            return;
+        }
+        let close: Vec<bool> = (0..self.tabs.len())
+            .map(|i| match which {
+                CloseTabs::All => true,
+                CloseTabs::Others => i != at,
+                CloseTabs::Left => i < at,
+                CloseTabs::Right => i > at,
+                CloseTabs::Unmodified => !self.tabs[i].is_dirty(),
+            })
+            .collect();
+        let dirty: Vec<usize> = (0..self.tabs.len()).filter(|i| close[*i] && self.tabs[*i].is_dirty()).collect();
+        if !dirty.is_empty() {
+            match unsaved {
+                Unsaved::Ask => {
+                    let action = |unsaved| Action::CloseTabs { which, at, unsaved };
+                    self.dialog = Some(Dialog::Confirm {
+                        title: "Unsaved changes".into(),
+                        message: format!("{} of the tabs being closed have unsaved changes.", dirty.len()),
+                        buttons: vec![
+                            ("Cancel".into(), Action::CloseDialog),
+                            ("Discard".into(), action(Unsaved::Discard)),
+                            ("Save".into(), action(Unsaved::Save)),
+                        ],
+                    });
+                    return;
+                }
+                Unsaved::Discard => {}
+                Unsaved::Save => {
+                    let mut saved = true;
+                    for i in dirty {
+                        saved &= self.save(i);
+                    }
+                    if !saved {
+                        return;
+                    }
+                    self.regenerate();
+                }
+            }
+        }
+        self.remove_tabs(&close);
+    }
+
+    /// Removes the tabs marked in `close`. The active tab stays active; when it goes, its right neighbour that
+    /// stays takes over (the last tab when there is none).
+    fn remove_tabs(&mut self, close: &[bool]) {
+        if !close.contains(&true) {
+            return;
+        }
+        let kept_before = |i: usize| (0..i).filter(|j| !close[*j]).count();
+        let kept = close.iter().filter(|c| !**c).count();
         self.active = match self.active {
-            _ if self.tabs.is_empty() => None,
-            Some(a) if a > i => Some(a - 1),
-            Some(a) => Some(a.min(self.tabs.len() - 1)),
+            _ if kept == 0 => None,
+            Some(a) if !close[a] => Some(kept_before(a)),
+            Some(a) => Some(kept_before(a).min(kept - 1)),
             None => None,
         };
+        let mut i = 0;
+        self.tabs.retain(|_| {
+            i += 1;
+            !close[i - 1]
+        });
         self.refresh_functions();
         self.validated = None;
         self.touch_all();
         self.save_config();
+    }
+
+    /// Closes the project (its open tabs are remembered for the next time it opens). Asks first when tabs have
+    /// unsaved changes.
+    pub fn close_project(&mut self, unsaved: Unsaved) {
+        if self.project.is_none() {
+            return;
+        }
+        if self.is_dirty() {
+            match unsaved {
+                Unsaved::Ask => {
+                    self.dialog = Some(Dialog::Confirm {
+                        title: "Unsaved changes".into(),
+                        message: "Some assets have unsaved changes.".into(),
+                        buttons: vec![
+                            ("Cancel".into(), Action::CloseDialog),
+                            ("Close without saving".into(), Action::CloseProject(Unsaved::Discard)),
+                            ("Save all and close".into(), Action::CloseProject(Unsaved::Save)),
+                        ],
+                    });
+                    return;
+                }
+                Unsaved::Discard => {}
+                Unsaved::Save => {
+                    if !self.save_all() {
+                        return;
+                    }
+                    self.regenerate();
+                }
+            }
+        }
+        self.save_config();
+        let root = self.project.take().map(|p| p.root.display().to_string()).unwrap_or_default();
+        self.watcher = None;
+        self.registry = shader_stdlib::registry();
+        self.disk = AssetSet::default();
+        self.folders.clear();
+        self.tabs.clear();
+        self.active = None;
+        self.functions.clear();
+        self.diags.clear();
+        self.project_diags.clear();
+        self.regen_only.clear();
+        self.validated = None;
+        self.current_folder.clear();
+        self.info(format!("Closed project {root}"));
+        self.touch_all();
     }
 
     // ---- validation / generation ----
@@ -902,6 +1044,14 @@ impl Editor {
             Action::OpenAsset(id) => self.open_asset(&id),
             Action::ActivateTab(i) => self.activate(i),
             Action::CloseTab(i) => self.close_tab(i, false),
+            Action::CloseTabs { which, at, unsaved } => {
+                self.dialog = None;
+                self.close_tabs(which, at, unsaved);
+            }
+            Action::CloseProject(unsaved) => {
+                self.dialog = None;
+                self.close_project(unsaved);
+            }
             Action::DiscardTab(i) => {
                 self.dialog = None;
                 self.close_tab(i, true);
@@ -993,6 +1143,15 @@ impl Editor {
             Action::Disconnect { to } => {
                 if let Some(d) = self.doc_mut() {
                     d.edit(|a| a.disconnect_input((&to.0, &to.1)));
+                }
+            }
+            Action::DisconnectPin { node, pin, output } => {
+                let at_pin = |e: &shader_graph_core::model::Edge| {
+                    let end = if output { &e.from } else { &e.to };
+                    end.0 == node && end.1 == pin
+                };
+                if let Some(d) = self.doc_mut() {
+                    d.edit(|a| a.edges.retain(|e| !at_pin(e)));
                 }
             }
             Action::Moved { nodes, frames } => {
@@ -2013,6 +2172,113 @@ mod tests {
         e.apply(Action::DiscardTab(0));
         assert!(e.tabs.is_empty());
         assert!(e.active.is_none());
+    }
+
+    /// Opens four materials; `dirty` ones get an unsaved node. Returns their names in tab order.
+    fn four_tabs(e: &mut Editor, dirty: &[usize]) -> Vec<String> {
+        let names = ["env/rock_wet", "env/flag", "fx/hologram", "fx/coords"];
+        for (i, n) in names.into_iter().enumerate() {
+            e.apply(Action::OpenAsset(AssetId::new(AssetType::Material, n)));
+            if dirty.contains(&i) {
+                e.apply(Action::AddNode {
+                    kind: "stdlib::Time".into(),
+                    pos: (0.0, 0.0),
+                    link: None,
+                    params: Vec::new(),
+                });
+            }
+        }
+        names.iter().map(|n| format!("shaders/{n}.material")).collect()
+    }
+
+    fn titles(e: &Editor) -> Vec<String> {
+        e.tabs.iter().map(Tab::title).collect()
+    }
+
+    #[test]
+    fn tab_menu_closes_groups_of_tabs() {
+        let close = |which, at| Action::CloseTabs { which, at, unsaved: Unsaved::Ask };
+        let (_dir, mut e) = project();
+        let names = four_tabs(&mut e, &[]);
+        e.apply(Action::ActivateTab(3));
+        e.apply(close(CloseTabs::Left, 2));
+        assert_eq!(titles(&e), names[2..]);
+        assert_eq!(e.active, Some(1), "the active tab stays active");
+        e.apply(close(CloseTabs::Right, 0));
+        assert_eq!(titles(&e), names[2..3]);
+        assert_eq!(e.active, Some(0), "the active tab closed: the last one left takes over");
+
+        let (_dir, mut e) = project();
+        four_tabs(&mut e, &[]);
+        e.apply(Action::ActivateTab(0));
+        e.apply(close(CloseTabs::Others, 2));
+        assert_eq!(titles(&e), names[2..3]);
+        assert_eq!(e.active, Some(0));
+        e.apply(close(CloseTabs::All, 0));
+        assert!(e.tabs.is_empty() && e.active.is_none());
+    }
+
+    #[test]
+    fn closing_unsaved_tabs_from_the_tab_menu_asks() {
+        let (_dir, mut e) = project();
+        let names = four_tabs(&mut e, &[1, 3]);
+        e.apply(Action::CloseTabs { which: CloseTabs::Unmodified, at: 0, unsaved: Unsaved::Ask });
+        assert!(e.dialog.is_none(), "only clean tabs: no question");
+        assert_eq!(titles(&e), [names[1].clone(), names[3].clone()]);
+
+        e.apply(Action::CloseTabs { which: CloseTabs::Others, at: 0, unsaved: Unsaved::Ask });
+        let Some(Dialog::Confirm { buttons, .. }) = e.dialog.clone() else { panic!("asks") };
+        assert_eq!(e.tabs.len(), 2);
+        e.apply(buttons.last().unwrap().1.clone());
+        assert!(e.dialog.is_none());
+        assert_eq!(titles(&e), names[1..2]);
+        assert!(e.tabs[0].is_dirty(), "the kept tab keeps its changes");
+        assert!(
+            e.disk.assets[&AssetId::new(AssetType::Material, "fx/coords")]
+                .as_ref()
+                .unwrap()
+                .nodes
+                .values()
+                .any(|n| n.kind == "stdlib::Time"),
+            "Save saved the closed one"
+        );
+
+        e.apply(Action::CloseTabs { which: CloseTabs::All, at: 0, unsaved: Unsaved::Discard });
+        assert!(e.tabs.is_empty());
+    }
+
+    #[test]
+    fn closing_the_project_remembers_its_tabs() {
+        let (dir, mut e) = project();
+        let names = four_tabs(&mut e, &[2]);
+        e.apply(Action::CloseProject(Unsaved::Ask));
+        assert!(matches!(e.dialog, Some(Dialog::Confirm { .. })), "unsaved changes: asks");
+        assert!(e.project.is_some());
+        e.apply(Action::CloseProject(Unsaved::Discard));
+        assert!(e.project.is_none() && e.tabs.is_empty() && e.disk.ids().next().is_none());
+        e.open_project(dir.path()).unwrap();
+        assert_eq!(titles(&e), names);
+        assert!(!e.is_dirty(), "discarded");
+    }
+
+    #[test]
+    fn ctrl_click_disconnects_every_wire_of_a_pin() {
+        let (_dir, mut e) = project();
+        e.apply(Action::OpenAsset(AssetId::new(AssetType::Material, "env/rock_wet")));
+        let d = e.doc().unwrap();
+        let out = d.asset.nodes.iter().find(|(_, n)| n.kind == "output::Pbr3d").unwrap().0.clone();
+        let into = d.asset.edges.iter().filter(|x| x.to.0 == out).count();
+        assert!(into > 1);
+        let edge = d.asset.edges.iter().find(|x| x.to.0 == out).unwrap().clone();
+        let fan_out = |e: &Editor| e.doc().unwrap().asset.edges.iter().filter(|x| x.from == edge.from).count();
+        assert!(fan_out(&e) > 0);
+        e.apply(Action::DisconnectPin { node: edge.from.0.clone(), pin: edge.from.1.clone(), output: true });
+        assert_eq!(fan_out(&e), 0);
+        e.apply(Action::Undo);
+        e.apply(Action::DisconnectPin { node: out.clone(), pin: edge.to.1.clone(), output: false });
+        let d = e.doc().unwrap();
+        assert!(d.asset.edge_into(&out, &edge.to.1).is_none());
+        assert_eq!(d.asset.edges.iter().filter(|x| x.to.0 == out).count(), into - 1, "only that pin");
     }
 
     #[test]

@@ -2,8 +2,8 @@
 //! icon's size in physical pixels, so they stay sharp at any window scale factor.
 //!
 //! Glyph and line icons are rendered in white and tinted through `ImageNode::color`; their accent detail is a
-//! separate child layer in [`ACCENT`]. Solid and sketch icons keep the colours of icon-rs's dark palette, the tint
-//! only fades them through its alpha.
+//! separate child layer in [`ACCENT`]. Solid and sketch icons keep the colours of icon-rs's dark palette with our
+//! accent ([`ICON_PALETTE`]), the tint only fades them through its alpha.
 
 use std::collections::HashMap;
 
@@ -16,10 +16,12 @@ use resvg::{tiny_skia, usvg};
 use shader_graph_core::model::{AssetKind, MaterialKind};
 use shader_project::{AssetId, AssetType};
 
+use super::{ACCENT, ACCENT_RGB};
 use crate::state::NewKind;
 
-/// Colour of the accent layer of tintable icons (icon-rs's dark accent).
-pub const ACCENT: Color = Color::srgb_u8(0x60, 0xa5, 0xfa);
+/// Colours of solid and sketch icons: icon-rs's dark palette with the UI accent.
+const ICON_PALETTE: Palette =
+    Palette { accent: icon_rs::Rgb(ACCENT_RGB[0], ACCENT_RGB[1], ACCENT_RGB[2]), ..Palette::DARK };
 
 // Our own icons, drawn by hand in icon-rs's house style (see icons/README.md). `svg_dark` is unused: the dark
 // variant is made with `Icon::recolor`, as icon-rs makes its own.
@@ -62,10 +64,11 @@ pub enum IconId {
     Copy,
     OpenExternal,
     Curve,
+    Close,
 }
 
 impl IconId {
-    pub const ALL: [IconId; 25] = [
+    pub const ALL: [IconId; 26] = [
         IconId::File,
         IconId::Folder,
         IconId::FolderOpen,
@@ -91,6 +94,7 @@ impl IconId {
         IconId::Copy,
         IconId::OpenExternal,
         IconId::Curve,
+        IconId::Close,
     ];
 
     fn source(self) -> Icon {
@@ -120,6 +124,7 @@ impl IconId {
             IconId::Copy => icon_rs::COPY,
             IconId::OpenExternal => icon_rs::OPEN_EXTERNAL,
             IconId::Curve => icon_rs::SPLINE,
+            IconId::Close => icon_rs::CLOSE,
         }
     }
 
@@ -255,7 +260,7 @@ fn layer_svg(icon: Icon, layer: Layer) -> String {
     match layer {
         Layer::Ink => paint(icon.svg, "#ffffff", "none"),
         Layer::Accent => paint(icon.svg, "none", "#ffffff"),
-        Layer::Full => icon.recolor(&Palette::DARK),
+        Layer::Full => icon.recolor(&ICON_PALETTE),
     }
 }
 

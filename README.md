@@ -102,14 +102,20 @@ Bevy reloads the shader without a restart.
 
 ## Editor
 
-On the left is the asset browser (the `shaders/` tree: create a Pbr3d/Unlit3d/Sprite2d material, a function,
-a curve, a folder; rename, move by dragging onto a folder, delete; RMB → show the
-generated WESL/Rust in a read-only, syntax-highlighted tab), in the center the tabs and the canvas, on the right the properties (node parameters, input
+The toolbar holds the main menu — **File** (Open Project, Close Project, Save, Save All, Quit) and **Assets** (create
+a Pbr3d/Unlit3d/Sprite2d material, a function, a curve, a folder; Regenerate) — then Undo / Redo and the actions of
+the active tab (graph: Auto-layout, Comment, Fit; curve: Select all, Delete; generated file: Copy, Source, Open
+externally).
+
+On the left is the asset browser (the `shaders/` tree: double click opens an asset; RMB on a folder or on the empty
+space below the tree creates a Pbr3d/Unlit3d/Sprite2d material, a function, a curve, a folder; RMB on an asset:
+rename, move (also by dragging onto a folder), delete, show the generated WESL/Rust in a read-only,
+syntax-highlighted tab), in the center the tabs and the canvas, on the right the properties (node parameters, input
 default values, asset blend mode / two-sided / shading), at the bottom the log (click — focus the node).
 The browser is an IDE-style file tree: folders with expand carets, an icon per asset kind (function, Pbr3d,
-Unlit3d, Sprite2d, curve); tabs, the `+Pbr`/`+Unlit`/`+2D`/`+Fn`/`+Curve`/`+Folder` buttons and the browser's RMB menus show icons
-too. In the toolbar Save / Save all / Undo / Redo are icon-only buttons; hover a toolbar button for its name and
-hotkey. The bottom-right corner of the main view shows the open document's type (`pbr3d`, `unlit3d`, `sprite2d`,
+Unlit3d, Sprite2d, curve); the active tab's asset is highlighted, unsaved assets get an orange dot after the name.
+Tabs and menus show icons too; Undo / Redo are icon-only buttons — hover a toolbar button for its name and hotkey.
+RMB on a tab: Close / Close All / Close Others / Close to the Left / Close to the Right / Close Unmodified. The bottom-right corner of the main view shows the open document's type (`pbr3d`, `unlit3d`, `sprite2d`,
 `function`, `curve`, or `wesl`/`rust` for a generated file) as a faint watermark over the view.
 Generated-file tabs refresh after every regeneration; Ctrl+C there copies the whole file, and the header has
 "Open in the default application". Icons come from [icon-rs](https://crates.io/crates/icon-rs), plus a few
@@ -117,14 +123,13 @@ drawn by hand in `crates/shader_editor_app/icons/`.
 Validation runs live: nodes with errors are outlined in red, with warnings — in yellow.
 
 Values are also edited right on the nodes (UE-style): an unconnected input shows a slider (inputs with a known
-range, e.g. Lerp Alpha), a number field, X/Y fields, or a color button with R/G/B(/A) fields — the button opens a
-color picker (values are linear); a wire hides the editor. Constants and parameters edit their value under the
+range, e.g. Lerp Alpha), a number field, X/Y fields, or a color button (Float3/Float4/Color) that opens a color picker (values are linear;
+exact components are edited in Properties); a wire hides the editor. Constants and parameters edit their value under the
 title (ScalarParameter's slider spans Slider Min..Max). RMB on an input pin: the type of polymorphic inputs
 (Float…Float4, e.g. Lerp A/B), Reset to default, Disconnect.
 
 **Curves** (`+Curve`) are 1D functions on the unit square: points `(t, value)`, both in `0..1`. A curve tab shows
-the plot with draggable points; the `Catmull-Rom` / `Simple` switch in its header (and in Properties) only changes
-the preview — the file stores just the points. The `Sample Curve` node (Utility) picks a curve of the project in
+the plot with draggable points; the `Catmull-Rom` / `Simple` switch in its header only changes the preview — the file stores just the points. The `Sample Curve` node (Utility) picks a curve of the project in
 Properties, has a `Type` (`Catmull-Rom` — smooth, may overshoot between points; `Simple` — linear) and returns the
 value at `T`; outside the first/last point the curve holds the end values. The node shows a small read-only plot of
 its curve (with a line at `T` while `T` is not connected; "n/a" when no curve is selected). Renaming a curve updates the nodes that
@@ -144,17 +149,21 @@ use it.
 | Comment frame around the selection | C |
 | Reroute point on a wire / delete a wire | double click / RMB click on the wire |
 | Pin menu: polymorphic type / reset value / disconnect | RMB click on an input pin |
+| Disconnect every wire of a pin / a wire | Ctrl+LMB on the pin / on the wire |
 | Named route: a wire without a visible wire (Named Route + one usage per place) | palette: "Named Route", then "Named Route Usage: {name}" |
 | Auto-layout the selection (or the whole graph) | Ctrl+L |
 | Close tab / next tab | Ctrl+W (or MMB on the tab) / Ctrl+Tab |
+| Close several tabs (all, others, left/right, unmodified) | RMB on a tab |
+| Open an asset | double click in the browser |
 | Scroll a generated file horizontally | Shift+wheel |
-| Curve: add a point / move / multi-select | double click on empty space / drag a point / Shift+click (Ctrl+click) |
+| Curve: add a point / move / multi-select | double click on empty space / drag a point / Shift+click |
+| Curve drag: lock to the T / value axis, snap to the 0.1 grid | hold X / Y, hold Shift |
 | Curve: nudge the selected points | arrow keys (Shift: ×10) |
 | Curve: point menu / plot menu (add point, select all, preview mode) | RMB on a point / on empty space |
 | Open project / quit | Ctrl+O / Ctrl+Q |
 
 Pan — drag with the right (or middle) mouse button (an RMB press that does not move is a click), zoom — wheel, box select — LMB on empty space; the minimap
-in the bottom left is clickable. Unsaved tabs are marked with `*`; on close and on an external change
+in the bottom left is clickable. Unsaved tabs are marked with `*` (browser rows with an orange dot); on close and on an external change
 of the file (git checkout) the editor asks what to do. Window size, recent projects and open
 tabs are stored in `~/.config/shader-editor/config.ron`.
 

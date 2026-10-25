@@ -1,4 +1,5 @@
-//! Asset browser (spec §9.1): `shaders/` tree, open, create, rename, move (drag onto a folder), delete.
+//! Asset browser (spec §9.1): `shaders/` tree, open (double click), create (RMB menus), rename, move (drag onto a
+//! folder), delete. The asset of the active tab is highlighted; unsaved ones get an accent dot after the name.
 
 use std::collections::BTreeSet;
 
@@ -7,7 +8,7 @@ use shader_project::{AssetId, AssetType};
 
 use super::dialog::open_icon_menu;
 use super::icons::{IconId, icon};
-use super::{HoverRow, ROW_ACTIVE, TEXT, TEXT_DIM, text};
+use super::{ACCENT, HoverRow, ROW_ACTIVE, TEXT, TEXT_DIM, text};
 use crate::state::{Action, Actions, Editor, GenFile, NewKind};
 use crate::tab::{Lang, Tab};
 
@@ -25,7 +26,10 @@ pub struct BrowserPlugin;
 
 impl Plugin for BrowserPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, redraw).add_observer(click_row).add_observer(drop_on_folder);
+        app.add_systems(Update, redraw)
+            .add_observer(click_row)
+            .add_observer(click_background)
+            .add_observer(drop_on_folder);
     }
 }
 
@@ -40,18 +44,29 @@ fn row_icons(caret: Option<IconId>, item: IconId) -> Vec<Box<dyn Scene>> {
     vec![caret, Box::new(icon(item, ICON, TEXT))]
 }
 
-fn row(
-    label: String,
-    icons: Vec<Box<dyn Scene>>,
-    depth: usize,
-    row: BrowserRow,
+/// What a row shows besides its label.
+#[derive(Clone, Copy, Default)]
+struct RowState {
     active: bool,
     error: bool,
-) -> impl Scene {
+    dirty: bool,
+}
+
+fn row(label: String, icons: Vec<Box<dyn Scene>>, depth: usize, row: BrowserRow, state: RowState) -> impl Scene {
+    let RowState { active, error, dirty } = state;
     let base = if active { ROW_ACTIVE } else { Color::NONE };
     let hover = HoverRow { base };
     let pad = px(6.0 + depth as f32 * 14.0);
     let color = if error { Color::srgb(0.95, 0.45, 0.45) } else { TEXT };
+    let dot: Vec<Box<dyn Scene>> = if dirty {
+        vec![Box::new(bsn! {
+            Node { width: px(7), height: px(7), margin: UiRect::left(px(2)), border_radius: BorderRadius::MAX }
+            BackgroundColor(ACCENT)
+            Pickable::IGNORE
+        })]
+    } else {
+        Vec::new()
+    };
     bsn! {
         Node {
             flex_direction: FlexDirection::Row,
@@ -68,6 +83,8 @@ fn row(
             {icons}
             --
             @text(label, color, 13.0)
+            --
+            {dot}
         ]
     }
 }
@@ -109,9 +126,8 @@ fn redraw(
     }
     let hidden = |path: &str| editor.collapsed.iter().any(|c| path.starts_with(&format!("{c}/")));
     let root_row = BrowserRow { folder: Some(String::new()), asset: None };
-    let root_active = editor.current_folder.is_empty();
     let root_icons = row_icons(None, IconId::FolderOpen);
-    commands.spawn_scene(bsn! { @row("shaders".into(), root_icons, 0, root_row, root_active, false) ChildOf(body) });
+    commands.spawn_scene(bsn! { @row("shaders".into(), root_icons, 0, root_row, RowState::default()) ChildOf(body) });
 
     // Depth-first: each folder, then its assets; root assets last.
     let emit_assets = |dir: &str, depth: usize, commands: &mut Commands| {
@@ -123,11 +139,13 @@ fn redraw(
                 continue;
             }
             let icons = row_icons(None, IconId::for_id(id, editor.asset_kind(id)));
-            let dirty = editor.tabs.iter().any(|t| t.asset() == id && t.is_dirty());
-            let label = format!("{}{}", id.name(), if dirty { " *" } else { "" });
+            let state = RowState {
+                active: active.as_ref() == Some(id),
+                error: errors.contains(id),
+                dirty: editor.tabs.iter().any(|t| t.asset() == id && t.is_dirty()),
+            };
             let r = BrowserRow { folder: None, asset: Some(id.clone()) };
-            let (is_active, err) = (active.as_ref() == Some(id), errors.contains(id));
-            commands.spawn_scene(bsn! { @row(label, icons, depth, r, is_active, err) ChildOf(body) });
+            commands.spawn_scene(bsn! { @row(id.name().to_string(), icons, depth, r, state) ChildOf(body) });
         }
     };
     for f in &folders {
@@ -143,8 +161,7 @@ fn redraw(
             row_icons(Some(IconId::CaretDown), IconId::FolderOpen)
         };
         let r = BrowserRow { folder: Some(f.clone()), asset: None };
-        let is_current = editor.current_folder == *f;
-        commands.spawn_scene(bsn! { @row(name.to_string(), icons, depth, r, is_current, false) ChildOf(body) });
+        commands.spawn_scene(bsn! { @row(name.to_string(), icons, depth, r, RowState::default()) ChildOf(body) });
         if !collapsed {
             emit_assets(f, depth + 1, &mut commands);
         }
@@ -168,13 +185,9 @@ fn click_row(
             }
             actions.push(Action::SelectFolder(f.clone()));
         }
-        (PointerButton::Primary, _, Some(id)) => actions.push(Action::OpenAsset(id.clone())),
+        (PointerButton::Primary, _, Some(id)) if ev.count >= 2 => actions.push(Action::OpenAsset(id.clone())),
         (PointerButton::Secondary, Some(f), _) => {
-            let mut items: Vec<(Option<IconId>, String, Action)> = NewKind::ALL
-                .iter()
-                .map(|k| (Some(IconId::for_new(*k)), format!("New {}...", k.label()), Action::NewAssetDialog(*k)))
-                .collect();
-            items.push((Some(IconId::FolderNew), "New folder...".into(), Action::NewFolderDialog));
+            let mut items = create_items();
             if !f.is_empty() {
                 items.push((Some(IconId::Delete), "Delete folder...".into(), Action::DeleteFolderDialog(f.clone())));
             }
@@ -206,6 +219,36 @@ fn click_row(
         }
         _ => {}
     }
+}
+
+/// "New ..." items of the folder menus (and the main menu's Assets): created in the selected folder.
+pub fn create_items() -> Vec<(Option<IconId>, String, Action)> {
+    let mut items: Vec<(Option<IconId>, String, Action)> = NewKind::ALL
+        .iter()
+        .map(|k| (Some(IconId::for_new(*k)), format!("New {}...", k.label()), Action::NewAssetDialog(*k)))
+        .collect();
+    items.push((Some(IconId::FolderNew), "New folder...".into(), Action::NewFolderDialog));
+    items
+}
+
+/// RMB on the empty space below the tree: the root folder's menu.
+fn click_background(
+    ev: On<PointerClick>,
+    body: Query<(), With<BrowserBody>>,
+    editor: Res<Editor>,
+    mut actions: ResMut<Actions>,
+    mut commands: Commands,
+) {
+    let target = ev.event_target();
+    if ev.button != PointerButton::Secondary
+        || !body.contains(target)
+        || ev.original_event_target() != target
+        || editor.project.is_none()
+    {
+        return;
+    }
+    actions.push(Action::SelectFolder(String::new()));
+    open_icon_menu(&mut commands, ev.pointer.position, create_items());
 }
 
 /// Dragging an asset row onto a folder row moves the asset there.

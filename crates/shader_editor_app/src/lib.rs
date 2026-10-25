@@ -179,7 +179,8 @@ fn open_startup_project(mut editor: ResMut<Editor>, startup: Res<StartupProject>
 /// Debug aid: `SHADER_EDITOR_SCREENSHOT=out.png` saves a screenshot after a few seconds and quits;
 /// `SHADER_EDITOR_OPEN=env/rock_wet.material.ron` opens an asset at startup (`…ron#wesl` / `#rust`: its generated
 /// file in a text tab, after the asset's graph).
-/// `SHADER_EDITOR_DEMO=palette|wire|dialog|menu` additionally opens that popup before the shot.
+/// `SHADER_EDITOR_DEMO=palette|wire|dialog|menu|tab_menu` additionally opens that popup before the shot (`menu`: the
+/// main menu's File).
 fn debug_screenshot(
     mut frames: Local<u32>,
     mut editor: ResMut<Editor>,
@@ -219,16 +220,8 @@ fn debug_screenshot(
                 palette.show(Vec2::new(520.0, 300.0), Vec2::ZERO, link);
             }
             Ok("dialog") => actions.push(Action::NewAssetDialog(state::NewKind::Pbr3d)),
-            Ok("menu") => ui::dialog::open_icon_menu(
-                &mut commands,
-                Vec2::new(120.0, 250.0),
-                vec![
-                    (Some(ui::icons::IconId::Pbr), "Open".into(), Action::None),
-                    (Some(ui::icons::IconId::Edit), "Rename...".into(), Action::None),
-                    (Some(ui::icons::IconId::Delete), "Delete...".into(), Action::None),
-                    (None, "No icon".into(), Action::None),
-                ],
-            ),
+            Ok("menu") => ui::dialog::open_icon_menu(&mut commands, Vec2::new(6.0, 30.0), ui::MainMenu::File.items()),
+            Ok("tab_menu") => ui::dialog::open_icon_menu(&mut commands, Vec2::new(260.0, 60.0), ui::tabs::tab_menu(0)),
             _ => {}
         }
     }

@@ -19,3 +19,4 @@ Short records in the "context → decision → consequences" format. Numbering i
 | [0013](0013-ui-icons.md) | UI icons: icon-rs SVGs rasterized at runtime with resvg, own icons drawn by hand |
 | [0014](0014-tab-content-kinds.md) | Tab content kinds (graph, read-only text) and syntax-highlighted generated files |
 | [0015](0015-curve-assets.md) | Curve assets: `*.curve.ron`, per-curve WESL modules, the Sample Curve node, the curve editor |
+| [0016](0016-main-menu-and-ui-revision.md) | Main menu and per-view toolbar, browser double click / dirty dots, tab close menu, Ctrl+LMB disconnect, curve drag modifiers, one accent colour |

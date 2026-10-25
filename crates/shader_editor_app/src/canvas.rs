@@ -255,14 +255,14 @@ fn node_scene(editor: &Editor, asset: &Asset, path: &str, id: &str, canvas: Enti
     let cat = def.map_or("Unknown".to_string(), |d| d.info().category.clone());
     let head = category_color(&cat);
     let mut rows: Vec<Box<dyn Scene>> = Vec::new();
-    // Wide editors (vectors, colors) need a wider node.
+    // Vector editors (a number field per component) need a wider node.
     let mut wide = false;
     let params = editor.registry.resolved_params(&n.kind, &n.params);
     if curve_preview::has_preview(editor, &n.kind) {
         rows.push(Box::new(curve_preview::node_preview(id)));
     }
     if let Some((key, inline)) = inline_for_param(&n.kind, &params) {
-        wide |= matches!(inline, Inline::Vector(_) | Inline::Color(_));
+        wide |= matches!(inline, Inline::Vector(_));
         let v = params.get(&key).cloned().unwrap_or(Value::Float(0.0));
         let target = PropTarget::Param { node: id.into(), key };
         rows.push(Box::new(bsn! { Node { min_height: px(26), align_items: AlignItems::Center } Children [ @{inline_scene(target, inline, &v)} ] }));
@@ -286,7 +286,7 @@ fn node_scene(editor: &Editor, asset: &Asset, path: &str, id: &str, canvas: Enti
                 } else if !p.required
                     && let Some(inline) = inline_for_pin(p.ty, p.range)
                 {
-                    wide |= matches!(inline, Inline::Vector(_) | Inline::Color(_));
+                    wide |= matches!(inline, Inline::Vector(_));
                     let v = n.inputs.get(&p.id).cloned().unwrap_or_else(|| p.default.clone()).coerce(p.ty);
                     let target = PropTarget::Input { node: id.into(), pin: p.id.clone() };
                     editor_scene = Some(inline_scene(target, inline, &v));
