@@ -16,7 +16,7 @@ Asset(
       kind: "param::TextureObject",
       pos: (0.0, 405.0),
       params: {
-        "default": Str("textures/water_normal.png"),
+        "default": Str("textures/water_normal"),
         "name": Str("normals"),
       },
     ),

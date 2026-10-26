@@ -5,6 +5,11 @@ import bevy_pbr::render::mesh_view_bindings::globals;
 import super::super::curves::dir_common::crv_pulse::sample_curve_catmullrom as sg_curve_common__pulse_catmullrom;
 import super::super::curves::dir_common::crv_steps::sample_curve_simple as sg_curve_common__steps_simple;
 
+// The game's compiled material enables this feature; after a change of parameters, texture bindings or
+// World Position Offset the shader stops compiling here until the game is rebuilt.
+@if(!SG_LAYOUT_740e364b)
+const_assert material_layout_changed__rebuild_the_game;
+
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // --- builtins ---

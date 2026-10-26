@@ -37,7 +37,8 @@ Constraints found while researching:
   → E006 (`Env::curves` lists the loadable ones). The node title shows the curve name, and the node body a read-only
   preview of the curve (`ui::curve_preview`: a small tiny-skia plot in the node's `type`, from the open curve tab's
   unsaved points if there is one; a vertical line at `T` while that input is unconnected; "n/a" without a loadable
-  curve). It is redrawn by its own system when that data changes, not by canvas rebuilds. The IR records used curves
+  curve). It is redrawn by its own system when that data changes, not by canvas rebuilds (*update, decision 0026:*
+  now a kind of the generic `ui::node_preview::NodePreview` mechanism, `CurvePreview`). The IR records used curves
   (`Ir::curves`); `DepGraph` counts them as dependencies, so saving a curve also re-checks its users.
 - **Paths**: `shaders/curves/` is reserved for materials (it would clash with the generated `autogen/curves/`),
   like `stdlib/` and `functions/` (superseded by 0020: material directories are emitted as `dir_curves/`, the

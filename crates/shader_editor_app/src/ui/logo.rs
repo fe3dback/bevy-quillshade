@@ -76,7 +76,7 @@ fn decode(png: &[u8]) -> Image {
 fn downsample(image: Image, want: u32) -> Image {
     let mut size = image.width();
     let mut rgba = image.data.expect("decoded image has data");
-    while size % 2 == 0 && size / 2 >= want.max(1) {
+    while size.is_multiple_of(2) && size / 2 >= want.max(1) {
         let half = size / 2;
         let mut out = vec![0u8; (half * half * 4) as usize];
         for y in 0..half {

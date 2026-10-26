@@ -19,3 +19,10 @@ toml = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 insta = { workspace = true }
+png = { workspace = true }
+ktx2 = { workspace = true }
+
+# `cargo test` runs the generator's unit tests too.
+[[example]]
+name = "png_to_ktx2"
+test = true

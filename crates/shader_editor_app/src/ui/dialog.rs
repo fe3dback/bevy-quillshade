@@ -12,6 +12,7 @@ use bevy::text::{EditableText, TextEdit};
 use bevy::ui_widgets::{Activate, Button, RequestClose};
 
 use super::icons::{IconId, icon};
+use super::tooltip::Tooltip;
 use super::{HoverRow, OnActivate, TEXT, TEXT_DIM, button, text};
 use crate::state::{Action, Actions, Dialog, Editor, Submit};
 
@@ -102,11 +103,21 @@ fn redraw(
         Dialog::About => {
             ("About".into(), vec![Box::new(about())], vec![Box::new(button("OK", Action::CloseDialog, true))])
         }
-        Dialog::QuickStart => (
-            "Quick Start".into(),
-            vec![Box::new(super::welcome::quick_start())],
-            vec![Box::new(button("OK", Action::CloseDialog, true))],
-        ),
+        Dialog::QuickStart(step) => {
+            let last = super::welcome::QUICK_START_STEPS.len() - 1;
+            let mut b: Vec<Box<dyn Scene>> = Vec::new();
+            if *step > 0 {
+                b.push(Box::new(button("Back", Action::QuickStart(step - 1), false)));
+            }
+            b.push(Box::new(bsn! { Node { flex_grow: 1.0 } }));
+            if *step < last {
+                b.push(Box::new(button("Close", Action::CloseDialog, false)));
+                b.push(Box::new(button("Next", Action::QuickStart(step + 1), true)));
+            } else {
+                b.push(Box::new(button("Done", Action::CloseDialog, true)));
+            }
+            ("Quick Start".into(), vec![Box::new(super::welcome::quick_start(*step))], b)
+        }
     };
     if let Dialog::Input { submit: Submit::OpenProject, .. } = d {
         for p in editor.config.recent_projects.iter().take(6) {
@@ -116,7 +127,7 @@ fn redraw(
     }
     let width = px(match d {
         Dialog::About => 540,
-        Dialog::QuickStart => 640,
+        Dialog::QuickStart(_) => 820,
         _ => 460,
     });
     commands.spawn_scene(bsn! {
@@ -243,13 +254,35 @@ pub fn menu_separator() -> (Option<IconId>, String, Action) {
     (None, String::new(), Action::None)
 }
 
+/// An item of a context menu.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MenuEntry {
+    pub icon: Option<IconId>,
+    /// `"Save\tCtrl+S"` shows its hotkey on the right; empty = a separator.
+    pub label: String,
+    pub action: Action,
+    /// Shown dimmed and does nothing; the text (why) is its tooltip.
+    pub disabled: Option<String>,
+}
+
+impl From<(Option<IconId>, String, Action)> for MenuEntry {
+    fn from((icon, label, action): (Option<IconId>, String, Action)) -> Self {
+        MenuEntry { icon, label, action, disabled: None }
+    }
+}
+
 /// [`open_menu`] with an icon before each label; items without one keep the icon's space when any item has one.
 /// A label `"Save\tCtrl+S"` shows its hotkey on the right; an empty label is a separator ([`menu_separator`]).
 pub fn open_icon_menu(commands: &mut Commands, pos: Vec2, items: Vec<(Option<IconId>, String, Action)>) {
-    let with_icons = items.iter().any(|(i, ..)| i.is_some());
+    open_menu_entries(commands, pos, items.into_iter().map(MenuEntry::from).collect());
+}
+
+/// [`open_icon_menu`] whose items may be disabled ([`MenuEntry::disabled`]).
+pub fn open_menu_entries(commands: &mut Commands, pos: Vec2, items: Vec<MenuEntry>) {
+    let with_icons = items.iter().any(|m| m.icon.is_some());
     let rows: Vec<Box<dyn Scene>> = items
         .into_iter()
-        .map(|(id, label, action)| -> Box<dyn Scene> {
+        .map(|MenuEntry { icon: id, label, action, disabled }| -> Box<dyn Scene> {
             if label.is_empty() {
                 return Box::new(bsn! {
                     Node { height: px(1), margin: UiRect::axes(px(6), px(4)) }
@@ -260,34 +293,22 @@ pub fn open_icon_menu(commands: &mut Commands, pos: Vec2, items: Vec<(Option<Ico
                 Some((l, h)) => (l.to_string(), h.to_string()),
                 None => (label, String::new()),
             };
-            let (act, hover) = (OnActivate(action), HoverRow { base: Color::NONE });
+            let color = if disabled.is_some() { TEXT_DIM } else { TEXT };
             let lead: Vec<Box<dyn Scene>> = match id {
-                Some(id) => vec![Box::new(icon(id, 16.0, TEXT))],
+                Some(id) => vec![Box::new(icon(id, 16.0, color))],
                 None if with_icons => vec![Box::new(bsn! { Node { width: px(16), flex_shrink: 0.0 } })],
                 None => Vec::new(),
             };
-            Box::new(bsn! {
-                Node {
-                    align_items: AlignItems::Center,
-                    column_gap: px(8),
-                    padding: UiRect::axes(px(10), px(4)),
-                    border_radius: BorderRadius::all(px(3)),
+            match disabled {
+                Some(why) => {
+                    let tip = Tooltip(why);
+                    Box::new(bsn! { @menu_row(lead, label, color, hotkey) tip })
                 }
-                BackgroundColor(Color::NONE)
-                Button
-                MenuItem
-                act
-                hover
-                Children [
-                    {lead}
-                    --
-                    @text(label, TEXT, 13.0)
-                    --
-                    Node { flex_grow: 1.0, min_width: px(24) }
-                    --
-                    @text(hotkey, TEXT_DIM, 12.0)
-                ]
-            })
+                None => {
+                    let (act, hover) = (OnActivate(action), HoverRow { base: Color::NONE });
+                    Box::new(bsn! { @menu_row(lead, label, color, hotkey) Button MenuItem act hover })
+                }
+            }
         })
         .collect();
     let (x, y) = (px(pos.x), px(pos.y));
@@ -312,6 +333,28 @@ pub fn open_icon_menu(commands: &mut Commands, pos: Vec2, items: Vec<(Option<Ico
             Children [ {rows} ]
         ]
     });
+}
+
+/// A context menu row: icon (or its space), label, hotkey.
+fn menu_row(lead: Vec<Box<dyn Scene>>, label: String, color: Color, hotkey: String) -> impl Scene {
+    bsn! {
+        Node {
+            align_items: AlignItems::Center,
+            column_gap: px(8),
+            padding: UiRect::axes(px(10), px(4)),
+            border_radius: BorderRadius::all(px(3)),
+        }
+        BackgroundColor(Color::NONE)
+        Children [
+            {lead}
+            --
+            @text(label, color, 13.0)
+            --
+            Node { flex_grow: 1.0, min_width: px(24) }
+            --
+            @text(hotkey, TEXT_DIM, 12.0)
+        ]
+    }
 }
 
 fn close_menus(commands: &mut Commands, menus: &Query<Entity, With<MenuRoot>>) {

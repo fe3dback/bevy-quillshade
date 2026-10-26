@@ -7,7 +7,7 @@ use shader_codegen_wesl::{GenCtx, paths};
 use shader_graph_core::consts::NoConsts;
 use shader_graph_core::ir::build_ir;
 use shader_graph_core::model::{Asset, AssetKind, MaterialKind, Node, PbrSettings};
-use shader_graph_core::registry::NoCurves;
+use shader_graph_core::registry::{NoCurves, NoTextures};
 use shader_graph_core::{BlendMode, FunctionSig, Value};
 
 struct G {
@@ -84,7 +84,7 @@ fn rock_wet_compiles_against_bevy() {
     g.link((&remap, "out"), (&out, "ambient_occlusion"));
 
     let fns: BTreeMap<String, FunctionSig> = BTreeMap::new();
-    let res = build_ir(&g.a, "env/rock_wet", &registry, &fns, &NoCurves, &NoConsts);
+    let res = build_ir(&g.a, "env/rock_wet", &registry, &fns, &NoCurves, &NoConsts, &NoTextures);
     for d in &res.diagnostics {
         eprintln!("{d}");
     }
@@ -92,7 +92,7 @@ fn rock_wet_compiles_against_bevy() {
     let ir = res.ir.unwrap();
     assert_eq!(
         ir.params.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
-        ["albedo", "normal_map", "tint", "wetness", "speed"]
+        ["albedo", "normal_map", "speed", "tint", "wetness"]
     );
     let generated = shader_codegen_wesl::material(
         &ir,
@@ -106,6 +106,10 @@ fn rock_wet_compiles_against_bevy() {
     }
     let main = paths::material_module("env/rock_wet");
     files.add(&main, generated.text.clone());
+    // Decision 0029: without the layout feature the game's material enables, the shader does not compile.
+    let guard = check::compile(&bevy, &files, &main, Variant::Forward3d).unwrap_err();
+    assert!(guard.message.contains("material_layout_changed__rebuild_the_game"), "{guard}");
+    files.enable(ir.layout_feature());
     for v in [Variant::Forward3d, Variant::Forward3dBare, Variant::Deferred3d] {
         if let Err(e) = check::compile(&bevy, &files, &main, v) {
             panic!("{e}");

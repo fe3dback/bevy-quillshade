@@ -72,10 +72,11 @@ pub enum IconId {
     Link,
     Help,
     Warning,
+    Image,
 }
 
 impl IconId {
-    pub const ALL: [IconId; 33] = [
+    pub const ALL: [IconId; 34] = [
         IconId::File,
         IconId::Folder,
         IconId::FolderOpen,
@@ -109,6 +110,7 @@ impl IconId {
         IconId::Link,
         IconId::Help,
         IconId::Warning,
+        IconId::Image,
     ];
 
     fn source(self) -> Icon {
@@ -146,6 +148,7 @@ impl IconId {
             IconId::Link => icon_rs::LINK,
             IconId::Help => icon_rs::HELP,
             IconId::Warning => icon_rs::WARNING_FILLED,
+            IconId::Image => icon_rs::IMAGE,
         }
     }
 
@@ -165,6 +168,7 @@ impl IconId {
         match id.ty {
             AssetType::Curve => IconId::Curve,
             AssetType::Consts => IconId::Consts,
+            AssetType::Texture => IconId::Image,
             AssetType::Material | AssetType::Function => IconId::for_asset(kind),
         }
     }

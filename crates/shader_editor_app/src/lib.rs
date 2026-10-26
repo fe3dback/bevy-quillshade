@@ -21,14 +21,18 @@ pub mod consts_doc;
 pub mod curve_doc;
 mod demo;
 pub mod doc;
+pub mod doc_kind;
+pub mod droppable;
 mod external;
 mod fixes;
+pub mod game_image;
 pub mod highlight;
 pub mod history;
 pub mod inline;
 pub mod search;
 pub mod state;
 pub mod tab;
+pub mod texture_doc;
 pub mod ui;
 
 use canvas::{CanvasPlugin, CanvasSystems, EditorCanvas};
@@ -224,8 +228,9 @@ fn open_startup_project(mut editor: ResMut<Editor>, startup: Res<StartupProject>
 
 /// Debug aid: `SHADER_EDITOR_SCREENSHOT=out.png` saves a screenshot after a few seconds and quits;
 /// `SHADER_EDITOR_OPEN=env/rock_wet.material.ron` opens an asset at startup (`…ron#wesl` / `#rust`: its generated
-/// file in a text tab, after the asset's graph).
-/// `SHADER_EDITOR_DEMO=palette|wire|dialog|about|quick_start|open_project|welcome|menu|tab_menu` additionally opens that popup before the
+/// file in a text tab, after the asset's graph; `@game/textures/rock_albedo.ktx2`: a game image's tab;
+/// `@internal/default`: a built-in texture's read-only Texture tab).
+/// `SHADER_EDITOR_DEMO=palette|wire|dialog|about|quick_start[:N]|texture_channel:N|open_project|welcome|menu|tab_menu` additionally opens that popup before the
 /// shot (`menu`: the main menu's File; `welcome`: closes the project).
 fn debug_screenshot(
     mut frames: Local<u32>,
@@ -238,6 +243,16 @@ fn debug_screenshot(
     let Ok(path) = std::env::var("SHADER_EDITOR_SCREENSHOT") else { return };
     *frames += 1;
     if *frames == 2
+        && let Ok(open) = std::env::var("SHADER_EDITOR_OPEN")
+        && let Some(path) = open.strip_prefix(tab::GAME_KEY_PREFIX)
+    {
+        editor.open_game_image(path);
+    } else if *frames == 2
+        && let Ok(open) = std::env::var("SHADER_EDITOR_OPEN")
+        && open.starts_with(shader_graph_core::texture::INTERNAL_PREFIX)
+    {
+        editor.open_asset(&shader_project::AssetId::new(shader_project::AssetType::Texture, open));
+    } else if *frames == 2
         && let Ok(open) = std::env::var("SHADER_EDITOR_OPEN")
         && let (rel, lang) = open.split_once('#').map_or((open.as_str(), None), |(r, l)| (r, Some(l)))
         && let Some(id) = shader_project::assets::id_from_rel(rel)
@@ -267,11 +282,30 @@ fn debug_screenshot(
             }
             Ok("dialog") => actions.push(Action::NewAssetDialog(state::NewKind::Pbr3d)),
             Ok("about") => actions.push(Action::About),
-            Ok("quick_start") => actions.push(Action::QuickStart),
+            Ok("quick_start") => actions.push(Action::QuickStart(0)),
+            Ok(d) if d.starts_with("texture_channel:") => {
+                actions.push(Action::TextureChannel(d["texture_channel:".len()..].parse::<usize>().ok()))
+            }
+            Ok(d) if d.starts_with("quick_start:") => actions
+                .push(Action::QuickStart(d["quick_start:".len()..].parse::<usize>().unwrap_or(1).saturating_sub(1))),
             Ok("open_project") => actions.push(Action::OpenProjectDialog),
             Ok("welcome") => actions.push(Action::CloseProject(state::Unsaved::Discard)),
             Ok("menu") => ui::dialog::open_icon_menu(&mut commands, Vec2::new(6.0, 30.0), ui::MainMenu::File.items()),
             Ok("tab_menu") => ui::dialog::open_icon_menu(&mut commands, Vec2::new(260.0, 60.0), ui::tabs::tab_menu(0)),
+            Ok("game_file_menu") => {
+                // RMB menus of the first game image with a Texture asset (disabled item) and the first without.
+                let has = |f: &&String| shader_project::game_assets::texture_for_file(&editor.disk, f).is_some();
+                let with = editor.game_files.iter().find(has);
+                let without = editor.game_files.iter().find(|f| !has(f));
+                for (i, f) in [with, without].into_iter().flatten().enumerate() {
+                    let row = ui::tree::TreeRow {
+                        tree: ui::tree::TreeId::GameAssets,
+                        item: ui::tree::TreeItem::GameFile(f.clone()),
+                    };
+                    let pos = Vec2::new(240.0, 300.0 + 60.0 * i as f32);
+                    ui::dialog::open_menu_entries(&mut commands, pos, ui::tree::row_menu(&editor, &row));
+                }
+            }
             _ => {}
         }
     }

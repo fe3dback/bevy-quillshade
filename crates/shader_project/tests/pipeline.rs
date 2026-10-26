@@ -2,6 +2,7 @@
 
 use std::path::Path;
 
+use shader_codegen_rust::manifest::{ManifestMaterial, ManifestTexture, parse_manifest};
 use shader_codegen_wesl::check::BevySources;
 use shader_graph_core::Code;
 use shader_project::assets::{AssetId, AssetType};
@@ -44,7 +45,7 @@ fn regen_fixtures_and_is_idempotent() {
     assert!(wesl.contains("import super::super::functions::dir_common::fun_wet_mask::{WetMaskOut, fun_wet_mask};"));
     let rs = read(&p.root.join("crates/shaders/src/materials/dir_env/mat_rock_wet.rs"));
     assert!(
-        rs.contains("pub fn new(inp_albedo: Handle<Image>, inp_normal_map: Handle<Image>, inp_tint: LinearRgba, inp_wetness: f32, inp_speed: f32) -> Self"),
+        rs.contains("pub(crate) fn new(inp_albedo: Handle<Image>, inp_normal_map: Handle<Image>, inp_speed: f32, inp_tint: LinearRgba, inp_wetness: f32) -> Self"),
         "{rs}"
     );
     assert!(p.root.join("assets/shaders/autogen/stdlib/math.wesl").exists());
@@ -129,13 +130,16 @@ fn errors_block_only_affected_asset() {
     let (_d, p) = temp_project();
     regenerate(&p, &RegenOptions::default()).unwrap();
     let old = read(&p.root.join("assets/shaders/autogen/dir_env/mat_water.wesl"));
-    // Break water: remove the texture connection of a TextureSample (E004).
+    // Break water: a TextureSample without its `tex` connection, referring to a missing Texture asset (E006).
     let id = AssetId::new(AssetType::Material, "env/water");
     let mut a = shader_project::assets::load(&p, &id).unwrap();
     a.edges.retain(|e| !(e.to.1 == "tex"));
+    for n in a.nodes.values_mut().filter(|n| n.kind == "stdlib::TextureSample") {
+        n.params.insert("texture".into(), shader_graph_core::Value::Str("textures/missing".into()));
+    }
     ops::save(&p, &id, &a).unwrap();
     let r = regenerate(&p, &RegenOptions::default()).unwrap();
-    assert!(r.assets[&id].diagnostics.iter().any(|d| d.code == Code::E004));
+    assert!(r.assets[&id].diagnostics.iter().any(|d| d.code == Code::E006), "{:?}", r.assets[&id].diagnostics);
     assert_eq!(old, read(&p.root.join("assets/shaders/autogen/dir_env/mat_water.wesl")));
     // The Rust module of the broken material is kept and still registered.
     assert!(p.root.join("crates/shaders/src/materials/dir_env/mat_water.rs").exists());
@@ -151,6 +155,27 @@ fn workspace_warning_w105() {
     let w = p.workspace_warning().unwrap();
     assert_eq!(w.code, Code::W105);
     assert!(w.message.contains("crates/shaders"));
+}
+
+/// A project without materials: `lib.rs` has no `pub use materials::*;` (a glob re-export of nothing is
+/// `unused_imports`, failing the game's `clippy -D warnings`).
+#[test]
+fn empty_project_has_no_dead_reexports() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("Cargo.toml"), "[workspace]\nmembers = [\"crates/*\"]\n").unwrap();
+    std::fs::create_dir_all(dir.path().join("assets")).unwrap();
+    let p = Project::open(dir.path()).unwrap();
+    let r = regenerate(&p, &RegenOptions::default()).unwrap();
+    assert!(!r.has_errors(), "{:?}", r.diagnostics().collect::<Vec<_>>());
+    let lib = read(&p.root.join("crates/shaders/src/lib.rs"));
+    assert!(!lib.contains("pub use materials::"), "{lib}");
+    let mods = read(&p.root.join("crates/shaders/src/materials/mod.rs"));
+    assert!(!mods.contains("pub use"), "{mods}");
+
+    // With materials the glob is back.
+    fixtures::save_all(&p).unwrap();
+    regenerate(&p, &RegenOptions::default()).unwrap();
+    assert!(read(&p.root.join("crates/shaders/src/lib.rs")).contains("pub use materials::*;\n"));
 }
 
 #[test]
@@ -171,7 +196,7 @@ fn named_routes_teleport_wires() {
     use shader_graph_core::consts::NoConsts;
     use shader_graph_core::ir::build_ir;
     use shader_graph_core::model::{Asset, AssetKind, MaterialKind, Node, PbrSettings};
-    use shader_graph_core::registry::{NoCurves, NoFunctions};
+    use shader_graph_core::registry::{NoCurves, NoFunctions, NoTextures};
     use shader_graph_core::{Value, ir::Ir};
 
     let reg = shader_stdlib::registry();
@@ -184,7 +209,7 @@ fn named_routes_teleport_wires() {
         a
     };
     let ir = |a: &Asset| -> (Option<Ir>, Vec<Code>) {
-        let r = build_ir(a, "m", &reg, &NoFunctions, &NoCurves, &NoConsts);
+        let r = build_ir(a, "m", &reg, &NoFunctions, &NoCurves, &NoConsts, &NoTextures);
         (r.ir, r.diagnostics.iter().map(|d| d.code).collect())
     };
 
@@ -287,7 +312,7 @@ fn keyword_names_generate_and_compile() {
     assert!(p.root.join("assets/shaders/autogen/dir_curves/mat_tint.wesl").exists());
     let rs = read(&p.crate_dir().join("src/materials/dir_kw/dir_loop/mat_type.rs"));
     assert!(rs.contains("pub inp_self: f32"), "{rs}");
-    assert!(rs.contains("pub fn set_inp_self("), "{rs}");
+    assert!(rs.contains("pub(crate) fn set_inp_self("), "{rs}");
 }
 
 #[test]
@@ -474,4 +499,816 @@ fn function_with_attributes_compiles() {
     assert!(mat.contains("stdlib::material::MaterialAttributesPbr"), "{mat}");
     assert!(mat.contains("fun_layer(MaterialAttributesPbr("), "{mat}");
     assert!(p.root.join("assets/shaders/autogen/stdlib/material.wesl").exists());
+}
+
+/// Writes a (fake) game image under `assets/`.
+fn game_image(p: &Project, rel: &str) {
+    let f = p.assets_dir().join(rel);
+    std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+    std::fs::write(f, b"\x89PNG not really").unwrap();
+}
+
+fn codes_of(r: &shader_project::RegenReport, id: &AssetId) -> Vec<Code> {
+    r.assets[id].diagnostics.iter().map(|d| d.code).collect()
+}
+
+/// Review focus 1: two Texture assets on one file are both errors (neither silently wins), also when the clash comes
+/// from editing a path.
+#[test]
+fn texture_duplicate_path_is_e011_on_both() {
+    use shader_graph_core::TextureAsset;
+    let (_d, p) = temp_project();
+    game_image(&p, "textures/rock.png");
+    game_image(&p, "textures/moss.png");
+    let a = AssetId::new(AssetType::Texture, "textures/rock");
+    let b = AssetId::new(AssetType::Texture, "textures/rock_copy");
+    let c = AssetId::new(AssetType::Texture, "textures/moss");
+    ops::create_texture(&p, &a, &TextureAsset::new("textures/rock.png")).unwrap();
+    ops::save_texture(&p, &b, &TextureAsset::new("textures/rock.png")).unwrap();
+    ops::create_texture(&p, &c, &TextureAsset::new("textures/moss.png")).unwrap();
+    let set = shader_project::AssetSet::load_all(&p);
+    assert_eq!(set.textures.len(), 3 + fixtures::textures().len());
+    assert!(set.contains(&a) && set.ids().any(|i| *i == c));
+    let paths = shader_project::regen::texture_paths(&set);
+    assert_eq!(paths["textures/rock.png"], vec![a.clone(), b.clone()]);
+
+    let r = regenerate(&p, &RegenOptions { dry_run: true, ..Default::default() }).unwrap();
+    assert_eq!(codes_of(&r, &a), vec![Code::E011], "{:?}", r.assets[&a].diagnostics);
+    assert_eq!(codes_of(&r, &b), vec![Code::E011], "{:?}", r.assets[&b].diagnostics);
+    assert!(r.assets[&a].diagnostics[0].message.contains("shaders/textures/rock_copy.texture.ron"));
+    assert!(codes_of(&r, &c).is_empty());
+    assert!(!r.assets[&a].ok && !r.assets[&b].ok && r.assets[&c].ok, "E011 assets count as failed");
+    assert_eq!(r.diagnostics().filter(|d| d.is_error()).count(), 2);
+
+    // Resolving the clash by a path edit, then creating it again by another one.
+    ops::save_texture(&p, &b, &TextureAsset::new("textures/moss.png")).unwrap();
+    let r = regenerate(&p, &RegenOptions { dry_run: true, ..Default::default() }).unwrap();
+    assert!(codes_of(&r, &a).is_empty() && r.assets[&a].ok);
+    assert_eq!(codes_of(&r, &b), vec![Code::E011]);
+    assert_eq!(codes_of(&r, &c), vec![Code::E011]);
+    // Creating a second asset for a file that already has one is refused.
+    let e = ops::create_texture(&p, &AssetId::new(AssetType::Texture, "x"), &TextureAsset::new("textures/rock.png"));
+    assert!(e.unwrap_err().to_string().contains("textures/rock.texture.ron"));
+}
+
+/// Sampler settings wgpu cannot create are E013 (an error: the asset is not in the manifest, materials using it get
+/// the default texture); a valid sampler clears it.
+#[test]
+fn texture_invalid_sampler_is_e013() {
+    use shader_graph_core::TextureAsset;
+    use shader_graph_core::texture::{FilterMode, SamplerSettings, TextureSettings};
+    let (_d, p) = temp_project();
+    game_image(&p, "textures/rock_albedo.ktx2");
+    let id = AssetId::new(AssetType::Texture, "textures/rock_albedo");
+    let with = |sampler: SamplerSettings| TextureAsset {
+        settings: TextureSettings { sampler: Some(sampler), ..Default::default() },
+        ..TextureAsset::new("textures/rock_albedo.ktx2")
+    };
+    let linear = SamplerSettings {
+        mag_filter: FilterMode::Linear,
+        min_filter: FilterMode::Linear,
+        mipmap_filter: FilterMode::Linear,
+        ..SamplerSettings::default()
+    };
+    for bad in [
+        SamplerSettings { anisotropy_clamp: 8, ..SamplerSettings::default() },
+        SamplerSettings { anisotropy_clamp: 0, ..linear },
+        SamplerSettings { lod_min_clamp: 4.0, lod_max_clamp: 2.0, ..linear },
+        SamplerSettings { lod_min_clamp: -1.0, ..linear },
+    ] {
+        ops::save_texture(&p, &id, &with(bad)).unwrap();
+        let r = regenerate(&p, &RegenOptions::default()).unwrap();
+        assert_eq!(codes_of(&r, &id), vec![Code::E013], "{bad:?}: {:?}", r.assets[&id].diagnostics);
+        assert!(r.assets[&id].diagnostics[0].message.starts_with("invalid sampler settings: "));
+        assert!(!r.assets[&id].ok, "E013 counts as failed");
+        let (textures, materials) = manifest(&p);
+        assert!(!textures.iter().any(|t| t.id == "textures/rock_albedo"), "{bad:?}");
+        assert_eq!(manifest_material(&materials, "env/rock_wet").textures["inp_albedo"], "@internal/default");
+    }
+    ops::save_texture(&p, &id, &with(SamplerSettings { anisotropy_clamp: 16, ..linear })).unwrap();
+    let r = regenerate(&p, &RegenOptions::default()).unwrap();
+    assert!(codes_of(&r, &id).is_empty() && r.assets[&id].ok, "{:?}", r.assets[&id].diagnostics);
+    let (textures, materials) = manifest(&p);
+    assert!(textures.iter().any(|t| t.id == "textures/rock_albedo"));
+    assert_eq!(manifest_material(&materials, "env/rock_wet").textures["inp_albedo"], "textures/rock_albedo");
+}
+
+#[test]
+fn texture_bad_extension_is_e012() {
+    use shader_graph_core::TextureAsset;
+    let (_d, p) = temp_project();
+    game_image(&p, "textures/old.ktx");
+    let id = AssetId::new(AssetType::Texture, "old");
+    ops::save_texture(&p, &id, &TextureAsset::new("textures/old.ktx")).unwrap();
+    let abs = AssetId::new(AssetType::Texture, "abs");
+    ops::save_texture(&p, &abs, &TextureAsset::new("/textures/old.png")).unwrap();
+    let r = regenerate(&p, &RegenOptions { dry_run: true, ..Default::default() }).unwrap();
+    assert_eq!(codes_of(&r, &id), vec![Code::E012], "{:?}", r.assets[&id].diagnostics);
+    assert!(r.assets[&id].diagnostics[0].message.contains("ktx2, png"));
+    assert_eq!(codes_of(&r, &abs), vec![Code::E012], "no W109 for an invalid path");
+    assert!(!r.assets[&id].ok && !r.assets[&abs].ok);
+    // Creating one with a bad path is refused; a broken file is E009.
+    assert!(ops::create_texture(&p, &AssetId::new(AssetType::Texture, "y"), &TextureAsset::new("a.jpg")).is_err());
+    std::fs::write(id.file(&p), "TextureAsset(format_version: 1)").unwrap();
+    let r = regenerate(&p, &RegenOptions { dry_run: true, ..Default::default() }).unwrap();
+    assert_eq!(codes_of(&r, &id), vec![Code::E009]);
+}
+
+#[test]
+fn texture_missing_file_is_w109() {
+    use shader_graph_core::TextureAsset;
+    let (_d, p) = temp_project();
+    regenerate(&p, &RegenOptions::default()).unwrap();
+    let id = AssetId::new(AssetType::Texture, "textures/rock");
+    ops::create_texture(&p, &id, &TextureAsset::new("textures/rock.ktx2")).unwrap();
+    let r = regenerate(&p, &RegenOptions::default()).unwrap();
+    assert_eq!(codes_of(&r, &id), vec![Code::W109], "{:?}", r.assets[&id].diagnostics);
+    assert!(r.assets[&id].ok, "a missing file is only a warning");
+    assert!(!r.has_errors(), "{:?}", r.diagnostics().collect::<Vec<_>>());
+    // A Texture asset generates no WESL, only its manifest entry and its `BakedTextures` field.
+    let changed: Vec<String> = r.changes.iter().map(|c| p.rel(c.path())).collect();
+    assert_eq!(
+        changed,
+        ["assets/shaders/autogen/baked.ron", "crates/shaders/src/baked/textures.rs"],
+        "{:?}",
+        r.changes
+    );
+    game_image(&p, "textures/rock.ktx2");
+    let r = regenerate(&p, &RegenOptions::default()).unwrap();
+    assert!(codes_of(&r, &id).is_empty());
+}
+
+/// Decision 0029: a KTX2 cube map cannot be bound as `texture_2d` (the game would quit at bind group creation), so it is
+/// E014 and left out of the manifest.
+#[test]
+fn texture_cube_map_is_e014() {
+    use shader_graph_core::TextureAsset;
+    let (_d, p) = temp_project();
+    let file = p.assets_dir().join("textures/sky.ktx2");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    let mut header = vec![0xAB, b'K', b'T', b'X', b' ', b'2', b'0', 0xBB, b'\r', b'\n', 0x1A, b'\n'];
+    for v in [37u32, 1, 64, 64, 0, 0, 6, 1, 0] {
+        header.extend(v.to_le_bytes());
+    }
+    std::fs::write(&file, &header).unwrap();
+    let id = AssetId::new(AssetType::Texture, "textures/sky");
+    ops::create_texture(&p, &id, &TextureAsset::new("textures/sky.ktx2")).unwrap();
+    let r = regenerate(&p, &RegenOptions::default()).unwrap();
+    assert_eq!(codes_of(&r, &id), vec![Code::E014]);
+    let d = &r.assets[&id].diagnostics[0];
+    assert!(d.message.contains("`assets/textures/sky.ktx2`: the image is a cube map (6 faces)"), "{}", d.message);
+    assert!(!r.assets[&id].ok);
+    assert!(manifest(&p).0.iter().all(|t| t.id != "textures/sky"), "not loaded by the game");
+}
+
+#[test]
+fn texture_rename_keeps_file() {
+    use shader_graph_core::TextureAsset;
+    use shader_graph_core::texture::{AddressMode, FilterMode, SamplerSettings};
+    let (_d, p) = temp_project();
+    game_image(&p, "textures/rock.png");
+    let id = AssetId::new(AssetType::Texture, "textures/rock");
+    let mut t = TextureAsset::new("textures/rock.png");
+    t.settings.is_srgb = false;
+    t.settings.sampler = Some(SamplerSettings {
+        address_mode_u: AddressMode::Repeat,
+        mag_filter: FilterMode::Linear,
+        ..Default::default()
+    });
+    ops::create_texture(&p, &id, &t).unwrap();
+    let moved = ops::rename(&p, &id, "env/rock_albedo").unwrap();
+    assert_eq!(moved, AssetId::new(AssetType::Texture, "env/rock_albedo"));
+    assert!(!id.file(&p).exists());
+    assert_eq!(shader_project::assets::load_texture(&p, &moved).unwrap(), t, "path and settings survive");
+    assert_eq!(std::fs::read(p.assets_dir().join("textures/rock.png")).unwrap(), b"\x89PNG not really");
+    let r = regenerate(&p, &RegenOptions::default()).unwrap();
+    assert!(codes_of(&r, &moved).is_empty() && r.assets[&moved].ok);
+    ops::delete(&p, &moved).unwrap();
+    assert!(p.assets_dir().join("textures/rock.png").exists(), "deleting the asset keeps the game file");
+}
+
+/// Texture references (design §1.2): material `m/tex_mat` (a texture parameter defaulting to `textures/a`), function
+/// `lib/tex_fn` (a texture object parameter defaulting to `textures/a`; parameters are E009 inside functions, which
+/// does not matter for references — Task 9 gives functions fixed textures) and material `m/caller` that calls the
+/// function.
+struct TextureUsers {
+    texture: AssetId,
+    material: AssetId,
+    function: AssetId,
+    caller: AssetId,
+}
+
+fn texture_users(p: &Project) -> TextureUsers {
+    use shader_graph_core::model::{AssetKind, MaterialKind, UnlitSettings};
+    use shader_graph_core::{TextureAsset, Value};
+    use shader_project::fixtures::GraphBuilder;
+    let s = |v: &str| Value::Str(v.into());
+    game_image(p, "textures/a.png");
+    let texture = AssetId::new(AssetType::Texture, "textures/a");
+    ops::create_texture(p, &texture, &TextureAsset::new("textures/a.png")).unwrap();
+
+    let mut g = GraphBuilder::new("tex_fn", AssetKind::Function);
+    let c = g.node("stdlib::Constant", (0.0, 0.0));
+    let out = g.node_p("output::FunctionOutput", (200.0, 0.0), &[("name", s("result"))]);
+    g.link((&c, "out"), (&out, "in"));
+    g.node_p("param::TextureObject", (0.0, 200.0), &[("name", s("tex")), ("default", s("textures/a"))]);
+    let function = AssetId::new(AssetType::Function, "lib/tex_fn");
+    ops::save(p, &function, &g.finish()).unwrap();
+
+    let unlit = AssetKind::Material(MaterialKind::Unlit3d(UnlitSettings::default()));
+    let mut g = GraphBuilder::new("tex_mat", unlit);
+    let out = g.node("output::Unlit3d", (400.0, 0.0));
+    let t = g.node_p("param::TextureSample2D", (0.0, 0.0), &[("name", s("albedo")), ("default", s("textures/a"))]);
+    g.link((&t, "rgb"), (&out, "color"));
+    let material = AssetId::new(AssetType::Material, "m/tex_mat");
+    ops::save(p, &material, &g.finish()).unwrap();
+
+    let mut g = GraphBuilder::new("caller", unlit);
+    let out = g.node("output::Unlit3d", (400.0, 0.0));
+    let call = g.node("function::lib/tex_fn", (0.0, 0.0));
+    g.link((&call, "result"), (&out, "color"));
+    let caller = AssetId::new(AssetType::Material, "m/caller");
+    ops::save(p, &caller, &g.finish()).unwrap();
+    TextureUsers { texture, material, function, caller }
+}
+
+/// Texture ids the nodes of asset `id` refer to.
+fn texture_ids(p: &Project, id: &AssetId) -> Vec<String> {
+    let (registry, _) = shader_project::regen::project_registry(p);
+    let a = shader_project::assets::load(p, id).unwrap();
+    shader_graph_core::registry::texture_refs(&a, &registry).into_iter().map(|r| r.2).collect()
+}
+
+/// Review focus 5: renaming a Texture asset rewrites the references of materials and functions.
+#[test]
+fn texture_rename_rewrites_refs() {
+    let (_d, p) = temp_project();
+    let u = texture_users(&p);
+    assert_eq!(texture_ids(&p, &u.material), vec!["textures/a"]);
+    assert_eq!(texture_ids(&p, &u.function), vec!["textures/a"]);
+    let moved = ops::rename(&p, &u.texture, "textures/b").unwrap();
+    assert_eq!(texture_ids(&p, &u.material), vec!["textures/b"]);
+    assert_eq!(texture_ids(&p, &u.function), vec!["textures/b"]);
+    // Both users depend on the renamed asset, so they regenerate with it.
+    let (registry, _) = shader_project::regen::project_registry(&p);
+    let deps = shader_project::regen::DepGraph::build(&shader_project::AssetSet::load_all(&p), &registry);
+    let affected = deps.affected(&[moved].into());
+    assert!(affected.contains(&u.material) && affected.contains(&u.function), "{affected:?}");
+    let r = regenerate(&p, &RegenOptions::default()).unwrap();
+    assert!(r.assets[&u.material].ok, "{:?}", r.assets[&u.material].diagnostics);
+}
+
+/// Review focus 5: deleting a Texture asset clears the references to it (W110 + default texture come in Task 8).
+#[test]
+fn texture_delete_clears_refs() {
+    let (_d, p) = temp_project();
+    let u = texture_users(&p);
+    ops::delete(&p, &u.texture).unwrap();
+    assert!(!u.texture.file(&p).exists());
+    let (registry, _) = shader_project::regen::project_registry(&p);
+    for id in [&u.material, &u.function] {
+        let a = shader_project::assets::load(&p, id).unwrap();
+        let defaults: Vec<_> = a.nodes.values().filter_map(|n| n.params.get("default")).collect();
+        assert_eq!(defaults, vec![&shader_graph_core::Value::Str(String::new())], "{id}");
+        assert!(shader_graph_core::registry::texture_refs(&a, &registry).is_empty());
+    }
+    let r = regenerate(&p, &RegenOptions::default()).unwrap();
+    assert!(r.assets[&u.material].ok, "{:?}", r.assets[&u.material].diagnostics);
+    // The cleared parameter default falls back to the default texture (W110).
+    assert!(codes_of(&r, &u.material).contains(&Code::W110), "{:?}", r.assets[&u.material].diagnostics);
+    let ir = r.assets[&u.material].ir.as_ref().unwrap();
+    assert_eq!(ir.textures[0].texture, shader_stdlib::internal::DEFAULT_TEXTURE);
+}
+
+/// Old files stored a texture default as an image path (`textures/rock_albedo.png`); Texture asset ids never contain
+/// `.`, so such a file fails to load (no migration, `format_version` stays 1) with a message naming the node.
+#[test]
+fn old_texture_default_path_fails_to_load() {
+    let (_d, p) = temp_project();
+    let id = AssetId::new(AssetType::Material, "env/rock_wet");
+    let text = std::fs::read_to_string(id.file(&p)).unwrap();
+    let (node, _) = shader_project::assets::load(&p, &id)
+        .unwrap()
+        .nodes
+        .into_iter()
+        .find(|(_, n)| n.kind == "param::TextureSample2D")
+        .expect("rock_wet has a texture parameter");
+    let new_id = shader_project::assets::load(&p, &id).unwrap().nodes[&node].params["default"].as_str().to_string();
+    assert!(!new_id.is_empty() && !new_id.contains('.'), "{new_id}");
+    std::fs::write(id.file(&p), text.replace(&format!("Str(\"{new_id}\")"), "Str(\"textures/rock_albedo.png\")"))
+        .unwrap();
+    let e = shader_project::assets::load(&p, &id).unwrap_err();
+    assert!(e.contains(&format!("node `{node}`")) && e.contains("textures/rock_albedo.png"), "{e}");
+    assert!(e.contains("Texture asset"), "{e}");
+    let r = regenerate(&p, &RegenOptions::default()).unwrap();
+    assert!(r.assets[&id].diagnostics.iter().any(|d| d.is_error() && d.message.contains("Texture asset")));
+}
+
+#[test]
+fn texture_dependency_regenerates_materials() {
+    let (_d, p) = temp_project();
+    let u = texture_users(&p);
+    let (registry, _) = shader_project::regen::project_registry(&p);
+    let set = shader_project::AssetSet::load_all(&p);
+    let ids = shader_project::regen::texture_ids(&set);
+    let mut want: std::collections::BTreeSet<String> = ["@internal/default", "textures/a"].map(String::from).into();
+    want.extend(fixtures::textures().into_iter().map(|(path, _)| path.to_string()));
+    assert_eq!(ids, want, "what `Env::textures` knows");
+    let deps = shader_project::regen::DepGraph::build(&set, &registry);
+    assert!(deps.uses[&u.material].contains(&u.texture));
+    assert!(deps.uses[&u.function].contains(&u.texture));
+    assert_eq!(deps.uses[&u.caller], [u.function.clone()].into(), "only through the function");
+    let affected = deps.affected(&[u.texture.clone()].into());
+    for id in [&u.texture, &u.material, &u.function, &u.caller] {
+        assert!(affected.contains(id), "{id} not in {affected:?}");
+    }
+    assert_eq!(affected.len(), 4, "{affected:?}");
+    // `@internal/*` textures are not project assets: no dependency.
+    let mut a = shader_project::assets::load(&p, &u.material).unwrap();
+    for n in a.nodes.values_mut().filter(|n| n.kind == "param::TextureSample2D") {
+        n.params.insert("default".into(), shader_graph_core::Value::Str("@internal/default".into()));
+    }
+    ops::save(&p, &u.material, &a).unwrap();
+    let deps = shader_project::regen::DepGraph::build(&shader_project::AssetSet::load_all(&p), &registry);
+    assert!(!deps.uses.contains_key(&u.material), "{:?}", deps.uses.get(&u.material));
+}
+
+/// Design §1.3: a fixed texture is a material binding of its own after the parameter textures; the Rust field is
+/// filled with `Handle::default()` by `new`. Swapping the node's texture changes neither WESL nor Rust.
+#[test]
+fn fixed_texture_binding_in_wesl_and_rust() {
+    use shader_graph_core::Value;
+    use shader_graph_core::model::{AssetKind, MaterialKind, PbrSettings};
+    use shader_project::fixtures::GraphBuilder;
+    let (_d, p) = temp_project();
+    let s = |v: &str| Value::Str(v.into());
+    let mut g = GraphBuilder::new("fixed", AssetKind::Material(MaterialKind::Pbr3d(PbrSettings::default())));
+    let out = g.node("output::Pbr3d", (600.0, 0.0));
+    let fixed = g.node_p("stdlib::TextureSample", (0.0, 0.0), &[("texture", s("textures/rock_albedo"))]);
+    let param =
+        g.node_p("param::TextureSample2D", (0.0, 200.0), &[("name", s("detail")), ("default", s("textures/atlas"))]);
+    let mul = g.node("stdlib::Multiply", (300.0, 0.0));
+    g.link((&fixed, "rgb"), (&mul, "a"));
+    g.link((&param, "rgb"), (&mul, "b"));
+    g.link((&mul, "out"), (&out, "base_color"));
+    let id = AssetId::new(AssetType::Material, "m/fixed");
+    let mut asset = g.finish();
+    ops::save(&p, &id, &asset).unwrap();
+    let bevy = BevySources::discover();
+    let r = regenerate(&p, &RegenOptions { compile_check: bevy.as_ref(), ..Default::default() }).unwrap();
+    assert!(r.assets[&id].ok, "{:?}", r.assets[&id].diagnostics);
+    let wesl_path = p.root.join("assets/shaders/autogen/dir_m/mat_fixed.wesl");
+    let rs_path = p.root.join("crates/shaders/src/materials/dir_m/mat_fixed.rs");
+    let (wesl, rs) = (read(&wesl_path), read(&rs_path));
+    for l in [
+        "@binding(101) var inp_detail: texture_2d<f32>;",
+        "@binding(102) var inp_detail_sampler: sampler;",
+        &format!("@binding(103) var ft_{fixed}: texture_2d<f32>;"),
+        &format!("@binding(104) var ft_{fixed}_sampler: sampler;"),
+    ] {
+        assert!(wesl.contains(l), "{l}\n{wesl}");
+    }
+    assert!(rs.contains("pub(crate) fn new(inp_detail: Handle<Image>) -> Self"), "{rs}");
+    for l in [
+        format!("    #[texture(103)]\n    #[sampler(104)]\n    pub ft_{fixed}: Handle<Image>,"),
+        format!("            ft_{fixed}: Handle::default(),"),
+    ] {
+        assert!(rs.contains(&l), "{l}\n{rs}");
+    }
+    assert_eq!(shader_codegen_wesl::binding_of(r.assets[&id].ir.as_ref().unwrap(), "detail"), Some(101));
+
+    asset.nodes.get_mut(&fixed).unwrap().params.insert("texture".into(), s("textures/sprite"));
+    ops::save(&p, &id, &asset).unwrap();
+    let r = regenerate(&p, &RegenOptions::default()).unwrap();
+    assert!(r.assets[&id].ok, "{:?}", r.assets[&id].diagnostics);
+    assert_eq!(r.assets[&id].ir.as_ref().unwrap().textures[1].texture, "textures/sprite");
+    assert_eq!((wesl, rs), (read(&wesl_path), read(&rs_path)), "swapping a fixed texture keeps the code");
+
+    // Only fixed textures: `new()` has no arguments, so the type derives `Default` (clippy `new_without_default`).
+    asset.nodes.remove(&param);
+    asset.connect((&fixed, "rgb"), (&mul, "b"));
+    ops::save(&p, &id, &asset).unwrap();
+    let r = regenerate(&p, &RegenOptions::default()).unwrap();
+    assert!(r.assets[&id].ok, "{:?}", r.assets[&id].diagnostics);
+    let rs = read(&rs_path);
+    assert!(
+        rs.contains("#[derive(Asset, AsBindGroup, Reflect, Debug, Clone, Default)]")
+            && rs.contains("pub(crate) fn new() -> Self")
+    );
+}
+
+/// Hidden texture of the fixture function `common/tex_layer` (its `TextureSample` is node `n02`).
+fn tex_layer_hidden(texture: &str) -> Vec<shader_graph_core::registry::HiddenTexture> {
+    vec![shader_graph_core::registry::HiddenTexture {
+        origin: "common/tex_layer".into(),
+        node: "n02".into(),
+        texture: texture.into(),
+    }]
+}
+
+/// Design §1.3: a fixed texture inside a function is a hidden trailing input (after the builtins), forwarded by a
+/// calling function as a hidden input of its own with the same origin.
+#[test]
+fn function_fixed_texture_is_hidden_input() {
+    let (_d, p) = temp_project();
+    let bevy = BevySources::discover();
+    let r = regenerate(&p, &RegenOptions { compile_check: bevy.as_ref(), ..Default::default() }).unwrap();
+    for path in ["common/tex_layer", "common/tex_layer_outer"] {
+        let id = AssetId::new(AssetType::Function, path);
+        assert!(r.assets[&id].ok, "{path}: {:?}", r.assets[&id].diagnostics);
+        let ir = r.assets[&id].ir.as_ref().unwrap();
+        assert_eq!(ir.function_sig.as_ref().unwrap().textures, tex_layer_hidden("textures/rock_albedo"), "{path}");
+        assert!(ir.textures.is_empty(), "{path}: functions have no material bindings");
+    }
+    let hidden = "ft_common_tex_layer_n02: texture_2d<f32>, ft_common_tex_layer_n02_sampler: sampler) -> vec3<f32> {";
+    let inner = read(&p.root.join("assets/shaders/autogen/functions/dir_common/fun_tex_layer.wesl"));
+    assert!(inner.contains(&format!("fn fun_tex_layer(inp_tint: vec3<f32>, b_uv0: vec2<f32>, {hidden}")), "{inner}");
+    assert!(
+        inner.contains("textureSample(ft_common_tex_layer_n02, ft_common_tex_layer_n02_sampler, b_uv0)"),
+        "{inner}"
+    );
+    let outer = read(&p.root.join("assets/shaders/autogen/functions/dir_common/fun_tex_layer_outer.wesl"));
+    assert!(outer.contains(&format!("fn fun_tex_layer_outer(inp_scale: f32, b_uv0: vec2<f32>, {hidden}")), "{outer}");
+    assert!(
+        outer.contains(
+            "fun_tex_layer(vec3<f32>(1.0, 1.0, 1.0), b_uv0, ft_common_tex_layer_n02, ft_common_tex_layer_n02_sampler)"
+        ),
+        "{outer}"
+    );
+}
+
+/// Review Focus 2: `env/tex_layers` calls `tex_layer` twice and `tex_layer_outer` (which calls `tex_layer`) once — one
+/// material binding per origin node, passed at all three call sites; the WESL compiles (forward / no-UV / deferred).
+#[test]
+fn material_dedups_hidden_texture_per_origin() {
+    use shader_graph_core::{TextureBinding, TextureSource};
+    let (_d, p) = temp_project();
+    let bevy = BevySources::discover();
+    assert!(bevy.is_some(), "Bevy 0.20 sources are needed for the WESL compile check");
+    let r = regenerate(&p, &RegenOptions { compile_check: bevy.as_ref(), ..Default::default() }).unwrap();
+    let id = AssetId::new(AssetType::Material, "env/tex_layers");
+    assert!(r.assets[&id].ok, "{:?}", r.assets[&id].diagnostics);
+    let ir = r.assets[&id].ir.as_ref().unwrap();
+    assert_eq!(
+        ir.textures,
+        vec![TextureBinding {
+            ident: "ft_common_tex_layer_n02".into(),
+            source: TextureSource::Fixed { node: "n02".into(), origin: Some("common/tex_layer".into()) },
+            texture: "textures/rock_albedo".into(),
+            binding: 101,
+        }]
+    );
+    let wesl = read(&p.root.join("assets/shaders/autogen/dir_env/mat_tex_layers.wesl"));
+    for l in [
+        "@binding(101) var ft_common_tex_layer_n02: texture_2d<f32>;",
+        "@binding(102) var ft_common_tex_layer_n02_sampler: sampler;",
+    ] {
+        assert!(wesl.contains(l), "{l}\n{wesl}");
+    }
+    assert_eq!(wesl.matches("ft_common_tex_layer_n02, ft_common_tex_layer_n02_sampler)").count(), 3, "{wesl}");
+    let rs = read(&p.root.join("crates/shaders/src/materials/dir_env/mat_tex_layers.rs"));
+    for l in [
+        "    #[texture(101)]\n    #[sampler(102)]\n    pub ft_common_tex_layer_n02: Handle<Image>,",
+        "            ft_common_tex_layer_n02: Handle::default(),",
+    ] {
+        assert!(rs.contains(l), "{l}\n{rs}");
+    }
+}
+
+/// Design §1.3: the identifier comes from the origin node, not the Texture asset, so swapping the texture of the node
+/// inside the function changes neither the WESL nor the Rust of its callers (only the binding's value).
+#[test]
+fn swap_fixed_texture_keeps_codegen() {
+    let (_d, p) = temp_project();
+    let r = regenerate(&p, &RegenOptions::default()).unwrap();
+    assert!(!r.has_errors());
+    let files = [
+        "assets/shaders/autogen/dir_env/mat_tex_layers.wesl",
+        "crates/shaders/src/materials/dir_env/mat_tex_layers.rs",
+        "assets/shaders/autogen/functions/dir_common/fun_tex_layer.wesl",
+        "assets/shaders/autogen/functions/dir_common/fun_tex_layer_outer.wesl",
+    ];
+    let before: Vec<String> = files.iter().map(|f| read(&p.root.join(f))).collect();
+
+    let fn_id = AssetId::new(AssetType::Function, "common/tex_layer");
+    let mut layer = fixtures::tex_layer();
+    layer
+        .nodes
+        .get_mut("n02")
+        .unwrap()
+        .params
+        .insert("texture".into(), shader_graph_core::Value::Str("textures/sprite".into()));
+    ops::save(&p, &fn_id, &layer).unwrap();
+    let r = regenerate(&p, &RegenOptions::default()).unwrap();
+    assert!(!r.has_errors());
+    let mat = AssetId::new(AssetType::Material, "env/tex_layers");
+    assert_eq!(r.assets[&mat].ir.as_ref().unwrap().textures[0].texture, "textures/sprite");
+    let outer = AssetId::new(AssetType::Function, "common/tex_layer_outer");
+    let sig = r.assets[&outer].ir.as_ref().unwrap().function_sig.clone().unwrap();
+    assert_eq!(sig.textures, tex_layer_hidden("textures/sprite"));
+    let after: Vec<String> = files.iter().map(|f| read(&p.root.join(f))).collect();
+    for ((f, b), a) in files.iter().zip(&before).zip(&after) {
+        assert_eq!(b, a, "{f} changed after swapping the function's texture");
+    }
+}
+
+fn internal_dir(p: &Project) -> std::path::PathBuf {
+    p.root.join("assets/shaders/internal")
+}
+
+#[test]
+fn internal_textures_are_written() {
+    let (_d, p) = temp_project();
+    let r = regenerate(&p, &RegenOptions::default()).unwrap();
+    assert!(!r.has_errors());
+    let dir = internal_dir(&p);
+    for t in shader_stdlib::internal::INTERNAL_TEXTURES {
+        assert_eq!(std::fs::read(dir.join(t.file)).unwrap(), t.bytes, "{}", t.file);
+    }
+    let t = &shader_stdlib::internal::INTERNAL_TEXTURES[0];
+    assert!(r.changes.contains(&shader_project::writer::Change::Create(dir.join(t.file))), "{:?}", r.changes);
+    assert!(shader_project::regen::has_marker(&read(&dir.join(".autogen"))));
+    // The directory is owned: a stale file is an orphan, a damaged texture is restored.
+    std::fs::write(dir.join("stale.png"), [0x89, 0x50, 0xff]).unwrap();
+    std::fs::write(dir.join(t.file), [0u8, 1, 2]).unwrap();
+    let r = regenerate(&p, &RegenOptions::default()).unwrap();
+    assert!(!r.has_errors());
+    assert!(!dir.join("stale.png").exists());
+    assert_eq!(std::fs::read(dir.join(t.file)).unwrap(), t.bytes);
+    assert!(r.changes.contains(&shader_project::writer::Change::Modify(dir.join(t.file))), "{:?}", r.changes);
+}
+
+#[test]
+fn internal_dir_without_marker_is_e008() {
+    let (_d, p) = temp_project();
+    let dir = internal_dir(&p);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("x.png"), [0x89u8, 0x50, 0xff, 0x00]).unwrap();
+    let r = regenerate(&p, &RegenOptions::default()).unwrap();
+    assert!(r.project.iter().any(|d| d.code == Code::E008), "{:?}", r.project);
+    assert_eq!(std::fs::read(dir.join("x.png")).unwrap(), [0x89u8, 0x50, 0xff, 0x00]);
+    let names: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect();
+    assert_eq!(names, ["x.png"]);
+    // The rest of the project still regenerates.
+    assert!(p.root.join("assets/shaders/autogen/dir_env/mat_rock_wet.wesl").exists());
+    assert!(r.assets.values().all(|a| a.diagnostics.iter().all(|d| d.code != Code::E008)));
+}
+
+/// Errors block only their own asset: an `internal/` that is a regular file is E008 (not "empty, owned"), nothing is
+/// written there and the rest of the project regenerates.
+#[test]
+fn internal_path_is_a_file_is_e008() {
+    let (_d, p) = temp_project();
+    let path = internal_dir(&p);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, b"not a directory").unwrap();
+    let r = regenerate(&p, &RegenOptions::default()).expect("regen must not abort");
+    assert!(r.project.iter().any(|d| d.code == Code::E008), "{:?}", r.project);
+    assert_eq!(std::fs::read(&path).unwrap(), b"not a directory");
+    assert!(p.root.join("assets/shaders/autogen/dir_env/mat_rock_wet.wesl").exists());
+    assert!(p.root.join("crates/shaders/src/lib.rs").exists());
+}
+
+/// E008 anti-goal: a generated path that cannot be read (here a directory in the way) is never replaced; only its
+/// asset is blocked.
+#[test]
+fn unreadable_target_is_e008() {
+    let (_d, p) = temp_project();
+    let target = p.root.join("assets/shaders/autogen/dir_env/mat_rock_wet.wesl");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::write(target.join("foreign.txt"), b"foreign").unwrap();
+    let r = regenerate(&p, &RegenOptions::default()).expect("regen must not abort");
+    let id = AssetId::new(AssetType::Material, "env/rock_wet");
+    assert!(codes_of(&r, &id).contains(&Code::E008), "{:?}", codes_of(&r, &id));
+    assert!(!r.assets[&id].ok);
+    assert_eq!(std::fs::read(target.join("foreign.txt")).unwrap(), b"foreign");
+    assert!(p.root.join("assets/shaders/autogen/dir_env/mat_water.wesl").exists());
+}
+
+/// Same with a file the user cannot read (skipped when running as root, which reads it anyway).
+#[cfg(unix)]
+#[test]
+fn permission_denied_target_is_e008() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_d, p) = temp_project();
+    let target = p.root.join("assets/shaders/autogen/dir_env/mat_rock_wet.wesl");
+    std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+    std::fs::write(&target, b"foreign").unwrap();
+    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read(&target).is_ok() {
+        eprintln!("permission_denied_target_is_e008: skipped (file is readable anyway, root?)");
+        return;
+    }
+    let r = regenerate(&p, &RegenOptions::default()).expect("regen must not abort");
+    let id = AssetId::new(AssetType::Material, "env/rock_wet");
+    assert!(codes_of(&r, &id).contains(&Code::E008), "{:?}", codes_of(&r, &id));
+    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(std::fs::read(&target).unwrap(), b"foreign");
+}
+
+/// The orphan scan never follows symlinks: a linked directory inside the owned `internal/` (where unproduced files
+/// are deleted without a marker check) keeps its target's files, and a link loop in `autogen/` does not hang regen.
+#[cfg(unix)]
+#[test]
+fn orphan_scan_skips_symlinks() {
+    let (_d, p) = temp_project();
+    regenerate(&p, &RegenOptions::default()).unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(outside.path().join("sub")).unwrap();
+    std::fs::write(outside.path().join("keep.png"), b"outside").unwrap();
+    let marked = "// AUTOGENERATED by shader-editor v1 \u{2014} do not edit\n";
+    std::fs::write(outside.path().join("marked.wesl"), marked).unwrap();
+    let dir = internal_dir(&p);
+    std::os::unix::fs::symlink(outside.path(), dir.join("link")).unwrap();
+    std::os::unix::fs::symlink(outside.path().join("keep.png"), dir.join("file_link.png")).unwrap();
+    let autogen = p.root.join("assets/shaders/autogen");
+    std::os::unix::fs::symlink(outside.path(), autogen.join("outside")).unwrap();
+    std::os::unix::fs::symlink(&autogen, autogen.join("loop")).unwrap();
+
+    let r = regenerate(&p, &RegenOptions::default()).unwrap();
+    assert!(!r.has_errors(), "{:?}", r.diagnostics().collect::<Vec<_>>());
+    assert_eq!(std::fs::read(outside.path().join("keep.png")).unwrap(), b"outside");
+    assert_eq!(read(&outside.path().join("marked.wesl")), marked);
+    assert!(outside.path().join("sub").is_dir(), "empty dir behind a link removed");
+    for link in [dir.join("link"), dir.join("file_link.png"), autogen.join("outside"), autogen.join("loop")] {
+        assert!(link.symlink_metadata().is_ok(), "{} deleted", link.display());
+    }
+}
+
+#[test]
+fn foreign_binary_in_autogen_is_e008() {
+    let (_d, p) = temp_project();
+    let foreign: &[u8] = &[0xff, 0xfe, 0x00, 0x80, b'\n'];
+    // A file regen would produce: blocked with E008 instead of being overwritten.
+    let target = p.root.join("assets/shaders/autogen/dir_env/mat_rock_wet.wesl");
+    // A file nobody produces: kept as is (not an orphan, no marker).
+    let other = p.root.join("assets/shaders/autogen/foo.wesl");
+    std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+    std::fs::write(&target, foreign).unwrap();
+    std::fs::write(&other, foreign).unwrap();
+    let r = regenerate(&p, &RegenOptions::default()).unwrap();
+    let id = AssetId::new(AssetType::Material, "env/rock_wet");
+    assert!(codes_of(&r, &id).contains(&Code::E008), "{:?}", codes_of(&r, &id));
+    assert_eq!(std::fs::read(&target).unwrap(), foreign);
+    assert_eq!(std::fs::read(&other).unwrap(), foreign);
+}
+
+#[test]
+fn unchanged_binary_not_rewritten() {
+    let (_d, p) = temp_project();
+    regenerate(&p, &RegenOptions::default()).unwrap();
+    let dir = internal_dir(&p);
+    let file = dir.join(shader_stdlib::internal::INTERNAL_TEXTURES[0].file);
+    let mtime = |f: &Path| std::fs::metadata(f).unwrap().modified().unwrap();
+    let (tex, marker) = (mtime(&file), mtime(&dir.join(".autogen")));
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let again = regenerate(&p, &RegenOptions::default()).unwrap();
+    assert!(again.changes.is_empty(), "{:?}", again.changes);
+    assert_eq!(tex, mtime(&file));
+    assert_eq!(marker, mtime(&dir.join(".autogen")));
+}
+
+fn manifest(p: &Project) -> (Vec<ManifestTexture>, Vec<ManifestMaterial>) {
+    parse_manifest(&read(&p.root.join("assets/shaders/autogen/baked.ron"))).unwrap()
+}
+
+fn manifest_material<'a>(m: &'a [ManifestMaterial], path: &str) -> &'a ManifestMaterial {
+    m.iter().find(|m| m.path == path).unwrap_or_else(|| panic!("{path} not in the manifest"))
+}
+
+/// Design §3.2.1: every valid Texture asset (used or not) + internal textures, every material with its parameter
+/// defaults and texture choices; the generated crate embeds it.
+#[test]
+fn regen_writes_manifest() {
+    use shader_codegen_rust::manifest::ParamValue;
+    let (_d, p) = temp_project();
+    let r = regenerate(&p, &RegenOptions::default()).unwrap();
+    assert!(!r.has_errors());
+    let text = read(&p.root.join("assets/shaders/autogen/baked.ron"));
+    assert!(shader_project::regen::has_marker(&text), "{text}");
+    let (textures, materials) = manifest(&p);
+
+    let ids: Vec<&str> = textures.iter().map(|t| t.id.as_str()).collect();
+    let mut expected: Vec<&str> = fixtures::textures().iter().map(|(id, _)| *id).collect();
+    expected.push("@internal/default");
+    expected.sort();
+    assert_eq!(ids, expected);
+    let tex = |id: &str| textures.iter().find(|t| t.id == id).unwrap();
+    assert_eq!(tex("textures/rock_albedo").path, "textures/rock_albedo.ktx2");
+    assert!(!tex("textures/rock_normal").settings.is_srgb);
+    assert_eq!(tex("@internal/default").path, "shaders/internal/default.png");
+    assert_eq!(tex("@internal/default").settings, (shader_stdlib::internal::INTERNAL_TEXTURES[0].settings)());
+
+    let paths: Vec<&str> = materials.iter().map(|m| m.path.as_str()).collect();
+    let mut expected: Vec<&str> = fixtures::all().into_iter().filter(|(_, f, _)| !f).map(|(p, _, _)| p).collect();
+    expected.sort();
+    assert_eq!(paths, expected);
+    let rock = manifest_material(&materials, "env/rock_wet");
+    assert_eq!(rock.textures["inp_albedo"], "textures/rock_albedo");
+    assert_eq!(rock.textures["inp_normal_map"], "textures/rock_normal");
+    assert_eq!(rock.params["inp_tint"], ParamValue::Color([0.9, 0.85, 0.8, 1.0]));
+    assert!(matches!(rock.params["inp_wetness"], ParamValue::Float(_)));
+    assert!(!rock.params.contains_key("inp_albedo"), "texture parameters are in `textures`");
+    let layers = manifest_material(&materials, "env/tex_layers");
+    assert_eq!(layers.textures["ft_common_tex_layer_n02"], "textures/rock_albedo");
+
+    // The generated crate embeds the manifest and has a field per material and texture.
+    let lib = read(&p.root.join("crates/shaders/src/lib.rs"));
+    assert!(lib.contains("include_str!(\"../../../assets/shaders/autogen/baked.ron\")"), "{lib}");
+    let mats = read(&p.root.join("crates/shaders/src/baked/materials.rs"));
+    assert!(mats.contains("pub rock_wet: Handle<"), "{mats}");
+    assert!(mats.contains("pub mat_type: Handle<"), "{mats}");
+    let texs = read(&p.root.join("crates/shaders/src/baked/textures.rs"));
+    assert!(texs.contains("pub rock_albedo: Handle<Image>"), "{texs}");
+    assert!(texs.contains("\"@internal/default\" => Some(&self.internal.default)"), "{texs}");
+    let cargo = read(&p.root.join("crates/shaders/Cargo.toml"));
+    for dep in ["\"png\"", "\"ktx2\"", "\"zstd_rust\"", "serde = ", "ron = \"0.12\""] {
+        assert!(cargo.contains(dep), "{dep}: {cargo}");
+    }
+
+    // Unchanged project: the manifest is not rewritten.
+    let again = regenerate(&p, &RegenOptions::default()).unwrap();
+    assert!(again.changes.is_empty(), "{:?}", again.changes);
+}
+
+/// Design §3.2.1: a material that fails to build keeps its previous manifest entry, like its Rust module.
+#[test]
+fn failed_material_keeps_old_manifest_entry() {
+    use shader_codegen_rust::manifest::ParamValue;
+    let (_d, p) = temp_project();
+    regenerate(&p, &RegenOptions::default()).unwrap();
+    let (_, before) = manifest(&p);
+    let old = manifest_material(&before, "env/water").clone();
+    assert_eq!(old.params["inp_deep_color"], ParamValue::Color([0.0, 0.15, 0.3, 1.0]));
+
+    // New default for `deep_color` and a broken TextureSample (missing Texture asset, E006).
+    let id = AssetId::new(AssetType::Material, "env/water");
+    let mut a = shader_project::assets::load(&p, &id).unwrap();
+    for n in a.nodes.values_mut() {
+        if n.kind == "param::Color" {
+            n.params.insert("default".into(), shader_graph_core::Value::Color([1.0, 0.0, 0.0, 1.0]));
+        }
+    }
+    let good = a.clone();
+    a.edges.retain(|e| e.to.1 != "tex");
+    for n in a.nodes.values_mut().filter(|n| n.kind == "stdlib::TextureSample") {
+        n.params.insert("texture".into(), shader_graph_core::Value::Str("textures/missing".into()));
+    }
+    ops::save(&p, &id, &a).unwrap();
+    let r = regenerate(&p, &RegenOptions::default()).unwrap();
+    assert!(codes_of(&r, &id).contains(&Code::E006));
+    let (_, after) = manifest(&p);
+    assert_eq!(manifest_material(&after, "env/water"), &old);
+    assert_eq!(after.len(), before.len());
+
+    // Fixed again: the new default is written.
+    ops::save(&p, &id, &good).unwrap();
+    let r = regenerate(&p, &RegenOptions::default()).unwrap();
+    assert!(!r.has_errors());
+    let (_, fixed) = manifest(&p);
+    assert_eq!(
+        manifest_material(&fixed, "env/water").params["inp_deep_color"],
+        ParamValue::Color([1.0, 0.0, 0.0, 1.0])
+    );
+}
+
+/// Review focus 1: Texture assets with E011 are not in the manifest (neither wins Bevy's "first load wins"); the
+/// materials using them get the default texture instead, but both keep their `BakedTextures` field.
+#[test]
+fn e011_textures_not_in_manifest() {
+    use shader_graph_core::TextureAsset;
+    let (_d, p) = temp_project();
+    let copy = AssetId::new(AssetType::Texture, "textures/rock_copy");
+    ops::save_texture(&p, &copy, &TextureAsset::new("textures/rock_albedo.ktx2")).unwrap();
+    let r = regenerate(&p, &RegenOptions::default()).unwrap();
+    assert!(codes_of(&r, &copy).contains(&Code::E011));
+    assert!(codes_of(&r, &AssetId::new(AssetType::Texture, "textures/rock_albedo")).contains(&Code::E011));
+    let (textures, materials) = manifest(&p);
+    let ids: Vec<&str> = textures.iter().map(|t| t.id.as_str()).collect();
+    assert!(!ids.contains(&"textures/rock_albedo") && !ids.contains(&"textures/rock_copy"), "{ids:?}");
+    assert!(ids.contains(&"textures/rock_normal") && ids.contains(&"@internal/default"), "{ids:?}");
+    let rock = manifest_material(&materials, "env/rock_wet");
+    assert_eq!(rock.textures["inp_albedo"], "@internal/default");
+    assert_eq!(rock.textures["inp_normal_map"], "textures/rock_normal");
+    let layers = manifest_material(&materials, "env/tex_layers");
+    assert_eq!(layers.textures["ft_common_tex_layer_n02"], "@internal/default");
+    // Design §3.1: `BakedTextures` keeps a field for both (an asset error must not break the game's build; the
+    // runtime gives them the default texture).
+    let texs = read(&p.root.join("crates/shaders/src/baked/textures.rs"));
+    for kept in ["pub rock_albedo: Handle<Image>", "pub rock_copy: Handle<Image>", "\"textures/rock_copy\""] {
+        assert!(texs.contains(kept), "{kept}: {texs}");
+    }
+    assert!(texs.contains("pub rock_normal: Handle<Image>"), "{texs}");
+
+    // A Texture asset whose RON does not parse (E009) or whose name is no identifier (E005) has no field.
+    let shaders = p.root.join("shaders/textures");
+    std::fs::write(shaders.join("broken.texture.ron"), "TextureAsset(").unwrap();
+    ops::save_texture(&p, &AssetId::new(AssetType::Texture, "textures/Bad"), &TextureAsset::new("textures/bad.png"))
+        .unwrap();
+    let r = regenerate(&p, &RegenOptions::default()).unwrap();
+    assert!(codes_of(&r, &AssetId::new(AssetType::Texture, "textures/broken")).contains(&Code::E009));
+    assert!(codes_of(&r, &AssetId::new(AssetType::Texture, "textures/Bad")).contains(&Code::E005));
+    let texs = read(&p.root.join("crates/shaders/src/baked/textures.rs"));
+    assert!(!texs.contains("broken") && !texs.contains("Bad") && !texs.contains("bad"), "{texs}");
+    assert!(texs.contains("pub rock_copy: Handle<Image>"), "{texs}");
 }

@@ -58,18 +58,16 @@ Asset(
       kind: "param::TextureSample2D",
       pos: (-136.09784, -988.7245),
       params: {
-        "default": Str("textures/rock_albedo.png"),
+        "default": Str("textures/rock_albedo"),
         "name": Str("albedo"),
-        "order": Int(0),
       },
     ),
     "n03": Node(
       kind: "param::TextureSample2D",
       pos: (1533.1292, -16.522425),
       params: {
-        "default": Str("textures/rock_normal.png"),
+        "default": Str("textures/rock_normal"),
         "name": Str("normal_map"),
-        "order": Int(1),
         "sampler_type": Str("Normal"),
       },
     ),
@@ -79,7 +77,6 @@ Asset(
       params: {
         "default": Color((0.6288158, 0.14549951, 0.65770394, 1.0)),
         "name": Str("tint"),
-        "order": Int(2),
       },
     ),
     "n05": Node(
@@ -91,7 +88,6 @@ Asset(
         "max": Float(1.0),
         "min": Float(0.0),
         "name": Str("wetness"),
-        "order": Int(3),
       },
     ),
     "n06": Node(
@@ -102,7 +98,6 @@ Asset(
         "max": Float(10.0),
         "min": Float(0.0),
         "name": Str("speed"),
-        "order": Int(4),
       },
     ),
     "n07": Node(

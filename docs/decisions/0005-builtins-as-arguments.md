@@ -5,3 +5,5 @@
 **Decision.** Every builtin value a function needs (directly or through nested functions) is added as a trailing `b_*` parameter of its signature. The calling material substitutes the value from its own environment.
 
 **Consequences.** Functions are portable across material kinds and stages; a function's WESL signature depends on the builtins it uses (visible in the snapshot tests).
+
+*Update (decision 0024):* fixed textures inside a function use the same mechanism: each becomes a hidden trailing texture + sampler parameter `ft_<function path>_<node>` after the `b_*` ones, passed on by every caller (a material binds it once per origin node).

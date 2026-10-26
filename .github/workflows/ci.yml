@@ -38,6 +38,13 @@ jobs:
         run: |
           cargo run -- regen examples/sample_game
           git diff --exit-code -- examples/sample_game
+          # `git diff` ignores new (untracked) generated files.
+          untracked="$(git status --porcelain -- examples/sample_game)"
+          if [ -n "$untracked" ]; then
+            echo "regen left changed or new files:"
+            echo "$untracked"
+            exit 1
+          fi
       - name: Generated crate builds and is clippy-clean
         working-directory: examples/sample_game
         run: cargo clippy --workspace --all-targets -- -D warnings

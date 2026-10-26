@@ -57,7 +57,8 @@ zero, changed to 1.0 — see Nodes).
   (unsaved edits show at once), redrawn by its own system like the curve preview: `f32` — the number; `vecN` — a
   colour square from the components (linear RGB, missing ones 0, alpha ignored); `bool` / `compileFlag` — a 32×32
   square with `0` / `1` and a small check mark, green when on, grey when off; "n/a" without a resolvable constant.
-  The title shows the constant's name.
+  The title shows the constant's name. (*Update, decision 0026:* now a kind of the generic
+  `ui::node_preview::NodePreview` mechanism, `ConstPreview`; the "n/a" label is the mechanism's.)
 - **Browser / menu**: `New Global Consts...` (icon-rs `custom-table`), watermark `consts`; no "Show generated WESL"
   for tables.
 

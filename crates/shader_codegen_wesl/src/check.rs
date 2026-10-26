@@ -145,11 +145,19 @@ impl Resolver for CheckResolver<'_> {
 #[derive(Default)]
 pub struct Files {
     modules: HashMap<ModulePath, String>,
+    /// Extra features enabled in every compile: the materials' layout features (decision 0029), which Bevy gets
+    /// from the generated Rust `specialize`.
+    features: Vec<String>,
 }
 
 impl Files {
     pub fn add(&mut self, module: &[String], text: impl Into<String>) {
         self.modules.insert(ModulePath::new(PathOrigin::Absolute, module.to_vec()), text.into());
+    }
+
+    /// Enables feature `name` (a material's [`shader_graph_core::Ir::layout_feature`]).
+    pub fn enable(&mut self, name: impl Into<String>) {
+        self.features.push(name.into());
     }
 }
 
@@ -195,6 +203,9 @@ pub fn compile_with(
         .iter(),
     ) {
         features.flags.insert(f.to_string(), Feature::Enable);
+    }
+    for f in &files.features {
+        features.flags.insert(f.clone(), Feature::Enable);
     }
     let options =
         CompileOptions { imports: true, condcomp: true, visibility: false, strip, features, ..Default::default() };

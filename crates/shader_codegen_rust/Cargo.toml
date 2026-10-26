@@ -8,3 +8,8 @@ license = { workspace = true }
 [dependencies]
 shader_graph_core = { workspace = true }
 shader_codegen_wesl = { workspace = true }
+serde = { workspace = true }
+ron = { workspace = true }
+
+[dev-dependencies]
+shader_stdlib = { workspace = true }

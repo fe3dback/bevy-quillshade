@@ -26,6 +26,18 @@ pub enum Code {
     E009,
     /// Generated WESL failed to compile (should not happen).
     E010,
+    /// Two or more Texture assets point at the same game file (design §1.1); reported at each of them.
+    E011,
+    /// Invalid Texture asset path: empty, absolute, with `\\` or empty / `.` / `..` components, or an unsupported
+    /// extension (only `ktx2`, `png`).
+    E012,
+    /// Invalid Texture asset sampler settings: what wgpu cannot create (anisotropy 0, anisotropy above 1 without
+    /// Linear mag / min / mipmap filters, LOD clamps negative or inverted (min > max)), plus non-finite LOD clamps,
+    /// which wgpu accepts (decision 0024).
+    E013,
+    /// Texture asset image that is no plain 2D texture (a KTX2 cube map, array or 3D texture): a `texture_2d` binding
+    /// cannot take it (decision 0029).
+    E014,
     /// Dead branch, excluded from codegen.
     W101,
     /// Output pin inactive for the current blend mode.
@@ -42,6 +54,11 @@ pub enum Code {
     W107,
     /// Node preview changes the generated Rust crate (extra parameters or builtins) (decision 0022).
     W108,
+    /// Texture asset file missing under `assets/` (it may be added later; the game falls back to the default texture).
+    W109,
+    /// Texture node without a texture (no property, no connected pin, no parameter default): uses the internal
+    /// default texture `@internal/default` (design §1.2).
+    W110,
 }
 
 impl Code {
@@ -58,6 +75,10 @@ impl Code {
                 | Code::E008
                 | Code::E009
                 | Code::E010
+                | Code::E011
+                | Code::E012
+                | Code::E013
+                | Code::E014
         )
     }
 }

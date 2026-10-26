@@ -7,6 +7,10 @@ import super::super::stdlib::shading::sg_fresnel;
 
 struct HologramParams { inp_color: vec4<f32>, inp_scan_speed: f32, _pad0: f32, _pad1: f32, _pad2: f32 }
 @group(constants::MATERIAL_BIND_GROUP) @binding(100) var<uniform> params: HologramParams;
+// The game's compiled material enables this feature; after a change of parameters, texture bindings or
+// World Position Offset the shader stops compiling here until the game is rebuilt.
+@if(!SG_LAYOUT_758e8054)
+const_assert material_layout_changed__rebuild_the_game;
 
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {

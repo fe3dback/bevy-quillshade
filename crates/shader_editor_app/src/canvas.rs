@@ -24,7 +24,7 @@ use crate::inline::{Inline, inline_for_param, inline_for_pin, inline_scene};
 use crate::state::{Action, Actions, Editor, Link, PropTarget, ViewRequest, display_value};
 use crate::ui::icons::{IconId, icon};
 use crate::ui::props::PropField;
-use crate::ui::{ACCENT, const_preview, curve_preview};
+use crate::ui::{ACCENT, node_preview};
 
 /// Moves a frame makes to carry the nodes inside it.
 pub const CARRIED: EditOrigin = EditOrigin::Custom(1);
@@ -180,11 +180,12 @@ pub fn node_title(editor: &Editor, asset: &Asset, id: &str) -> String {
         _ if has_label(&n.kind) && !n.label.is_empty() => n.label.clone(),
         _ if n.kind.starts_with("stdlib::Constant") => params.get("value").map(short).unwrap_or(name),
         _ => {
-            // Sample Curve: the curve's name (decision 0015); Global*: the constant's name (decision 0017).
+            // Sample Curve: the curve's name (decision 0015); Global*: the constant's name (decision 0017); texture
+            // nodes: the Texture asset's name.
             let curve = def
                 .params()
                 .into_iter()
-                .find(|p| matches!(p.kind, ParamKind::Curve | ParamKind::GlobalConst(_)))
+                .find(|p| matches!(p.kind, ParamKind::Curve | ParamKind::GlobalConst(_) | ParamKind::Texture))
                 .map(|c| p(&c.id));
             match curve.filter(|c| !c.is_empty()) {
                 Some(path) => format!("{} ({name})", path.rsplit('/').next().unwrap_or(&path)),
@@ -279,12 +280,9 @@ fn node_scene(editor: &Editor, asset: &Asset, path: &str, id: &str, canvas: Enti
     // Vector editors (a number field per component) need a wider node.
     let mut wide = false;
     let params = editor.registry.resolved_params(&n.kind, &n.params);
-    if curve_preview::has_preview(editor, &n.kind) {
-        rows.push(Box::new(curve_preview::node_preview(id)));
-    }
-    if let Some(ty) = const_preview::preview_type(editor, &n.kind) {
-        rows.push(Box::new(const_preview::node_preview(id, ty)));
-    }
+    let previews = def.map(|d| node_preview::previews(d.as_ref(), &id.to_string())).unwrap_or_default();
+    rows.extend(previews.rows);
+    let mut beside = previews.beside_outputs;
     if let Some((key, inline)) = inline_for_param(&n.kind, &params) {
         wide |= matches!(inline, Inline::Vector(_));
         let v = params.get(&key).cloned().unwrap_or(Value::Float(0.0));
@@ -292,10 +290,26 @@ fn node_scene(editor: &Editor, asset: &Asset, path: &str, id: &str, canvas: Enti
         rows.push(Box::new(bsn! { Node { min_height: px(26), align_items: AlignItems::Center } Children [ @{inline_scene(target, inline, &v)} ] }));
     }
     if let Some(sig) = &sig {
+        let mut outputs: Vec<Box<dyn Scene>> = Vec::new();
         for p in &sig.outputs {
             let key = PinKey { node: id.into(), pin: p.id.clone(), output: true };
             let label = if p.label.is_empty() { p.ty.label().to_string() } else { p.label.clone() };
-            rows.push(Box::new(pin_row(label, Port::output(PortType::ANY), pin_color(p.ty), key, LABEL, None)));
+            outputs.push(Box::new(pin_row(label, Port::output(PortType::ANY), pin_color(p.ty), key, LABEL, None)));
+        }
+        if beside.is_empty() || outputs.is_empty() {
+            rows.append(&mut beside);
+            rows.extend(outputs);
+        } else {
+            // The previews left, the output pins right (their ports stay on the node's right border).
+            let cols = std::mem::take(&mut beside);
+            rows.push(Box::new(bsn! {
+                Node { column_gap: px(12), align_items: AlignItems::Center }
+                Children [
+                    Node { flex_direction: FlexDirection::Column, row_gap: px(6) } Children [ {cols} ]
+                    --
+                    Node { flex_direction: FlexDirection::Column, row_gap: px(6), flex_grow: 1.0 } Children [ {outputs} ]
+                ]
+            }));
         }
         // A usage's input is fed by its declaration, not by a wire.
         let usage = def.is_some_and(|d| d.role() == NodeRole::RouteUsage);
@@ -740,15 +754,18 @@ fn sync_selection(
 // ---------------------------------------------------------------------------------------------
 // View
 
-/// Converts a window position (logical px) into graph space of `canvas`.
+/// Converts a window position (logical px) into graph space of `canvas`. Same math as bevy_noodle's `local()`:
+/// the node's scale factor is the window's times `UiScale`, window positions are scaled by the window's only.
 pub fn window_to_graph(
     world_pos: Vec2,
     computed: &ComputedNode,
     transform: &UiGlobalTransform,
     view: &CanvasView,
+    ui_scale: f32,
 ) -> Option<Vec2> {
-    let n = computed.normalize_point(*transform, world_pos / computed.inverse_scale_factor())?;
-    let local = (n + 0.5) * computed.size() * computed.inverse_scale_factor();
+    let scale = computed.inverse_scale_factor();
+    let n = computed.normalize_point(*transform, world_pos / (scale * ui_scale))?;
+    let local = (n + 0.5) * computed.size() * scale;
     Some(view.canvas_to_graph(local))
 }
 
@@ -822,4 +839,27 @@ pub fn link_of(key: &PinKey) -> Link {
 
 pub fn node_ids(world: &mut World) -> Vec<(Entity, NodeId)> {
     world.query::<(Entity, &NodeKey)>().iter(world).map(|(e, k)| (e, k.0.clone())).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::math::Affine2;
+
+    /// With `UiScale` 2 the canvas node's scale factor is 2 (window scale 1), so its logical size is half its
+    /// physical size; window positions are not scaled by `UiScale` (bevy_noodle's `local()`).
+    #[test]
+    fn window_to_graph_respects_ui_scale() {
+        let computed = ComputedNode { size: Vec2::new(800.0, 600.0), inverse_scale_factor: 0.5, ..default() };
+        let transform = UiGlobalTransform::from(Affine2::from_translation(Vec2::new(400.0, 300.0)));
+        let view = CanvasView::default();
+        // The window point (200, 100) is 1/4 of the width and 1/6 of the height into the canvas (logical 400x300).
+        let at = window_to_graph(Vec2::new(200.0, 100.0), &computed, &transform, &view, 2.0).unwrap();
+        let expected = view.canvas_to_graph(Vec2::new(100.0, 50.0));
+        assert!((at - expected).length() < 0.01, "{at} != {expected}");
+        // Without scaling the same call matches the old behaviour.
+        let computed1 = ComputedNode { inverse_scale_factor: 1.0, ..computed };
+        let at1 = window_to_graph(Vec2::new(200.0, 100.0), &computed1, &transform, &view, 1.0).unwrap();
+        assert!((at1 - view.canvas_to_graph(Vec2::new(200.0, 100.0))).length() < 0.01);
+    }
 }

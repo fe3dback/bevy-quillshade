@@ -11,23 +11,27 @@ pub mod ir;
 pub mod model;
 pub mod preview;
 pub mod registry;
+pub mod texture;
 pub mod types;
 pub mod value;
 
 pub use consts::{ConstLookup, ConstType, GlobalConst, GlobalConsts};
 pub use curve::{Curve, Interp};
 pub use diag::{Code, Diagnostic, Diagnostics};
-pub use ir::{Ir, IrPreview, IrResult, IrStage, UniformField, UniformLayout, UniformTy, build_ir};
+pub use ir::{
+    Ir, IrPreview, IrResult, IrStage, TextureBinding, TextureSource, UniformField, UniformLayout, UniformTy, build_ir,
+};
 pub use model::{
     Asset, AssetKind, BlendMode, Edge, Frame, MaterialKind, Meta, Node, NodeId, PbrOutputMode, PbrSettings, Preview,
     PreviewMode, Shading, SpriteSettings, UnlitSettings,
 };
 pub use preview::{PreviewSlot, PreviewSource, ShaderOutputDto, albedo_expr, converts_to_albedo};
 pub use registry::{
-    Builtin, CurveLookup, EmitCtx, Env, FnPort, FunctionLookup, FunctionSig, Hotkey, HotkeyKey, MaterialParam,
-    NodeAction, NodeDef, NodeInfo, NodeOp, NodeRole, Operand, ParamDef, ParamKind, ParamType, PinDef, Registry, SigCtx,
-    Signature, Stage,
+    Builtin, CurveLookup, EmitCtx, Env, FnPort, FunctionLookup, FunctionSig, HiddenTexture, Hotkey, HotkeyKey,
+    MaterialParam, NodeAction, NodeDef, NodeInfo, NodeOp, NodeRole, Operand, ParamDef, ParamKind, ParamType, PinDef,
+    Registry, SigCtx, Signature, Stage, TextureLookup,
 };
+pub use texture::{TextureAsset, TextureSettings};
 pub use types::{Conversion, PinType, conversion};
 pub use value::Value;
 

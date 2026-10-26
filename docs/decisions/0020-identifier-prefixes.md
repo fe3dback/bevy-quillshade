@@ -60,3 +60,9 @@ prefix user names in generated code instead.
   `rock_wet` (decision 0019's example); the WESL and Rust tabs of one material still do.
 - Fixtures `kw/fn` (function `fn` with input `in`, outputs `out` and `let`) and `kw/loop/type` (parameters `self`
   and `mesh`) cover the keyword path in the snapshot suite, the WESL compile check and the sample game's clippy run.
+
+*Update (decisions 0024, 0025):* fixed textures add the generator prefix `ft_` (`ft_<node>`, `ft_<function path with
+/ → _>_<node>` for a function's hidden texture input; a clash of two such names is E006). The game-facing fields of
+`BakedMaterials` / `BakedTextures` (`baked.env.rock_wet`) are **not** statically prefixed: they keep the plain name
+and get `dir_` / `mat_` / the new `tex_` only for a Rust keyword or a clash inside one struct (their module paths
+below `baked::` still use `dir_`).

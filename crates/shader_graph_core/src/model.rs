@@ -367,8 +367,12 @@ impl Asset {
         s
     }
 
-    /// Sorts collections into canonical order and drops dangling references.
+    /// Sorts collections into canonical order, drops dangling references and the `order` property material
+    /// parameter nodes no longer have (decision 0027).
     pub fn normalize(&mut self) {
+        for n in self.nodes.values_mut().filter(|n| n.kind.starts_with("param::")) {
+            n.params.remove("order");
+        }
         self.edges.retain(|e| self.nodes.contains_key(&e.from.0) && self.nodes.contains_key(&e.to.0));
         self.edges.sort_by(|a, b| (&a.to, &a.from).cmp(&(&b.to, &b.from)));
         self.edges.dedup();
@@ -433,6 +437,16 @@ mod tests {
         let b = Asset::from_ron(&text).unwrap();
         assert_eq!(a, b);
         assert_eq!(text, b.to_ron());
+    }
+
+    #[test]
+    fn parameter_order_property_is_dropped() {
+        let mut a = Asset::new("rock", AssetKind::Material(MaterialKind::Pbr3d(PbrSettings::default())));
+        let p = a.add_node(Node::new("param::Scalar", (0.0, 0.0)).with_param("order", Value::Int(3)));
+        let f = a.add_node(Node::new("output::FunctionInput", (0.0, 0.0)).with_param("order", Value::Int(3)));
+        let b = Asset::from_ron(&a.to_ron()).unwrap();
+        assert!(!b.nodes[&p].params.contains_key("order"), "decision 0027");
+        assert_eq!(b.nodes[&f].params.get("order"), Some(&Value::Int(3)), "function pins keep their order");
     }
 
     #[test]

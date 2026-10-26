@@ -2,11 +2,16 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+pub mod baked;
+pub mod manifest;
+
 use shader_codegen_wesl::{header, params_struct, paths};
 use shader_graph_core::ident::{input_ident, to_pascal_case};
 use shader_graph_core::registry::{Builtin, ParamType};
 use shader_graph_core::value::rust_f32;
-use shader_graph_core::{BlendMode, GENERATOR_VERSION, Ir, MaterialKind, MaterialParam, Shading, UniformTy, Value};
+use shader_graph_core::{
+    BlendMode, GENERATOR_VERSION, Ir, MaterialKind, MaterialParam, Shading, TextureSource, UniformTy, Value,
+};
 
 /// Name of the generated crate.
 pub const CRATE_NAME: &str = "shaders";
@@ -126,32 +131,26 @@ pub fn material_module(ir: &Ir, source_file: &str) -> String {
     };
 
     line(&mut o, &header(source_file));
-    let specialize = needs_instance_index || (two_sided && matches!(kind, MaterialKind::Unlit3d(_)));
     // Imports.
     if has_uniform && ir.params.iter().any(|p| p.ty == ParamType::Color) {
         line(&mut o, "use bevy::color::ColorToComponents;");
     }
-    if specialize {
-        line(&mut o, "use bevy::mesh::MeshVertexBufferLayoutRef;");
-    }
+    line(&mut o, "use bevy::mesh::MeshVertexBufferLayoutRef;");
     match kind {
         MaterialKind::Pbr3d(_) => {
-            if specialize {
-                line(
-                    &mut o,
-                    "use bevy::pbr::{ExtendedMaterial, MaterialExtension, MaterialExtensionKey, MaterialExtensionPipeline};",
-                );
-            } else {
-                line(&mut o, "use bevy::pbr::{ExtendedMaterial, MaterialExtension};");
-            }
+            line(
+                &mut o,
+                "use bevy::pbr::{ExtendedMaterial, MaterialExtension, MaterialExtensionKey, MaterialExtensionPipeline};",
+            );
         }
         MaterialKind::Unlit3d(_) => {
-            if specialize {
-                line(&mut o, "use bevy::pbr::{MaterialPipeline, MaterialPipelineKey};");
-            }
+            line(&mut o, "use bevy::pbr::{MaterialPipeline, MaterialPipelineKey};");
         }
         MaterialKind::Sprite2d(_) => {
-            line(&mut o, "use bevy::sprite_render::{AlphaMode2d, MaterialExtension2d, SpriteMaterialPlugin};");
+            line(
+                &mut o,
+                "use bevy::sprite_render::{AlphaMode2d, Material2dKey, Material2dPipeline, MaterialExtension2d, SpriteMaterialPlugin};",
+            );
         }
     }
     line(&mut o, "use bevy::prelude::*;");
@@ -159,14 +158,27 @@ pub fn material_module(ir: &Ir, source_file: &str) -> String {
     if has_uniform {
         rr.push("ShaderType");
     }
-    if specialize {
-        rr.extend(["RenderPipelineDescriptor", "SpecializedMeshPipelineError"]);
-    }
+    rr.extend(["RenderPipelineDescriptor", "SpecializedMeshPipelineError"]);
     line(&mut o, &format!("use bevy::render::render_resource::{{{}}};", rr.join(", ")));
     line(&mut o, "use bevy::shader::ShaderRef;");
     line(&mut o, "");
+    line(&mut o, "use crate::baked::MaterialValues;");
+    line(&mut o, "");
     line(&mut o, "/// Asset path of the generated shader.");
     line(&mut o, &format!("pub const SHADER_PATH: &str = \"{}\";", shader_asset_path(ir)));
+    line(&mut o, "");
+    line(&mut o, "/// Id of this material in the baked manifest (`baked.ron`).");
+    line(&mut o, &format!("pub const BAKED_ID: &str = \"{}\";", ir.path));
+    line(&mut o, "");
+    line(
+        &mut o,
+        "/// WESL feature of this material's binding layout, enabled in `specialize`: a hot-reloaded shader whose",
+    );
+    line(
+        &mut o,
+        "/// bindings no longer match this code fails to compile instead of crashing the renderer (rebuild the game).",
+    );
+    line(&mut o, &format!("pub const LAYOUT_FEATURE: &str = \"{}\";", ir.layout_feature()));
     line(&mut o, "");
 
     // Params struct.
@@ -211,8 +223,10 @@ pub fn material_module(ir: &Ir, source_file: &str) -> String {
         MaterialKind::Sprite2d(_) => "Sprite material: add `SpriteMaterial(handle)` next to `Sprite`.".to_string(),
     };
     line(&mut o, &format!("/// {doc}"));
-    let no_fields = !has_uniform && ir.texture_params().next().is_none();
-    if no_fields {
+    let no_fields = !has_uniform && ir.textures.is_empty();
+    // Without parameters every field has a default (fixed textures: `Handle::default()`), and `new()` takes no
+    // arguments: clippy's `new_without_default` wants `Default`.
+    if ir.params.is_empty() {
         line(&mut o, "#[derive(Asset, AsBindGroup, Reflect, Debug, Clone, Default)]");
     } else {
         line(&mut o, "#[derive(Asset, AsBindGroup, Reflect, Debug, Clone)]");
@@ -222,19 +236,38 @@ pub fn material_module(ir: &Ir, source_file: &str) -> String {
         line(&mut o, "    #[uniform(100)]");
         line(&mut o, &format!("    pub params: {},", names.params));
     }
-    for (i, p) in ir.texture_params().enumerate() {
-        line(&mut o, &format!("    #[texture({})]", 101 + 2 * i));
-        line(&mut o, &format!("    #[sampler({})]", 102 + 2 * i));
-        line(&mut o, &format!("    pub {}: Handle<Image>,", input_ident(&p.name)));
+    for t in &ir.textures {
+        if let TextureSource::Fixed { node, origin } = &t.source {
+            // The texture id is not written here: swapping a node's texture keeps the Rust code (design §1.3).
+            let of = match origin {
+                Some(f) => format!("node `{node}` of function `{f}`"),
+                None => format!("node `{node}`"),
+            };
+            line(
+                &mut o,
+                &format!("    /// Fixed texture of {of}; `new` sets `Handle::default()` (Bevy's white image)."),
+            );
+        }
+        line(&mut o, &format!("    #[texture({})]", t.binding));
+        line(&mut o, &format!("    #[sampler({})]", t.binding + 1));
+        line(&mut o, &format!("    pub {}: Handle<Image>,", t.ident));
     }
     line(&mut o, "}");
     line(&mut o, "");
 
     // Trait impl.
+    let mut defs = vec!["LAYOUT_FEATURE"];
+    if needs_instance_index {
+        defs.push("\"VERTEX_OUTPUT_INSTANCE_INDEX\"");
+    }
     let push_defs = |o: &mut String| {
-        o.push_str("        descriptor.vertex.shader_defs.push(\"VERTEX_OUTPUT_INSTANCE_INDEX\".into());\n");
+        for d in &defs {
+            o.push_str(&format!("        descriptor.vertex.shader_defs.push({d}.into());\n"));
+        }
         o.push_str("        if let Some(fragment) = descriptor.fragment.as_mut() {\n");
-        o.push_str("            fragment.shader_defs.push(\"VERTEX_OUTPUT_INSTANCE_INDEX\".into());\n");
+        for d in &defs {
+            o.push_str(&format!("            fragment.shader_defs.push({d}.into());\n"));
+        }
         o.push_str("        }\n");
     };
     match kind {
@@ -253,18 +286,16 @@ pub fn material_module(ir: &Ir, source_file: &str) -> String {
                 line(&mut o, "        SHADER_PATH.into()");
                 line(&mut o, "    }");
             }
-            if specialize {
-                line(&mut o, "");
-                line(&mut o, "    fn specialize(");
-                line(&mut o, "        _pipeline: &MaterialExtensionPipeline,");
-                line(&mut o, "        descriptor: &mut RenderPipelineDescriptor,");
-                line(&mut o, "        _layout: &MeshVertexBufferLayoutRef,");
-                line(&mut o, "        _key: MaterialExtensionKey<Self>,");
-                line(&mut o, "    ) -> Result<(), SpecializedMeshPipelineError> {");
-                push_defs(&mut o);
-                line(&mut o, "        Ok(())");
-                line(&mut o, "    }");
-            }
+            line(&mut o, "");
+            line(&mut o, "    fn specialize(");
+            line(&mut o, "        _pipeline: &MaterialExtensionPipeline,");
+            line(&mut o, "        descriptor: &mut RenderPipelineDescriptor,");
+            line(&mut o, "        _layout: &MeshVertexBufferLayoutRef,");
+            line(&mut o, "        _key: MaterialExtensionKey<Self>,");
+            line(&mut o, "    ) -> Result<(), SpecializedMeshPipelineError> {");
+            push_defs(&mut o);
+            line(&mut o, "        Ok(())");
+            line(&mut o, "    }");
             line(&mut o, "}");
             line(&mut o, "");
             line(&mut o, &format!("/// Asset type: `StandardMaterial` extended by [`{}`].", names.main));
@@ -286,23 +317,19 @@ pub fn material_module(ir: &Ir, source_file: &str) -> String {
             line(&mut o, "    fn alpha_mode(&self) -> AlphaMode {");
             line(&mut o, &format!("        {}", alpha_mode_3d(s.blend)));
             line(&mut o, "    }");
-            if specialize {
-                line(&mut o, "");
-                line(&mut o, "    fn specialize(");
-                line(&mut o, "        _pipeline: &MaterialPipeline,");
-                line(&mut o, "        descriptor: &mut RenderPipelineDescriptor,");
-                line(&mut o, "        _layout: &MeshVertexBufferLayoutRef,");
-                line(&mut o, "        _key: MaterialPipelineKey<Self>,");
-                line(&mut o, "    ) -> Result<(), SpecializedMeshPipelineError> {");
-                if two_sided {
-                    line(&mut o, "        descriptor.primitive.cull_mode = None;");
-                }
-                if needs_instance_index {
-                    push_defs(&mut o);
-                }
-                line(&mut o, "        Ok(())");
-                line(&mut o, "    }");
+            line(&mut o, "");
+            line(&mut o, "    fn specialize(");
+            line(&mut o, "        _pipeline: &MaterialPipeline,");
+            line(&mut o, "        descriptor: &mut RenderPipelineDescriptor,");
+            line(&mut o, "        _layout: &MeshVertexBufferLayoutRef,");
+            line(&mut o, "        _key: MaterialPipelineKey<Self>,");
+            line(&mut o, "    ) -> Result<(), SpecializedMeshPipelineError> {");
+            if two_sided {
+                line(&mut o, "        descriptor.primitive.cull_mode = None;");
             }
+            push_defs(&mut o);
+            line(&mut o, "        Ok(())");
+            line(&mut o, "    }");
             line(&mut o, "}");
             line(&mut o, "");
         }
@@ -315,23 +342,35 @@ pub fn material_module(ir: &Ir, source_file: &str) -> String {
             line(&mut o, "    fn alpha_mode(&self) -> Option<AlphaMode2d> {");
             line(&mut o, &format!("        Some({})", alpha_mode_2d(s.blend)));
             line(&mut o, "    }");
+            line(&mut o, "");
+            line(&mut o, "    fn specialize(");
+            line(&mut o, "        _pipeline: &Material2dPipeline,");
+            line(&mut o, "        descriptor: &mut RenderPipelineDescriptor,");
+            line(&mut o, "        _layout: &MeshVertexBufferLayoutRef,");
+            line(&mut o, "        _key: Material2dKey<Self>,");
+            line(&mut o, "    ) -> Result<(), SpecializedMeshPipelineError> {");
+            push_defs(&mut o);
+            line(&mut o, "        Ok(())");
+            line(&mut o, "    }");
             line(&mut o, "}");
             line(&mut o, "");
         }
     }
 
-    // Constructor, setters.
+    // Constructor, setters: crate-internal since baked materials (design §3.1: games take materials from
+    // `BakedMaterials`); nothing in the crate calls them, hence `allow(dead_code)`.
     line(&mut o, &format!("impl {} {{", names.main));
-    line(&mut o, "    /// All graph parameters are required; order = parameter order in the editor:");
+    line(&mut o, "    /// All graph parameters are required, sorted by name:");
     for p in &ir.params {
         line(&mut o, &format!("    /// - {}", param_doc(p)));
     }
     if ir.params.len() > 7 {
         line(&mut o, "    #[allow(clippy::too_many_arguments)]");
     }
+    line(&mut o, "    #[allow(dead_code)]");
     let args: Vec<String> =
         ir.params.iter().map(|p| format!("{}: {}", input_ident(&p.name), rust_arg_type(p.ty))).collect();
-    line(&mut o, &format!("    pub fn new({}) -> Self {{", args.join(", ")));
+    line(&mut o, &format!("    pub(crate) fn new({}) -> Self {{", args.join(", ")));
     if no_fields {
         line(&mut o, "        Self {}");
     } else {
@@ -352,16 +391,21 @@ pub fn material_module(ir: &Ir, source_file: &str) -> String {
             }
             line(&mut o, "            },");
         }
-        for p in ir.texture_params() {
-            line(&mut o, &format!("            {},", input_ident(&p.name)));
+        for t in &ir.textures {
+            match t.source {
+                TextureSource::Param(_) => line(&mut o, &format!("            {},", t.ident)),
+                TextureSource::Fixed { .. } => line(&mut o, &format!("            {}: Handle::default(),", t.ident)),
+            }
         }
         line(&mut o, "        }");
     }
     line(&mut o, "    }");
+    from_values(&mut o, ir, &names.params);
     for p in &ir.params {
         let field = input_ident(&p.name);
         line(&mut o, "");
-        line(&mut o, &format!("    pub fn set_{field}(&mut self, v: {}) {{", rust_arg_type(p.ty)));
+        line(&mut o, "    #[allow(dead_code)]");
+        line(&mut o, &format!("    pub(crate) fn set_{field}(&mut self, v: {}) {{", rust_arg_type(p.ty)));
         if p.ty == ParamType::Texture {
             line(&mut o, &format!("        self.{field} = v;"));
         } else {
@@ -419,6 +463,60 @@ pub fn material_module(ir: &Ir, source_file: &str) -> String {
     o
 }
 
+/// `from_values` of a material module (design §3.2): values from the manifest (missing or mistyped → the compiled
+/// default, `{Name}Params::default()`, with a warning), images through `tex`. Called by `BakedMaterials::insert`.
+fn from_values(o: &mut String, ir: &Ir, params: &str) {
+    let has_uniform = !ir.uniform.is_empty();
+    let (v, tex) = (
+        if has_uniform || !ir.textures.is_empty() { "v" } else { "_v" },
+        if ir.textures.is_empty() { "_tex" } else { "tex" },
+    );
+    o.push('\n');
+    o.push_str(
+        "    /// Material from baked values: `v` from the manifest (a missing or mistyped value keeps the compiled\n",
+    );
+    o.push_str("    /// default, with a warning), `tex` maps a Texture asset id to its image.\n");
+    o.push_str(&format!(
+        "    pub(crate) fn from_values({v}: &MaterialValues, {tex}: &dyn Fn(&str) -> Handle<Image>) -> Self {{\n"
+    ));
+    if !has_uniform && ir.textures.is_empty() {
+        o.push_str("        Self {}\n");
+        o.push_str("    }\n");
+        return;
+    }
+    if has_uniform {
+        o.push_str(&format!("        let d = {params}::default();\n"));
+    }
+    o.push_str("        Self {\n");
+    if has_uniform {
+        o.push_str(&format!("            params: {params} {{\n"));
+        for f in &ir.uniform.fields {
+            let value = match f.param.map(|i| ir.params[i].ty) {
+                None => "0.0".to_string(),
+                Some(ty) => {
+                    let (get, map) = match ty {
+                        ParamType::Scalar => ("float", ""),
+                        ParamType::Vec2 => ("vec2", ""),
+                        ParamType::Vec3 => ("vec3", ""),
+                        ParamType::Vec4 => ("vec4", ""),
+                        ParamType::Color => ("color", ""),
+                        ParamType::Bool => ("boolean", ".map(u32::from)"),
+                        ParamType::Texture => unreachable!("texture parameters are not uniform fields"),
+                    };
+                    format!("v.{get}(BAKED_ID, \"{}\"){map}.unwrap_or(d.{})", f.name, f.name)
+                }
+            };
+            o.push_str(&format!("                {}: {value},\n", f.name));
+        }
+        o.push_str("            },\n");
+    }
+    for t in &ir.textures {
+        o.push_str(&format!("            {}: tex(v.texture(BAKED_ID, \"{}\")),\n", t.ident, t.ident));
+    }
+    o.push_str("        }\n");
+    o.push_str("    }\n");
+}
+
 /// One generated material for crate-level files.
 pub struct MaterialEntry {
     /// Asset path (`env/rock_wet`).
@@ -451,12 +549,15 @@ pub enum BevyDep {
 }
 
 /// All crate files: relative path (inside `crates/shaders`) → content. Includes `Cargo.toml`,
-/// `src/lib.rs`, every `mod.rs`, and the given material modules (keyed by asset path). Modules are named by
+/// `src/lib.rs`, every `mod.rs`, the given material modules (keyed by asset path) and `src/baked/` (design §3.1:
+/// `BakedMaterials` over `entries`, `BakedTextures` over `texture_ids`: every Texture asset that parses, not only
+/// the manifest's valid ones, plus the internal textures). Modules are named by
 /// `paths::material_components` (`dir_env::mat_rock_wet`, decision 0020).
 pub fn crate_files(
     entries: &[MaterialEntry],
     modules: &BTreeMap<String, String>,
     bevy: BevyDep,
+    texture_ids: &[String],
 ) -> BTreeMap<String, String> {
     let mut files = BTreeMap::new();
     files.insert("Cargo.toml".to_string(), cargo_toml(bevy));
@@ -464,6 +565,8 @@ pub fn crate_files(
     // Directory tree: dir path ("" = materials root) → (child dirs, leaf modules).
     let mut dirs: BTreeMap<String, (BTreeSet<String>, BTreeSet<String>)> = BTreeMap::new();
     dirs.entry(String::new()).or_default();
+    // Whether `materials` re-exports anything: a glob re-export of nothing is `unused_imports` in the game.
+    let mut root_reexports = false;
     for e in entries {
         let parts = paths::material_components(&e.path);
         let (name, sub) = parts.split_last().expect("non-empty path");
@@ -518,6 +621,7 @@ pub fn crate_files(
                     uses.push(format!("pub use {module}::{{{}}};", items.join(", ")));
                 }
             }
+            root_reexports = !uses.is_empty();
             if !uses.is_empty() {
                 o.push('\n');
                 for u in uses {
@@ -533,12 +637,16 @@ pub fn crate_files(
     for (path, text) in modules {
         files.insert(format!("src/materials/{}.rs", paths::material_components(path).join("/")), text.clone());
     }
-    files.insert("src/lib.rs".to_string(), lib_rs());
+    files.insert("src/lib.rs".to_string(), lib_rs(root_reexports));
+    files.insert("src/baked/mod.rs".to_string(), baked::mod_rs());
+    files.insert("src/baked/materials.rs".to_string(), baked::materials_rs(entries));
+    files.insert("src/baked/textures.rs".to_string(), baked::textures_rs(texture_ids));
     files
 }
 
-/// Bevy features the generated code needs; kept with `workspace = true` too (features are additive).
-const BEVY_FEATURES: &str = r#"["std", "bevy_pbr", "bevy_sprite_render", "bevy_asset", "bevy_color", "bevy_mesh"]"#;
+/// Bevy features the generated code needs; kept with `workspace = true` too (features are additive). `png` / `ktx2`
+/// / `zstd_rust`: the image formats of Texture assets (design §3.4); `bevy_log`: warnings of the baked loader.
+const BEVY_FEATURES: &str = r#"["std", "bevy_pbr", "bevy_sprite_render", "bevy_asset", "bevy_color", "bevy_mesh", "bevy_log", "png", "ktx2", "zstd_rust"]"#;
 
 fn cargo_toml(bevy: BevyDep) -> String {
     let dep = match bevy {
@@ -555,31 +663,41 @@ publish = false
 
 [dependencies]
 bevy = {dep}
+serde = {{ version = "1", features = ["derive"] }}
+ron = "0.12"
 "#
     )
 }
 
-fn lib_rs() -> String {
+fn lib_rs(materials_reexports: bool) -> String {
+    let materials_glob = if materials_reexports { "pub use materials::*;\n" } else { "" };
     format!(
         r#"// AUTOGENERATED by shader-editor v{GENERATOR_VERSION} — do not edit
-//! Materials generated by shader-editor. Add [`ShadersPlugin`] to the app and create materials
-//! with the generated constructors, e.g. `materials.add(RockWetExt::new(..).material())`.
+//! Materials generated by shader-editor. Add [`ShadersPlugin`] to the app, call [`BakedMaterialsLoader::load`] and
+//! take the materials from [`BakedMaterials`] (`baked.env.rock_wet`), images of Texture assets from [`BakedTextures`].
 
 use bevy::prelude::*;
 
+pub mod baked;
 pub mod materials;
 
-pub use materials::*;
-
+pub use baked::{{
+    BakedMaterials, BakedMaterialsLoader, BakedMaterialsProgress, BakedMaterialsReady, BakedPlugin, BakedTextures,
+}};
+{materials_glob}
 /// Version of the generator that produced this crate.
 pub const AUTOGEN_VERSION: u32 = {GENERATOR_VERSION};
 
-/// Registers every generated material.
+/// The baked manifest at build time (design §3.2): the compiled snapshot of every Texture asset and material value.
+pub const COMPILED_MANIFEST: &str = include_str!("../../../assets/shaders/autogen/baked.ron");
+
+/// Registers every generated material and the baked materials loader ([`BakedPlugin`]).
 pub struct ShadersPlugin;
 
 impl Plugin for ShadersPlugin {{
     fn build(&self, app: &mut App) {{
         materials::register(app);
+        app.add_plugins(BakedPlugin);
     }}
 }}
 "#

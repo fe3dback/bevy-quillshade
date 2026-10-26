@@ -8,6 +8,10 @@ import super::super::stdlib::texture::sg_normal_from_height;
 
 @group(constants::MATERIAL_BIND_GROUP) @binding(101) var inp_tex_tex: texture_2d<f32>;
 @group(constants::MATERIAL_BIND_GROUP) @binding(102) var inp_tex_tex_sampler: sampler;
+// The game's compiled material enables this feature; after a change of parameters, texture bindings or
+// World Position Offset the shader stops compiling here until the game is rebuilt.
+@if(!SG_LAYOUT_535442a9)
+const_assert material_layout_changed__rebuild_the_game;
 
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {

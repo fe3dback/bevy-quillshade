@@ -456,6 +456,11 @@ fn function_call_emit(c: &mut EmitCtx) {
     for b in &f.builtins {
         args.push(c.builtin(*b));
     }
+    // Hidden fixed textures of the callee (design §1.3), forwarded from the caller's own hidden inputs / bindings.
+    for h in &f.textures {
+        let (tex, s) = c.hidden_texture(h);
+        args.push(format!("{tex}, {s}"));
+    }
     // Prefixed WESL names (decision 0020): `fun_{name}(..)`, result fields `.out_{port}`.
     let call = format!("{}({})", function_ident(&f.name), args.join(", "));
     if f.outputs.len() == 1 {

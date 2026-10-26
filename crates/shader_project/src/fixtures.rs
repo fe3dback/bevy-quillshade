@@ -5,6 +5,7 @@ use shader_graph_core::curve::Curve;
 use shader_graph_core::model::{
     Asset, AssetKind, BlendMode, MaterialKind, Node, PbrOutputMode, PbrSettings, SpriteSettings, UnlitSettings,
 };
+use shader_graph_core::texture::{AddressMode, FilterMode, SamplerSettings, TextureAsset, TextureSettings};
 use shader_graph_core::{PinType, Value};
 
 use crate::assets::{AssetId, AssetType};
@@ -135,39 +136,27 @@ pub fn rock_wet() -> Asset {
     let albedo = g.node_p(
         "param::TextureSample2D",
         (0.0, 0.0),
-        &[("name", s("albedo")), ("order", Value::Int(0)), ("default", s("textures/rock_albedo.png"))],
+        &[("name", s("albedo")), ("default", s("textures/rock_albedo"))],
     );
     let normal = g.node_p(
         "param::TextureSample2D",
         (0.0, 220.0),
-        &[
-            ("name", s("normal_map")),
-            ("sampler_type", s("Normal")),
-            ("order", Value::Int(1)),
-            ("default", s("textures/rock_normal.png")),
-        ],
+        &[("name", s("normal_map")), ("sampler_type", s("Normal")), ("default", s("textures/rock_normal"))],
     );
     let tint = g.node_p(
         "param::Color",
         (0.0, 440.0),
-        &[("name", s("tint")), ("order", Value::Int(2)), ("default", Value::Color([0.9, 0.85, 0.8, 1.0]))],
+        &[("name", s("tint")), ("default", Value::Color([0.9, 0.85, 0.8, 1.0]))],
     );
     let wet = g.node_p(
         "param::Scalar",
         (0.0, 600.0),
-        &[
-            ("name", s("wetness")),
-            ("order", Value::Int(3)),
-            ("default", f(0.3)),
-            ("min", f(0.0)),
-            ("max", f(1.0)),
-            ("group", s("Surface")),
-        ],
+        &[("name", s("wetness")), ("default", f(0.3)), ("min", f(0.0)), ("max", f(1.0)), ("group", s("Surface"))],
     );
     let speed = g.node_p(
         "param::Scalar",
         (0.0, 700.0),
-        &[("name", s("speed")), ("order", Value::Int(4)), ("default", f(1.0)), ("min", f(0.0)), ("max", f(10.0))],
+        &[("name", s("speed")), ("default", f(1.0)), ("min", f(0.0)), ("max", f(10.0))],
     );
     let base = g.node("stdlib::Multiply", (250.0, 40.0));
     g.link((&albedo, "rgb"), (&base, "a"));
@@ -372,7 +361,7 @@ pub fn water() -> Asset {
     let tex = g.node_p(
         "param::TextureObject",
         (0.0, 300.0),
-        &[("name", s("normals")), ("default", s("textures/water_normal.png"))],
+        &[("name", s("normals")), ("default", s("textures/water_normal"))],
     );
     let deep = g.node_p(
         "param::Color",
@@ -421,7 +410,7 @@ pub fn coords() -> Asset {
     let kind = AssetKind::Material(MaterialKind::Unlit3d(UnlitSettings::default()));
     let mut g = GraphBuilder::new("coords", kind);
     let out = g.node("output::Unlit3d", (1200.0, 0.0));
-    let atlas = g.node_p("param::TextureObject", (0.0, 0.0), &[("name", s("atlas"))]);
+    let atlas = g.node_p("param::TextureObject", (0.0, 0.0), &[("name", s("atlas")), ("default", s("textures/atlas"))]);
     let fb = g.node("stdlib::FlipBook", (200.0, 0.0));
     g.link((&atlas, "out"), (&fb, "tex"));
     let rot = g.node("stdlib::Rotator", (0.0, 200.0));
@@ -600,6 +589,81 @@ pub fn terrain_layers() -> Asset {
     g.finish()
 }
 
+/// Function with a fixed texture (design §1.3): `textures/rock_albedo` sampled at the mesh UV, times `tint`. The
+/// texture becomes a hidden trailing input of the function (`ft_common_tex_layer_n02`), after the builtin `b_uv0`.
+pub fn tex_layer() -> Asset {
+    let mut g = GraphBuilder::new("tex_layer", AssetKind::Function);
+    let tint = g.node_p(
+        "output::FunctionInput",
+        (0.0, 0.0),
+        &[
+            ("name", s("tint")),
+            ("type", Value::Type(PinType::Float3)),
+            ("default", Value::Float4([1.0; 4])),
+            ("order", Value::Int(0)),
+        ],
+    );
+    let sample = g.node_p("stdlib::TextureSample", (0.0, 150.0), &[("texture", s("textures/rock_albedo"))]);
+    let mul = g.node("stdlib::Multiply", (300.0, 50.0));
+    g.link((&sample, "rgb"), (&mul, "a"));
+    g.link((&tint, "out"), (&mul, "b"));
+    let out = g.node_p(
+        "output::FunctionOutput",
+        (550.0, 50.0),
+        &[("name", s("rgb")), ("type", Value::Type(PinType::Float3)), ("order", Value::Int(0))],
+    );
+    g.link((&mul, "out"), (&out, "value"));
+    g.finish()
+}
+
+/// Function calling `common/tex_layer`: forwards its hidden texture as a hidden input of its own (design §1.3).
+pub fn tex_layer_outer() -> Asset {
+    let mut g = GraphBuilder::new("tex_layer_outer", AssetKind::Function);
+    let scale = g.node_p(
+        "output::FunctionInput",
+        (0.0, 0.0),
+        &[
+            ("name", s("scale")),
+            ("type", Value::Type(PinType::Float)),
+            ("default", Value::Float4([0.5; 4])),
+            ("order", Value::Int(0)),
+        ],
+    );
+    let layer = g.node("function::common/tex_layer", (0.0, 150.0));
+    let mul = g.node("stdlib::Multiply", (300.0, 50.0));
+    g.link((&layer, "rgb"), (&mul, "a"));
+    g.link((&scale, "out"), (&mul, "b"));
+    let out = g.node_p(
+        "output::FunctionOutput",
+        (550.0, 50.0),
+        &[("name", s("rgb")), ("type", Value::Type(PinType::Float3)), ("order", Value::Int(0))],
+    );
+    g.link((&mul, "out"), (&out, "value"));
+    g.finish()
+}
+
+/// Material calling `common/tex_layer` twice and `common/tex_layer_outer` once (Review Focus 2): the function's fixed
+/// texture is one material binding (per origin node, not per call), passed at all three call sites.
+pub fn tex_layers() -> Asset {
+    let mut g = GraphBuilder::new("tex_layers", AssetKind::Material(MaterialKind::Pbr3d(PbrSettings::default())));
+    let out = g.node("output::Pbr3d", (900.0, 0.0));
+    let warm = g.node("function::common/tex_layer", (0.0, -150.0));
+    g.input(&warm, "tint", Value::Float3([1.0, 0.8, 0.6]));
+    let cold = g.node("function::common/tex_layer", (0.0, 50.0));
+    g.input(&cold, "tint", Value::Float3([0.6, 0.8, 1.0]));
+    let outer = g.node("function::common/tex_layer_outer", (0.0, 250.0));
+    g.input(&outer, "scale", f(0.25));
+    let mix = g.node("stdlib::Lerp", (300.0, -50.0));
+    g.link((&warm, "rgb"), (&mix, "a"));
+    g.link((&cold, "rgb"), (&mix, "b"));
+    g.input(&mix, "alpha", f(0.5));
+    let add = g.node("stdlib::Add", (600.0, 50.0));
+    g.link((&mix, "out"), (&add, "a"));
+    g.link((&outer, "rgb"), (&add, "b"));
+    g.link((&add, "out"), (&out, "base_color"));
+    g.finish()
+}
+
 /// Function whose name and ports are Rust/WGSL keywords (decision 0020): `out = in * 2`, `let = in`.
 pub fn keyword_fn() -> Asset {
     let mut g = GraphBuilder::new("fn", AssetKind::Function);
@@ -633,11 +697,8 @@ pub fn keyword_names() -> Asset {
     let mut g = GraphBuilder::new("type", kind);
     let out = g.node("output::Unlit3d", (800.0, 0.0));
     let this = g.node_p("param::Scalar", (0.0, 0.0), &[("name", s("self")), ("default", f(0.5))]);
-    let mesh = g.node_p(
-        "param::Color",
-        (0.0, 150.0),
-        &[("name", s("mesh")), ("order", Value::Int(1)), ("default", Value::Color([0.9, 0.4, 0.1, 1.0]))],
-    );
+    let mesh =
+        g.node_p("param::Color", (0.0, 150.0), &[("name", s("mesh")), ("default", Value::Color([0.9, 0.4, 0.1, 1.0]))]);
     let call = g.node("function::kw/fn", (250.0, 0.0));
     g.link((&this, "out"), (&call, "in"));
     let color = g.node("stdlib::Multiply", (550.0, 50.0));
@@ -674,8 +735,43 @@ pub fn curves() -> Vec<(&'static str, Curve)> {
     ]
 }
 
-/// Writes every fixture (graphs, curves, constant tables) into `project`.
+/// Texture asset fixtures (design §1.1): (`shaders/`-relative path, asset). The images are in
+/// `examples/sample_game/assets/textures/`; `rock_albedo` and `water_normal` are `.ktx2` (made from the `.png` next to
+/// them by the `png_to_ktx2` example, design §4.4), the rest `.png`, so the sample exercises both formats.
+pub fn textures() -> Vec<(&'static str, TextureAsset)> {
+    let linear_repeat = SamplerSettings {
+        address_mode_u: AddressMode::Repeat,
+        address_mode_v: AddressMode::Repeat,
+        address_mode_w: AddressMode::Repeat,
+        mag_filter: FilterMode::Linear,
+        min_filter: FilterMode::Linear,
+        mipmap_filter: FilterMode::Linear,
+        ..Default::default()
+    };
+    let nearest =
+        SamplerSettings { mag_filter: FilterMode::Nearest, min_filter: FilterMode::Nearest, ..Default::default() };
+    let with = |path: &str, settings: TextureSettings| TextureAsset { settings, ..TextureAsset::new(path) };
+    let linear_data = TextureSettings { is_srgb: false, ..Default::default() };
+    vec![
+        ("textures/rock_albedo", TextureAsset::new("textures/rock_albedo.ktx2")),
+        ("textures/rock_normal", with("textures/rock_normal.png", linear_data.clone())),
+        (
+            "textures/water_normal",
+            with("textures/water_normal.ktx2", TextureSettings { sampler: Some(linear_repeat), ..linear_data }),
+        ),
+        (
+            "textures/atlas",
+            with("textures/atlas.png", TextureSettings { sampler: Some(nearest), ..Default::default() }),
+        ),
+        ("textures/sprite", TextureAsset::new("textures/sprite.png")),
+    ]
+}
+
+/// Writes every fixture (graphs, curves, constant tables, Texture assets) into `project`.
 pub fn save_all(project: &Project) -> Result<(), OpError> {
+    for (path, texture) in textures() {
+        ops::save_texture(project, &AssetId::new(AssetType::Texture, path), &texture)?;
+    }
     for (path, is_fn, asset) in all() {
         let id = AssetId::new(if is_fn { AssetType::Function } else { AssetType::Material }, path);
         ops::save(project, &id, &asset)?;
@@ -694,7 +790,10 @@ pub fn all() -> Vec<(&'static str, bool, Asset)> {
     vec![
         ("common/wet_mask", true, wet_mask()),
         ("common/rock_layer", true, rock_layer()),
+        ("common/tex_layer", true, tex_layer()),
+        ("common/tex_layer_outer", true, tex_layer_outer()),
         ("env/rock_wet", false, rock_wet()),
+        ("env/tex_layers", false, tex_layers()),
         ("env/flag", false, flag()),
         ("env/water", false, water()),
         ("env/terrain_layers", false, terrain_layers()),

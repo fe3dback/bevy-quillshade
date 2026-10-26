@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use shader_graph_core::consts::NoConsts;
 use shader_graph_core::model::{AssetKind, MaterialKind, PbrSettings};
-use shader_graph_core::registry::{Env, NoCurves, NoFunctions, SigCtx, Signature};
+use shader_graph_core::registry::{Env, NoCurves, NoFunctions, NoTextures, SigCtx, Signature};
 
 fn signature(kind: &str) -> Signature {
     let reg = shader_stdlib::registry();
@@ -17,6 +17,7 @@ fn signature(kind: &str) -> Signature {
         functions: &NoFunctions,
         curves: &NoCurves,
         consts: &NoConsts,
+        textures: &NoTextures,
     };
     def.signature(&SigCtx {
         node_id: "n",

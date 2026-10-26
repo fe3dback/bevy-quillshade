@@ -5,7 +5,8 @@ use shader_graph_core::consts::GlobalConsts;
 use shader_graph_core::curve::Curve;
 use shader_graph_core::ident::check_ident;
 use shader_graph_core::model::{Asset, AssetKind, MaterialKind, Node};
-use shader_graph_core::registry::{FUNCTION_PREFIX, Registry, const_refs, curve_refs};
+use shader_graph_core::registry::{FUNCTION_PREFIX, Registry, const_refs, curve_refs, texture_refs};
+use shader_graph_core::texture::TextureAsset;
 
 use crate::assets::{self, AssetId, AssetType};
 use crate::layout::Project;
@@ -61,6 +62,12 @@ pub fn save_consts(project: &Project, id: &AssetId, table: &GlobalConsts) -> Res
     write_source(project, id, &table.to_ron())
 }
 
+/// Writes a Texture asset file (creating `shaders/` and parent directories). No checks: an invalid or shared image
+/// path is reported by validation (E012 / E011).
+pub fn save_texture(project: &Project, id: &AssetId, texture: &TextureAsset) -> Result<(), OpError> {
+    write_source(project, id, &texture.to_ron())
+}
+
 fn write_source(project: &Project, id: &AssetId, text: &str) -> Result<(), OpError> {
     project.ensure_shaders_dir()?;
     let file = id.file(project);
@@ -103,6 +110,27 @@ pub fn create_consts(project: &Project, path: &str) -> Result<AssetId, OpError> 
     Ok(id)
 }
 
+/// New Texture asset `id` for the game image `texture.path`. Refused when the image path is invalid (E012 rules) or
+/// another Texture asset already points at the same file (one game file — one Texture asset, design §1.1).
+pub fn create_texture(project: &Project, id: &AssetId, texture: &TextureAsset) -> Result<(), OpError> {
+    if id.ty != AssetType::Texture {
+        return Err(OpError::Invalid(format!("{} is not a texture", id.source_rel())));
+    }
+    check_path(&id.path)?;
+    if id.file(project).exists() {
+        return Err(OpError::Exists(id.source_rel()));
+    }
+    TextureAsset::check_path(&texture.path).map_err(OpError::Invalid)?;
+    if let Some(other) = assets::scan(project)
+        .into_iter()
+        .filter(|o| o.ty == AssetType::Texture)
+        .find(|o| assets::load_texture(project, o).is_ok_and(|t| t.path == texture.path))
+    {
+        return Err(OpError::Invalid(format!("`{}` already has a Texture asset: {other}", texture.path)));
+    }
+    save_texture(project, id, texture)
+}
+
 fn create(project: &Project, path: &str, kind: AssetKind) -> Result<AssetId, OpError> {
     check_path(path)?;
     let id = AssetId::new(AssetType::of(&kind), path);
@@ -120,8 +148,9 @@ pub fn create_folder(project: &Project, path: &str) -> Result<(), OpError> {
     Ok(())
 }
 
-/// Renames/moves an asset; function and curve references in other assets are updated (constants are referenced
-/// by name, so moving their table changes nothing for its users).
+/// Renames/moves an asset; function, curve and Texture asset references in other assets are updated (constants are
+/// referenced by name, so moving their table changes nothing for its users). A Texture asset keeps its image path:
+/// the game file is never moved.
 pub fn rename(project: &Project, id: &AssetId, new_path: &str) -> Result<AssetId, OpError> {
     check_path(new_path)?;
     let new_id = AssetId::new(id.ty, new_path);
@@ -142,6 +171,10 @@ pub fn rename(project: &Project, id: &AssetId, new_path: &str) -> Result<AssetId
             table.name = new_id.name().to_string();
             save_consts(project, &new_id, &table)?;
         }
+        AssetType::Texture => {
+            let texture = assets::load_texture(project, id).map_err(OpError::Invalid)?;
+            save_texture(project, &new_id, &texture)?;
+        }
         AssetType::Material | AssetType::Function => {
             let mut asset = assets::load(project, id).map_err(OpError::Invalid)?;
             asset.name = new_id.name().to_string();
@@ -149,14 +182,10 @@ pub fn rename(project: &Project, id: &AssetId, new_path: &str) -> Result<AssetId
         }
     }
     std::fs::remove_file(id.file(project))?;
-    if id.ty == AssetType::Curve {
-        let (registry, _) = crate::regen::project_registry(project);
-        for other in assets::scan(project).into_iter().filter(|o| o.ty.is_graph()) {
-            let Ok(mut a) = assets::load(project, &other) else { continue };
-            if rename_curve_refs(&mut a, &registry, &id.path, new_path) {
-                save(project, &other, &a)?;
-            }
-        }
+    match id.ty {
+        AssetType::Curve => rewrite_graphs(project, |a, r| rename_curve_refs(a, r, &id.path, new_path))?,
+        AssetType::Texture => rewrite_graphs(project, |a, r| rename_texture_refs(a, r, &id.path, new_path))?,
+        _ => {}
     }
     if id.ty == AssetType::Function {
         let (old_kind, new_kind) = (format!("{FUNCTION_PREFIX}{}", id.path), format!("{FUNCTION_PREFIX}{new_path}"));
@@ -177,29 +206,52 @@ pub fn rename(project: &Project, id: &AssetId, new_path: &str) -> Result<AssetId
     Ok(new_id)
 }
 
-/// Points every node of `asset` that samples curve `old` to `new`; returns whether anything changed.
-pub fn rename_curve_refs(asset: &mut Asset, registry: &Registry, old: &str, new: &str) -> bool {
-    let refs: Vec<(String, String)> =
-        curve_refs(asset, registry).into_iter().filter(|r| r.2 == old).map(|(n, p, _)| (n, p)).collect();
-    for (node, param) in &refs {
-        if let Some(n) = asset.nodes.get_mut(node) {
-            n.params.insert(param.clone(), Value::Str(new.to_string()));
+/// Applies `edit` to every graph asset of the project and saves the ones it changed (`edit` returns whether it did).
+/// Files that do not load are skipped.
+fn rewrite_graphs(project: &Project, mut edit: impl FnMut(&mut Asset, &Registry) -> bool) -> Result<(), OpError> {
+    let (registry, _) = crate::regen::project_registry(project);
+    for other in assets::scan(project).into_iter().filter(|o| o.ty.is_graph()) {
+        let Ok(mut a) = assets::load(project, &other) else { continue };
+        if edit(&mut a, &registry) {
+            save(project, &other, &a)?;
         }
     }
-    !refs.is_empty()
+    Ok(())
+}
+
+/// Points every node of `asset` that samples curve `old` to `new`; returns whether anything changed.
+pub fn rename_curve_refs(asset: &mut Asset, registry: &Registry, old: &str, new: &str) -> bool {
+    set_refs(asset, curve_refs(asset, registry), old, new)
+}
+
+/// Points every node of `asset` that refers to Texture asset `old` to `new`; returns whether anything changed.
+pub fn rename_texture_refs(asset: &mut Asset, registry: &Registry, old: &str, new: &str) -> bool {
+    set_refs(asset, texture_refs(asset, registry), old, new)
+}
+
+/// Clears every reference of `asset`'s nodes to Texture asset `id` (they then use the default texture, design
+/// §1.2); returns whether anything changed. Used when the Texture asset is deleted.
+pub fn clear_texture_refs(asset: &mut Asset, registry: &Registry, id: &str) -> bool {
+    set_refs(asset, texture_refs(asset, registry), id, "")
+}
+
+/// Sets the parameters of `refs` (`(node, param, value)`, from `curve_refs` & co.) whose value is `old` to `new`;
+/// returns whether anything changed.
+fn set_refs(asset: &mut Asset, refs: Vec<(String, String, String)>, old: &str, new: &str) -> bool {
+    let mut changed = false;
+    for (node, param, _) in refs.into_iter().filter(|r| r.2 == old) {
+        if let Some(n) = asset.nodes.get_mut(&node) {
+            n.params.insert(param, Value::Str(new.to_string()));
+            changed = true;
+        }
+    }
+    changed
 }
 
 /// Clears every reference of `asset`'s nodes to global constant `name` (they then output 1.0, W106); returns
 /// whether anything changed. Used when the constant changes its type or is deleted (decision 0017).
 pub fn clear_const_refs(asset: &mut Asset, registry: &Registry, name: &str) -> bool {
-    let refs: Vec<(String, String)> =
-        const_refs(asset, registry).into_iter().filter(|r| r.2 == name).map(|(n, p, _)| (n, p)).collect();
-    for (node, param) in &refs {
-        if let Some(n) = asset.nodes.get_mut(node) {
-            n.params.insert(param.clone(), Value::Str(String::new()));
-        }
-    }
-    !refs.is_empty()
+    set_refs(asset, const_refs(asset, registry), name, "")
 }
 
 /// Moves an asset into directory `dir` (`""` = shaders root).
@@ -208,9 +260,13 @@ pub fn move_to(project: &Project, id: &AssetId, dir: &str) -> Result<AssetId, Op
     rename(project, id, &new_path)
 }
 
-/// Deletes the asset source; autogen is removed by the following full regeneration.
+/// Deletes the asset source; autogen is removed by the following full regeneration. Deleting a Texture asset keeps
+/// its game image and clears the references to it in every graph (design §1.2).
 pub fn delete(project: &Project, id: &AssetId) -> Result<(), OpError> {
     std::fs::remove_file(id.file(project))?;
+    if id.ty == AssetType::Texture {
+        rewrite_graphs(project, |a, r| clear_texture_refs(a, r, &id.path))?;
+    }
     Ok(())
 }
 

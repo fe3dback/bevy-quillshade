@@ -5202,8 +5202,11 @@ dependencies = [
 name = "shader_codegen_rust"
 version = "0.1.0"
 dependencies = [
+ "ron",
+ "serde",
  "shader_codegen_wesl",
  "shader_graph_core",
+ "shader_stdlib",
 ]
 
 [[package]]
@@ -5250,7 +5253,9 @@ name = "shader_project"
 version = "0.1.0"
 dependencies = [
  "insta",
+ "ktx2",
  "notify",
+ "png",
  "ron",
  "serde",
  "shader_codegen_rust",

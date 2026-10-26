@@ -27,7 +27,7 @@ pub enum ParamKind {
         min: Option<i32>,
         max: Option<i32>,
     },
-    /// Single line string (names, groups, texture paths).
+    /// Single line string (names, groups).
     Str,
     /// Multi-line WESL code.
     Code,
@@ -41,6 +41,9 @@ pub enum ParamKind {
     Curve,
     /// Name of a global constant of this type from any constant table (stored as `Value::Str`; decision 0017).
     GlobalConst(ConstType),
+    /// Id of a Texture asset of the project (`textures/env/rock`) or of an internal texture (`@internal/default`);
+    /// `""` = none (stored as `Value::Str`; design §1.2).
+    Texture,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -206,6 +209,22 @@ pub fn const_refs(asset: &crate::model::Asset, registry: &Registry) -> Vec<(Node
     out
 }
 
+/// Texture ids `asset` refers to through [`ParamKind::Texture`] parameters: `(node id, param id, texture id)`.
+/// Includes internal ids (`@internal/default`); empty references are skipped.
+pub fn texture_refs(asset: &crate::model::Asset, registry: &Registry) -> Vec<(NodeId, String, String)> {
+    let mut out = Vec::new();
+    for (id, n) in &asset.nodes {
+        let Some(def) = registry.get(&n.kind) else { continue };
+        for p in def.params().into_iter().filter(|p| p.kind == ParamKind::Texture) {
+            let texture = n.params.get(&p.id).unwrap_or(&p.default).as_str();
+            if !texture.is_empty() {
+                out.push((id.clone(), p.id, texture.to_string()));
+            }
+        }
+    }
+    out
+}
+
 #[derive(Debug, Clone)]
 pub struct NodeInfo {
     pub id: String,
@@ -339,6 +358,27 @@ pub struct FunctionSig {
     pub outputs: Vec<FnPort>,
     /// Hidden builtin arguments, appended after declared inputs in this order.
     pub builtins: Vec<Builtin>,
+    /// Hidden fixed-texture arguments (design §1.3), appended after the builtins in this order (sorted by
+    /// `(origin, node)`): the function's own fixed textures and those of the functions it calls, transitively.
+    pub textures: Vec<HiddenTexture>,
+}
+
+/// Fixed texture of a node inside a function (design §1.3), passed to the function as a hidden trailing texture +
+/// sampler argument `ft_{origin}_{node}` / `ft_{origin}_{node}_sampler` ([`fixed_texture_ident`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HiddenTexture {
+    /// Path of the function the node lives in (`common/tex_layer`).
+    pub origin: String,
+    pub node: NodeId,
+    /// Texture asset id (or `@internal/*`), resolved, never empty.
+    pub texture: String,
+}
+
+impl HiddenTexture {
+    /// WESL identifier of the texture argument; the sampler is `{ident}_sampler`.
+    pub fn ident(&self) -> String {
+        fixed_texture_ident(Some(&self.origin), &self.node)
+    }
 }
 
 impl FunctionSig {
@@ -387,6 +427,26 @@ impl CurveLookup for BTreeSet<String> {
     }
 }
 
+/// Textures nodes can refer to: the project's Texture assets and the internal textures (`@internal/*`).
+pub trait TextureLookup {
+    fn has_texture(&self, id: &str) -> bool;
+}
+
+/// No textures at all (tests, signatures).
+pub struct NoTextures;
+
+impl TextureLookup for NoTextures {
+    fn has_texture(&self, _id: &str) -> bool {
+        false
+    }
+}
+
+impl TextureLookup for BTreeSet<String> {
+    fn has_texture(&self, id: &str) -> bool {
+        self.contains(id)
+    }
+}
+
 /// Graph-wide information available to node definitions.
 pub struct Env<'a> {
     pub asset_kind: AssetKind,
@@ -395,6 +455,7 @@ pub struct Env<'a> {
     pub functions: &'a dyn FunctionLookup,
     pub curves: &'a dyn CurveLookup,
     pub consts: &'a dyn ConstLookup,
+    pub textures: &'a dyn TextureLookup,
 }
 
 /// Inputs for computing a node signature.
@@ -447,6 +508,23 @@ pub enum Stage {
     Vertex,
     /// Body of a project function (stage-agnostic, builtins are arguments).
     Function,
+}
+
+/// Identifier of the fixed texture of node `node` (design §1.3); the sampler is `{ident}_sampler`.
+///
+/// - `origin: None` (a node of the material itself): `ft_{node}`, a material binding.
+/// - `origin: Some(fn)` (a node inside function `fn`): `ft_{fn}_{node}` with `/` → `_` in the path
+///   (`ft_common_tex_layer_n02`): a hidden argument of the function and of its callers, and the material binding.
+///
+/// Prefix `ft_` is not a user prefix of decision 0020 and not a generator name (`n_`, `b_`, `sg_`), so it never
+/// clashes with other identifiers. Node ids are `[a-z0-9]+`, so `ft_{node}` (no `_` after the prefix) never equals an
+/// origin identifier. Two origins can only collide when their paths differ by `/` vs `_` (`a/b_c` and `a_b/c`) and the
+/// node ids match; `build_ir` reports that as E006 rather than generating a duplicate.
+pub fn fixed_texture_ident(origin: Option<&str>, node: &str) -> String {
+    match origin {
+        None => format!("ft_{node}"),
+        Some(origin) => format!("ft_{}_{node}", origin.replace('/', "_")),
+    }
 }
 
 /// Value flowing along an edge in generated code.
@@ -504,8 +582,6 @@ pub struct MaterialParam {
     pub ty: ParamType,
     pub default: Value,
     pub group: String,
-    /// Sort key for constructor argument order (ties broken by node id = creation order).
-    pub order: i32,
     pub min: Option<f32>,
     pub max: Option<f32>,
     pub node: NodeId,
@@ -532,6 +608,10 @@ pub struct EmitSink {
     pub curves: BTreeSet<(String, Interp)>,
     pub custom_fns: BTreeMap<String, String>,
     pub params: BTreeMap<NodeId, MaterialParam>,
+    /// Fixed textures (design §1.3): `(origin function path, node id)` → Texture asset id. Origin `None` = a node of
+    /// the material being built ([`EmitCtx::fixed_texture`]); `Some(fn)` = a node inside function `fn` (the function
+    /// being built, or one it calls: [`EmitCtx::hidden_texture`]). One entry per node, however often it is used.
+    pub fixed_textures: BTreeMap<(Option<String>, NodeId), String>,
     /// Sink-node values: material output pins / function outputs, keyed by pin or output name.
     pub outputs: BTreeMap<String, String>,
     pub diagnostics: Vec<Diagnostic>,
@@ -653,6 +733,26 @@ impl EmitCtx<'_> {
         self.sink.custom_fns.insert(name.into(), code);
     }
 
+    /// Uses the fixed texture `texture_id` (a resolved Texture asset or internal id) of this node (design §1.3): in a
+    /// material a binding of its own (`ft_{node_id}`); inside a function a hidden trailing argument
+    /// (`ft_{fn}_{node_id}`, [`HiddenTexture`]). The id is not part of the identifier, so swapping the texture changes
+    /// neither WESL nor Rust.
+    pub fn fixed_texture(&mut self, texture_id: &str) -> Operand {
+        let origin = (self.stage == Stage::Function).then(|| self.env.asset_path.to_string());
+        let tex = fixed_texture_ident(origin.as_deref(), self.node_id);
+        self.sink.fixed_textures.insert((origin, self.node_id.into()), texture_id.into());
+        Operand::Texture { sampler: format!("{tex}_sampler"), tex }
+    }
+
+    /// Forwards a hidden texture of a called function (design §1.3): the caller's own hidden argument (in a function)
+    /// or material binding (in a material) of the same name, one per origin node however often it is called.
+    /// Returns the texture and sampler identifiers.
+    pub fn hidden_texture(&mut self, h: &HiddenTexture) -> (String, String) {
+        let tex = h.ident();
+        self.sink.fixed_textures.insert((Some(h.origin.clone()), h.node.clone()), h.texture.clone());
+        (tex.clone(), format!("{tex}_sampler"))
+    }
+
     pub fn declare_param(&mut self, p: MaterialParam) {
         self.sink.params.insert(self.node_id.into(), p);
     }
@@ -741,8 +841,31 @@ impl Hotkey {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NodeOp {
-    /// Replace the node with another kind (target node kind).
-    ConvertTo(String),
+    /// Replace the node with another kind, optionally mapping params and renaming pins.
+    Convert(Conversion),
+}
+
+/// How a node turns into another kind (decision 0021): params and pins with the same name are carried over
+/// by default; the fields below refine that for conversions between differently shaped nodes.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Conversion {
+    /// Target node kind.
+    pub kind: String,
+    /// Param mapping `(from, to)`. When non-empty only the listed params are copied (to the `to` id); the other
+    /// params of the target keep their defaults. When empty every param stays as it is.
+    pub params: Vec<(String, String)>,
+    /// `(param, base)`: fills `param` with a name unique among the same param of the asset's parameter nodes
+    /// (`param::*`): `base`, `base_1`, `base_2`, ...
+    pub unique_name: Option<(String, String)>,
+    /// Output pin renames `(old, new)`, to keep the edges leaving the node.
+    pub pins: Vec<(String, String)>,
+}
+
+impl Conversion {
+    /// Plain kind change: same-named params and pins are carried over.
+    pub fn kind(k: &str) -> Self {
+        Conversion { kind: k.to_string(), params: Vec::new(), unique_name: None, pins: Vec::new() }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

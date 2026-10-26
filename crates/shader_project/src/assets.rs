@@ -1,4 +1,4 @@
-//! Editor asset discovery and loading (`shaders/**/*.{material,function,curve,consts}.ron`).
+//! Editor asset discovery and loading (`shaders/**/*.{material,function,curve,consts,texture}.ron`).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -7,6 +7,7 @@ use shader_graph_core::consts::GlobalConsts;
 use shader_graph_core::curve::Curve;
 use shader_graph_core::ident::check_ident;
 use shader_graph_core::model::{Asset, AssetKind};
+use shader_graph_core::texture::TextureAsset;
 use shader_graph_core::{Code, Diagnostic, Registry};
 use shader_stdlib::user::UserNode;
 
@@ -20,6 +21,9 @@ pub enum AssetType {
     Curve,
     Function,
     Material,
+    /// Texture asset (design §1.1, decision 0024): a game image + loader settings, not a node graph; no file of its
+    /// own, only its entry in the baked manifest.
+    Texture,
 }
 
 impl AssetType {
@@ -29,6 +33,7 @@ impl AssetType {
             AssetType::Function => "function",
             AssetType::Curve => "curve",
             AssetType::Consts => "consts",
+            AssetType::Texture => "texture",
         }
     }
 
@@ -37,9 +42,10 @@ impl AssetType {
         matches!(self, AssetType::Material | AssetType::Function)
     }
 
-    /// Assets with a generated WESL module (constant tables have none: their values are inlined).
+    /// Assets with a generated WESL module (constant tables have none: their values are inlined; Texture assets
+    /// have none either).
     pub fn has_wesl(self) -> bool {
-        self != AssetType::Consts
+        !matches!(self, AssetType::Consts | AssetType::Texture)
     }
 
     pub fn of(kind: &AssetKind) -> Self {
@@ -82,7 +88,7 @@ impl std::fmt::Display for AssetId {
 /// Parses `shaders/`-relative file path into an asset id.
 pub fn id_from_rel(rel: &str) -> Option<AssetId> {
     let rel = rel.replace('\\', "/");
-    [AssetType::Material, AssetType::Function, AssetType::Curve, AssetType::Consts]
+    [AssetType::Material, AssetType::Function, AssetType::Curve, AssetType::Consts, AssetType::Texture]
         .into_iter()
         .find_map(|ty| rel.strip_suffix(&format!(".{}.ron", ty.suffix())).map(|p| AssetId::new(ty, p)))
 }
@@ -150,6 +156,9 @@ pub fn load(project: &Project, id: &AssetId) -> Result<Asset, String> {
     if AssetType::of(&asset.kind) != id.ty {
         return Err(format!("file suffix `.{}.ron` does not match asset kind", id.ty.suffix()));
     }
+    // Texture references are stdlib params (user nodes have none).
+    static STDLIB: std::sync::OnceLock<Registry> = std::sync::OnceLock::new();
+    shader_stdlib::nodes::texture::check_texture_refs(&asset, STDLIB.get_or_init(shader_stdlib::registry))?;
     Ok(asset)
 }
 
@@ -173,6 +182,15 @@ pub fn load_consts(project: &Project, id: &AssetId) -> Result<GlobalConsts, Stri
     let mut table = GlobalConsts::from_ron(&text).map_err(|e| e.to_string())?;
     table.name = id.name().to_string();
     Ok(table)
+}
+
+/// Loads a Texture asset file (its name is the file name; the image path is checked by validation, E012).
+pub fn load_texture(project: &Project, id: &AssetId) -> Result<TextureAsset, String> {
+    if id.ty != AssetType::Texture {
+        return Err(format!("{} is not a texture", id.source_rel()));
+    }
+    let text = std::fs::read_to_string(id.file(project)).map_err(|e| e.to_string())?;
+    TextureAsset::from_ron(&text)
 }
 
 /// Checks the asset path (spec §5): snake_case components. Generated modules are prefixed (`dir_`, `mat_`;
@@ -216,6 +234,8 @@ pub struct AssetSet {
     pub curves: BTreeMap<AssetId, Result<Curve, String>>,
     /// Global constant tables.
     pub consts: BTreeMap<AssetId, Result<GlobalConsts, String>>,
+    /// Texture assets (design §1.1).
+    pub textures: BTreeMap<AssetId, Result<TextureAsset, String>>,
 }
 
 impl AssetSet {
@@ -235,22 +255,29 @@ impl AssetSet {
                     let c = load_consts(project, &id);
                     set.consts.insert(id, c);
                 }
+                AssetType::Texture => {
+                    let t = load_texture(project, &id);
+                    set.textures.insert(id, t);
+                }
             }
         }
         set
     }
 
-    /// Every asset: graphs, curves, constant tables (sorted within each kind).
+    /// Every asset: graphs, curves, constant tables, textures (sorted within each kind).
     pub fn ids(&self) -> impl Iterator<Item = &AssetId> {
-        self.assets.keys().chain(self.curves.keys()).chain(self.consts.keys())
+        self.assets.keys().chain(self.curves.keys()).chain(self.consts.keys()).chain(self.textures.keys())
     }
 
     pub fn contains(&self, id: &AssetId) -> bool {
-        self.assets.contains_key(id) || self.curves.contains_key(id) || self.consts.contains_key(id)
+        self.assets.contains_key(id)
+            || self.curves.contains_key(id)
+            || self.consts.contains_key(id)
+            || self.textures.contains_key(id)
     }
 
     pub fn len(&self) -> usize {
-        self.assets.len() + self.curves.len() + self.consts.len()
+        self.assets.len() + self.curves.len() + self.consts.len() + self.textures.len()
     }
 
     pub fn is_empty(&self) -> bool {

@@ -15,6 +15,7 @@ pub use dir_env::mat_exp42::{Exp42Ext, Exp42Material};
 pub use dir_env::mat_flag::{FlagExt, FlagMaterial, FlagParams};
 pub use dir_env::mat_rock_wet::{RockWetExt, RockWetMaterial, RockWetParams};
 pub use dir_env::mat_terrain_layers::{TerrainLayersExt, TerrainLayersMaterial};
+pub use dir_env::mat_tex_layers::{TexLayersExt, TexLayersMaterial};
 pub use dir_env::mat_water::{WaterExt, WaterMaterial, WaterParams};
 pub use dir_fx::mat_coords::CoordsMaterial;
 pub use dir_fx::mat_curve_bands::CurveBandsMaterial;

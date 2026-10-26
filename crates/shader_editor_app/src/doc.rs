@@ -6,12 +6,17 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use shader_graph_core::consts::NoConsts;
 use shader_graph_core::ir::{with_routes, would_create_cycle};
-use shader_graph_core::model::{Asset, Edge, Frame, Node, NodeId, new_node_id};
-use shader_graph_core::registry::{FunctionLookup, NoCurves, NodeRole, ROUTE_PARAM, Registry, SigCtx, Signature};
+use shader_graph_core::model::{Asset, AssetKind, Edge, Frame, MaterialKind, Node, NodeId, new_node_id};
+use shader_graph_core::registry::{
+    FunctionLookup, NoCurves, NoTextures, NodeRole, ROUTE_PARAM, Registry, SigCtx, Signature,
+};
 use shader_graph_core::{Env, PinType, Value, conversion};
-use shader_project::AssetId;
+use shader_project::{AssetId, AssetSet, Project, assets, ops};
 
+use crate::doc_kind::{TabDoc, asset_title, io_error};
 use crate::history::History;
+use crate::tab::ViewKind;
+use crate::ui::icons::IconId;
 
 /// Copied nodes with the edges between them.
 #[derive(Debug, Clone, Default)]
@@ -227,6 +232,84 @@ impl Doc {
 }
 
 /// Bounding box of node positions (top-left corners).
+impl TabDoc for Doc {
+    fn asset(&self) -> Option<&AssetId> {
+        Some(&self.id)
+    }
+
+    fn view(&self) -> ViewKind {
+        ViewKind::Graph
+    }
+
+    fn base_title(&self) -> String {
+        asset_title(&self.id)
+    }
+
+    fn icon(&self) -> IconId {
+        IconId::for_asset(Some(self.asset.kind))
+    }
+
+    fn kind_label(&self) -> &'static str {
+        match self.asset.kind {
+            AssetKind::Function => "function",
+            AssetKind::Material(MaterialKind::Pbr3d(_)) => "pbr3d",
+            AssetKind::Material(MaterialKind::Unlit3d(_)) => "unlit3d",
+            AssetKind::Material(MaterialKind::Sprite2d(_)) => "sprite2d",
+        }
+    }
+
+    fn is_dirty(&self) -> bool {
+        Doc::is_dirty(self)
+    }
+
+    fn is_read_only(&self) -> bool {
+        false
+    }
+
+    fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    fn save(&mut self, project: &Project) -> std::io::Result<()> {
+        ops::save(project, &self.id, &self.asset).map_err(io_error)?;
+        self.mark_saved();
+        Ok(())
+    }
+
+    fn changed_on_disk(&self, project: &Project) -> bool {
+        assets::load(project, &self.id).is_ok_and(|a| Asset::from_ron(&self.saved).ok() != Some(a))
+    }
+
+    fn reload_from_disk(&mut self, project: &Project) -> Result<(), String> {
+        self.reload(assets::load(project, &self.id)?);
+        Ok(())
+    }
+
+    fn keep_mine(&mut self, project: &Project) {
+        if let Ok(on_disk) = assets::load(project, &self.id) {
+            self.saved = on_disk.to_ron();
+        }
+    }
+
+    fn rename(&mut self, _project: &Project, from: &AssetId, to: &AssetId) {
+        if self.id != *from {
+            return;
+        }
+        self.id = to.clone();
+        self.asset.name = to.name().to_string();
+        self.mark_saved();
+        self.revision += 1;
+    }
+
+    fn config_key(&self) -> Option<String> {
+        Some(self.id.source_rel())
+    }
+
+    fn override_into(&self, set: &mut AssetSet) {
+        set.assets.insert(self.id.clone(), Ok(self.asset.clone()));
+    }
+}
+
 pub fn bounds(asset: &Asset, ids: &BTreeSet<NodeId>) -> Option<(f32, f32, f32, f32)> {
     let mut it = asset.nodes.iter().filter(|(k, _)| ids.is_empty() || ids.contains(*k)).map(|(_, n)| n.pos);
     let first = it.next()?;
@@ -262,7 +345,14 @@ pub fn node_signature(
     let def = registry.get(&node.kind)?;
     let params = registry.resolved_params(&node.kind, &node.params);
     let connected = connected_types(asset, id, registry, functions, path, 0);
-    let env = Env { asset_kind: asset.kind, asset_path: path, functions, curves: &NoCurves, consts: &NoConsts };
+    let env = Env {
+        asset_kind: asset.kind,
+        asset_path: path,
+        functions,
+        curves: &NoCurves,
+        consts: &NoConsts,
+        textures: &NoTextures,
+    };
     Some(def.signature(&SigCtx {
         node_id: id,
         kind: &node.kind,
@@ -307,7 +397,14 @@ fn output_type(
     let def = registry.get(&n.kind)?;
     let params = registry.resolved_params(&n.kind, &n.params);
     let connected = connected_types(asset, node, registry, functions, path, depth);
-    let env = Env { asset_kind: asset.kind, asset_path: path, functions, curves: &NoCurves, consts: &NoConsts };
+    let env = Env {
+        asset_kind: asset.kind,
+        asset_path: path,
+        functions,
+        curves: &NoCurves,
+        consts: &NoConsts,
+        textures: &NoTextures,
+    };
     let sig = def.signature(&SigCtx {
         node_id: node,
         kind: &n.kind,

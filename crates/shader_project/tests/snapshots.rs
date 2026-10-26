@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use shader_codegen_wesl::check::BevySources;
 use shader_graph_core::consts::NoConsts;
 use shader_graph_core::model::{AssetKind, MaterialKind, SpriteSettings, UnlitSettings};
-use shader_graph_core::registry::{FUNCTION_CALL_KIND, NoCurves, NoFunctions, NodeRole, SigCtx};
+use shader_graph_core::registry::{FUNCTION_CALL_KIND, NoCurves, NoFunctions, NoTextures, NodeRole, SigCtx};
 use shader_graph_core::{Asset, Env, PinType, Value, conversion};
 use shader_project::fixtures::{self, GraphBuilder};
 use shader_project::regen::{rust_file, wesl_file};
@@ -43,7 +43,14 @@ fn node_material(kind: &str) -> Option<(String, Asset)> {
 
     let params = reg.resolved_params(kind, &BTreeMap::new());
     let (connected, inputs) = (BTreeMap::new(), BTreeMap::new());
-    let env = Env { asset_kind, asset_path: &name, functions: &NoFunctions, curves: &NoCurves, consts: &NoConsts };
+    let env = Env {
+        asset_kind,
+        asset_path: &name,
+        functions: &NoFunctions,
+        curves: &NoCurves,
+        consts: &NoConsts,
+        textures: &NoTextures,
+    };
     let sig = def.signature(&SigCtx {
         node_id: &n,
         kind,
@@ -52,7 +59,9 @@ fn node_material(kind: &str) -> Option<(String, Asset)> {
         input_values: &inputs,
         env: &env,
     });
-    for p in sig.inputs.iter().filter(|p| p.ty == PinType::Texture2D) {
+    // Only required texture pins: an optional one (TextureSample `tex`) leaves the node on its `texture` property, a
+    // fixed binding of the default texture (W110).
+    for p in sig.inputs.iter().filter(|p| p.ty == PinType::Texture2D && p.required) {
         let t = g.node_p("param::TextureObject", (0.0, 0.0), &[("name", Value::Str(format!("tex_{}", p.id)))]);
         g.link((&t, "out"), (&n, &p.id));
     }
@@ -148,10 +157,18 @@ fn composite_materials_generate_and_compile() {
             snapshot(&format!("rust__{flat}"), &std::fs::read_to_string(rs).unwrap());
         }
     }
-    for f in ["Cargo.toml", "src/lib.rs", "src/materials/mod.rs"] {
+    for f in [
+        "Cargo.toml",
+        "src/lib.rs",
+        "src/materials/mod.rs",
+        "src/baked/mod.rs",
+        "src/baked/materials.rs",
+        "src/baked/textures.rs",
+    ] {
         let text = std::fs::read_to_string(p.crate_dir().join(f)).unwrap();
         snapshot(&format!("crate__{}", f.replace(['/', '.'], "_")), &text);
     }
+    snapshot("manifest", &std::fs::read_to_string(p.autogen_dir().join("baked.ron")).unwrap());
 }
 
 /// Node preview (spec §5, decision 0022): every material kind × preview mode generates and compiles, and the

@@ -15,6 +15,11 @@ import super::super::stdlib::material::{MaterialAttributesPbr, sg_lerp_attribute
 import super::super::stdlib::shading::{sg_slope_angle, sg_world_aligned_blend};
 import super::super::stdlib::transform::sg_tbn;
 
+// The game's compiled material enables this feature; after a change of parameters, texture bindings or
+// World Position Offset the shader stops compiling here until the game is rebuilt.
+@if(!SG_LAYOUT_7a07b390)
+const_assert material_layout_changed__rebuild_the_game;
+
 @fragment
 fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> FragmentOutput {
     var pbr_input = pbr_input_from_standard_material(in, is_front);

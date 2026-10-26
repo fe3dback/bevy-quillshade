@@ -5,15 +5,16 @@
 //! Updated from the model whenever it changes (an open table tab's unsaved values first), so it follows a table
 //! edited in another tab without canvas rebuilds.
 
-use std::collections::BTreeMap;
-
+use bevy::ecs::system::SystemParamItem;
 use bevy::prelude::*;
 use shader_graph_core::consts::{ConstType, GlobalConst};
 use shader_graph_core::model::NodeId;
-use shader_graph_core::registry::ParamKind;
+use shader_graph_core::registry::{NodeDef, ParamKind};
 
+use super::TEXT;
 use super::icons::{IconId, icon};
-use super::{TEXT, TEXT_DIM};
+use super::node_preview::{NodePreview, PreviewTarget};
+use crate::doc::Doc;
 use crate::state::Editor;
 
 /// Side of the colour / bool squares (logical px).
@@ -21,8 +22,8 @@ const SQUARE: f32 = 32.0;
 const ON: Color = Color::srgb_u8(34, 160, 84);
 const OFF: Color = Color::srgb_u8(82, 84, 92);
 
-/// What a part of a preview shows; `.0` is the model node.
-#[derive(Component, Clone, Default)]
+/// What a part of a preview row shows.
+#[derive(Component, Clone, Copy, Default)]
 pub enum ConstPart {
     /// The number of an `f32` constant.
     #[default]
@@ -35,58 +36,51 @@ pub enum ConstPart {
     Digit,
     /// Check mark of a flag.
     Check,
-    /// "n/a" label.
-    Na,
 }
 
-#[derive(Component, Clone, Default)]
-pub struct ConstPreview {
-    pub node: NodeId,
-    pub part: ConstPart,
-}
+/// Preview of the constant a `Global*` node reads.
+pub struct ConstPreview;
 
-pub struct ConstPreviewPlugin;
+impl NodePreview for ConstPreview {
+    /// The constant, when it resolves to one of the node's type.
+    type Key = GlobalConst;
+    type Draw = (
+        Query<'static, 'static, &'static Children>,
+        Query<
+            'static,
+            'static,
+            (
+                &'static ConstPart,
+                Option<&'static mut Text>,
+                Option<&'static mut BackgroundColor>,
+                Option<&'static mut ImageNode>,
+                Option<&'static mut Visibility>,
+            ),
+        >,
+    );
 
-impl Plugin for ConstPreviewPlugin {
-    fn build(&self, app: &mut App) {
-        app.add_systems(PostUpdate, update_previews.before(bevy::ui::UiSystems::Prepare));
+    fn applies(def: &dyn NodeDef) -> bool {
+        const_type(def).is_some()
     }
-}
 
-/// Type of the constant nodes of this kind read (`None`: not a `Global*` node).
-pub fn preview_type(editor: &Editor, kind: &str) -> Option<ConstType> {
-    editor.registry.get(kind)?.params().into_iter().find_map(|p| match p.kind {
-        ParamKind::GlobalConst(ty) => Some(ty),
-        _ => None,
-    })
-}
+    fn layout(_: &dyn NodeDef) -> Node {
+        Node { min_height: px(SQUARE + 4.0), align_items: AlignItems::Center, column_gap: px(8), ..default() }
+    }
 
-fn tag(node: &str, part: ConstPart) -> ConstPreview {
-    ConstPreview { node: node.into(), part }
-}
-
-/// The preview row of model node `node` reading a constant of type `ty`.
-pub fn node_preview(node: &str, ty: ConstType) -> impl Scene {
-    let body: Box<dyn Scene> = match ty {
-        ConstType::F32 => {
-            let t = tag(node, ConstPart::Number);
-            Box::new(bsn! { t Text("") TextFont { font_size: FontSize::Px(15.0) } TextColor(TEXT) Pickable::IGNORE })
-        }
-        ConstType::Vec2 | ConstType::Vec3 | ConstType::Vec4 => {
-            let t = tag(node, ConstPart::Swatch);
-            Box::new(bsn! {
-                t
+    fn content(def: &dyn NodeDef) -> Box<dyn Scene> {
+        match const_type(def).unwrap_or(ConstType::F32) {
+            ConstType::F32 => Box::new(
+                bsn! { ConstPart::Number Text("") TextFont { font_size: FontSize::Px(15.0) } TextColor(TEXT) Pickable::IGNORE },
+            ),
+            ConstType::Vec2 | ConstType::Vec3 | ConstType::Vec4 => Box::new(bsn! {
+                ConstPart::Swatch
                 Node { width: px(SQUARE), height: px(SQUARE), border: UiRect::all(px(1)), border_radius: BorderRadius::all(px(4)) }
                 BackgroundColor(Color::NONE)
                 BorderColor::all(Color::srgba(1.0, 1.0, 1.0, 0.25))
                 Pickable::IGNORE
-            })
-        }
-        ConstType::Bool | ConstType::CompileFlag => {
-            let (square, digit, check) =
-                (tag(node, ConstPart::Flag), tag(node, ConstPart::Digit), tag(node, ConstPart::Check));
-            Box::new(bsn! {
-                square
+            }),
+            ConstType::Bool | ConstType::CompileFlag => Box::new(bsn! {
+                ConstPart::Flag
                 Node {
                     width: px(SQUARE),
                     height: px(SQUARE),
@@ -97,7 +91,7 @@ pub fn node_preview(node: &str, ty: ConstType) -> impl Scene {
                 BackgroundColor(OFF)
                 Pickable::IGNORE
                 Children [
-                    digit
+                    ConstPart::Digit
                     Text("0")
                     TextFont { font_size: FontSize::Px(15.0), weight: FontWeight::BOLD }
                     TextColor(Color::WHITE)
@@ -105,39 +99,102 @@ pub fn node_preview(node: &str, ty: ConstType) -> impl Scene {
                     --
                     Node { position_type: PositionType::Absolute, right: px(1), top: px(1) }
                     Pickable::IGNORE
-                    Children [ @icon(IconId::Check, 11.0, Color::WHITE) check ]
+                    Children [ @icon(IconId::Check, 11.0, Color::WHITE) ConstPart::Check ]
                 ]
-            })
+            }),
         }
-    };
-    let na = tag(node, ConstPart::Na);
-    bsn! {
-        Node { min_height: px(SQUARE + 4.0), align_items: AlignItems::Center, column_gap: px(8) }
-        Pickable::IGNORE
-        Children [
-            @{body}
-            --
-            na
-            Text("n/a")
-            TextFont { font_size: FontSize::Px(12.0) }
-            TextColor(TEXT_DIM)
-            Visibility::Hidden
-            Pickable::IGNORE
-        ]
+    }
+
+    fn key(editor: &Editor, doc: &Doc, node: &NodeId) -> Option<GlobalConst> {
+        let n = doc.asset.nodes.get(node)?;
+        let def = editor.registry.get(&n.kind)?;
+        let params = editor.registry.resolved_params(&n.kind, &n.params);
+        let (id, ty) = def.params().into_iter().find_map(|p| match p.kind {
+            ParamKind::GlobalConst(ty) => Some((p.id, ty)),
+            _ => None,
+        })?;
+        let name = params.get(&id)?.as_str().to_string();
+        let (_, c) = editor.global_consts().remove(&name)?;
+        (c.ty == ty).then_some(c)
+    }
+
+    fn draw(c: Option<&GlobalConst>, at: PreviewTarget, (children, parts): &mut SystemParamItem<Self::Draw>) -> bool {
+        let on = c.is_some_and(|c| c.value.as_bool());
+        // The squares go away with the constant ("n/a" takes their place).
+        let shown = if c.is_some() { Visibility::Inherited } else { Visibility::Hidden };
+        for e in children.iter_descendants(at.root) {
+            let Ok((part, text, bg, image, vis)) = parts.get_mut(e) else { continue };
+            match part {
+                ConstPart::Number => {
+                    if let Some(mut t) = text {
+                        let want = c.map_or(String::new(), |c| short(c.value.as_f32()));
+                        if t.0 != want {
+                            t.0 = want;
+                        }
+                    }
+                }
+                ConstPart::Swatch => {
+                    if let Some(mut v) = vis {
+                        v.set_if_neq(shown);
+                    }
+                    if let Some(mut bg) = bg {
+                        let want = c.map_or(Color::NONE, |c| {
+                            let f = c.value.floats();
+                            let at = |i: usize| f.get(i).copied().unwrap_or(0.0);
+                            Color::linear_rgb(at(0), at(1), at(2))
+                        });
+                        bg.set_if_neq(BackgroundColor(want));
+                    }
+                }
+                ConstPart::Flag => {
+                    if let Some(mut v) = vis {
+                        v.set_if_neq(shown);
+                    }
+                    if let Some(mut bg) = bg {
+                        let want = match c {
+                            Some(_) if on => ON,
+                            Some(_) => OFF,
+                            None => Color::NONE,
+                        };
+                        bg.set_if_neq(BackgroundColor(want));
+                    }
+                }
+                ConstPart::Digit => {
+                    if let Some(mut t) = text {
+                        let want = match c {
+                            Some(_) if on => "1",
+                            Some(_) => "0",
+                            None => "",
+                        };
+                        if t.0 != want {
+                            t.0 = want.into();
+                        }
+                    }
+                }
+                ConstPart::Check => {
+                    if let Some(mut image) = image {
+                        let alpha = match c {
+                            Some(_) if on => 1.0,
+                            Some(_) => 0.3,
+                            None => 0.0,
+                        };
+                        if image.color.alpha() != alpha {
+                            image.color = Color::WHITE.with_alpha(alpha);
+                        }
+                    }
+                }
+            }
+        }
+        true
     }
 }
 
-/// The constant node `node` reads, if it resolves to one of the node's type.
-fn resolve(editor: &Editor, consts: &BTreeMap<String, GlobalConst>, node: &str) -> Option<GlobalConst> {
-    let n = editor.doc()?.asset.nodes.get(node)?;
-    let def = editor.registry.get(&n.kind)?;
-    let params = editor.registry.resolved_params(&n.kind, &n.params);
-    let (id, ty) = def.params().into_iter().find_map(|p| match p.kind {
-        ParamKind::GlobalConst(ty) => Some((p.id, ty)),
+/// Type of the constant nodes of this definition read (`None`: not a `Global*` node).
+fn const_type(def: &dyn NodeDef) -> Option<ConstType> {
+    def.params().into_iter().find_map(|p| match p.kind {
+        ParamKind::GlobalConst(ty) => Some(ty),
         _ => None,
-    })?;
-    let c = consts.get(params.get(&id)?.as_str())?;
-    (c.ty == ty).then(|| c.clone())
+    })
 }
 
 /// `x` with at most 3 decimals and no trailing zeros.
@@ -145,96 +202,6 @@ fn short(x: f32) -> String {
     let s = format!("{x:.3}");
     let s = s.trim_end_matches('0').trim_end_matches('.');
     if s.is_empty() || s == "-0" { "0".into() } else { s.into() }
-}
-
-fn update_previews(
-    editor: Res<Editor>,
-    added: Query<(), Added<ConstPreview>>,
-    mut parts: Query<(
-        &ConstPreview,
-        Option<&mut Text>,
-        Option<&mut BackgroundColor>,
-        Option<&mut ImageNode>,
-        Option<&mut Visibility>,
-    )>,
-) {
-    if !editor.is_changed() && added.is_empty() {
-        return;
-    }
-    let consts: BTreeMap<String, GlobalConst> =
-        editor.global_consts().into_iter().map(|(name, (_, c))| (name, c)).collect();
-    let mut cache: BTreeMap<NodeId, Option<GlobalConst>> = BTreeMap::new();
-    for (p, text, bg, image, vis) in &mut parts {
-        let c = cache.entry(p.node.clone()).or_insert_with(|| resolve(&editor, &consts, &p.node));
-        let on = c.as_ref().is_some_and(|c| c.value.as_bool());
-        // The squares go away with the constant ("n/a" takes their place).
-        let shown = if c.is_some() { Visibility::Inherited } else { Visibility::Hidden };
-        match p.part {
-            ConstPart::Number => {
-                if let Some(mut t) = text {
-                    let want = c.as_ref().map_or(String::new(), |c| short(c.value.as_f32()));
-                    if t.0 != want {
-                        t.0 = want;
-                    }
-                }
-            }
-            ConstPart::Swatch => {
-                if let Some(mut v) = vis {
-                    v.set_if_neq(shown);
-                }
-                if let Some(mut bg) = bg {
-                    let want = c.as_ref().map_or(Color::NONE, |c| {
-                        let f = c.value.floats();
-                        let at = |i: usize| f.get(i).copied().unwrap_or(0.0);
-                        Color::linear_rgb(at(0), at(1), at(2))
-                    });
-                    bg.set_if_neq(BackgroundColor(want));
-                }
-            }
-            ConstPart::Flag => {
-                if let Some(mut v) = vis {
-                    v.set_if_neq(shown);
-                }
-                if let Some(mut bg) = bg {
-                    let want = match c {
-                        Some(_) if on => ON,
-                        Some(_) => OFF,
-                        None => Color::NONE,
-                    };
-                    bg.set_if_neq(BackgroundColor(want));
-                }
-            }
-            ConstPart::Digit => {
-                if let Some(mut t) = text {
-                    let want = match c {
-                        Some(_) if on => "1",
-                        Some(_) => "0",
-                        None => "",
-                    };
-                    if t.0 != want {
-                        t.0 = want.into();
-                    }
-                }
-            }
-            ConstPart::Check => {
-                if let Some(mut image) = image {
-                    let alpha = match c {
-                        Some(_) if on => 1.0,
-                        Some(_) => 0.3,
-                        None => 0.0,
-                    };
-                    if image.color.alpha() != alpha {
-                        image.color = Color::WHITE.with_alpha(alpha);
-                    }
-                }
-            }
-            ConstPart::Na => {
-                if let Some(mut v) = vis {
-                    v.set_if_neq(if c.is_some() { Visibility::Hidden } else { Visibility::Inherited });
-                }
-            }
-        }
-    }
 }
 
 #[cfg(test)]

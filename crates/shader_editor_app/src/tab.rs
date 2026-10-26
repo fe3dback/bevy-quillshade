@@ -5,12 +5,17 @@
 use std::path::PathBuf;
 
 use shader_graph_core::model::AssetKind;
+use shader_graph_core::texture::INTERNAL_PREFIX;
 use shader_project::regen::{rust_file, wesl_file};
 use shader_project::{AssetId, Project, assets};
 
 use crate::consts_doc::ConstsDoc;
 use crate::curve_doc::CurveDoc;
 use crate::doc::Doc;
+use crate::doc_kind::TabDoc;
+use crate::game_image::FileStamp;
+use crate::texture_doc::TextureDoc;
+use crate::ui::icons::IconId;
 
 /// The view that shows a tab's content.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,6 +28,10 @@ pub enum ViewKind {
     Curve,
     /// Global constant table: add form + table (decision 0017).
     Consts,
+    /// Read-only game image (design §4.4).
+    Image,
+    /// Texture asset: settings form + preview (design §4.4).
+    Texture,
 }
 
 /// Generated file shown in a text tab.
@@ -84,6 +93,167 @@ impl TextDoc {
     }
 }
 
+impl TabDoc for TextDoc {
+    fn asset(&self) -> Option<&AssetId> {
+        None
+    }
+
+    fn view(&self) -> ViewKind {
+        ViewKind::Text
+    }
+
+    fn base_title(&self) -> String {
+        self.rel.clone()
+    }
+
+    fn icon(&self) -> IconId {
+        IconId::Code
+    }
+
+    fn kind_label(&self) -> &'static str {
+        self.lang.label()
+    }
+
+    fn is_dirty(&self) -> bool {
+        false
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
+    fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    fn save(&mut self, _project: &Project) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    fn changed_on_disk(&self, _project: &Project) -> bool {
+        false
+    }
+
+    fn reload_from_disk(&mut self, _project: &Project) -> Result<(), String> {
+        self.reload();
+        match self.text {
+            Some(_) => Ok(()),
+            None => Err(format!("{} does not exist", self.rel)),
+        }
+    }
+
+    fn keep_mine(&mut self, _project: &Project) {}
+
+    /// The generated file moves with its source (regeneration fills it).
+    fn rename(&mut self, project: &Project, from: &AssetId, to: &AssetId) {
+        if self.source != *from {
+            return;
+        }
+        if let Some(moved) = TextDoc::open(project, to.clone(), self.lang) {
+            *self = TextDoc { revision: self.revision + 1, ..moved };
+        }
+    }
+
+    /// `AssetId::source_rel` of the source plus `#wesl` / `#rust`.
+    fn config_key(&self) -> Option<String> {
+        Some(format!("{}#{}", self.source.source_rel(), self.lang.label()))
+    }
+}
+
+/// Prefix of a game image's key in the user config (`@game/textures/rock.png`); `@` never starts an asset's
+/// `shaders/…` key.
+pub const GAME_KEY_PREFIX: &str = "@game/";
+
+/// A game image (design §4.4) in a read-only tab. Pure data: the view decodes the file through
+/// [`crate::game_image::GameImageCache`] whenever [`ImageDoc::revision`] changes.
+#[derive(Debug, Clone)]
+pub struct ImageDoc {
+    /// Path relative to the game's `assets/` dir, `/`-separated.
+    pub path: String,
+    /// The file's modification time and size when last checked (`None`: missing).
+    stamp: Option<FileStamp>,
+    /// Bumped whenever the file changes.
+    pub revision: u64,
+}
+
+impl ImageDoc {
+    pub fn open(project: &Project, path: &str) -> ImageDoc {
+        let mut doc = ImageDoc { path: path.to_string(), stamp: None, revision: 0 };
+        doc.reload(project);
+        doc
+    }
+
+    /// Re-checks the file; returns whether it changed (the view then decodes it again).
+    pub fn reload(&mut self, project: &Project) -> bool {
+        let stamp = FileStamp::of(&project.assets_dir().join(&self.path));
+        if stamp == self.stamp && self.revision > 0 {
+            return false;
+        }
+        self.stamp = stamp;
+        self.revision += 1;
+        true
+    }
+}
+
+impl TabDoc for ImageDoc {
+    fn asset(&self) -> Option<&AssetId> {
+        None
+    }
+
+    fn view(&self) -> ViewKind {
+        ViewKind::Image
+    }
+
+    fn base_title(&self) -> String {
+        format!("assets/{}", self.path)
+    }
+
+    fn icon(&self) -> IconId {
+        IconId::Image
+    }
+
+    fn kind_label(&self) -> &'static str {
+        "image"
+    }
+
+    fn is_dirty(&self) -> bool {
+        false
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
+    fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    fn save(&mut self, _project: &Project) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    fn changed_on_disk(&self, _project: &Project) -> bool {
+        false
+    }
+
+    fn reload_from_disk(&mut self, project: &Project) -> Result<(), String> {
+        self.reload(project);
+        match self.stamp {
+            Some(_) => Ok(()),
+            None => Err(format!("assets/{} does not exist", self.path)),
+        }
+    }
+
+    fn keep_mine(&mut self, _project: &Project) {}
+
+    /// Game files are not assets: nothing to follow.
+    fn rename(&mut self, _project: &Project, _from: &AssetId, _to: &AssetId) {}
+
+    fn config_key(&self) -> Option<String> {
+        Some(format!("{GAME_KEY_PREFIX}{}", self.path))
+    }
+}
+
 #[derive(Debug, Clone)]
 #[allow(clippy::large_enum_variant)] // a handful of tabs, not worth the indirection
 pub enum Tab {
@@ -91,39 +261,42 @@ pub enum Tab {
     Text(TextDoc),
     Curve(CurveDoc),
     Consts(ConstsDoc),
+    Image(ImageDoc),
+    Texture(TextureDoc),
 }
 
 impl Tab {
-    pub fn view(&self) -> ViewKind {
+    /// The content as a [`TabDoc`], whatever its kind.
+    pub fn doc(&self) -> &dyn TabDoc {
         match self {
-            Tab::Graph(_) => ViewKind::Graph,
-            Tab::Text(_) => ViewKind::Text,
-            Tab::Curve(_) => ViewKind::Curve,
-            Tab::Consts(_) => ViewKind::Consts,
+            Tab::Graph(d) => d,
+            Tab::Text(t) => t,
+            Tab::Curve(c) => c,
+            Tab::Consts(c) => c,
+            Tab::Image(i) => i,
+            Tab::Texture(t) => t,
         }
     }
 
-    /// The asset the tab belongs to.
-    pub fn asset(&self) -> &AssetId {
+    pub fn doc_mut(&mut self) -> &mut dyn TabDoc {
         match self {
-            Tab::Graph(d) => &d.id,
-            Tab::Text(t) => &t.source,
-            Tab::Curve(c) => &c.id,
-            Tab::Consts(c) => &c.id,
+            Tab::Graph(d) => d,
+            Tab::Text(t) => t,
+            Tab::Curve(c) => c,
+            Tab::Consts(c) => c,
+            Tab::Image(i) => i,
+            Tab::Texture(t) => t,
         }
+    }
+
+    /// The asset the tab belongs to: the one it edits, or the source of a generated file (closed with it on
+    /// delete, highlighted in the browser).
+    pub fn owner(&self) -> Option<&AssetId> {
+        self.doc().asset().or_else(|| self.text().map(|t| &t.source))
     }
 
     pub fn title(&self) -> String {
-        format!("{}{}", self.base_title(), self.suffix())
-    }
-
-    fn base_title(&self) -> String {
-        match self {
-            Tab::Graph(_) | Tab::Curve(_) | Tab::Consts(_) => {
-                self.asset().source_rel().trim_end_matches(".ron").to_string()
-            }
-            Tab::Text(t) => t.rel.clone(),
-        }
+        format!("{}{}", self.doc().base_title(), self.suffix())
     }
 
     /// ` (preview)` on a material with a previewed node (decision 0022).
@@ -144,18 +317,9 @@ impl Tab {
 
     /// [`Tab::short_title`] without the preview suffix: what tab labels compare to find shared names.
     fn short_name(&self) -> String {
-        let title = self.base_title();
+        let title = self.doc().base_title();
         let name = title.rsplit('/').next().unwrap_or(&title);
         name.split('.').next().unwrap_or(name).to_string()
-    }
-
-    pub fn is_dirty(&self) -> bool {
-        match self {
-            Tab::Graph(d) => d.is_dirty(),
-            Tab::Curve(c) => c.is_dirty(),
-            Tab::Consts(c) => c.is_dirty(),
-            Tab::Text(_) => false,
-        }
     }
 
     pub fn graph(&self) -> Option<&Doc> {
@@ -207,20 +371,52 @@ impl Tab {
         }
     }
 
-    /// Key in the user config: `AssetId::source_rel`, plus `#wesl` / `#rust` for generated files.
-    pub fn config_key(&self) -> String {
+    pub fn image(&self) -> Option<&ImageDoc> {
         match self {
-            Tab::Graph(_) | Tab::Curve(_) | Tab::Consts(_) => self.asset().source_rel(),
-            Tab::Text(t) => format!("{}#{}", t.source.source_rel(), t.lang.label()),
+            Tab::Image(i) => Some(i),
+            _ => None,
+        }
+    }
+
+    pub fn texture(&self) -> Option<&TextureDoc> {
+        match self {
+            Tab::Texture(t) => Some(t),
+            _ => None,
+        }
+    }
+
+    pub fn texture_mut(&mut self) -> Option<&mut TextureDoc> {
+        match self {
+            Tab::Texture(t) => Some(t),
+            _ => None,
         }
     }
 }
 
-/// Parses [`Tab::config_key`]: the asset and, for a text tab, the generated file.
-pub fn parse_config_key(key: &str) -> Option<(AssetId, Option<Lang>)> {
+/// What a tab's [`TabDoc::config_key`] names.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TabKey {
+    /// An asset's own document (`shaders/env/rock.material.ron`).
+    Asset(AssetId),
+    /// A file generated from the asset (`…ron#wesl` / `#rust`).
+    Generated(AssetId, Lang),
+    /// A game image (`@game/<path under assets/>`).
+    GameImage(String),
+    /// A built-in texture's read-only Texture tab (`@internal/default`, design §2).
+    Internal(String),
+}
+
+/// Parses [`TabDoc::config_key`].
+pub fn parse_config_key(key: &str) -> Option<TabKey> {
+    if let Some(path) = key.strip_prefix(GAME_KEY_PREFIX) {
+        return (!path.is_empty()).then(|| TabKey::GameImage(path.to_string()));
+    }
+    if key.starts_with(INTERNAL_PREFIX) {
+        return Some(TabKey::Internal(key.to_string()));
+    }
     match key.split_once('#') {
-        Some((rel, lang)) => Some((assets::id_from_source_rel(rel)?, Some(Lang::from_label(lang)?))),
-        None => Some((assets::id_from_source_rel(key)?, None)),
+        Some((rel, lang)) => Some(TabKey::Generated(assets::id_from_source_rel(rel)?, Lang::from_label(lang)?)),
+        None => Some(TabKey::Asset(assets::id_from_source_rel(key)?)),
     }
 }
 

@@ -9,7 +9,7 @@ use super::icons::{IconId, icon};
 use super::tooltip::Tooltip;
 use super::{HoverRow, OnActivate, TEXT, TEXT_DIM, text};
 use crate::state::{Action, Actions, CloseTabs, Editor, Unsaved};
-use crate::tab::{Tab, labels};
+use crate::tab::labels;
 
 #[derive(Component, Default, Clone)]
 pub struct TabsBar;
@@ -77,15 +77,7 @@ fn redraw(
         .iter()
         .zip(labels)
         .enumerate()
-        .map(|(i, (t, label))| {
-            let icon = match t {
-                Tab::Graph(d) => IconId::for_asset(Some(d.asset.kind)),
-                Tab::Text(_) => IconId::Code,
-                Tab::Curve(_) => IconId::Curve,
-                Tab::Consts(_) => IconId::Consts,
-            };
-            (label, t.title(), icon, t.is_dirty(), editor.active == Some(i))
-        })
+        .map(|(i, (t, label))| (label, t.title(), t.doc().icon(), t.doc().is_dirty(), editor.active == Some(i)))
         .collect();
     if last.as_ref() == Some(&key) {
         return;

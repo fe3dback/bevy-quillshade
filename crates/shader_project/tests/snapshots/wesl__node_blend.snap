@@ -6,6 +6,11 @@ source: crates/shader_project/tests/snapshots.rs
 import bevy_pbr::render::forward_io::VertexOutput;
 import super::super::stdlib::color::sg_blend_overlay;
 
+// The game's compiled material enables this feature; after a change of parameters, texture bindings or
+// World Position Offset the shader stops compiling here until the game is rebuilt.
+@if(!SG_LAYOUT_740e364b)
+const_assert material_layout_changed__rebuild_the_game;
+
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // --- graph ---

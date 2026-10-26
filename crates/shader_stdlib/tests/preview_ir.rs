@@ -5,7 +5,7 @@ use shader_graph_core::ir::{IrPreview, WPO_PIN, build_ir};
 use shader_graph_core::model::{
     Asset, AssetKind, MaterialKind, Node, PbrSettings, Preview, PreviewMode, SpriteSettings, UnlitSettings,
 };
-use shader_graph_core::registry::{NoCurves, NoFunctions};
+use shader_graph_core::registry::{NoCurves, NoFunctions, NoTextures};
 use shader_graph_core::{Code, Diagnostic, Ir, Value};
 
 fn node(a: &mut Asset, id: &str, kind: &str, params: &[(&str, Value)]) -> String {
@@ -19,7 +19,7 @@ fn node(a: &mut Asset, id: &str, kind: &str, params: &[(&str, Value)]) -> String
 
 fn build(a: &Asset) -> (Ir, Vec<Diagnostic>) {
     let reg = shader_stdlib::registry();
-    let r = build_ir(a, "test/mat", &reg, &NoFunctions, &NoCurves, &NoConsts);
+    let r = build_ir(a, "test/mat", &reg, &NoFunctions, &NoCurves, &NoConsts, &NoTextures);
     let errors: Vec<_> = r.diagnostics.iter().filter(|d| d.is_error()).collect();
     assert!(errors.is_empty(), "{errors:?}");
     (r.ir.expect("ir"), r.diagnostics)
@@ -144,7 +144,7 @@ fn preview_ignored_messages() {
     for (target, text) in [("odd", "cannot be resolved"), ("out", "material output node cannot be previewed")] {
         a.preview = Preview { node: Some(target.into()), mode: PreviewMode::Unlit };
         let reg = shader_stdlib::registry();
-        let r = build_ir(&a, "test/mat", &reg, &NoFunctions, &NoCurves, &NoConsts);
+        let r = build_ir(&a, "test/mat", &reg, &NoFunctions, &NoCurves, &NoConsts, &NoTextures);
         assert!(
             r.diagnostics
                 .iter()
@@ -230,7 +230,7 @@ fn full_preview_forces_alpha_over_an_opacity_slot() {
     node(&mut a, "out", "output::Pbr3d", &[]);
     node(&mut a, "m", "test::OpaqueSlotMul", &[]);
     a.preview = Preview { node: Some("m".into()), mode: PreviewMode::Full };
-    let r = build_ir(&a, "test/mat", &reg, &NoFunctions, &NoCurves, &NoConsts);
+    let r = build_ir(&a, "test/mat", &reg, &NoFunctions, &NoCurves, &NoConsts, &NoTextures);
     let ir = r.ir.expect("ir");
     assert!(ir.preview.is_some(), "{:?}", r.diagnostics);
     assert_eq!(ir.main.outputs.keys().collect::<Vec<_>>(), ["base_color"], "alpha stays 1 (decision 0022)");

@@ -10,6 +10,10 @@ import super::super::stdlib::uv::{sg_flipbook_uv, sg_rotate_uv};
 
 @group(constants::MATERIAL_BIND_GROUP) @binding(101) var inp_atlas: texture_2d<f32>;
 @group(constants::MATERIAL_BIND_GROUP) @binding(102) var inp_atlas_sampler: sampler;
+// The game's compiled material enables this feature; after a change of parameters, texture bindings or
+// World Position Offset the shader stops compiling here until the game is rebuilt.
+@if(!SG_LAYOUT_535442a9)
+const_assert material_layout_changed__rebuild_the_game;
 
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {

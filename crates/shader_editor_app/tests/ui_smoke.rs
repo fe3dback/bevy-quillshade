@@ -295,3 +295,147 @@ fn rows_without_editor_keep_their_alignment() {
     let row = app.world().get::<ChildOf>(out).unwrap().parent();
     assert_eq!(app.world().get::<Children>(row).unwrap().len(), 2);
 }
+
+#[test]
+fn node_previews_follow_the_model_without_rebuild() {
+    use shader_editor_app::ui::const_preview::{ConstPart, ConstPreview};
+    use shader_editor_app::ui::node_preview::{NodePreviewsPlugin, PreviewNa, PreviewRoot};
+    use shader_graph_core::Value;
+
+    let (_dir, mut app) = app();
+    app.add_plugins(NodePreviewsPlugin);
+    act(&mut app, Action::OpenAsset(AssetId::new(AssetType::Material, "fx/global_tint")));
+    let amount = {
+        let d = app.world().resource::<Editor>().doc().unwrap();
+        let (id, _) = d.asset.nodes.iter().find(|(_, n)| n.kind == "stdlib::GlobalConstF32").unwrap();
+        id.clone()
+    };
+    // The number of the constant and whether "n/a" is visible, in the row of `amount`.
+    let row = |app: &mut App| {
+        let w = app.world_mut();
+        let root = w.query::<(Entity, &PreviewRoot<ConstPreview>)>().iter(w).find(|(_, r)| r.node == amount).unwrap().0;
+        let children: Vec<Entity> = w.get::<Children>(root).unwrap().iter().collect();
+        let number = children.iter().copied().find(|c| matches!(w.get::<ConstPart>(*c), Some(ConstPart::Number)));
+        let na = children.iter().copied().find(|c| w.get::<PreviewNa>(*c).is_some()).unwrap();
+        let text = number.map(|n| w.get::<Text>(n).unwrap().0.clone());
+        (number, text, w.get::<Visibility>(na) == Some(&Visibility::Hidden))
+    };
+    let (number, text, na_hidden) = row(&mut app);
+    assert_eq!((text.as_deref(), na_hidden), (Some("0.35"), true));
+
+    // A table change (here: on disk) shows on the same entities: no canvas rebuild.
+    let shown = app.world().resource::<EditorCanvas>().shown.clone();
+    {
+        let mut e = app.world_mut().resource_mut::<Editor>();
+        let table = e.disk.consts.values_mut().find_map(|t| t.as_mut().ok()).unwrap();
+        table.consts.iter_mut().find(|c| c.name == "glow_amount").unwrap().value = Value::Float(0.9);
+    }
+    app.update();
+    assert_eq!(row(&mut app), (number, Some("0.9".into()), true));
+    assert_eq!(app.world().resource::<EditorCanvas>().shown, shown, "not rebuilt");
+
+    // A node reading an unknown constant shows "n/a".
+    let target = PropTarget::Param { node: amount.clone(), key: "const".into() };
+    act(&mut app, Action::SetValue { target, value: Value::Str("missing".into()), merge: false });
+    let (_, text, na_hidden) = row(&mut app);
+    assert_eq!((text.as_deref(), na_hidden), (Some(""), false));
+}
+
+/// A preview kind whose data never draws (as an image that fails to decode).
+struct FailingPreview;
+
+impl shader_editor_app::ui::node_preview::NodePreview for FailingPreview {
+    type Key = ();
+    type Draw = ();
+
+    fn applies(_: &dyn shader_graph_core::registry::NodeDef) -> bool {
+        true
+    }
+
+    fn layout(_: &dyn shader_graph_core::registry::NodeDef) -> Node {
+        Node::default()
+    }
+
+    fn content(_: &dyn shader_graph_core::registry::NodeDef) -> Box<dyn Scene> {
+        Box::new(bsn! { Node })
+    }
+
+    fn key(_: &Editor, _: &shader_editor_app::doc::Doc, _: &String) -> Option<()> {
+        Some(())
+    }
+
+    fn draw(_: Option<&()>, _: shader_editor_app::ui::node_preview::PreviewTarget, _: &mut ()) -> bool {
+        false
+    }
+}
+
+#[test]
+fn a_preview_that_fails_to_draw_shows_na() {
+    use shader_editor_app::ui::node_preview::{NodePreviewPlugin, PreviewNa, PreviewRoot, preview_row};
+
+    let (_dir, mut app) = app();
+    app.add_plugins(NodePreviewPlugin::<FailingPreview>::default());
+    act(&mut app, Action::OpenAsset(AssetId::new(AssetType::Material, "fx/global_tint")));
+    let def = app.world().resource::<Editor>().registry.get("stdlib::Time").unwrap().clone();
+    let row = preview_row::<FailingPreview>(def.as_ref(), &"n1".to_string()).unwrap();
+    app.world_mut().spawn_scene(row).unwrap();
+    app.update();
+    let w = app.world_mut();
+    let root = w.query_filtered::<Entity, With<PreviewRoot<FailingPreview>>>().single(w).unwrap();
+    let na = w.get::<Children>(root).unwrap().iter().find(|c| w.get::<PreviewNa>(*c).is_some()).unwrap();
+    assert_eq!(w.get::<Visibility>(na), Some(&Visibility::Inherited), "a key that does not draw shows n/a");
+}
+
+#[test]
+fn texture_thumbnail_shows_the_image_and_na_without_rebuild() {
+    use shader_editor_app::ui::node_preview::{NodePreviewsPlugin, PreviewNa, PreviewRoot};
+    use shader_editor_app::ui::texture_preview::{SIDE, TexturePart, TexturePreview};
+    use shader_graph_core::Value;
+
+    let (dir, mut app) = app();
+    let textures = dir.path().join("assets/textures");
+    std::fs::create_dir_all(&textures).unwrap();
+    let sample = concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples/sample_game/assets/textures/rock_albedo.ktx2");
+    std::fs::copy(sample, textures.join("rock_albedo.ktx2")).unwrap();
+    app.add_plugins(NodePreviewsPlugin);
+    act(&mut app, Action::OpenAsset(AssetId::new(AssetType::Material, "env/rock_wet")));
+    let node = |app: &App, default: &str| {
+        let d = app.world().resource::<Editor>().doc().unwrap();
+        let v = Value::Str(default.into());
+        d.asset.nodes.iter().find(|(_, n)| n.params.get("default") == Some(&v)).unwrap().0.clone()
+    };
+    let (albedo, normal) = (node(&app, "textures/rock_albedo"), node(&app, "textures/rock_normal"));
+    // (row root, "n/a" visible, image tint, image width) of `node`'s thumbnail.
+    let row = |app: &mut App, node: &str| {
+        let w = app.world_mut();
+        let root = w.query::<(Entity, &PreviewRoot<TexturePreview>)>().iter(w).find(|(_, r)| r.node == node).unwrap().0;
+        let na = w.get::<Children>(root).unwrap().iter().find(|c| w.get::<PreviewNa>(*c).is_some()).unwrap();
+        let image = w
+            .query::<(Entity, &TexturePart)>()
+            .iter(w)
+            .find(|(e, p)| {
+                **p == TexturePart::Image
+                    && std::iter::successors(Some(*e), |e| w.get::<ChildOf>(*e).map(ChildOf::parent)).any(|e| e == root)
+            })
+            .unwrap()
+            .0;
+        let (tint, width) = (w.get::<ImageNode>(image).unwrap().color, w.get::<Node>(image).unwrap().width);
+        (root, w.get::<Visibility>(na) == Some(&Visibility::Inherited), tint, width)
+    };
+    let (root, na, tint, width) = row(&mut app, &albedo);
+    assert_eq!((na, tint, width), (false, Color::WHITE, px(SIDE)), "the image fills the square");
+    let (_, na, tint, _) = row(&mut app, &normal);
+    assert_eq!((na, tint), (true, Color::NONE), "rock_normal.png is not in this project: n/a");
+
+    // The Texture asset now points at a missing file (here: on disk): n/a on the same row, no canvas rebuild.
+    let shown = app.world().resource::<EditorCanvas>().shown.clone();
+    {
+        let mut e = app.world_mut().resource_mut::<Editor>();
+        let id = AssetId::new(AssetType::Texture, "textures/rock_albedo");
+        e.disk.textures.get_mut(&id).unwrap().as_mut().unwrap().path = "textures/gone.png".into();
+    }
+    app.update();
+    let (same, na, tint, _) = row(&mut app, &albedo);
+    assert_eq!((same, na, tint), (root, true, Color::NONE));
+    assert_eq!(app.world().resource::<EditorCanvas>().shown, shown, "not rebuilt");
+}

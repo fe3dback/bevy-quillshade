@@ -9,7 +9,7 @@ use bevy::feathers::tokens;
 use bevy::input_focus::tab_navigation::TabGroup;
 use bevy::prelude::*;
 use bevy::ui::ui_transform::UiGlobalTransform;
-use bevy::ui_widgets::{Activate, ScrollArea};
+use bevy::ui_widgets::{Activate, Button, ScrollArea};
 use bevy_noodle::style::kit;
 
 use crate::state::{Action, Actions, Editor, GenFile, Unsaved, ViewRequest};
@@ -22,19 +22,23 @@ pub mod curve_preview;
 pub mod curve_view;
 pub mod dialog;
 pub mod icons;
+pub mod image_view;
 pub mod input;
 pub mod log;
 pub mod logo;
+pub mod node_preview;
 pub mod palette;
 pub mod props;
 pub mod tabs;
 pub mod text_view;
+pub mod texture_preview;
+pub mod texture_view;
 pub mod tooltip;
+pub mod tree;
 pub mod welcome;
 
 use dialog::{menu_separator, open_icon_menu};
 use icons::{IconId, icon};
-use shader_graph_core::model::{AssetKind, MaterialKind};
 use tooltip::Tooltip;
 
 /// Pushes its action when the widget is activated (buttons, menu items).
@@ -92,9 +96,8 @@ impl Plugin for UiPlugin {
             tabs::TabsPlugin,
             text_view::TextViewPlugin,
             curve_view::CurveViewPlugin,
-            curve_preview::CurvePreviewPlugin,
             consts_view::ConstsViewPlugin,
-            const_preview::ConstPreviewPlugin,
+            node_preview::NodePreviewsPlugin,
             props::PropsPlugin,
             log::LogPlugin,
             dialog::DialogPlugin,
@@ -103,7 +106,13 @@ impl Plugin for UiPlugin {
             input::InputPlugin,
             tooltip::TooltipPlugin,
         ))
-        .add_plugins((logo::LogoPlugin, welcome::WelcomePlugin))
+        .add_plugins((
+            logo::LogoPlugin,
+            welcome::WelcomePlugin,
+            image_view::ImageViewPlugin,
+            texture_view::TextureViewPlugin,
+            crate::game_image::GameImagePlugin,
+        ))
         .add_systems(Startup, spawn_layout)
         .add_systems(Update, (show_active_view, show_empty_hint, show_doc_kind, show_status, redraw_view_tools))
         .add_observer(activate_action)
@@ -183,6 +192,37 @@ pub fn button(label: impl Into<String>, action: Action, primary: bool) -> impl S
     }
 }
 
+/// A toggle chip (a step tab, one button of a button group): accent background while `selected`, an optional dim
+/// `tag` after the label.
+pub fn chip(
+    label: impl Into<String>,
+    action: Action,
+    selected: bool,
+    tip: impl Into<String>,
+    tag: Option<&str>,
+) -> impl Scene {
+    let label = label.into();
+    let base = if selected { ACCENT.with_alpha(0.45) } else { Color::NONE };
+    let (act, hover, tip) = (OnActivate(action), HoverRow { base }, Tooltip(tip.into()));
+    let tag_color = if selected { TEXT } else { TEXT_DIM };
+    let tags: Vec<Box<dyn Scene>> =
+        tag.map(|t| -> Box<dyn Scene> { Box::new(text(t, tag_color, 11.0)) }).into_iter().collect();
+    bsn! {
+        Node {
+            align_items: AlignItems::Center,
+            column_gap: px(6),
+            padding: UiRect::axes(px(8), px(4)),
+            border_radius: BorderRadius::all(px(4)),
+        }
+        BackgroundColor(base)
+        Button
+        act
+        hover
+        tip
+        Children [ @text(label, TEXT, 13.0) -- {tags} ]
+    }
+}
+
 /// Plain text with an explicit color and size.
 pub fn text(s: impl Into<String>, color: Color, font_size: f32) -> impl Scene {
     let s = s.into();
@@ -237,7 +277,7 @@ impl MainMenu {
                 items
             }
             MainMenu::Help => vec![
-                (Some(IconId::Help), "Quick Start".into(), Action::QuickStart),
+                (Some(IconId::Help), "Quick Start".into(), Action::QuickStart(0)),
                 (Some(IconId::Link), "Project Page".into(), Action::OpenUrl(crate::PROJECT_URL.into())),
                 menu_separator(),
                 (Some(IconId::Info), "About".into(), Action::About),
@@ -325,8 +365,9 @@ fn view_tools(tab: &Tab) -> Vec<Box<dyn Scene>> {
                 "Delete the selected points (Del)",
             )),
         ],
-        // The add form has its own Add button.
-        Tab::Consts(_) => Vec::new(),
+        // The add form has its own Add button; an image has nothing to act on (Properties offers its Texture asset);
+        // a Texture tab's form and preview controls are in the view.
+        Tab::Consts(_) | Tab::Image(_) | Tab::Texture(_) => Vec::new(),
         Tab::Text(t) => {
             let which = match t.lang {
                 Lang::Wesl => GenFile::Wesl,
@@ -358,7 +399,7 @@ fn redraw_view_tools(
     mut commands: Commands,
 ) {
     // A text tab's buttons name its source: rebuilt per tab, not per view kind.
-    let key = editor.tab().map(Tab::config_key);
+    let key = editor.tab().and_then(|t| t.doc().config_key());
     if last.as_ref() == Some(&key) {
         return;
     }
@@ -405,9 +446,13 @@ fn spawn_layout(mut commands: Commands) {
                 BackgroundColor(PANEL_BG)
                 BorderColor::all(BORDER)
                 Children [
-                    @header("Assets")
+                    @header("Project")
                     --
-                    @scroll_column() browser::BrowserBody
+                    @scroll_column() browser::BrowserBody Node { flex_grow: 3.0, flex_basis: px(0) }
+                    --
+                    @header("Game Assets")
+                    --
+                    @scroll_column() browser::GameAssetsBody Node { flex_grow: 2.0, flex_basis: px(0) }
                 ]
                 --
                 // Center: tabs, canvas, log.
@@ -435,6 +480,10 @@ fn spawn_layout(mut commands: Commands) {
                         @curve_view::curve_view()
                         --
                         @consts_view::consts_view()
+                        --
+                        @image_view::image_view()
+                        --
+                        @texture_view::texture_view()
                         --
                         EmptyHint
                         Node { position_type: PositionType::Absolute, left: px(24), top: px(24) }
@@ -487,7 +536,7 @@ fn spawn_layout(mut commands: Commands) {
 }
 
 fn show_active_view(editor: Res<Editor>, mut q: Query<(&ViewOf, &mut Visibility)>) {
-    let active = editor.tab().map_or(ViewKind::Graph, Tab::view);
+    let active = editor.tab().map_or(ViewKind::Graph, |t| t.doc().view());
     for (view, mut v) in &mut q {
         v.set_if_neq(if view.0 == active { Visibility::Inherited } else { Visibility::Hidden });
     }
@@ -500,23 +549,9 @@ fn show_empty_hint(editor: Res<Editor>, mut q: Query<&mut Visibility, With<Empty
     }
 }
 
-/// Watermark text for a tab: the asset type of a graph, the language of a generated file.
-fn doc_kind_label(tab: &Tab) -> &'static str {
-    match tab {
-        Tab::Graph(d) => match d.asset.kind {
-            AssetKind::Function => "function",
-            AssetKind::Material(MaterialKind::Pbr3d(_)) => "pbr3d",
-            AssetKind::Material(MaterialKind::Unlit3d(_)) => "unlit3d",
-            AssetKind::Material(MaterialKind::Sprite2d(_)) => "sprite2d",
-        },
-        Tab::Text(t) => t.lang.label(),
-        Tab::Curve(_) => "curve",
-        Tab::Consts(_) => "consts",
-    }
-}
-
+/// Watermark text: the asset type of a graph, the language of a generated file ([`crate::doc_kind::TabDoc::kind_label`]).
 fn show_doc_kind(editor: Res<Editor>, mut q: Query<&mut Text, With<DocKindText>>) {
-    let label = editor.tab().map_or("", doc_kind_label);
+    let label = editor.tab().map_or("", |t| t.doc().kind_label());
     for mut t in &mut q {
         if t.0 != label {
             t.0 = label.into();

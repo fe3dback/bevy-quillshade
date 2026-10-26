@@ -10,8 +10,9 @@ use crate::ident::{check_ident, input_ident};
 use crate::model::{Asset, AssetKind, Edge, MaterialKind, NodeId, PbrOutputMode, PreviewMode};
 use crate::preview::{PreviewSlot, PreviewSource, albedo_expr};
 use crate::registry::{
-    Builtin, CurveLookup, EmitCtx, EmitSink, Env, FnPort, FunctionLookup, FunctionSig, IrLine, MaterialParam, NodeDef,
-    NodeRole, Operand, ParamType, ROUTE_PARAM, Registry, SigCtx, Signature, Stage,
+    Builtin, CurveLookup, EmitCtx, EmitSink, Env, FnPort, FunctionLookup, FunctionSig, HiddenTexture, IrLine,
+    MaterialParam, NodeDef, NodeRole, Operand, ParamType, ROUTE_PARAM, Registry, SigCtx, Signature, Stage,
+    TextureLookup, fixed_texture_ident,
 };
 use crate::types::{PinType, conversion};
 use crate::value::Value;
@@ -131,13 +132,39 @@ impl UniformLayout {
             }
         }
         if !fields.is_empty() {
-            while offset % 16 != 0 {
+            while !offset.is_multiple_of(16) {
                 push_pad(&mut fields, &mut offset);
             }
         }
         UniformLayout { fields, size: offset }
     }
 }
+
+/// Where the texture of a material binding comes from (design §1.3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TextureSource {
+    /// Texture parameter (its name without the `inp_` prefix): set from the game, `texture` is its default.
+    Param(String),
+    /// Fixed texture of node `node`: of the material itself (`origin: None`) or of a function it calls (`origin`
+    /// = the path of the function the node lives in).
+    Fixed { node: NodeId, origin: Option<String> },
+}
+
+/// One texture + sampler binding of a material. The IR owns the full list, like the uniform layout, so the WESL
+/// declarations and the Rust `#[texture]` / `#[sampler]` fields agree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextureBinding {
+    /// WESL / Rust identifier of the texture (`inp_albedo`, `ft_n03`); the sampler is `{ident}_sampler`.
+    pub ident: String,
+    pub source: TextureSource,
+    /// Texture asset id (or `@internal/*`): the fixed texture, or a parameter's default. Never empty.
+    pub texture: String,
+    /// Texture binding; the sampler is at `binding + 1`.
+    pub binding: u32,
+}
+
+/// First texture binding (the uniform block is `@binding(100)`).
+pub const FIRST_TEXTURE_BINDING: u32 = 101;
 
 /// Active node preview of a material (decision 0022).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -157,9 +184,12 @@ pub struct Ir {
     pub main: IrStage,
     /// Vertex stage (World Position Offset), materials only.
     pub vertex: Option<IrStage>,
-    /// Material parameters in constructor order.
+    /// Material parameters sorted by name (ties: node id; decision 0027): constructor and binding order.
     pub params: Vec<MaterialParam>,
     pub uniform: UniformLayout,
+    /// Texture bindings of a material: parameters first (by name), then fixed textures sorted by
+    /// `(origin, node)`; numbered `101/102`, `103/104`, … Empty for functions.
+    pub textures: Vec<TextureBinding>,
     pub stdlib: BTreeSet<(String, String)>,
     /// Project functions called (paths).
     pub functions: BTreeSet<String>,
@@ -175,8 +205,9 @@ pub struct Ir {
 }
 
 impl Ir {
-    pub fn texture_params(&self) -> impl Iterator<Item = &MaterialParam> {
-        self.params.iter().filter(|p| p.ty == ParamType::Texture)
+    /// Texture binding of the texture parameter `name`.
+    pub fn param_texture(&self, name: &str) -> Option<&TextureBinding> {
+        self.textures.iter().find(|t| matches!(&t.source, TextureSource::Param(p) if p == name))
     }
 
     /// All builtins used by any stage.
@@ -186,6 +217,32 @@ impl Ir {
             b.extend(v.builtins.iter().copied());
         }
         b
+    }
+
+    /// WESL feature naming the binding layout of a material (decision 0029): `SG_LAYOUT_` + an FNV-1a hash of its
+    /// kind, vertex stage, uniform fields (names, types, offsets) and texture binding numbers. The generated Rust
+    /// material enables it in `specialize`; the WESL refuses to compile without it, so a hot-reloaded shader whose
+    /// bindings no longer match the compiled game fails to compile instead of failing pipeline creation (which quits
+    /// the game). Texture identifiers are left out: the bindings are matched by number (the runtime overlay maps
+    /// them by position), so wiring another fixed texture node in keeps the layout.
+    pub fn layout_feature(&self) -> String {
+        let kind = match self.kind.material() {
+            Some(MaterialKind::Pbr3d(_)) => "pbr3d",
+            Some(MaterialKind::Unlit3d(_)) => "unlit3d",
+            Some(MaterialKind::Sprite2d(_)) => "sprite2d",
+            None => "function",
+        };
+        let mut key = format!("{kind};vertex={};", self.vertex.is_some());
+        for f in &self.uniform.fields {
+            key.push_str(&format!("{}:{:?}@{};", f.name, f.ty, f.offset));
+        }
+        key.push_str(&format!("size={};", self.uniform.size));
+        for t in &self.textures {
+            key.push_str(&format!("tex@{};", t.binding));
+        }
+        // FNV-1a (32 bit): stable across Rust versions, unlike `DefaultHasher`.
+        let hash = key.bytes().fold(0x811c_9dc5_u32, |h, b| (h ^ u32::from(b)).wrapping_mul(0x0100_0193));
+        format!("SG_LAYOUT_{hash:08x}")
     }
 }
 
@@ -238,6 +295,7 @@ pub fn declared_function_sig(asset: &Asset, path: &str, registry: &Registry) -> 
         inputs: inputs.into_iter().map(|x| x.2).collect(),
         outputs: outputs.into_iter().map(|x| x.2).collect(),
         builtins: Vec::new(),
+        textures: Vec::new(),
     }
 }
 
@@ -278,12 +336,13 @@ pub fn build_ir(
     functions: &dyn FunctionLookup,
     curves: &dyn CurveLookup,
     consts: &dyn ConstLookup,
+    textures: &dyn TextureLookup,
 ) -> IrResult {
     let original = asset;
     let routed = with_routes(asset, registry);
     let asset = routed.as_ref();
     let mut diags = Diagnostics::default();
-    let env = Env { asset_kind: asset.kind, asset_path: path, functions, curves, consts };
+    let env = Env { asset_kind: asset.kind, asset_path: path, functions, curves, consts, textures };
 
     if let Err(e) = check_ident(&asset.name) {
         diags.push(Diagnostic::new(Code::E005, format!("asset name: {e}")));
@@ -636,7 +695,9 @@ pub fn build_ir(
     let mut curves_used = BTreeSet::new();
     let mut custom_fns = BTreeMap::new();
     let mut params_by_node: BTreeMap<NodeId, MaterialParam> = BTreeMap::new();
+    let mut fixed_textures: BTreeMap<(Option<String>, NodeId), String> = BTreeMap::new();
     for sink in stages.values() {
+        fixed_textures.extend(sink.fixed_textures.iter().map(|(k, v)| (k.clone(), v.clone())));
         stdlib.extend(sink.stdlib.iter().cloned());
         functions_used.extend(sink.functions.iter().cloned());
         curves_used.extend(sink.curves.iter().cloned());
@@ -651,7 +712,8 @@ pub fn build_ir(
         }
     }
     let mut params: Vec<MaterialParam> = params_by_node.into_values().collect();
-    params.sort_by(|a, b| (a.order, &a.node).cmp(&(b.order, &b.node)));
+    // By name, so the order needs no editor field and survives copy/paste (decision 0027); duplicates are E005.
+    params.sort_by(|a, b| (&a.name, &a.node).cmp(&(&b.name, &b.node)));
     let mut names = BTreeSet::new();
     for p in &params {
         if let Err(e) = check_ident(&p.name) {
@@ -664,6 +726,29 @@ pub fn build_ir(
                 Diagnostic::new(Code::E005, format!("`{}_sampler` clashes with a texture sampler name", p.name))
                     .at_node(&p.node),
             );
+        }
+    }
+    {
+        // `ft_{fn}_{node}` maps `/` to `_` (design §1.3): two origins may only collide as `a/b_c` vs `a_b/c`.
+        let mut idents: BTreeMap<String, String> = BTreeMap::new();
+        for (origin, node) in fixed_textures.keys() {
+            let ident = fixed_texture_ident(origin.as_deref(), node);
+            let what = match origin {
+                Some(o) => format!("node `{node}` of function `{o}`"),
+                None => format!("node `{node}`"),
+            };
+            for name in [ident.clone(), format!("{ident}_sampler")] {
+                if let Some(other) = idents.insert(name.clone(), what.clone()) {
+                    diags.push(Diagnostic::new(
+                        Code::E006,
+                        format!(
+                            "the fixed textures of {other} and {what} get the same identifier `{name}`; \
+                             rename one of the functions"
+                        ),
+                    ));
+                    break;
+                }
+            }
         }
     }
     {
@@ -708,7 +793,7 @@ pub fn build_ir(
             // Not previewable after all: build the normal IR, so the extra upstream leaves no trace.
             let mut normal = original.clone();
             normal.preview.node = None;
-            let mut r = build_ir(&normal, path, registry, functions, curves, consts);
+            let mut r = build_ir(&normal, path, registry, functions, curves, consts, textures);
             let msg = format!("preview ignored: `{}` has no output that converts to a color", n.def.info().name);
             r.diagnostics.push(Diagnostic::new(Code::W107, msg).at_node(p));
             return r;
@@ -765,6 +850,13 @@ pub fn build_ir(
     let function_sig = if asset.kind.is_function() {
         let mut sig = declared_function_sig(asset, path, registry);
         sig.builtins = main.builtins.iter().copied().collect();
+        // Own fixed textures and the callees' (all with an origin inside a function), sorted by `(origin, node)`.
+        sig.textures = fixed_textures
+            .iter()
+            .filter_map(|((origin, node), texture)| {
+                Some(HiddenTexture { origin: origin.clone()?, node: node.clone(), texture: texture.clone() })
+            })
+            .collect();
         let mut seen = BTreeSet::new();
         for (id, n) in &nodes {
             if matches!(n.def.role(), NodeRole::FunctionInput | NodeRole::FunctionOutput) {
@@ -801,6 +893,7 @@ pub fn build_ir(
 
     let uses_normal = main.outputs.contains_key("normal");
     let uniform = UniformLayout::compute(&params);
+    let textures = if asset.kind.is_function() { Vec::new() } else { texture_bindings(&params, fixed_textures) };
     IrResult {
         ir: Some(Ir {
             path: path.to_string(),
@@ -810,6 +903,7 @@ pub fn build_ir(
             vertex,
             params,
             uniform,
+            textures,
             stdlib,
             functions: functions_used,
             curves: curves_used,
@@ -820,6 +914,30 @@ pub fn build_ir(
         }),
         diagnostics: diags.into_vec(),
     }
+}
+
+/// Texture bindings of a material: texture parameters by name, then fixed textures by `(origin, node)`.
+fn texture_bindings(
+    params: &[MaterialParam],
+    fixed: BTreeMap<(Option<String>, NodeId), String>,
+) -> Vec<TextureBinding> {
+    let params = params
+        .iter()
+        .filter(|p| p.ty == ParamType::Texture)
+        .map(|p| (input_ident(&p.name), TextureSource::Param(p.name.clone()), p.default.as_str().to_string()));
+    let fixed = fixed.into_iter().map(|((origin, node), texture)| {
+        (fixed_texture_ident(origin.as_deref(), &node), TextureSource::Fixed { node, origin }, texture)
+    });
+    params
+        .chain(fixed)
+        .enumerate()
+        .map(|(i, (ident, source, texture))| TextureBinding {
+            ident,
+            source,
+            texture,
+            binding: FIRST_TEXTURE_BINDING + 2 * i as u32,
+        })
+        .collect()
 }
 
 /// Deterministic Kahn topological order of `set` (ties broken by node id).

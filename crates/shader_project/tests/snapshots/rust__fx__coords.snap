@@ -8,8 +8,17 @@ use bevy::prelude::*;
 use bevy::render::render_resource::{AsBindGroup, RenderPipelineDescriptor, SpecializedMeshPipelineError};
 use bevy::shader::ShaderRef;
 
+use crate::baked::MaterialValues;
+
 /// Asset path of the generated shader.
 pub const SHADER_PATH: &str = "shaders/autogen/dir_fx/mat_coords.wesl";
+
+/// Id of this material in the baked manifest (`baked.ron`).
+pub const BAKED_ID: &str = "fx/coords";
+
+/// WESL feature of this material's binding layout, enabled in `specialize`: a hot-reloaded shader whose
+/// bindings no longer match this code fails to compile instead of crashing the renderer (rebuild the game).
+pub const LAYOUT_FEATURE: &str = "SG_LAYOUT_535442a9";
 
 /// Unlit 3D material (`MeshMaterial3d`).
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone)]
@@ -34,8 +43,10 @@ impl Material for CoordsMaterial {
         _layout: &MeshVertexBufferLayoutRef,
         _key: MaterialPipelineKey<Self>,
     ) -> Result<(), SpecializedMeshPipelineError> {
+        descriptor.vertex.shader_defs.push(LAYOUT_FEATURE.into());
         descriptor.vertex.shader_defs.push("VERTEX_OUTPUT_INSTANCE_INDEX".into());
         if let Some(fragment) = descriptor.fragment.as_mut() {
+            fragment.shader_defs.push(LAYOUT_FEATURE.into());
             fragment.shader_defs.push("VERTEX_OUTPUT_INSTANCE_INDEX".into());
         }
         Ok(())
@@ -43,15 +54,25 @@ impl Material for CoordsMaterial {
 }
 
 impl CoordsMaterial {
-    /// All graph parameters are required; order = parameter order in the editor:
+    /// All graph parameters are required, sorted by name:
     /// - `inp_atlas`
-    pub fn new(inp_atlas: Handle<Image>) -> Self {
+    #[allow(dead_code)]
+    pub(crate) fn new(inp_atlas: Handle<Image>) -> Self {
         Self {
             inp_atlas,
         }
     }
 
-    pub fn set_inp_atlas(&mut self, v: Handle<Image>) {
+    /// Material from baked values: `v` from the manifest (a missing or mistyped value keeps the compiled
+    /// default, with a warning), `tex` maps a Texture asset id to its image.
+    pub(crate) fn from_values(v: &MaterialValues, tex: &dyn Fn(&str) -> Handle<Image>) -> Self {
+        Self {
+            inp_atlas: tex(v.texture(BAKED_ID, "inp_atlas")),
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn set_inp_atlas(&mut self, v: Handle<Image>) {
         self.inp_atlas = v;
     }
 }

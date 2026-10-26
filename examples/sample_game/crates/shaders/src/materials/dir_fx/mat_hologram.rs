@@ -6,8 +6,17 @@ use bevy::prelude::*;
 use bevy::render::render_resource::{AsBindGroup, ShaderType, RenderPipelineDescriptor, SpecializedMeshPipelineError};
 use bevy::shader::ShaderRef;
 
+use crate::baked::MaterialValues;
+
 /// Asset path of the generated shader.
 pub const SHADER_PATH: &str = "shaders/autogen/dir_fx/mat_hologram.wesl";
+
+/// Id of this material in the baked manifest (`baked.ron`).
+pub const BAKED_ID: &str = "fx/hologram";
+
+/// WESL feature of this material's binding layout, enabled in `specialize`: a hot-reloaded shader whose
+/// bindings no longer match this code fails to compile instead of crashing the renderer (rebuild the game).
+pub const LAYOUT_FEATURE: &str = "SG_LAYOUT_758e8054";
 
 /// Uniform block at `@binding(100)`; layout matches `HologramParams` in WESL (32 bytes).
 #[derive(ShaderType, Reflect, Debug, Clone, Copy, PartialEq)]
@@ -59,15 +68,20 @@ impl Material for HologramMaterial {
         _key: MaterialPipelineKey<Self>,
     ) -> Result<(), SpecializedMeshPipelineError> {
         descriptor.primitive.cull_mode = None;
+        descriptor.vertex.shader_defs.push(LAYOUT_FEATURE.into());
+        if let Some(fragment) = descriptor.fragment.as_mut() {
+            fragment.shader_defs.push(LAYOUT_FEATURE.into());
+        }
         Ok(())
     }
 }
 
 impl HologramMaterial {
-    /// All graph parameters are required; order = parameter order in the editor:
+    /// All graph parameters are required, sorted by name:
     /// - `inp_color`
     /// - `inp_scan_speed`, UI range 0.0..1.0
-    pub fn new(inp_color: LinearRgba, inp_scan_speed: f32) -> Self {
+    #[allow(dead_code)]
+    pub(crate) fn new(inp_color: LinearRgba, inp_scan_speed: f32) -> Self {
         Self {
             params: HologramParams {
                 inp_color: inp_color.to_vec4(),
@@ -79,11 +93,28 @@ impl HologramMaterial {
         }
     }
 
-    pub fn set_inp_color(&mut self, v: LinearRgba) {
+    /// Material from baked values: `v` from the manifest (a missing or mistyped value keeps the compiled
+    /// default, with a warning), `tex` maps a Texture asset id to its image.
+    pub(crate) fn from_values(v: &MaterialValues, _tex: &dyn Fn(&str) -> Handle<Image>) -> Self {
+        let d = HologramParams::default();
+        Self {
+            params: HologramParams {
+                inp_color: v.color(BAKED_ID, "inp_color").unwrap_or(d.inp_color),
+                inp_scan_speed: v.float(BAKED_ID, "inp_scan_speed").unwrap_or(d.inp_scan_speed),
+                _pad0: 0.0,
+                _pad1: 0.0,
+                _pad2: 0.0,
+            },
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn set_inp_color(&mut self, v: LinearRgba) {
         self.params.inp_color = v.to_vec4();
     }
 
-    pub fn set_inp_scan_speed(&mut self, v: f32) {
+    #[allow(dead_code)]
+    pub(crate) fn set_inp_scan_speed(&mut self, v: f32) {
         self.params.inp_scan_speed = v;
     }
 }

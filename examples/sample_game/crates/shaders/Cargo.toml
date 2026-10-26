@@ -6,4 +6,6 @@ edition = "2024"
 publish = false
 
 [dependencies]
-bevy = { version = "0.20", default-features = false, features = ["std", "bevy_pbr", "bevy_sprite_render", "bevy_asset", "bevy_color", "bevy_mesh"] }
+bevy = { version = "0.20", default-features = false, features = ["std", "bevy_pbr", "bevy_sprite_render", "bevy_asset", "bevy_color", "bevy_mesh", "bevy_log", "png", "ktx2", "zstd_rust"] }
+serde = { version = "1", features = ["derive"] }
+ron = "0.12"

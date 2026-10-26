@@ -25,7 +25,6 @@ Asset(
       params: {
         "default": Color((0.9, 0.4, 0.1, 1.0)),
         "name": Str("mesh"),
-        "order": Int(1),
       },
     ),
     "n04": Node(

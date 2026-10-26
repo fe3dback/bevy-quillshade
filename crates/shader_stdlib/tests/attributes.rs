@@ -6,7 +6,7 @@ use shader_graph_core::ir::{WPO_PIN, build_ir};
 use shader_graph_core::model::{
     Asset, AssetKind, BlendMode, MaterialKind, Node, PbrOutputMode, PbrSettings, Shading, UnlitSettings,
 };
-use shader_graph_core::registry::{NoCurves, NoFunctions, SigCtx};
+use shader_graph_core::registry::{NoCurves, NoFunctions, NoTextures, SigCtx};
 use shader_graph_core::{Code, Diagnostic, Ir, IrResult, PinType, Value};
 
 const MAKE: &str = "stdlib::MakeMaterialAttributesPbr";
@@ -23,7 +23,7 @@ fn node(a: &mut Asset, id: &str, kind: &str, params: &[(&str, Value)]) -> String
 
 fn build_raw(a: &Asset) -> IrResult {
     let reg = shader_stdlib::registry();
-    build_ir(a, "test/mat", &reg, &NoFunctions, &NoCurves, &NoConsts)
+    build_ir(a, "test/mat", &reg, &NoFunctions, &NoCurves, &NoConsts, &NoTextures)
 }
 
 fn build(a: &Asset) -> (Ir, Vec<Diagnostic>) {
@@ -86,6 +86,7 @@ fn make_has_field_pins() {
         functions: &NoFunctions,
         curves: &NoCurves,
         consts: &NoConsts,
+        textures: &NoTextures,
     };
     let empty = Default::default();
     let params = Default::default();
@@ -191,6 +192,7 @@ fn output_sig(settings: PbrSettings) -> shader_graph_core::Signature {
         functions: &NoFunctions,
         curves: &NoCurves,
         consts: &NoConsts,
+        textures: &NoTextures,
     };
     let empty = Default::default();
     let params = Default::default();

@@ -15,6 +15,7 @@ Asset(
       kind: "param::TextureObject",
       pos: (0.0, 0.0),
       params: {
+        "default": Str("textures/atlas"),
         "name": Str("atlas"),
       },
     ),

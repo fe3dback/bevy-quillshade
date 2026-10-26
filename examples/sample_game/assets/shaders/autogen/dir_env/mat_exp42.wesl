@@ -9,6 +9,10 @@ import bevy_pbr::render::mesh_view_bindings::globals;
 import bevy_render::globals::Globals;
 import super::super::curves::dir_common::crv_pulse::sample_curve_catmullrom as sg_curve_common__pulse_catmullrom;
 
+// The game's compiled material enables this feature; after a change of parameters, texture bindings or
+// World Position Offset the shader stops compiling here until the game is rebuilt.
+@if(!SG_LAYOUT_2198dbcb)
+const_assert material_layout_changed__rebuild_the_game;
 @if(PREPASS_PIPELINE) @group(0) @binding(1) var<uniform> sg_prepass_globals: Globals;
 
 @fragment

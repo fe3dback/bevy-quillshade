@@ -5,13 +5,18 @@
 //! first input pin of `SHADER_EDITOR_INPUT_NODE`, `node_rmb` right-clicks the middle of an unselected node (or of
 //! `SHADER_EDITOR_INPUT_NODE`) to open its menu, `node_dblclick` double-clicks the middle of that node (opens the
 //! file it refers to; the active tab is logged), `hover` rests on the toolbar's Undo button (its tooltip),
-//! `curve_drag` drags the second point of an open curve, `curve_add` double-clicks below it. The input goes through
+//! `curve_drag` drags the second point of an open curve, `curve_add` double-clicks below it, `texture_zoom` turns the
+//! wheel 10 notches over the preview of an open Texture tab (left of its centre), `drop_game_file` drags the Game
+//! Assets row of `SHADER_EDITOR_INPUT_FILE` (a path under `assets/`; default: the first game file) onto the middle of
+//! `SHADER_EDITOR_INPUT_NODE` (default: the canvas centre) and logs the texture references of the graph. The input
+//! goes through
 //! the same window messages winit writes,
 //! so picking, bevy_noodle and the editor see a real gesture; the outcome is logged.
 
 use bevy::feathers::controls::{FeathersColorInput, FeathersColorWheel, FeathersSlider};
 use bevy::input::ButtonState;
-use bevy::input::mouse::MouseButtonInput;
+use bevy::input::mouse::{MouseButtonInput, MouseScrollUnit, MouseWheel};
+use bevy::input::touch::TouchPhase;
 use bevy::prelude::*;
 use bevy::ui::ui_transform::UiGlobalTransform;
 use bevy::window::{CursorMoved, PrimaryWindow, WindowEvent};
@@ -22,7 +27,9 @@ use crate::state::{Editor, PropTarget};
 use crate::ui::curve_view::CurveHandle;
 use crate::ui::palette::Palette;
 use crate::ui::props::PropField;
+use crate::ui::texture_view::TextureViewArea;
 use crate::ui::tooltip::Tooltip;
+use crate::ui::tree::{TreeItem, TreeRow};
 
 /// First frame of the gesture (the asset opens on frame 2, the screenshot is taken on frame 240).
 const START: u32 = 160;
@@ -31,6 +38,8 @@ enum Step {
     Move(Vec2),
     Press(MouseButton),
     Release(MouseButton),
+    /// Wheel notches (positive: up / zoom in).
+    Wheel(f32),
     Wait,
 }
 
@@ -76,9 +85,13 @@ pub fn scripted_input(
     ports: Query<(&PinKey, &UiGlobalTransform, &ComputedNode)>,
     wheels: Query<(&UiGlobalTransform, &ComputedNode), With<FeathersColorWheel>>,
     tips: Query<(&Tooltip, &UiGlobalTransform, &ComputedNode)>,
-    handles: Query<(&CurveHandle, &UiGlobalTransform, &ComputedNode)>,
+    (handles, previews, rows): (
+        Query<(&CurveHandle, &UiGlobalTransform, &ComputedNode)>,
+        Query<(&UiGlobalTransform, &ComputedNode), With<TextureViewArea>>,
+        Query<(&TreeRow, &UiGlobalTransform, &ComputedNode)>,
+    ),
     mut events: MessageWriter<WindowEvent>,
-    mut moved: MessageWriter<CursorMoved>,
+    (mut moved, mut wheel): (MessageWriter<CursorMoved>, MessageWriter<MouseWheel>),
     mut buttons: MessageWriter<MouseButtonInput>,
 ) {
     let Ok(name) = std::env::var("SHADER_EDITOR_INPUT") else { return };
@@ -200,6 +213,30 @@ pub fn scripted_input(
                     [Step::Move(at)].into_iter().chain(click()).chain([Step::Wait]).chain(click()).collect()
                 }
             }
+            "texture_zoom" => {
+                let Some((t, c)) = previews.iter().next() else {
+                    error!("demo {name}: no Texture tab");
+                    return;
+                };
+                let at = logical(t, c) - Vec2::new(60.0, 0.0);
+                [Step::Move(at)].into_iter().chain((0..10).map(|_| Step::Wheel(1.0))).collect()
+            }
+            "drop_game_file" => {
+                let file = std::env::var("SHADER_EDITOR_INPUT_FILE").ok();
+                let row = rows
+                    .iter()
+                    .find(|r| matches!(&r.0.item, TreeItem::GameFile(p) if file.as_ref().is_none_or(|f| f == p)));
+                let Some((row, t, c)) = row else {
+                    error!("demo {name}: no Game Assets row {file:?}");
+                    return;
+                };
+                let target = wanted.as_ref().and_then(|w| nodes.iter().find(|n| n.0.0 == *w));
+                s.node = target.map(|n| n.0.0.clone());
+                let to = target.map_or(logical(ct, cc), |(_, _, t, c)| logical(t, c));
+                let from = logical(t, c);
+                info!("demo {name}: dragging {:?} from {from} to {to}", row.item);
+                drag(from, MouseButton::Left, to - from)
+            }
             "rmb_pan" => drag(canvas_min + 20.0, MouseButton::Right, Vec2::new(150.0, 80.0)),
             "mmb_pan" => drag(canvas_min + 20.0, MouseButton::Middle, Vec2::new(150.0, 80.0)),
             other => {
@@ -239,10 +276,25 @@ pub fn scripted_input(
                 buttons.write(e);
                 events.write(e.into());
             }
+            Some(Step::Wheel(y)) => {
+                let e = MouseWheel { unit: MouseScrollUnit::Line, x: 0.0, y, window, phase: TouchPhase::Moved };
+                wheel.write(e);
+                events.write(e.into());
+            }
             Some(Step::Wait) => {}
             None if s.frame == START + 40 && name == "node_dblclick" => {
-                let tab = editor.active.map(|i| editor.tabs[i].asset().source_rel());
+                let tab = editor.active.and_then(|i| editor.tabs[i].owner()).map(shader_project::AssetId::source_rel);
                 info!("demo node_dblclick: active tab {}", tab.unwrap_or_default());
+            }
+            None if s.frame == START + 40 && name == "drop_game_file" => {
+                let Some(d) = editor.doc() else { return };
+                for (id, n) in &d.asset.nodes {
+                    let tex = n.params.get("texture").or_else(|| n.params.get("default"));
+                    if n.kind.contains("Texture") {
+                        info!("demo drop_game_file: rev {} node {id} {} at {:?} = {tex:?}", d.revision, n.kind, n.pos);
+                    }
+                }
+                info!("demo drop_game_file: selection {:?}", d.selection);
             }
             None if s.frame == START + 40 => report(&s),
             None => {}

@@ -22,7 +22,8 @@ use crate::consts_doc::ConstsDoc;
 use crate::curve_doc::CurveDoc;
 use crate::doc::{node_signature, route_declarations};
 use crate::state::{Action, Actions, Editor, GenFile, PropTarget, display_value, preview_mode_label};
-use crate::tab::{Lang, Tab, TextDoc};
+use crate::tab::{ImageDoc, Lang, Tab, TextDoc};
+use crate::texture_doc::TextureDoc;
 
 #[derive(Component, Default, Clone)]
 pub struct PropsBody;
@@ -200,12 +201,13 @@ fn keyed_select(target: PropTarget, choices: &[(String, String)], current: &str)
 }
 
 /// Choices of reference parameters: named route declarations of the asset, curve assets of the project, global
-/// constants (of the parameter's type).
+/// constants (of the parameter's type), Texture assets and built-in textures.
 #[derive(Default, Clone)]
 struct Choices {
     routes: Vec<(String, String)>,
     curves: Vec<(String, String)>,
     consts: Vec<(String, String)>,
+    textures: Vec<(String, String)>,
 }
 
 /// Widget editing a value of `kind`.
@@ -214,6 +216,8 @@ fn value_widget(target: PropTarget, kind: &ParamKind, v: &Value, choices: &Choic
         ParamKind::Route => keyed_select(target, &choices.routes, v.as_str()),
         ParamKind::Curve => keyed_select(target, &choices.curves, v.as_str()),
         ParamKind::GlobalConst(_) => keyed_select(target, &choices.consts, v.as_str()),
+        // `(none)`: the node uses the default texture (W110).
+        ParamKind::Texture => keyed_select(target, &choices.textures, v.as_str()),
         ParamKind::Float { .. } => number(target, 0, v.as_f32(), None),
         ParamKind::Float2 => vector(target, &v.coerce(PinType::Float2).floats(), false),
         ParamKind::Float3 => vector(target, &v.coerce(PinType::Float3).floats(), false),
@@ -320,6 +324,57 @@ fn curve_rows(c: &CurveDoc, out: &mut Vec<Box<dyn Scene>>) {
     }
     out.push(Box::new(section("Hotkeys")));
     for (keys, what) in CURVE_HOTKEYS {
+        out.push(Box::new(hotkey_row(keys, what)));
+    }
+}
+
+/// A game image tab (design §4.4): the file and the Texture asset pointing at it (size and format are in the view's
+/// header, they come from the decoded image).
+fn image_rows(editor: &Editor, i: &ImageDoc, out: &mut Vec<Box<dyn Scene>>) {
+    use crate::doc_kind::TabDoc;
+    out.push(Box::new(text(i.base_title(), TEXT, 15.0)));
+    out.push(Box::new(text("Game image, read-only", TEXT_DIM, 12.0)));
+    match editor.texture_for_file(&i.path) {
+        Some(id) => out.push(Box::new(text(format!("Texture asset: {}", id.source_rel()), TEXT_DIM, 12.0))),
+        None => out.push(Box::new(button("Create Texture Asset", Action::CreateTextureForFile(i.path.clone()), false))),
+    }
+}
+
+/// Hotkeys of the Texture tab's preview.
+const TEXTURE_HOTKEYS: [(&str, &str); 5] = [
+    ("Wheel", "Zoom the preview"),
+    ("Drag", "Pan the preview"),
+    ("Double-click", "Fit the preview"),
+    ("Ctrl+Z / Y", "Undo / redo"),
+    ("Ctrl+S", "Save and regenerate"),
+];
+
+/// A Texture tab (design §4.4): what it is, its image, its problems (the form and preview are the view).
+fn texture_rows(editor: &Editor, t: &TextureDoc, out: &mut Vec<Box<dyn Scene>>) {
+    use crate::doc_kind::TabDoc;
+    out.push(Box::new(text(t.base_title(), TEXT, 15.0)));
+    let kind = if t.is_internal() { "Built-in texture, read-only" } else { "Type: Texture asset" };
+    out.push(Box::new(text(kind, TEXT_DIM, 12.0)));
+    out.push(Box::new(text(format!("Image: assets/{}", t.asset.path), TEXT_DIM, 12.0)));
+    out.push(Box::new(bsn! { @text("", TEXT_DIM, 12.0) super::texture_view::TextureInfoText }));
+    if !t.is_internal() {
+        out.push(Box::new(text(
+            "Settings reach the game through the baked manifest (hot-reloaded); sRGB and grayscale expansion need a \
+             rebuild.",
+            TEXT_DIM,
+            12.0,
+        )));
+    }
+    if let Some(diags) = editor.diags.get(&t.id).filter(|d| !d.is_empty() && !t.is_internal()) {
+        out.push(Box::new(section("Problems")));
+        for diag in diags {
+            let c = if diag.is_error() { Color::srgb(0.95, 0.42, 0.42) } else { Color::srgb(0.95, 0.78, 0.35) };
+            out.push(Box::new(text(format!("{}: {}", diag.code, diag.message), c, 12.0)));
+        }
+    }
+    out.push(Box::new(section("Hotkeys")));
+    let hotkeys = if t.is_internal() { &TEXTURE_HOTKEYS[..3] } else { &TEXTURE_HOTKEYS[..] };
+    for (keys, what) in hotkeys {
         out.push(Box::new(hotkey_row(keys, what)));
     }
 }
@@ -431,6 +486,7 @@ fn node_rows(editor: &Editor, id: &str, out: &mut Vec<Box<dyn Scene>>) {
         routes: route_declarations(&d.asset, &editor.registry),
         curves: editor.curve_paths().into_iter().map(|p| (p.clone(), p)).collect(),
         consts: Vec::new(),
+        textures: editor.texture_choices(),
     };
     let global_consts = editor.global_consts();
     let defs = def.params();
@@ -461,6 +517,13 @@ fn node_rows(editor: &Editor, id: &str, out: &mut Vec<Box<dyn Scene>>) {
             }
             choices_here = Some(c);
         }
+        // A deleted Texture asset stays visible as the current choice (the node reports E006).
+        if p.kind == ParamKind::Texture && !v.as_str().is_empty() && !choices.textures.iter().any(|c| c.0 == v.as_str())
+        {
+            let mut c = choices.clone();
+            c.textures.push((v.as_str().to_string(), format!("{} (missing)", v.as_str())));
+            choices_here = Some(c);
+        }
         let choices = choices_here.as_ref().unwrap_or(&choices);
         out.push(Box::new(labeled(p.label.clone(), value_widget(target, &p.kind, &v, choices))));
     }
@@ -471,6 +534,7 @@ fn node_rows(editor: &Editor, id: &str, out: &mut Vec<Box<dyn Scene>>) {
             AssetType::Curve => "Open curve",
             AssetType::Consts => "Open constant table",
             AssetType::Material => "Open material",
+            AssetType::Texture => "Open texture",
         };
         out.push(Box::new(button(label, Action::OpenAsset(target), false)));
     }
@@ -521,6 +585,8 @@ fn redraw(
         Some(Tab::Text(t)) => text_rows(t, &mut rows),
         Some(Tab::Curve(c)) => curve_rows(c, &mut rows),
         Some(Tab::Consts(c)) => consts_rows(c, &mut rows),
+        Some(Tab::Image(i)) => image_rows(&editor, i, &mut rows),
+        Some(Tab::Texture(t)) => texture_rows(&editor, t, &mut rows),
         Some(Tab::Graph(d)) => {
             if let Some(f) = d.selected_frame.as_ref().and_then(|f| d.asset.comments.iter().find(|c| c.id == *f)) {
                 rows.push(Box::new(text("Comment", TEXT, 15.0)));

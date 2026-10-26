@@ -12,8 +12,10 @@ use shader_graph_core::{Hotkey, HotkeyKey};
 use super::dialog::open_menu;
 use super::palette::Palette;
 use super::props::PropField;
+use super::tree::TreeRow;
 use crate::canvas::{EditorCanvas, NodeKey, PinKey, link_of, window_to_graph};
 use crate::doc::connection_error;
+use crate::droppable::Dropped;
 use crate::state::{Action, Actions, Editor, ViewRequest};
 
 pub struct InputPlugin;
@@ -29,7 +31,8 @@ impl Plugin for InputPlugin {
             .add_observer(edge_click)
             .add_observer(pin_click)
             .add_observer(node_click)
-            .add_observer(wire_dropped);
+            .add_observer(wire_dropped)
+            .add_observer(drop_on_canvas);
     }
 }
 
@@ -48,14 +51,15 @@ fn cursor_graph(
     window: &Query<&Window>,
     ec: &EditorCanvas,
     canvases: &Query<(&ComputedNode, &UiGlobalTransform, &CanvasView)>,
+    ui_scale: f32,
 ) -> Option<(Vec2, Vec2)> {
     let cursor = window.iter().next()?.cursor_position()?;
     let (c, t, v) = canvases.get(ec.canvas).ok()?;
-    let n = c.normalize_point(*t, cursor / c.inverse_scale_factor())?;
+    let n = c.normalize_point(*t, cursor / (c.inverse_scale_factor() * ui_scale))?;
     if n.x.abs() > 0.5 || n.y.abs() > 0.5 {
         return None;
     }
-    Some((cursor, window_to_graph(cursor, c, t, v)?))
+    Some((cursor, window_to_graph(cursor, c, t, v, ui_scale)?))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -64,6 +68,7 @@ fn shortcuts(
     window: Query<&Window>,
     ec: Option<Res<EditorCanvas>>,
     canvases: Query<(&ComputedNode, &UiGlobalTransform, &CanvasView)>,
+    ui_scale: Res<UiScale>,
     editor: Res<Editor>,
     mut palette: ResMut<Palette>,
     mut preview: ResMut<PreviewKey>,
@@ -73,7 +78,8 @@ fn shortcuts(
     let ctrl = keys.any_pressed([ControlLeft, ControlRight, SuperLeft, SuperRight]);
     let shift = keys.any_pressed([ShiftLeft, ShiftRight]);
     // The (hidden) graph canvas has the same rect as the other views: only a graph tab has a graph position.
-    let at = ec.as_ref().filter(|_| editor.doc().is_some()).and_then(|ec| cursor_graph(&window, ec, &canvases));
+    let at =
+        ec.as_ref().filter(|_| editor.doc().is_some()).and_then(|ec| cursor_graph(&window, ec, &canvases, ui_scale.0));
     let mut push = |a: Action| actions.push(a);
     if ctrl {
         match () {
@@ -231,6 +237,7 @@ fn canvas_click(
     ec: Option<Res<EditorCanvas>>,
     graph: GraphQuery,
     canvases: Query<(&ComputedNode, &UiGlobalTransform, &CanvasView)>,
+    ui_scale: Res<UiScale>,
     keys: Res<ButtonInput<KeyCode>>,
     editor: Res<Editor>,
     right: Res<RightPress>,
@@ -246,7 +253,7 @@ fn canvas_click(
         return;
     }
     let Ok((c, t, v)) = canvases.get(ec.canvas) else { return };
-    let Some(at) = window_to_graph(click.pointer.position, c, t, v) else { return };
+    let Some(at) = window_to_graph(click.pointer.position, c, t, v, ui_scale.0) else { return };
     match click.button {
         PointerButton::Secondary if right.is_click(click.pointer.position) => {
             palette.show(click.pointer.position, at, None)
@@ -340,6 +347,32 @@ fn node_click(
     open_menu(&mut commands, click.pointer.position, editor.node_menu(node));
 }
 
+/// A sidebar row (a game image, a Texture asset, a built-in texture) dragged onto the graph canvas (design §4.3).
+/// `PointerDragDrop` bubbles from the entity under the pointer (a node, its pins and fields, or the canvas itself) up
+/// to the canvas; what the drop does is decided by [`Action::Drop`].
+#[allow(clippy::too_many_arguments)]
+fn drop_on_canvas(
+    ev: On<PointerDragDrop>,
+    ec: Option<Res<EditorCanvas>>,
+    rows: Query<&TreeRow>,
+    graph: GraphQuery,
+    nodes: Query<&NodeKey>,
+    canvases: Query<(&ComputedNode, &UiGlobalTransform, &CanvasView)>,
+    ui_scale: Res<UiScale>,
+    editor: Res<Editor>,
+    mut actions: ResMut<Actions>,
+) {
+    let Some(ec) = ec else { return };
+    if ev.event_target() != ec.canvas || ev.button != PointerButton::Primary || editor.doc().is_none() {
+        return;
+    }
+    let Some(item) = rows.get(ev.dropped).ok().and_then(Dropped::from_row) else { return };
+    let node = graph.node_of(ev.original_event_target()).and_then(|n| nodes.get(n).ok()).map(|k| k.0.clone());
+    let Ok((c, t, v)) = canvases.get(ec.canvas) else { return };
+    let Some(at) = window_to_graph(ev.pointer.position, c, t, v, ui_scale.0) else { return };
+    actions.push(Action::Drop { item, pos: (at.x, at.y), node });
+}
+
 /// Right click (not a pan) or Ctrl+LMB on a wire removes it; double click inserts a reroute point.
 #[allow(clippy::too_many_arguments)]
 fn edge_click(
@@ -348,6 +381,7 @@ fn edge_click(
     graph: GraphQuery,
     keys_q: Query<&PinKey>,
     canvases: Query<(&ComputedNode, &UiGlobalTransform, &CanvasView)>,
+    ui_scale: Res<UiScale>,
     keys: Res<ButtonInput<KeyCode>>,
     right: Res<RightPress>,
     mut actions: ResMut<Actions>,
@@ -368,7 +402,7 @@ fn edge_click(
         _ if remove => actions.push(Action::Disconnect { to: (b.node.clone(), b.pin.clone()) }),
         PointerButton::Primary if click.count >= 2 => {
             let Ok((c, t, v)) = canvases.get(ec.canvas) else { return };
-            if let Some(at) = window_to_graph(click.pointer.position, c, t, v) {
+            if let Some(at) = window_to_graph(click.pointer.position, c, t, v, ui_scale.0) {
                 actions.push(Action::AddReroute {
                     from: (a.node.clone(), a.pin.clone()),
                     to: (b.node.clone(), b.pin.clone()),

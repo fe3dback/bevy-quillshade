@@ -7,7 +7,8 @@ use shader_graph_core::registry::{
 use shader_graph_core::value::wesl_scalar;
 use shader_graph_core::{Code, ConstType, PinType, Value};
 
-use crate::def::{def, pin_in, pin_out, sig};
+use crate::def::{def, pin_out, sig};
+use crate::nodes::texture::{SAMPLE_PARAMS, TEXTURE_PARAM, texture_convert};
 
 const CAT_CONST: &str = "Constants";
 const CAT_PARAM: &str = "Parameters";
@@ -188,7 +189,6 @@ fn common_params(default_name: &str) -> Vec<ParamDef> {
     vec![
         ParamDef::new("name", "Name", ParamKind::Str, Value::Str(default_name.into())),
         ParamDef::new("group", "Group", ParamKind::Str, Value::Str(String::new())),
-        ParamDef::new("order", "Order", ParamKind::Int { min: None, max: None }, Value::Int(0)),
     ]
 }
 
@@ -196,14 +196,19 @@ fn common_params(default_name: &str) -> Vec<ParamDef> {
 /// `inp_{name}_sampler`; decision 0020).
 fn declare(c: &mut shader_graph_core::EmitCtx, ty: ParamType) -> String {
     let name = to_snake_case(c.param("name").as_str());
-    let default = c.param("default").clone();
+    let default = if ty == ParamType::Texture {
+        // A Texture asset id; empty → the default texture (W110), unknown → E006.
+        let id = c.param("default").as_str().to_string();
+        Value::Str(crate::nodes::texture::resolve_texture(c, &id).unwrap_or(id))
+    } else {
+        c.param("default").clone().coerce(ty.pin_type())
+    };
     let (min, max) = (c.params.get("min").map(Value::as_f32), c.params.get("max").map(Value::as_f32));
     let p = MaterialParam {
         name: name.clone(),
         ty,
-        default: if ty == ParamType::Texture { default } else { default.coerce(ty.pin_type()) },
+        default,
         group: c.param("group").as_str().to_string(),
-        order: c.param("order").as_i32(),
         min: min.filter(|m| m.is_finite() && min != max),
         max: max.filter(|m| m.is_finite() && min != max),
         node: c.node_id.to_string(),
@@ -301,7 +306,9 @@ fn register_parameters(r: &mut Registry) {
     for p in common_params("texture") {
         b = b.param(p);
     }
-    b = b.param(ParamDef::new("default", "Default Path", ParamKind::Str, Value::Str(String::new())));
+    b = b.param(ParamDef::new("default", "Default Texture", ParamKind::Texture, Value::Str(String::new()))).action(
+        texture_convert("Convert to Texture Object", "stdlib::TextureObject", ("default", TEXTURE_PARAM), &[], false),
+    );
     r.register(b.build(
         |_| sig(vec![], vec![pin_out("out", "", PinType::Texture2D)]),
         |c| {
@@ -317,15 +324,18 @@ fn register_parameters(r: &mut Registry) {
         b = b.param(p);
     }
     b = b
-        .param(ParamDef::new("default", "Default Path", ParamKind::Str, Value::Str(String::new())))
-        .param(crate::nodes::texture::sampler_type_param());
+        .param(ParamDef::new("default", "Default Texture", ParamKind::Texture, Value::Str(String::new())))
+        .param(crate::nodes::texture::mip_mode_param())
+        .param(crate::nodes::texture::sampler_type_param())
+        .action(texture_convert(
+            "Convert to Texture Sample",
+            "stdlib::TextureSample",
+            ("default", TEXTURE_PARAM),
+            SAMPLE_PARAMS,
+            false,
+        ));
     r.register(b.build(
-        |_| {
-            sig(
-                vec![pin_in("uv", "UVs", PinType::Float2, 0.0).implicit("uv0")],
-                crate::nodes::texture::sample_outputs(),
-            )
-        },
+        |c| sig(crate::nodes::texture::sample_inputs(c), crate::nodes::texture::sample_outputs()),
         |c| {
             let n = declare(c, ParamType::Texture);
             crate::nodes::texture::emit_sample(c, &n, &format!("{n}_sampler"));

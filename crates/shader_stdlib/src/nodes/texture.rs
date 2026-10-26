@@ -1,12 +1,56 @@
 //! Texture category.
 
-use shader_graph_core::registry::{Operand, ParamDef, ParamKind, PinDef, Registry};
-use shader_graph_core::{AssetKind, Code, EmitCtx, MaterialKind, PinType, Stage, Value};
+use shader_graph_core::registry::{
+    Conversion, NodeAction, NodeOp, Operand, ParamDef, ParamKind, PinDef, Registry, texture_refs,
+};
+use shader_graph_core::{Asset, AssetKind, Code, EmitCtx, MaterialKind, PinType, Stage, Value};
 
 use crate::def::{def, pin_in, pin_out, sig};
+use crate::internal::{DEFAULT_TEXTURE, internal_texture};
 use crate::nodes::coords::{implicit_time, implicit_uv};
 
 const CAT: &str = "Texture";
+
+/// Property of non-parameter texture nodes: the Texture asset they use (design §1.2).
+pub const TEXTURE_PARAM: &str = "texture";
+
+/// `texture` property: a Texture asset id, `""` = none (the default texture, W110).
+pub fn texture_param() -> ParamDef {
+    ParamDef::new(TEXTURE_PARAM, "Texture", ParamKind::Texture, Value::Str(String::new()))
+}
+
+/// `MipValueMode` of sampling nodes; anything but `None` adds the `mip` input.
+pub fn mip_mode_param() -> ParamDef {
+    ParamDef::new(
+        "mip_mode",
+        "MipValueMode",
+        ParamKind::Enum(vec!["None".into(), "Bias".into(), "Level".into()]),
+        Value::Str("None".into()),
+    )
+}
+
+/// Inputs of sampling nodes after the texture: `uv` (uv0 when unconnected) and `mip` for a mip mode.
+pub fn sample_inputs(c: &shader_graph_core::SigCtx) -> Vec<PinDef> {
+    let mut ins = vec![pin_in("uv", "UVs", PinType::Float2, 0.0).implicit("uv0")];
+    if c.param("mip_mode").as_str() != "None" {
+        ins.push(pin_in("mip", "Mip", PinType::Float, 0.0));
+    }
+    ins
+}
+
+/// Resolves a texture reference (design §1.2): `""` → the default texture (W110); an id that is neither an internal
+/// texture nor a Texture asset of the project → E006 and `None`.
+pub fn resolve_texture(c: &mut EmitCtx, id: &str) -> Option<String> {
+    if id.is_empty() {
+        c.diag(Code::W110, "no texture selected; uses the default texture");
+        return Some(DEFAULT_TEXTURE.to_string());
+    }
+    if internal_texture(id).is_some() || c.env.textures.has_texture(id) {
+        return Some(id.to_string());
+    }
+    c.diag(Code::E006, format!("texture `{id}` does not exist"));
+    None
+}
 
 pub fn sampler_type_param() -> ParamDef {
     ParamDef::new(
@@ -53,6 +97,35 @@ pub fn emit_sample(c: &mut EmitCtx, tex: &str, sampler: &str) {
     }
 }
 
+/// Rejects texture references stored as image paths by older files (`"textures/rock_albedo.png"`): Texture asset ids
+/// never contain `.`. There is no migration (`format_version` stays 1); the error names the node.
+pub fn check_texture_refs(asset: &Asset, registry: &Registry) -> Result<(), String> {
+    for (node, param, id) in texture_refs(asset, registry) {
+        if id.contains('.') {
+            let kind = &asset.nodes[&node].kind;
+            return Err(format!(
+                "node `{node}` ({kind}): `{param}` is the image path `{id}`, but a texture is now a Texture asset \
+                 reference; create a Texture asset for the image (`shaders/**/*.texture.ron`) and select it"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Texture of a node with a `texture` property and an optional `tex` pin: the connected pin overrides the property
+/// (UE behaviour); otherwise the property is the node's fixed texture binding.
+fn texture_or_property(c: &mut EmitCtx) -> Option<(String, String)> {
+    if let Some(t) = c.input_texture("tex") {
+        return Some(t);
+    }
+    let id = c.param(TEXTURE_PARAM).as_str().to_string();
+    let id = resolve_texture(c, &id)?;
+    match c.fixed_texture(&id) {
+        Operand::Texture { tex, sampler } => Some((tex, sampler)),
+        Operand::Value(_) => None,
+    }
+}
+
 fn texture_in(c: &mut EmitCtx) -> Option<(String, String)> {
     let t = c.input_texture("tex");
     if t.is_none() && !c.is_connected("tex") {
@@ -62,32 +135,78 @@ fn texture_in(c: &mut EmitCtx) -> Option<(String, String)> {
     t
 }
 
+/// A context action converting between a texture node and its parameter version (design §4.6, decision 0021): the
+/// texture reference moves between `from` and `to` (`texture` ↔ `default`), `keep` params are copied as they are,
+/// every other param is dropped (a parameter's name / group / order going back). `to_param` gives the new parameter
+/// a unique name (`texture`, `texture_1`, …).
+pub fn texture_convert(label: &str, kind: &str, (from, to): (&str, &str), keep: &[&str], to_param: bool) -> NodeAction {
+    let mut params = vec![(from.to_string(), to.to_string())];
+    params.extend(keep.iter().map(|p| (p.to_string(), p.to_string())));
+    NodeAction {
+        label: label.to_string(),
+        hotkey: None,
+        op: NodeOp::Convert(Conversion {
+            kind: kind.to_string(),
+            params,
+            unique_name: to_param.then(|| ("name".to_string(), TEXTURE_PARAM.to_string())),
+            pins: Vec::new(),
+        }),
+    }
+}
+
+/// Params of sampling nodes kept by the TextureSample ↔ parameter conversion.
+pub const SAMPLE_PARAMS: &[&str] = &["mip_mode", "sampler_type"];
+
 pub fn register(r: &mut Registry) {
     r.register(
         def("stdlib::TextureSample", "TextureSample", CAT)
             .kw(&["t", "texture", "sample", "tex2d", "sampler"])
-            .desc("Samples a texture. Unconnected UVs use uv0.")
-            .param(ParamDef::new(
-                "mip_mode",
-                "MipValueMode",
-                ParamKind::Enum(vec!["None".into(), "Bias".into(), "Level".into()]),
-                Value::Str("None".into()),
-            ))
+            .desc(
+                "Samples the Texture property, or the texture connected to Tex (it wins). Without either: the default \
+                 texture (W110). Unconnected UVs use uv0.",
+            )
+            .param(texture_param())
+            .param(mip_mode_param())
             .param(sampler_type_param())
+            .action(texture_convert(
+                "Convert to Parameter",
+                "param::TextureSample2D",
+                (TEXTURE_PARAM, "default"),
+                SAMPLE_PARAMS,
+                true,
+            ))
             .build(
                 |c| {
-                    let mut ins = vec![
-                        PinDef::new("tex", "Tex", PinType::Texture2D).required(),
-                        pin_in("uv", "UVs", PinType::Float2, 0.0).implicit("uv0"),
-                    ];
-                    if c.param("mip_mode").as_str() != "None" {
-                        ins.push(pin_in("mip", "Mip", PinType::Float, 0.0));
-                    }
+                    let mut ins = vec![PinDef::new("tex", "Tex", PinType::Texture2D)];
+                    ins.extend(sample_inputs(c));
                     sig(ins, sample_outputs())
                 },
                 |c| {
-                    let Some((t, s)) = texture_in(c) else { return };
+                    let Some((t, s)) = texture_or_property(c) else { return };
                     emit_sample(c, &t, &s);
+                },
+            ),
+    );
+
+    r.register(
+        def("stdlib::TextureObject", "TextureObject", CAT)
+            .kw(&["texture object", "tex"])
+            .desc("A Texture asset of the project as a Texture2D (TextureSample, TextureSize, function inputs, …).")
+            .param(texture_param())
+            .action(texture_convert(
+                "Convert to Parameter",
+                "param::TextureObject",
+                (TEXTURE_PARAM, "default"),
+                &[],
+                true,
+            ))
+            .build(
+                |_| sig(vec![], vec![pin_out("out", "", PinType::Texture2D)]),
+                |c| {
+                    let id = c.param(TEXTURE_PARAM).as_str().to_string();
+                    let Some(id) = resolve_texture(c, &id) else { return };
+                    let op = c.fixed_texture(&id);
+                    c.alias("out", op);
                 },
             ),
     );

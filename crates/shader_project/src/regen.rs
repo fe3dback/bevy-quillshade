@@ -4,17 +4,20 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use shader_codegen_rust::MaterialEntry;
+use shader_codegen_rust::manifest::{ManifestMaterial, ManifestTexture, manifest_ron, parse_manifest};
 use shader_codegen_wesl::check::{self, BevySources, Files};
 use shader_codegen_wesl::{GenCtx, Generated, paths};
 use shader_graph_core::consts::GlobalConst;
 use shader_graph_core::ident::check_ident;
 use shader_graph_core::ir::{Ir, IrResult, build_ir, declared_function_sig, find_cycle};
 use shader_graph_core::model::{Asset, Preview};
-use shader_graph_core::registry::{FUNCTION_PREFIX, const_refs, curve_refs};
+use shader_graph_core::registry::{FUNCTION_PREFIX, const_refs, curve_refs, texture_refs};
+use shader_graph_core::texture::{INTERNAL_PREFIX, KTX2_HEADER_LEN, TextureAsset, ktx2_not_2d};
 use shader_graph_core::{Code, Diagnostic, FunctionSig, Registry};
+use shader_stdlib::internal::{DEFAULT_TEXTURE, INTERNAL_TEXTURES};
 
 use crate::assets::{self, AssetId, AssetSet, AssetType};
-use crate::layout::Project;
+use crate::layout::{INTERNAL_DIR, INTERNAL_MARKER, Project};
 use crate::writer::{Change, WriteBatch};
 
 /// Which assets to regenerate.
@@ -42,7 +45,8 @@ pub struct AssetResult {
     pub diagnostics: Vec<Diagnostic>,
     pub ir: Option<Ir>,
     pub wesl: Option<Generated>,
-    /// Generated and not blocked by errors.
+    /// Generated and not blocked by errors. For a Texture asset: valid (no E011 / E012 / E013 / load error), so the
+    /// game may load it.
     pub ok: bool,
 }
 
@@ -64,7 +68,7 @@ impl RegenReport {
     }
 }
 
-/// Dependencies between assets (function calls, sampled curves, global constants read).
+/// Dependencies between assets (function calls, sampled curves, global constants read, Texture assets referenced).
 #[derive(Debug, Clone, Default)]
 pub struct DepGraph {
     pub uses: BTreeMap<AssetId, BTreeSet<AssetId>>,
@@ -92,6 +96,12 @@ impl DepGraph {
             for (_, _, name) in const_refs(a, registry) {
                 if let Some((table, _)) = consts.get(&name) {
                     add(id, table.clone());
+                }
+            }
+            // Internal textures are not project assets.
+            for (_, _, texture) in texture_refs(a, registry) {
+                if !texture.starts_with(INTERNAL_PREFIX) {
+                    add(id, AssetId::new(AssetType::Texture, texture));
                 }
             }
         }
@@ -148,6 +158,78 @@ pub fn collect_consts(set: &AssetSet) -> ConstTables {
     (consts, diags)
 }
 
+/// Image paths of the loadable Texture assets, each with the assets pointing at it (sorted); more than one is E011.
+pub fn texture_paths(set: &AssetSet) -> BTreeMap<String, Vec<AssetId>> {
+    let mut out: BTreeMap<String, Vec<AssetId>> = BTreeMap::new();
+    for (id, t) in &set.textures {
+        if let Ok(t) = t {
+            out.entry(t.path.clone()).or_default().push(id.clone());
+        }
+    }
+    out
+}
+
+/// Texture ids nodes may refer to: every Texture asset of the set (one with errors still exists; its problems are
+/// reported at the asset itself) and the internal textures (`@internal/*`).
+pub fn texture_ids(set: &AssetSet) -> BTreeSet<String> {
+    let internal = shader_stdlib::internal::INTERNAL_TEXTURES.iter().map(|t| t.id.to_string());
+    set.textures.keys().map(|id| id.path.clone()).chain(internal).collect()
+}
+
+/// Problems of every Texture asset (design §1.1): bad asset path (E005), load error (E009), invalid image path
+/// (E012), an image path shared with other Texture assets (E011, at each of them: neither may silently win Bevy's
+/// "first load wins"), sampler settings wgpu cannot create (E013), a KTX2 cube map / array / 3D texture (E014), image
+/// file missing under `assets/` (W109). An asset with an error is not loaded by the game (materials fall back to the
+/// default texture).
+pub fn texture_diagnostics(project: &Project, set: &AssetSet) -> BTreeMap<AssetId, Vec<Diagnostic>> {
+    let paths = texture_paths(set);
+    let mut out = BTreeMap::new();
+    for (id, t) in &set.textures {
+        let mut d = assets::validate_path(id);
+        let at = |code, message: String| Diagnostic::new(code, message).in_asset(id.source_rel());
+        if let Ok(Some(Err(e))) = t.as_ref().map(|t| t.settings.sampler.map(|s| s.check())) {
+            d.push(at(Code::E013, format!("invalid sampler settings: {e}")));
+        }
+        match t {
+            Err(e) => d.push(at(Code::E009, format!("cannot load: {e}"))),
+            Ok(t) => match TextureAsset::check_path(&t.path) {
+                Err(e) => d.push(at(Code::E012, format!("invalid texture path: {e}"))),
+                Ok(()) => {
+                    let others: Vec<String> =
+                        paths[&t.path].iter().filter(|o| *o != id).map(AssetId::source_rel).collect();
+                    if !others.is_empty() {
+                        let message = format!(
+                            "`{}` is also used by {}; a game file can have only one Texture asset",
+                            t.path,
+                            others.join(", ")
+                        );
+                        d.push(at(Code::E011, message));
+                    }
+                    let file = project.assets_dir().join(&t.path);
+                    if !file.is_file() {
+                        d.push(at(Code::W109, format!("`assets/{}` does not exist", t.path)));
+                    } else if let Some(e) = ktx2_header(&file).as_deref().and_then(ktx2_not_2d) {
+                        d.push(at(Code::E014, format!("`assets/{}`: {e}", t.path)));
+                    }
+                }
+            },
+        }
+        out.insert(id.clone(), d);
+    }
+    out
+}
+
+/// The first [`KTX2_HEADER_LEN`] bytes of a `.ktx2` file (`None` for another extension or a shorter file).
+fn ktx2_header(file: &std::path::Path) -> Option<Vec<u8>> {
+    use std::io::Read;
+    if !file.extension().is_some_and(|e| e.eq_ignore_ascii_case("ktx2")) {
+        return None;
+    }
+    let mut header = vec![0; KTX2_HEADER_LEN];
+    std::fs::File::open(file).ok()?.read_exact(&mut header).ok()?;
+    Some(header)
+}
+
 /// Registry with stdlib + project user nodes.
 pub fn project_registry(project: &Project) -> (Registry, Vec<Diagnostic>) {
     let mut r = shader_stdlib::registry();
@@ -155,9 +237,9 @@ pub fn project_registry(project: &Project) -> (Registry, Vec<Diagnostic>) {
     (r, d)
 }
 
-/// Output paths of an asset (`None` for constant tables, which generate nothing).
+/// Output paths of an asset (`None` for constant tables and Texture assets, which generate nothing).
 pub fn wesl_file(project: &Project, id: &AssetId) -> Option<PathBuf> {
-    Some(project.root.join("assets").join(paths::module_file(&module_of(id)?)))
+    Some(project.assets_dir().join(paths::module_file(&module_of(id)?)))
 }
 
 /// WESL module of an asset.
@@ -166,7 +248,7 @@ pub fn module_of(id: &AssetId) -> Option<Vec<String>> {
         AssetType::Material => paths::material_module(&id.path),
         AssetType::Function => paths::function_module(&id.path),
         AssetType::Curve => paths::curve_module(&id.path),
-        AssetType::Consts => return None,
+        AssetType::Consts | AssetType::Texture => return None,
     })
 }
 
@@ -251,6 +333,13 @@ pub fn regenerate_set(project: &Project, set: &AssetSet, opts: &RegenOptions) ->
         results.entry(id).or_default().diagnostics.extend(d);
     }
     let consts: BTreeMap<String, GlobalConst> = consts.into_iter().map(|(name, (_, c))| (name, c)).collect();
+    // Texture assets: validated only, they generate nothing.
+    for (id, d) in texture_diagnostics(project, set) {
+        let r = results.entry(id).or_default();
+        r.ok = !d.iter().any(Diagnostic::is_error);
+        r.diagnostics.extend(d);
+    }
+    let textures = texture_ids(set);
 
     // Functions: declared signatures, recursion check, topological build.
     let fn_ids: Vec<&AssetId> = loaded.keys().copied().filter(|i| i.ty == AssetType::Function).collect();
@@ -306,7 +395,7 @@ pub fn regenerate_set(project: &Project, set: &AssetSet, opts: &RegenOptions) ->
     for p in order {
         let id = AssetId::new(AssetType::Function, p);
         let asset = loaded[&id];
-        let r = build_ir(asset, p, &registry, &sigs, &curve_paths, &consts);
+        let r = build_ir(asset, p, &registry, &sigs, &curve_paths, &consts, &textures);
         let entry = results.entry(id.clone()).or_default();
         entry.diagnostics.extend(r.diagnostics.into_iter().map(|d| d.in_asset(id.source_rel())));
         for u in deps.uses.get(&id).into_iter().flatten().filter(|u| u.ty == AssetType::Function) {
@@ -335,7 +424,7 @@ pub fn regenerate_set(project: &Project, set: &AssetSet, opts: &RegenOptions) ->
 
     // Materials.
     for id in loaded.keys().copied().filter(|i| i.ty == AssetType::Material) {
-        let build = |a: &Asset| build_ir(a, &id.path, &registry, &sigs, &curve_paths, &consts);
+        let build = |a: &Asset| build_ir(a, &id.path, &registry, &sigs, &curve_paths, &consts, &textures);
         let mut r = build(loaded[id]);
         if let Some(w) = preview_changes_rust(loaded[id], &r, &id.source_rel(), build) {
             r.diagnostics.push(w);
@@ -377,7 +466,7 @@ pub fn regenerate_set(project: &Project, set: &AssetSet, opts: &RegenOptions) ->
         let mut g = match id.ty {
             AssetType::Material => shader_codegen_wesl::material(ir, &ctx),
             AssetType::Function => shader_codegen_wesl::function(ir, &ctx),
-            AssetType::Curve | AssetType::Consts => continue,
+            AssetType::Curve | AssetType::Consts | AssetType::Texture => continue,
         };
         if let Some(d) = &date {
             insert_date(&mut g.text, d);
@@ -409,6 +498,9 @@ pub fn regenerate_set(project: &Project, set: &AssetSet, opts: &RegenOptions) ->
             let (Some(module), Some(file)) = (module_of(id), wesl_file(project, id)) else { continue };
             if let Some(g) = &r.wesl {
                 files.add(&module, g.text.clone());
+                if let Some(ir) = r.ir.as_ref().filter(|i| i.kind.material().is_some()) {
+                    files.enable(ir.layout_feature());
+                }
             } else if let Ok(old) = std::fs::read_to_string(file) {
                 files.add(&module, old);
             }
@@ -438,23 +530,34 @@ pub fn regenerate_set(project: &Project, set: &AssetSet, opts: &RegenOptions) ->
     };
     let scoped = |id: &AssetId| in_scope.as_ref().is_none_or(|s| s.contains(id));
 
-    // Desired files, in write order: stdlib, curves, functions, materials, Rust crate.
-    let mut desired: Vec<(PathBuf, String)> = Vec::new();
+    // Desired files, in write order: stdlib, curves, functions, materials, Rust crate, internal textures.
+    let mut desired: Vec<(PathBuf, Vec<u8>)> = Vec::new();
     let autogen = project.autogen_dir();
     for (name, src) in shader_stdlib::MODULES {
         let mut text = shader_codegen_wesl::stdlib_module(name, src);
         if let Some(d) = &date {
             insert_date(&mut text, d);
         }
-        desired.push((autogen.join("stdlib").join(format!("{name}.wesl")), text));
+        desired.push((autogen.join("stdlib").join(format!("{name}.wesl")), text.into_bytes()));
     }
     for ty in [AssetType::Curve, AssetType::Function, AssetType::Material] {
         for (id, r) in &results {
             if id.ty == ty && r.ok && scoped(id) {
-                desired.push((wesl_file(project, id).unwrap(), r.wesl.as_ref().unwrap().text.clone()));
+                desired.push((wesl_file(project, id).unwrap(), r.wesl.as_ref().unwrap().text.clone().into_bytes()));
             }
         }
     }
+    // Baked manifest (design §3.2.1): failed materials keep their previous entry, read back from the old file.
+    let manifest_path = autogen.join("baked.ron");
+    let old_manifest: BTreeMap<String, ManifestMaterial> = std::fs::read_to_string(&manifest_path)
+        .ok()
+        .filter(|t| has_marker(t))
+        .and_then(|t| parse_manifest(&t).ok())
+        .map(|(_, m)| m.into_iter().map(|m| (m.path.clone(), m)).collect())
+        .unwrap_or_default();
+    let manifest_textures = manifest_textures(set, &results);
+    let loadable: BTreeSet<&str> = manifest_textures.iter().map(|t| t.id.as_str()).collect();
+    let mut manifest_materials: Vec<ManifestMaterial> = Vec::new();
     // Rust: modules of OK materials, entries also for failed materials that keep their old module.
     let mut entries = Vec::new();
     let mut modules = BTreeMap::new();
@@ -467,6 +570,7 @@ pub fn regenerate_set(project: &Project, set: &AssetSet, opts: &RegenOptions) ->
         if r.ok {
             let ir = r.ir.as_ref().unwrap();
             entries.push(MaterialEntry::from_ir(ir));
+            manifest_materials.push(ManifestMaterial::from_ir(ir));
             if scoped(id) {
                 let mut text = shader_codegen_rust::material_module(ir, &id.source_rel());
                 if let Some(d) = &date {
@@ -484,6 +588,13 @@ pub fn regenerate_set(project: &Project, set: &AssetSet, opts: &RegenOptions) ->
             {
                 keep.insert(rs);
                 entries.push(entry_from_old(id, &old));
+                // Without an old entry (manifest deleted): an empty one, the game keeps the compiled defaults.
+                manifest_materials.push(
+                    old_manifest
+                        .get(&id.path)
+                        .cloned()
+                        .unwrap_or_else(|| ManifestMaterial { path: id.path.clone(), ..Default::default() }),
+                );
             }
         }
     }
@@ -492,39 +603,85 @@ pub fn regenerate_set(project: &Project, set: &AssetSet, opts: &RegenOptions) ->
             keep.extend(wesl_file(project, id));
         }
     }
+    // A Texture asset the game does not load (E011 / E012 / E013 / load error, or gone since an old entry was
+    // written) → the default texture.
+    for t in manifest_materials.iter_mut().flat_map(|m| m.textures.values_mut()) {
+        if !loadable.contains(t.as_str()) {
+            *t = DEFAULT_TEXTURE.to_string();
+        }
+    }
     let crate_dir = project.crate_dir();
-    for (rel, text) in shader_codegen_rust::crate_files(&entries, &modules, project.bevy_dep()) {
-        desired.push((crate_dir.join(rel), text));
+    let texture_ids = texture_field_ids(set);
+    for (rel, text) in shader_codegen_rust::crate_files(&entries, &modules, project.bevy_dep(), &texture_ids) {
+        desired.push((crate_dir.join(rel), text.into_bytes()));
+    }
+    let mut manifest = manifest_ron(&manifest_textures, &manifest_materials);
+    if let Some(d) = &date {
+        insert_date(&mut manifest, d);
+    }
+    desired.push((manifest_path, manifest.into_bytes()));
+    // Internal textures (design §2), always written: binary files cannot carry the marker line, so `internal/` is
+    // owned through its marker file. A foreign directory blocks only them (E008).
+    let internal = project.internal_dir();
+    let internal_owned = internal_dir_owned(&internal);
+    if internal_owned {
+        let marker = format!("{}\n", shader_codegen_wesl::header("internal textures"));
+        desired.push((internal.join(INTERNAL_MARKER), marker.into_bytes()));
+        for t in INTERNAL_TEXTURES {
+            desired.push((internal.join(t.file), t.bytes.to_vec()));
+        }
+    } else {
+        report.project.push(Diagnostic::new(
+            Code::E008,
+            format!(
+                "`{}` is not a directory with a {INTERNAL_MARKER} marker file (or cannot be read); not writing \
+                 internal textures",
+                project.rel(&internal)
+            ),
+        ));
     }
 
-    // Compare with disk, refuse to overwrite foreign files (E008).
+    // Compare with disk, refuse to overwrite foreign files (E008), binary ones included. Files in `internal/` are
+    // owned through the directory marker (only desired when it is present).
     let mut batch = WriteBatch::default();
     let desired_paths: BTreeSet<PathBuf> = desired.iter().map(|(p, _)| p.clone()).collect();
-    for (path, text) in desired {
-        match std::fs::read_to_string(&path) {
-            Ok(old) if old == text => {}
-            Ok(old) if !has_marker(&old) => {
-                let d = Diagnostic::new(
-                    Code::E008,
-                    format!("`{}` has no AUTOGENERATED marker; not overwriting", project.rel(&path)),
-                );
-                match results.iter_mut().find(|(id, _)| {
-                    wesl_file(project, id).as_ref() == Some(&path) || rust_file(project, id).as_ref() == Some(&path)
-                }) {
-                    Some((id, r)) => {
-                        r.diagnostics.push(d.in_asset(id.source_rel()));
-                        r.ok = false;
-                    }
-                    None => report.project.push(d),
-                }
+    for (path, bytes) in desired {
+        let blocked = match std::fs::read(&path) {
+            Ok(old) if old == bytes => continue,
+            Ok(old) if !path.starts_with(&internal) && !std::str::from_utf8(&old).is_ok_and(has_marker) => {
+                format!("`{}` has no AUTOGENERATED marker; not overwriting", project.rel(&path))
             }
-            _ => batch.writes.push((path, text)),
+            Ok(_) => {
+                batch.writes.push((path, bytes));
+                continue;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                batch.writes.push((path, bytes));
+                continue;
+            }
+            // Unreadable (permissions, a directory in the way, …): it may be a foreign file, never replace it.
+            Err(e) => format!("`{}` cannot be read ({e}); not overwriting", project.rel(&path)),
+        };
+        let d = Diagnostic::new(Code::E008, blocked);
+        match results.iter_mut().find(|(id, _)| {
+            wesl_file(project, id).as_ref() == Some(&path) || rust_file(project, id).as_ref() == Some(&path)
+        }) {
+            Some((id, r)) => {
+                r.diagnostics.push(d.in_asset(id.source_rel()));
+                r.ok = false;
+            }
+            None => report.project.push(d),
         }
     }
 
-    // Orphans (full regen only): marker files that no source produces any more.
+    // Orphans (full regen only): marker files that no source produces any more; in an owned `internal/` every file
+    // no internal texture produces.
+    let mut roots = vec![autogen, crate_dir];
+    if internal_owned {
+        roots.push(internal.clone());
+    }
     if in_scope.is_none() {
-        for root in [&autogen, &crate_dir] {
+        for root in &roots {
             for f in walk_files(root) {
                 if desired_paths.contains(&f) || keep.contains(&f) {
                     continue;
@@ -532,7 +689,7 @@ pub fn regenerate_set(project: &Project, set: &AssetSet, opts: &RegenOptions) ->
                 if f.file_name().is_some_and(|n| n.to_string_lossy().contains(".tmp-")) {
                     continue;
                 }
-                if std::fs::read_to_string(&f).is_ok_and(|t| has_marker(&t)) {
+                if root == &internal || std::fs::read_to_string(&f).is_ok_and(|t| has_marker(&t)) {
                     batch.deletes.push(f);
                 }
             }
@@ -541,7 +698,7 @@ pub fn regenerate_set(project: &Project, set: &AssetSet, opts: &RegenOptions) ->
 
     report.changes = batch.changes();
     if !opts.dry_run && !batch.is_empty() {
-        batch.apply(&[autogen, crate_dir])?;
+        batch.apply(&roots)?;
     }
     report.assets = results;
     Ok(report)
@@ -581,6 +738,38 @@ fn insert_date(text: &mut String, date: &str) {
     }
 }
 
+/// Textures of the baked manifest (design §3.2.1): every Texture asset the game may load (no error: E011 / E012 /
+/// E013 / load error exclude it, so neither of two assets on one file wins Bevy's "first load wins"), used or not,
+/// and the internal textures.
+fn manifest_textures(set: &AssetSet, results: &BTreeMap<AssetId, AssetResult>) -> Vec<ManifestTexture> {
+    let internal_rel = INTERNAL_DIR.strip_prefix("assets/").expect("internal dir is under assets/");
+    let project = set.textures.iter().filter_map(|(id, t)| {
+        let t = t.as_ref().ok().filter(|_| results.get(id).is_some_and(|r| r.ok))?;
+        Some(ManifestTexture { id: id.path.clone(), path: t.path.clone(), settings: t.settings.clone() })
+    });
+    let internal = INTERNAL_TEXTURES.iter().map(|t| ManifestTexture {
+        id: t.id.to_string(),
+        path: format!("{internal_rel}/{}", t.file),
+        settings: (t.settings)(),
+    });
+    project.chain(internal).collect()
+}
+
+/// Ids of the `BakedTextures` fields (design §3.1 "all of them"): every Texture asset that parses and has a valid
+/// name — also one with an error (E011 / E012 / E013), so such an error never changes the public shape of the
+/// generated crate (the runtime points that field at the default texture) — and the internal textures. A Texture
+/// asset whose name is no identifier (E005) has no field (it cannot name a Rust field); one whose RON does not parse
+/// (E009) is left out too, per the final review ruling: its content is unknown, so nothing says it is a usable
+/// Texture asset.
+fn texture_field_ids(set: &AssetSet) -> Vec<String> {
+    let project = set
+        .textures
+        .iter()
+        .filter(|(id, t)| t.is_ok() && assets::validate_path(id).is_empty())
+        .map(|(id, _)| id.path.clone());
+    project.chain(INTERNAL_TEXTURES.iter().map(|t| t.id.to_string())).collect()
+}
+
 /// Rebuilds a crate entry of a material whose current graph is broken from its previous module.
 fn entry_from_old(id: &AssetId, old: &str) -> MaterialEntry {
     let base = shader_graph_core::ident::to_pascal_case(id.name());
@@ -594,14 +783,35 @@ fn entry_from_old(id: &AssetId, old: &str) -> MaterialEntry {
     }
 }
 
+/// Whether regen may write the internal textures directory: it carries the marker file, or it is an empty directory,
+/// or it does not exist. Anything else (a regular file in the way, an unreadable directory) is not owned (E008).
+fn internal_dir_owned(dir: &std::path::Path) -> bool {
+    let not_found = |e: &std::io::Error| e.kind() == std::io::ErrorKind::NotFound;
+    match std::fs::read(dir.join(INTERNAL_MARKER)) {
+        Ok(b) => std::str::from_utf8(&b).is_ok_and(has_marker),
+        Err(e) if not_found(&e) => match std::fs::read_dir(dir) {
+            Ok(mut entries) => entries.next().is_none(),
+            Err(e) => not_found(&e),
+        },
+        Err(_) => false,
+    }
+}
+
+/// Regular files below `root` (the orphan scan). Symlinks are skipped entirely: regen only ever writes regular files,
+/// so a link is never its own orphan, and following a linked directory could loop forever or delete files outside
+/// the project (in an owned `internal/` every unproduced file is deleted without a marker check).
 fn walk_files(root: &std::path::Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(d) = stack.pop() {
         let Ok(rd) = std::fs::read_dir(&d) else { continue };
         for e in rd.flatten() {
+            let Ok(ty) = e.file_type() else { continue };
+            if ty.is_symlink() {
+                continue;
+            }
             let p = e.path();
-            if p.is_dir() {
+            if ty.is_dir() {
                 // Never descend into build output of the generated crate.
                 if p.file_name().is_some_and(|n| n == "target") {
                     continue;

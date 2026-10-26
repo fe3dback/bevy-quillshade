@@ -2,6 +2,11 @@
 // bevy 0.20, stdlib v1
 import bevy_pbr::render::forward_io::VertexOutput;
 
+// The game's compiled material enables this feature; after a change of parameters, texture bindings or
+// World Position Offset the shader stops compiling here until the game is rebuilt.
+@if(!SG_LAYOUT_740e364b)
+const_assert material_layout_changed__rebuild_the_game;
+
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // --- builtins ---

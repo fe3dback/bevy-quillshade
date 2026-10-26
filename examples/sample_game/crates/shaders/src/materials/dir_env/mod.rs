@@ -3,6 +3,7 @@ pub mod mat_exp42;
 pub mod mat_flag;
 pub mod mat_rock_wet;
 pub mod mat_terrain_layers;
+pub mod mat_tex_layers;
 pub mod mat_water;
 
 pub(crate) fn register(app: &mut bevy::prelude::App) {
@@ -10,5 +11,6 @@ pub(crate) fn register(app: &mut bevy::prelude::App) {
     mat_flag::register(app);
     mat_rock_wet::register(app);
     mat_terrain_layers::register(app);
+    mat_tex_layers::register(app);
     mat_water::register(app);
 }

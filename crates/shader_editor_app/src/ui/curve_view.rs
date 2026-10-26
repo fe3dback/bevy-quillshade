@@ -8,9 +8,7 @@
 
 use std::collections::BTreeSet;
 
-use bevy::asset::RenderAssetUsages;
 use bevy::prelude::*;
-use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::ui::ui_transform::UiGlobalTransform;
 use resvg::tiny_skia;
 use shader_graph_core::Value;
@@ -19,6 +17,7 @@ use shader_graph_core::curve::{Curve, Interp};
 use super::dialog::open_icon_menu;
 use super::icons::IconId;
 use super::input::not_typing;
+use super::node_preview::{opaque_image, skia_color};
 use super::{HEADER_BG, TEXT, TEXT_DIM, VIEW_BG, ViewOf, button, icon_button, text};
 use crate::curve_doc::CurveDoc;
 use crate::state::{Action, Actions, CurveAction, Editor, PropTarget};
@@ -238,23 +237,6 @@ fn render_plot(
     if image_node.image != handle {
         image_node.image = handle;
     }
-}
-
-/// A pixmap with an opaque background as an image: its premultiplied pixels equal the straight ones Bevy expects.
-pub(super) fn opaque_image(pixmap: tiny_skia::Pixmap) -> Image {
-    let (width, height) = (pixmap.width(), pixmap.height());
-    Image::new(
-        Extent3d { width, height, depth_or_array_layers: 1 },
-        TextureDimension::D2,
-        pixmap.take(),
-        TextureFormat::Rgba8UnormSrgb,
-        RenderAssetUsages::RENDER_WORLD,
-    )
-}
-
-pub(super) fn skia_color(c: Color, alpha: f32) -> tiny_skia::Color {
-    let c = c.to_srgba();
-    tiny_skia::Color::from_rgba(c.red, c.green, c.blue, c.alpha * alpha).unwrap_or(tiny_skia::Color::BLACK)
 }
 
 /// Opaque background, the unit square and its grid; `scale` = physical px per logical px.

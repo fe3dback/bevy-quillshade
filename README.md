@@ -9,7 +9,7 @@
 
 A counterpart of the UE5 Material Editor: material and function graphs are stored as RON next to the game
 (`shaders/**`), and the editor generates WESL from them (`assets/shaders/autogen/**`) plus the Rust crate
-`crates/shaders` with material types, constructors and `ShadersPlugin`. The UI is Bevy UI +
+`crates/shaders` with material types, baked material handles and `ShadersPlugin`. The UI is Bevy UI +
 Feathers, the canvas is [bevy_noodle](https://github.com/gold-silver-copper/bevy_noodle). Codegen and
 validation also work without the GUI (CLI for CI).
 
@@ -53,11 +53,14 @@ shaders/                      # graph sources, under VCS
   common/wet_mask.function.ron
   common/pulse.curve.ron
   common/tuning.consts.ron    # global constants (no generated file of their own)
+  textures/rock.texture.ron   # Texture asset: a game image + loader settings (no generated file)
 assets/shaders/autogen/       # AUTOGEN WESL: stdlib/, functions/, curves/, one file per material
+  baked.ron                   # baked manifest: every Texture asset + every material's values
   dir_env/mat_rock_wet.wesl
   functions/dir_common/fun_wet_mask.wesl
   curves/dir_common/crv_pulse.wesl
-crates/shaders/               # AUTOGEN Rust crate (src/materials/dir_env/mat_rock_wet.rs, …)
+assets/shaders/internal/      # AUTOGEN internal textures (default.png) + `.autogen` marker file
+crates/shaders/               # AUTOGEN Rust crate (src/materials/dir_env/mat_rock_wet.rs, src/baked/, …)
 ```
 
 Generated names are prefixed by kind (decision 0020): directories `dir_`, material files/modules `mat_`, functions
@@ -75,7 +78,8 @@ bevy = { version = "0.20", features = ["file_watcher"] }   # file_watcher — fo
 shaders = { path = "crates/shaders" }
 ```
 
-The generated `crates/shaders/Cargo.toml` pins `bevy = { version = "0.20", default-features = false, features = [..] }`.
+The generated `crates/shaders/Cargo.toml` pins `bevy = { version = "0.20", default-features = false, features = [..] }`
+(the features include `png`, `ktx2` and `zstd_rust` for Texture assets) and depends on `serde` and `ron = "0.12"`.
 If the root `Cargo.toml` declares Bevy in `[workspace.dependencies]` (or takes `bevy = { workspace = true }` itself), it
 uses `bevy = { workspace = true, features = [..] }` instead, so the game's Bevy version and features apply. The same
 steps are in the editor under Help → Quick Start.
@@ -83,46 +87,106 @@ steps are in the editor under Help → Quick Start.
 ```rust
 use bevy::prelude::*;
 use bevy::sprite_render::SpriteMaterial;
-use shaders::{DissolveMaterial, RockWetExt, RockWetMaterial};
+use shaders::{BakedMaterials, BakedMaterialsLoader, BakedMaterialsProgress, BakedTextures};
 
 fn main() {
-    App::new().add_plugins((DefaultPlugins, shaders::ShadersPlugin)).add_systems(Startup, setup).run();
+    App::new()
+        .add_plugins((DefaultPlugins, shaders::ShadersPlugin))
+        .add_systems(Startup, (load, spawn).chain())
+        .add_systems(Update, loading_screen)
+        .run();
 }
 
-fn setup(
-    mut commands: Commands,
-    assets: Res<AssetServer>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut rock: ResMut<Assets<RockWetMaterial>>,
-    mut dissolve: ResMut<Assets<DissolveMaterial>>,
-) {
-    // Pbr3d: `{Name}Ext` + `{Name}Material = ExtendedMaterial<StandardMaterial, {Name}Ext>`.
-    // `new` takes every graph parameter in the order set in the editor.
-    let mat = RockWetExt::new(assets.load("textures/rock_albedo.png"), assets.load("textures/rock_normal.png"), LinearRgba::WHITE, 0.4, 1.5);
-    let mesh = meshes.add(Sphere::new(1.0).mesh().uv(48, 24).with_generated_tangents().unwrap());
-    commands.spawn((Mesh3d(mesh), MeshMaterial3d(rock.add(mat.material()))));
+// Optional: without it loading starts in the first PreUpdate, but then `BakedTextures` is empty in Startup.
+fn load(mut loader: BakedMaterialsLoader) {
+    let textures = loader.load(); // idempotent
+    info!("loading {textures} textures");
+}
 
-    // Sprite2d: an extension of `SpriteMaterial`, the component goes next to `Sprite`.
-    commands.spawn((
-        Sprite::from_image(assets.load("textures/sprite.png")),
-        SpriteMaterial(dissolve.add(DissolveMaterial::new(0.35, LinearRgba::rgb(1.0, 0.6, 0.1), 0.06))),
-    ));
+// Material handles exist from the start (reserved); `load()` fills `BakedTextures` at once.
+fn spawn(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, baked: Res<BakedMaterials>, tex: Res<BakedTextures>) {
+    let mesh = meshes.add(Sphere::new(1.0).mesh().uv(48, 24).with_generated_tangents().unwrap());
+    commands.spawn((Mesh3d(mesh), MeshMaterial3d(baked.env.rock_wet.clone())));
+    // Sprite2d materials go into `SpriteMaterial(..)`.
+    commands.spawn((Sprite::from_image(tex.textures.sprite.clone()), SpriteMaterial(baked.ui.dissolve.clone())));
+}
+
+fn loading_screen(mut progress: MessageReader<BakedMaterialsProgress>) {
+    for p in progress.read() {
+        info!("textures: {} loaded, {} failed of {}", p.loaded, p.failed, p.total);
+    }
 }
 ```
 
 - **Pbr3d** — `ExtendedMaterial<StandardMaterial, {Name}Ext>`: shadows, prepass and deferred
   work as with `StandardMaterial`; `.material()` applies blend mode, two-sided and unlit from the graph.
-- **Unlit3d** — its own `impl Material` (`{Name}Material::new(..)`).
+- **Unlit3d** — its own `impl Material` (`{Name}Material`).
 - **Sprite2d** — `MaterialExtension2d` for `SpriteMaterial`.
-- Parameters are fields, constructor arguments and setters prefixed with `inp_`: the `wetness` parameter is
-  `RockWetParams::inp_wetness`, the `inp_wetness` argument of `new` and `set_inp_wetness(&mut self, v)`; textures are
-  fields of the main type (`RockWetExt::inp_albedo`). `{Name}Params::default()` holds the graph's default values.
+- Parameters are fields prefixed with `inp_`: the `wetness` parameter is `RockWetParams::inp_wetness`; textures are
+  fields of the main type (`RockWetExt::inp_albedo`). A fixed texture (a `TextureSample` / `TextureObject` node with
+  its Texture property, design §1.3) is a field `ft_<node id>` (`ft_<function path>_<node id>` for a node inside a
+  called function) after the texture parameters (bindings `101/102`, `103/104`, … in that order).
+  `{Name}Params::default()` holds the graph's default values. The constructor `new` and the setters `set_inp_*` are
+  crate-internal (`pub(crate)`): games take materials from `BakedMaterials`, whose values come from the graph (design
+  §3.1).
   Type names (`RockWetExt`, `RockWetMaterial`, `RockWetParams`) are re-exported from the crate root, so the module
   path (`shaders::materials::dir_env::mat_rock_wet`) is rarely needed.
+- **Baked materials** (design §3). Regeneration writes `assets/shaders/autogen/baked.ron`: every valid Texture asset (id
+  → image path + loader settings, used or not) plus the internal textures, and every material (id → parameter defaults
+  by `inp_*` name, Texture asset id of every texture binding). The crate embeds it as `shaders::COMPILED_MANIFEST`. A
+  Texture asset with an error (E011, E012, E013, E014) is left out and the bindings using it get `@internal/default` (its
+  `BakedTextures` field stays, so the game still compiles, and holds the default texture at runtime); a
+  material that fails to build keeps its previous entry, like its Rust module (if a foreign file blocks `baked.ron`,
+  E008, the crate compiles that file instead). `shaders::BakedMaterials` (a resource) holds a handle per material,
+  nested by folder: `baked.env.rock_wet`, `baked.kw.dir_loop.mat_type`; `shaders::BakedTextures` an image handle per
+  texture: `tex.textures.rock_albedo`, `tex.internal.default`. Field names are the plain folder / asset names; a Rust
+  keyword gets its prefix (`dir_`, `mat_`, `tex_`), and a folder and an asset with the same name in one folder are both
+  prefixed (`env.dir_water.x`, `env.mat_water`). Both resources also map asset ids — the path under `shaders/`
+  without the extension, as in the manifest — to handles, for game data that names materials or textures (decision
+  0030): `baked.get::<RockWetMaterial>("env/rock_wet")` (typed; `None` for an unknown id or another material type; the
+  map itself is `baked.by_path: HashMap<String, UntypedHandle>`) and `tex.get("textures/rock_albedo")` /
+  `tex.by_path: HashMap<String, Handle<Image>>` (filled by `load()`, follows hot reloads, and also holds a texture
+  created in the editor after the build that a material uses). `by_path` is reserved at the root: a root folder
+  `by_path/` becomes `dir_by_path`.
+- **Loading** (design §3.3): `ShadersPlugin` registers the materials and creates `BakedMaterials` with reserved
+  handles (usable in `Startup`) and `BakedTextures` with default handles. `shaders::BakedMaterialsLoader` (a
+  `SystemParam`) `load()`s once (idempotent; returns the number of textures being loaded, `BakedMaterialsProgress`
+  `total`; optional — without a call `ShadersPlugin` starts in the first `PreUpdate`, decision 0027): it starts loading every texture of the compiled manifest with its Texture
+  asset settings (`ImageLoaderSettings`: sampler, `is_srgb`, `expand_grayscale`) and fills `BakedTextures` at once (a
+  system chained after it sees the real handles); on the next `PreUpdate` every material is built from the compiled
+  values and inserted behind its handle (Bevy shows it once its images are loaded), and `baked.ron` itself is loaded as
+  an asset. `progress()` / `is_ready()` give the state;
+  the messages `BakedMaterialsProgress { loaded, failed, total }` (written whenever a count changes; `total` = valid
+  Texture assets + internal textures) and `BakedMaterialsReady` (once, when `loaded + failed == total`) report it. A texture
+  that fails to load (file deleted after regeneration, corrupt image) is logged as an error naming its id and path,
+  counted as `failed`, and every material using it is rebuilt with `@internal/default`; `BakedMaterialsReady` is still
+  sent. Use `BakedTextures` instead of `AssetServer::load` for files that have a Texture asset: Bevy keeps the
+  settings of the first load of a path, so a plain `load` may drop the asset's settings.
+- **Hot reload** (design §3.2, §3.3 step 4): the compiled manifest is the base, `baked.ron` is an overlay applied when
+  it loads and whenever it changes on disk — that needs Bevy's `file_watcher` feature, which the game enables itself
+  (see the `Cargo.toml` above; the editor never adds it). Without a rebuild of the game these changes apply:
+  parameter values and the texture of a binding (the material is rebuilt behind the same handle); a Texture asset
+  pointed at another file (loaded with its settings and swapped in `BakedTextures` and in the materials — entities
+  that took the old image, e.g. a spawned `Sprite`, keep it); a sampler change (set on the loaded image, the
+  materials using it are refreshed); a texture created in the editor and used by a material (loaded by path, but not
+  in `BakedTextures`); another TextureSample / TextureObject node wired in place of the one the game was built with
+  (texture bindings are matched by number, decision 0029). These need a rebuild (`cargo run` again): `is_srgb` /
+  `expand_grayscale` (Bevy keeps the first load's settings), adding / removing / renaming / retyping a parameter or a
+  texture binding, adding or removing World Position Offset, adding / removing / renaming a material or changing its
+  kind or blend settings, new `BakedTextures` fields. A material whose bindings changed stops rendering until the
+  rebuild instead of crashing the game: each generated material passes its `LAYOUT_FEATURE` (`SG_LAYOUT_<hash>`) as
+  a shader def, and the WESL does not compile without its own (Bevy logs "no definition in scope for identifier:
+  `material_layout_changed__rebuild_the_game`", the game logs that the material changed; decision 0029). Anything out of sync with the
+  compiled code — a material or key the code does not know, a key the manifest lacks or retypes — keeps the compiled
+  value and logs one warning per key ("rebuild the game"); a `baked.ron` that does not parse or has another version
+  logs a warning and changes nothing. Textures loaded by a hot reload are not counted in `BakedMaterialsProgress`
+  after `BakedMaterialsReady`; one that fails falls back to `@internal/default` as above.
 
 Full example — [`examples/sample_game`](examples/sample_game): one mesh per reference
-material. While the game is running, saving a graph in the editor (Ctrl+S) rewrites the `.wesl`, and
-Bevy reloads the shader without a restart.
+material, using only `BakedMaterialsLoader` / `BakedMaterials` / `BakedTextures` (no `assets.load`, no material
+constructors; parameter values are the graph defaults). Its images are Texture assets in both formats:
+`rock_albedo` / `water_normal` are uncompressed `.ktx2`, the rest `.png`. While the game is running, saving a graph in
+the editor (Ctrl+S) rewrites the `.wesl` and `baked.ron`, and Bevy reloads the shader and the values without a restart.
 
 ## Editor
 
@@ -133,22 +197,62 @@ xdg-desktop-portal); cancel it to type or paste the path instead (Browse... reop
 
 The toolbar holds the logo and the main menu — **File** (Open Project, New Project, Close Project, Save, Save All,
 Quit), **Assets** (create a Pbr3d/Unlit3d/Sprite2d material, a function, a curve, a global constant table, a folder;
-Regenerate) and **Help** (Quick Start: how to hook a game up; Project Page; About: version, link, author, license) — then Undo /
+Regenerate) and **Help** (Quick Start: how to hook a game up, one tab per step; Project Page; About: version, link, author, license) — then Undo /
 Redo and the actions of the active tab (graph: Auto-layout, Comment, Fit; curve: Select all, Delete; constant table:
 Add; generated file: Copy, Source, Open externally).
 
-On the left is the asset browser (the `shaders/` tree: double click opens an asset; RMB on a folder or on the empty
-space below the tree creates a Pbr3d/Unlit3d/Sprite2d material, a function, a curve, a global constant table, a
-folder; RMB on an asset:
-rename, move (also by dragging onto a folder), delete, show the generated WESL/Rust in a read-only,
-syntax-highlighted tab), in the center the tabs and the canvas, on the right the properties (node parameters, input
-default values, asset blend mode / two-sided / shading / output), at the bottom the log (click — focus the node).
-The browser is an IDE-style file tree: folders with expand carets, an icon per asset kind (function, Pbr3d,
-Unlit3d, Sprite2d, curve, constant table); the active tab's asset is highlighted, unsaved assets get an orange dot after the name.
+On the left is the asset browser — the **Project** panel (the `shaders/` tree: double click opens an asset; RMB on a
+folder or on the empty space below the tree creates a Pbr3d/Unlit3d/Sprite2d material, a function, a curve, a global
+constant table, a folder; RMB on an asset: rename, move (also by dragging onto a folder), delete, show the generated
+WESL/Rust in a read-only, syntax-highlighted tab), in the center the tabs and the canvas, on the right the properties
+(node parameters, input default values, asset blend mode / two-sided / shading / output), at the bottom the log (click —
+focus the node). The browser is an IDE-style file tree: folders with expand carets, an icon per asset kind (function,
+Pbr3d, Unlit3d, Sprite2d, curve, constant table, texture); the active tab's asset is highlighted, unsaved assets get an
+orange dot after the name.
+
+The Project tree ends with the virtual read-only **Internal** folder of the editor's built-in textures
+(`@internal/default`; no rename / move / delete). Below it the read-only **Game Assets** panel lists the game's images
+under `assets/` (`.png`, `.ktx2`; `assets/shaders/` — the editor's own output — is hidden) and the folders holding them;
+it follows files added or removed on disk. RMB on an image → **Create Texture Asset** creates
+`shaders/textures/<folders>/<name>.texture.ron` pointing at it (the folders under `assets/`, a leading `textures/`
+dropped; names made snake_case, `_2`, `_3`… on a clash); the item is disabled when a Texture asset already points at the
+file. **Drag an image onto a graph** (design §4.3): on empty canvas (or onto a node without a texture property) it adds
+a `TextureSample` at the drop point referencing the image's Texture asset; onto a `TextureSample`, `TextureObject` or
+texture parameter node it sets that node's texture. When no Texture asset points at the image yet, one is created with
+default settings (same name rule as Create Texture Asset); Ctrl+Z reverts only the graph edit, the created asset stays.
+A Texture asset or `Internal` → `default` dragged from the Project tree works the same way.
+
+Double-click an image to open it in a read-only **image tab**: the image fitted to the view (transparent parts over a
+checkerboard), `WxH | format | mips` in its header, a load / decode error as text (decoded by Bevy, like the game
+would); it follows changes of the file and is restored on the next launch.
+
+Double-click a Texture asset to open its **Texture tab**: on the left a form with the image path (relative to `assets/`,
+applied on Enter; refused when another Texture asset already points at the file — on disk or in an open, unsaved tab, so
+a file a tab moved away from stays taken until that tab is saved — or when the path breaks the E012 rules; "Create
+Texture Asset" follows the same rule), sRGB and Expand grayscale (both need a rebuild in the game; grayscale expansion
+is not previewed — the editor always expands) and the sampler. **Easy** mode (the header's Easy | Advanced; the default
+unless the sampler is one no preset describes) has no form: "Use for" **Pixel art** (Nearest, Clamp to edge), **UI**
+(bilinear, Clamp to edge), **3D** (trilinear, Repeat) or **Ground** (trilinear + 16x anisotropy, Repeat) sets the whole
+sampler for that use (sRGB stays; one undo step). **Advanced** is the form: path, sRGB, Expand grayscale, "Default"
+(= the app's default sampler: with Bevy's `ImagePlugin::default()` Linear filters and Clamp to edge, *not* Repeat;
+turning it off starts from those values) and every sampler field. The image path, size, format and mip count are in
+Properties. The preview is decoded with the current, unsaved settings: the wheel zooms around the pointer (Nearest vs
+Linear shows up close), a drag pans, a double click fits again, "Tile 3x3" repeats the image so the address modes show,
+**R | G | B | All** shows one channel in grey (compressed formats: tinted) or the image (preview only). Invalid sampler settings (E013, e.g. anisotropy above 1 without Linear filters,
+inverted or negative LOD clamps) show the error instead of the image; Clamp to border on a GPU without the
+`ADDRESS_MODE_CLAMP_TO_BORDER` feature is previewed as Clamp to edge, with a note. Undo / Redo, Ctrl+S (saves,
+regenerates the baked manifest) work as for graphs. Built-in textures (double-click in **Internal**) open in a read-only
+Texture tab. In a node's Properties the Texture property is a picker of the project's Texture assets and the built-in
+ones, with an **Open texture** button. `TextureSample`, `TextureObject`, `TextureSampleParameter2D` and
+`TextureObjectParameter` show a 128×128 thumbnail of their texture left of the output pins (aspect kept; the built-in default
+without one; "n/a" for a missing Texture asset or an image that does not load); it follows unsaved edits of an open
+Texture tab, and a `TextureSample` wired straight to a TextureObject or texture parameter shows that node's texture.
+
 Tabs and menus show icons too; Undo / Redo are icon-only buttons — hover a toolbar button for its name and hotkey.
 Tabs are compact and wrap onto more rows when there are many; a tab shows the file name only (`rock_wet`), the full
 path when several open tabs share that name, and the full path as its tooltip. RMB on a tab: Close / Close All / Close Others / Close to the Left / Close to the Right / Close Unmodified. The bottom-right corner of the main view shows the open document's type (`pbr3d`, `unlit3d`, `sprite2d`,
-`function`, `curve`, `consts`, or `wesl`/`rust` for a generated file) as a faint watermark over the view.
+`function`, `curve`, `consts`, `image`, `texture`, or `wesl`/`rust` for a generated file) as a faint watermark over
+the view.
 Generated-file tabs refresh after every regeneration; Ctrl+C there copies the whole file, and the header has
 "Open in the default application". Icons come from [icon-rs](https://crates.io/crates/icon-rs), plus a few
 drawn by hand in `crates/shader_editor_app/icons/`.
@@ -159,7 +263,10 @@ range, e.g. Lerp Alpha), a number field, X/Y fields, or a color button (Float3/F
 exact components are edited in Properties); a wire hides the editor. Constants and parameters edit their value under the
 title (ScalarParameter's slider spans Slider Min..Max). RMB on an input pin: the type of polymorphic inputs
 (Float…Float4, e.g. Lerp A/B), Reset to default, Disconnect. RMB on a node: its own actions with their hotkeys
-(Add / Subtract / Multiply / Divide: Convert to one of the other three, keeping wires and values), then Exclusive
+(Add / Subtract / Multiply / Divide: Convert to one of the other three, keeping wires and values; `TextureSample` /
+`TextureObject`: **Convert to Parameter** (not in functions) → `TextureSampleParameter2D` / `TextureObjectParameter` with the texture as
+its default, the mip mode and sampler type kept and a unique name `texture`, `texture_1`, …; back with **Convert to
+Texture Sample** / **Convert to Texture Object**, which drops name and group), then Exclusive
 preview (materials only), Copy / Duplicate / Delete; an unselected node is selected first. A node action's hotkey works
 on the selected nodes without the menu (decision 0021).
 
@@ -214,6 +321,20 @@ beyond about 53° is 0 — and `Angle` is the slope in degrees (0 = flat, 90 = w
 normal; wire a perturbed normal in for "pixel normals". `examples/sample_game` has a two-layer terrain
 (`env/terrain_layers`, rock from the `common/rock_layer` function on the slopes, grass on top).
 
+**Textures**: a Texture asset is picked in the Texture property of `TextureSample` and `TextureObject` (Texture), or
+as the Default Texture of `TextureSampleParameter2D` / `TextureObjectParameter` (Parameters). `TextureSample`'s `Tex`
+input is optional and overrides its property when connected (like UE); `TextureObject` outputs its texture as a
+`Texture2D` for `TextureSample`, `TextureSize`, `FlipBook`, functions… Every such node with a fixed texture gets a
+material binding of its own, named after the node, so picking another texture changes neither WESL nor Rust. Without
+any texture a node samples the internal default texture `@internal/default` (a grey / white checkerboard, W110);
+nodes that take a texture only through their `Tex` pin (`TextureSize`, `TexelSize`, `FlipBook`,
+`NormalFromHeightmap`) still need it connected (E004).
+`TextureSampleParameter2D` has the same MipValueMode (None / Bias / Level + `Mip` input) as `TextureSample`. Inside a
+function a fixed texture becomes a hidden trailing texture + sampler argument `ft_<function path>_<node id>` (`/` →
+`_`, after the builtin arguments, like UV or time); callers pass it on — a calling function as a hidden argument of its
+own, a material as one binding per node of origin, however often the function is called. Two such names that collide
+(`a/b_c` and `a_b/c` with the same node id) are E006.
+
 **Double click on a node** that refers to another file — a function call, Sample Curve, a Global* node — opens that
 function / curve / constant table (or switches to its tab); Properties shows the same as an "Open …" button. User
 nodes are not editor assets and do nothing.
@@ -241,6 +362,9 @@ nodes are not editor assets and do nothing.
 | Close tab / next tab | Ctrl+W (or MMB on the tab) / Ctrl+Tab |
 | Close several tabs (all, others, left/right, unmodified) | RMB on a tab |
 | Open an asset | double click in the browser |
+| Open a game image / a built-in texture | double click in Game Assets / in Project → Internal |
+| Add a `TextureSample` for an image, or set a texture node's texture | drag an image (Game Assets), a Texture asset or `Internal` → `default` (Project) onto the canvas / onto the node |
+| Texture tab preview: zoom / pan / fit | wheel (around the pointer) / drag / double click |
 | Open the function / curve / constant table a node refers to | double click on the node |
 | Scroll a generated file horizontally | Shift+wheel |
 | Curve: add a point / move / multi-select | double click on empty space / drag a point / Shift+click |
@@ -293,6 +417,32 @@ Asset(
 - A global constant table (`*.consts.ron`): `GlobalConsts(format_version: 1, name: "tuning", consts:
   [GlobalConst(name: "glow_amount", ty: F32, value: Float(0.35)), ...])`, `ty` one of `F32`, `Vec2`, `Vec3`,
   `Vec4`, `Bool`, `CompileFlag` (values `Float`, `Float2`…`Float4`, `Bool`). Nodes store only the constant's name.
+- A Texture asset (`*.texture.ron`): a proxy to an image of the game, `path` relative to `assets/` (`/`-separated,
+  `.ktx2` or `.png` only), plus loader settings mirroring Bevy's `ImageLoaderSettings`. Fields at Bevy's default are
+  omitted (`is_srgb: true`, `expand_grayscale: true`, `sampler: None` = the app's default sampler; inside
+  `SamplerSettings`: address modes `ClampToEdge` (`Repeat`, `MirrorRepeat`, `ClampToBorder`), filters `Nearest`
+  (`Linear`), `lod_min_clamp: 0.0`, `lod_max_clamp: 32.0`, `anisotropy_clamp: 1`). A game file may have only one
+  Texture asset (E011); renaming or deleting the asset never touches the image. Nodes store the Texture asset's id
+  (`textures/rock`, or an internal texture such as `@internal/default`); renaming the asset rewrites these
+  references, deleting it clears them (the nodes then use the default texture, W110). A file from before Texture
+  assets that stores a texture default as an image path (`default: Str("textures/rock_albedo.png")`) does not load:
+  create a Texture asset for the image and put its id there.
+
+  ```ron
+  TextureAsset(
+    format_version: 1,
+    path: "textures/env/rock_albedo.ktx2",
+    settings: TextureSettings(
+      is_srgb: false,
+      sampler: Some(SamplerSettings(
+        address_mode_u: Repeat,
+        address_mode_v: Repeat,
+        mag_filter: Linear,
+        min_filter: Linear,
+      )),
+    ),
+  )
+  ```
 - User node (`shaders/.nodes/*.ron`):
   `UserNode(id: "soft_clamp", name: "SoftClamp", category: "User", inputs: [UserPin(name: "x", ty: Float3)], output: Float3, template: "return x / (vec3<f32>(1.0) + abs(x));")`.
 - Asset, directory, parameter, function port and global constant names are `snake_case` (`[a-z][a-z0-9_]*`, no
@@ -300,8 +450,9 @@ Asset(
   and user nodes are the exception: they appear verbatim in your WGSL, so they must not be Rust/WGSL keywords or
   names of generated code and must not start with `n_`, `b_`, `sg_` or `_`.
 - Autogen files start with the marker `AUTOGENERATED by shader-editor v1 … do not edit`; the editor does not
-  overwrite files without the marker (E008). Writes are atomic and happen only when the content changes;
-  orphaned files are deleted.
+  overwrite files without the marker (E008), binary ones included, nor files it cannot read (E008). Binary files
+  cannot carry the marker, so `assets/shaders/internal/` is owned through its marker file `.autogen`; a non-empty
+  `internal/` without it, or a regular file at that path, is left alone (E008). Writes are atomic and happen only when the content changes; orphaned files are deleted.
 
 ## Diagnostics
 
@@ -312,15 +463,21 @@ Asset(
 | E003 | incompatible types (no allowed auto-conversion; a Global* node reading a constant of another type) |
 | E004 | required input not connected (or a Named Route Usage without its declaration, a Sample Curve without a curve) |
 | E005 | invalid or duplicate name (also a global constant defined in two tables) |
-| E006 | nonexistent function / recursive functions / missing or broken curve / missing global constant |
+| E006 | nonexistent function / recursive functions / missing or broken curve / missing global constant / missing Texture asset / clashing hidden texture names of two functions |
 | E007 | WESL of a Custom node does not parse |
-| E008 | an autogen file without the marker blocks the write |
+| E008 | an autogen file without the marker (or one that cannot be read) blocks the write (or `assets/shaders/internal/` without its `.autogen` marker file, or not a directory) |
 | E009 | unknown node / broken file |
 | E010 | generated WESL failed wesl+naga (`--compile`, saving in the editor) |
+| E011 | two or more Texture assets point at the same game file (reported at each of them) |
+| E012 | invalid Texture asset path: empty, absolute, with `.` / `..` / empty components, `\` or `#`, or not `.ktx2` / `.png` |
+| E013 | invalid Texture asset sampler settings: `anisotropy_clamp` 0, `anisotropy_clamp` above 1 while a mag / min / mipmap filter is not `Linear`, LOD clamps non-finite, negative or `lod_min_clamp > lod_max_clamp` (the asset is not loaded; materials use the default texture) |
+| E014 | the image of a Texture asset is a KTX2 cube map, texture array or 3D texture: materials sample 2D textures only (the asset is not loaded; materials use the default texture; the editor previews the faces / layers stacked top to bottom) |
 | W101–W105 | dead branch, inactive output pin, mesh attribute may be missing, vector truncation, `crates/shaders` not in `[workspace.members]` |
 | W106 | a Global* node without a constant (outputs 1.0 / `true`) |
 | W107 | node preview active (the material output is bypassed), or the stored preview ignored (missing node, no output that converts to a color) |
 | W108 | node preview changes the generated Rust crate (extra parameters or builtins): rebuild the game, and again after turning preview off |
+| W109 | the image of a Texture asset does not exist under `assets/` (it may be added later) |
+| W110 | a texture node without a texture (no Texture property, no connected Tex, no parameter default): uses the internal default texture `@internal/default` |
 
 An error blocks generation only of its own asset; the rest are regenerated.
 
@@ -331,28 +488,38 @@ cargo test --workspace                           # unit, pipeline, snapshot + WE
 cargo clippy --workspace --all-targets -- -D warnings
 INSTA_UPDATE=always cargo test -p shader_project --test snapshots   # accept codegen changes
 cargo run -p shader_project --example make_sample -- examples/sample_game   # rebuild the example
+cargo run -p shader_project --example png_to_ktx2 -- [--linear] in.png [out.ktx2]   # uncompressed RGBA8 KTX2
 cd examples/sample_game && cargo clippy --workspace -- -D warnings  # the generated crate
 ```
 
 The snapshot suite (`crates/shader_project/tests/snapshots/`) has one material per stdlib node
 plus the reference graphs; every `.wesl` is compiled against the real Bevy 0.20 sources in the
 forward, forward without UV/tangents and deferred (`PREPASS_PIPELINE`) variants. `SAMPLE_SCREENSHOT=out cargo run`
-in `examples/sample_game` renders the scene, saves `out-1.png`/`out-2.png` and exits.
+in `examples/sample_game` renders the scene, saves `out-1.png` 5 s and `out-2.png` 25 s (real time) after the first
+frame and exits — edit and regenerate in between to check hot reload. `png_to_ktx2` (no external tools) wrote the
+sample's `.ktx2` files: one mip, no supercompression, `R8G8B8A8_SRGB` or `_UNORM` with `--linear`; a test checks they
+match their `.png`.
 
 | Crate | Role |
 | --- | --- |
 | `shader_graph_core` | model, types and conversions, node registry, validation, IR (no Bevy) |
-| `shader_stdlib` | standard library nodes, stdlib WESL modules, user nodes |
+| `shader_stdlib` | standard library nodes, stdlib WESL modules, user nodes, internal textures |
 | `shader_codegen_wesl` | WESL generation, compile check (wesl + naga) |
-| `shader_codegen_rust` | generation of `crates/shaders` |
-| `shader_project` | project layout, regeneration pipeline, atomic writes, asset operations, watcher |
+| `shader_codegen_rust` | generation of `crates/shaders` and of the baked manifest `baked.ron` (decision 0025) |
+| `shader_project` | project layout, regeneration pipeline, atomic writes, asset operations, watcher, game image scan |
 | `shader_editor_app` | GUI on Bevy + Feathers + bevy_noodle |
 
 ## Limitations
 
-WPO is not visible to the prepass/shadows; function outputs of type Texture2D are not supported; user nodes
-have a single output; Static Switch is out of v1; there is no native folder picker (the path is typed in,
-with a list of recent projects); sliders on nodes drag at the wrong speed and the color picker opens off its button when the canvas
-is zoomed (Bevy 0.20 bugs, see decision 0012); Custom-node and user-node input names cannot be keywords (they are
-used unprefixed in the WGSL you write, decision 0020); `MaterialAttributes (PBR)` cannot be used by Custom nodes, user
-nodes or parameters, and only Pbr3d has the `Wrapped` output (decision 0023). Details — [`docs/decisions/0010-v1-limitations.md`](docs/decisions/0010-v1-limitations.md).
+WPO is not visible to the prepass/shadows; function outputs of type Texture2D are not supported; user nodes have a
+single output; Static Switch is out of v1; sliders on nodes drag at the wrong speed and the color picker opens off its
+button when the canvas is zoomed (Bevy 0.20 bugs, see decision 0012); Custom-node and user-node input names cannot be
+keywords (they are used unprefixed in the WGSL you write, decision 0020); `MaterialAttributes (PBR)` cannot be used by
+Custom nodes, user nodes or parameters, and only Pbr3d has the `Wrapped` output (decision 0023). Textures: only `.png`
+and `.ktx2` (Bevy 0.20 cannot read `.ktx` v1; use lowercase extensions — E012 accepts `.PNG`, but Bevy picks the loader
+by a case-sensitive extension match); `is_srgb` / `expand_grayscale` changes need a rebuild of the game (Bevy
+keeps the first load's settings), and the editor cannot preview `expand_grayscale: false`; a function that samples a
+texture (MipValueMode None / Bias) cannot be used in World Position Offset — its `textureSample` would end up in the
+vertex shader, which WGSL forbids, and live validation does not report it (a material's own texture nodes switch to
+`textureSampleLevel` there); a texture that failed to load in the game is retried only when its path changes (decisions
+0024, 0025). Details — [`docs/decisions/0010-v1-limitations.md`](docs/decisions/0010-v1-limitations.md).

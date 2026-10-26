@@ -1,6 +1,7 @@
 //! Standard node library (spec §8): UE5-like node palette and the WESL modules it relies on.
 
 mod def;
+pub mod internal;
 pub mod nodes;
 pub mod user;
 

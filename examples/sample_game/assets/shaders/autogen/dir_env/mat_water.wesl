@@ -15,6 +15,10 @@ struct WaterParams { inp_deep_color: vec4<f32> }
 @group(constants::MATERIAL_BIND_GROUP) @binding(100) var<uniform> params: WaterParams;
 @group(constants::MATERIAL_BIND_GROUP) @binding(101) var inp_normals: texture_2d<f32>;
 @group(constants::MATERIAL_BIND_GROUP) @binding(102) var inp_normals_sampler: sampler;
+// The game's compiled material enables this feature; after a change of parameters, texture bindings or
+// World Position Offset the shader stops compiling here until the game is rebuilt.
+@if(!SG_LAYOUT_06c508b1)
+const_assert material_layout_changed__rebuild_the_game;
 @if(PREPASS_PIPELINE) @group(0) @binding(1) var<uniform> sg_prepass_globals: Globals;
 
 fn sg_custom_n11(f: f32, k: f32) -> f32 {

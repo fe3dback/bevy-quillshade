@@ -6,9 +6,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `shader-editor`: a node-based shader editor for **Bevy 0.20**, modelled on UE5's Material Editor. Graphs live as RON
 files in a game project (`shaders/**`); the tool generates WESL (`assets/shaders/autogen/**`) and a Rust crate
-(`crates/shaders`) with material types, constructors and `ShadersPlugin`. There is no in-editor preview — the game
-picks up regenerated `.wesl` via Bevy's asset hot-reload. One binary: no args → GUI; `regen` / `check` / `diff` →
-headless CLI.
+(`crates/shaders`) with material types, baked material / texture handles and `ShadersPlugin`. There is no in-editor
+material preview — the game picks up regenerated `.wesl` and the baked manifest via Bevy's asset hot-reload. One binary:
+no args → GUI; `regen` / `check` / `diff` → headless CLI.
 
 Source of requirements: `docs/techdoc.md` (the spec; code comments cite it as `spec §<section>`). Deviations
 from the spec and implementation choices are recorded in `docs/decisions/NNNN-*.md` — read the relevant one before
@@ -45,7 +45,8 @@ CLI exit codes: `0` ok, `1` validation errors, `2` project failed to open / writ
 `path:node[.pin]:CODE: text`.
 
 CI (`.github/workflows/ci.yml`, Linux/Windows/macOS) additionally runs `regen examples/sample_game` and fails on
-`git diff` — **any codegen change must be followed by regenerating the sample game and committing the result**, then
+`git diff` or a new untracked file (`git status --porcelain`) — **any codegen change must be followed by regenerating
+the sample game and committing the result** (new files included), then
 `cd examples/sample_game && cargo clippy --workspace --all-targets -- -D warnings` must pass on the generated crate.
 
 `cargo run -p shader_project --example make_sample -- examples/sample_game` rewrites the sample's `shaders/` from the
@@ -72,7 +73,8 @@ atomic write. Key facts that span several files:
 - **Generators read only the IR** (`shader_graph_core::ir`), never the editor model. The IR also owns the uniform
   layout (fields sorted vec4 → vec3+pad → vec2 → scalars, padded to 16 bytes); the WESL struct and the Rust `Params`
   struct are both derived from it, and the generated crate has a `min_size` test checking they match. Bindings: uniform
-  `@binding(100)`, textures/samplers `101/102`, `103/104`, …
+  `@binding(100)`, textures/samplers `101/102`, `103/104`, … from `Ir::textures` (texture parameters `inp_*`, then
+  fixed textures `ft_*` — one per node, also per node inside a called function; read by WESL, Rust and `binding_of`).
 - **Node registry**: every node implements `NodeDef` (`shader_graph_core::registry`). Stdlib nodes are Rust code built
   with the closure builder in `crates/shader_stdlib/src/def.rs` (`def(id, name, cat).kw(..).param(..).build(sig, emit)`)
   and registered per category in `crates/shader_stdlib/src/nodes/*.rs`. Reusable WESL helpers live in
@@ -89,6 +91,25 @@ atomic write. Key facts that span several files:
   `stdlib::Global*` nodes (param `const`, `ParamKind::GlobalConst(ty)`) inline the value as a literal through
   `Env::consts`; `regen::collect_consts` resolves names (unique project-wide), `const_refs` finds readers (deps,
   clearing on type change / delete). `regen::wesl_file` / `module_of` are `None` for tables.
+- **Texture assets** (`shaders/**/*.texture.ron`, decision 0024): `shader_graph_core::texture::TextureAsset` (image
+  path under the game's `assets/`, `.ktx2` / `.png` only, + loader settings), `AssetType::Texture`,
+  `AssetSet::textures`; no file of their own. One game file — one asset (E011 on every sharer); E012 path rules,
+  E013 sampler rules, E014 KTX2 cube map / array / 3D, W109 missing file
+  (`regen::texture_diagnostics`). Nodes reference them by id through
+  `ParamKind::Texture` (`texture_refs`: deps, rename rewrite, delete clears → W110 + `@internal/default`; missing →
+  E006); old image-path defaults fail in `assets::load`. **Internal textures** (`shader_stdlib::internal`,
+  `@internal/default`) are embedded PNGs written to `assets/shaders/internal/` on every regen.
+- **Baked manifest** (decision 0025): regen writes `assets/shaders/autogen/baked.ron` (`shader_codegen_rust::manifest`:
+  every valid Texture asset + every material's values / texture ids). The generated crate embeds it
+  (`COMPILED_MANIFEST`, `include_str!`) and overlays the runtime file on hot reload; `crates/shaders/src/baked/mod.rs`
+  is the static template `crates/shader_codegen_rust/templates/baked_mod.rs` (`BakedMaterialsLoader`, progress,
+  overlay), `baked/{materials,textures}.rs` come from `shader_codegen_rust::baked`. Generated `new` / `set_*` are
+  `pub(crate)`; games use `BakedMaterials` / `BakedTextures` (nested fields, or `by_path` / `get` by asset id,
+  decision 0030). **Layout guard** (decision 0029): every material WESL
+  compiles only with its `Ir::layout_feature()` (`SG_LAYOUT_<hash>`), which the generated `specialize` enables, so a
+  hot-reloaded shader with other bindings fails to compile instead of crashing the game; `check::Files::enable` does
+  the same for the compile check. The manifest's `layout` / `bindings` let the runtime match texture bindings by
+  position.
 - **Node kinds** are string paths: `stdlib::*`, `param::*`, `output::*`, `function::<sub/name>`, `user::<id>`.
 - **Material Attributes** (decision 0023): `PinType::MaterialAttributesPbr` is the WESL struct of the stdlib module
   `material.wesl`; field ids / defaults / activity live in `shader_graph_core::attributes` (shared by Make/Break, the
@@ -103,10 +124,14 @@ atomic write. Key facts that span several files:
   inserted nodes (`shader_graph_core::types::conversion`); truncation emits W104.
 - **Functions** are separate WESL modules imported by materials via relative `super::` paths (`codegen_wesl::paths`) —
   no inlining (decision 0002). Builtins a function needs (UV, time, world position…) become trailing hidden `b_*`
-  parameters filled in by the caller (decision 0005). Changing a function regenerates its dependents (`DepGraph`).
+  parameters filled in by the caller (decision 0005); its fixed textures follow as hidden `ft_<fn>_<node>` texture +
+  sampler parameters (`FunctionSig::textures`, decision 0024). Changing a function regenerates its dependents
+  (`DepGraph`).
 - **Writer** (`shader_project::writer`): all files go to temp first, then a series of renames; files are rewritten only
   if content changed (avoids spurious hot-reloads); orphans with the autogen marker are deleted; files *without* the
-  `// AUTOGENERATED by shader-editor v…` marker are never touched (E008). The editor never edits the game's root
+  `// AUTOGENERATED by shader-editor v…` marker are never touched (E008), binary ones included. Contents are bytes:
+  internal textures (`shader_stdlib::internal`) go to `assets/shaders/internal/`, owned through the marker file
+  `.autogen` (no marker in a non-empty dir → E008, nothing touched there). The editor never edits the game's root
   `Cargo.toml` (W105 instead).
 - **Errors block only their own asset**; the rest of the project still regenerates.
 - **Material kinds**: Pbr3d → `ExtendedMaterial<StandardMaterial, {Name}Ext>` (shadows/prepass/deferred for free);
@@ -123,10 +148,18 @@ atomic write. Key facts that span several files:
   bevy_noodle's scene history.
 - Connection validity is decided by `doc::connection_error` via a custom `ConnectionCheck` (bevy_noodle ports are all
   `PortType::ANY`).
-- Tabs are `tab::Tab` (graph `Doc`, read-only `TextDoc` of a generated file, `CurveDoc`, `ConstsDoc`);
-  `Editor::doc()` is `None` on a non-graph tab, `Editor::curve_doc()` / `consts_doc()` give the others. Both document kinds share
+- Tabs are `tab::Tab` (graph `Doc`, read-only `TextDoc` of a generated file, `CurveDoc`, `ConstsDoc`, read-only
+  `ImageDoc` of a game image decoded through `game_image::GameImageCache`, `TextureDoc` of a Texture asset — read-only
+  for a built-in `@internal/…` texture), each implementing `doc_kind::TabDoc` (title, icon, dirty, save, reload,
+  rename, config key, `override_into` for validation; `Tab::doc()`); `Editor::doc()` is `None` on a non-graph tab,
+  `Editor::curve_doc()` / `consts_doc()` / `texture_doc()` give the others. The editable kinds share
   `history::History<T>`. Each content kind has a view in `ui::DocArea` tagged `ViewOf(ViewKind)` (decision 0014 lists what
   a new kind needs). WESL/Rust highlighting is our own lexer (`highlight.rs`).
+- Module seams (decision 0026): `state/*` (types, tabs, regen, watch, apply, `*_ops`, tests), `doc_kind.rs`
+  (`TabDoc`), `ui/node_preview.rs` (generic in-node preview: curve / const / texture kinds in `kinds()`),
+  `ui/tree.rs` (`TreeSource`: Project + read-only Game Assets with the virtual Internal folder), `game_image.rs`
+  (`GameImageCache`: game images and internal textures decoded with `Image::from_buffer`), `droppable.rs`
+  (`DroppableFile`: dragging images / Texture assets onto a graph).
 - UI is pure Bevy UI + Feathers (`bsn!`); **no egui**. Workarounds for Feathers 0.20 bugs are in `fixes.rs`.
 - `EditorCorePlugin` runs without a window — logic is tested in `state::tests` and `tests/ui_smoke.rs`.
 - User config: `<OS config dir>/fe3dback/bevy-shader-editor/config.ron` (window size, recent projects, open tabs;
@@ -173,15 +206,20 @@ hand-drawn ones, rasterized at runtime with resvg (`crates/shader_editor_app/src
 
 ### Visual checks (debug env hooks)
 
-- Editor: `SHADER_EDITOR_SCREENSHOT=out.png [SHADER_EDITOR_OPEN=env/rock_wet.material.ron[#wesl|#rust]]
-  [SHADER_EDITOR_SELECT=stdlib::Lerp] [SHADER_EDITOR_DEMO=palette|wire|dialog|about|quick_start|open_project|welcome|menu|tab_menu] cargo run -- examples/sample_game`
-  — renders, saves the PNG and exits. `SHADER_EDITOR_INPUT=drag|rmb_click|rmb_pan|mmb_pan|slider|color|pin_rmb|node_rmb|node_dblclick|hover|curve_drag|curve_add`
+- Editor: `SHADER_EDITOR_SCREENSHOT=out.png [SHADER_EDITOR_OPEN=env/rock_wet.material.ron[#wesl|#rust]|@game/textures/rock_albedo.ktx2|@internal/default]
+  [SHADER_EDITOR_SELECT=stdlib::Lerp] [SHADER_EDITOR_DEMO=palette|wire|dialog|about|quick_start|open_project|welcome|menu|tab_menu|game_file_menu] cargo run -- examples/sample_game`
+  — renders, saves the PNG and exits. `SHADER_EDITOR_INPUT=drag|rmb_click|rmb_pan|mmb_pan|slider|color|pin_rmb|node_rmb|node_dblclick|hover|curve_drag|curve_add|texture_zoom|drop_game_file`
   (+ `SHADER_EDITOR_INPUT_NODE=<id>`, `SHADER_EDITOR_INPUT_TRACE=1`, `SHADER_EDITOR_ZOOM=<f32>`) plays a scripted mouse
   gesture through winit's messages and logs the outcome (`demo` lines; `slider`/`color` also log the edited value).
-- Sample game: `cd examples/sample_game && SAMPLE_SCREENSHOT=out cargo run` → `out-1.png`, `out-2.png` (used to verify
-  hot reload). Render comparison (PSNR) is not automated.
+  `drop_game_file` drags the Game Assets row `SHADER_EDITOR_INPUT_FILE=<path under assets/>` (default: the first one)
+  onto `SHADER_EDITOR_INPUT_NODE` (default: the canvas centre) and logs the graph's texture nodes; it may create a
+  Texture asset, so run it on a copy of the sample game.
+- Sample game: `cd examples/sample_game && SAMPLE_SCREENSHOT=out timeout 180 cargo run` → `out-1.png` 5 s and
+  `out-2.png` 25 s (real time) after the first frame, then exits; edit + `regen` in between to verify hot reload (the
+  window updates continuously and without vsync in this mode, so it works unfocused under lavapipe too). Render
+  comparison (PSNR) is not automated.
 
-## File format (`*.material.ron` / `*.function.ron`; curves: decision 0015)
+## File format (`*.material.ron` / `*.function.ron`; curves: decision 0015; textures: decision 0024)
 
 Serialized `Asset { format_version, kind, name, nodes, edges, comments, meta, preview }` (`preview` omitted when
 default, decision 0022) with struct names, 2-space indent,
@@ -199,5 +237,6 @@ add a migration in `Asset::from_ron` (current version: 1). See decision 0003.
   diagnostic codes, generated API, crate roles, limitations, dev commands.
 - Record non-obvious implementation choices or deviations from the spec as a new `docs/decisions/NNNN-*.md` and add it
   to `docs/decisions/README.md` (never delete an old decision — mark it "superseded by NNNN").
-- Never hand-edit autogen output (`examples/sample_game/assets/shaders/autogen/**`, `examples/sample_game/crates/shaders/**`,
-  `crates/shader_project/tests/snapshots/*.snap`) — change the generator and regenerate.
+- Never hand-edit autogen output (`examples/sample_game/assets/shaders/{autogen,internal}/**`,
+  `examples/sample_game/crates/shaders/**`, `crates/shader_project/tests/snapshots/*.snap`) — change the generator and
+  regenerate.

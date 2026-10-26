@@ -1,6 +1,6 @@
 //! Math category: per-component polymorphic operations (spec §8, 7.2).
 
-use shader_graph_core::registry::{Hotkey, HotkeyKey, NodeAction, NodeOp, PinDef, Registry};
+use shader_graph_core::registry::{Conversion, Hotkey, HotkeyKey, NodeAction, NodeOp, PinDef, Registry};
 use shader_graph_core::{PinType, Stage, attributes};
 
 use crate::def::{def, dim_fn, pin_in, pin_out, poly_ins, poly_out, sig};
@@ -47,7 +47,7 @@ pub fn register(r: &mut Registry) {
                 d = d.action(NodeAction {
                     label: format!("Convert to {other}"),
                     hotkey: Some(Hotkey::shift(key)),
-                    op: NodeOp::ConvertTo(format!("stdlib::{other}")),
+                    op: NodeOp::Convert(Conversion::kind(&format!("stdlib::{other}"))),
                 });
             }
         }
@@ -237,7 +237,7 @@ mod tests {
         let ops: Vec<(&str, String)> = a
             .iter()
             .map(|x| match &x.op {
-                NodeOp::ConvertTo(k) => (k.as_str(), x.hotkey.unwrap().label()),
+                NodeOp::Convert(c) => (c.kind.as_str(), x.hotkey.unwrap().label()),
             })
             .collect();
         assert_eq!(

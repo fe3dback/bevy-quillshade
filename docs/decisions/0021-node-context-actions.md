@@ -5,12 +5,13 @@ Divide into each other without rewiring (spec §1–§2 of the QA design). Node-
 the node is defined, but `shader_graph_core` and `shader_stdlib` must stay free of Bevy.
 
 **Decision.**
-- **Actions are data on `NodeDef`.** `NodeDef::context_actions()` (default empty) returns
-  `NodeAction { label, hotkey: Option<Hotkey>, op: NodeOp }`. `NodeOp` is a small closed enum the editor knows how
-  to apply (`ConvertTo(kind)` for now); `Hotkey { shift, key: HotkeyKey }` names a logical key (`Plus`, `Minus`,
-  `Star`, `Slash`, `Letter(c)`), and `Hotkey::label()` gives the menu text (`Shift +`, `V`). Stdlib nodes attach
-  actions with the builder's `.action(..)`. The four arithmetic nodes offer "Convert to" the other three with
-  `Shift +`, `Shift -`, `Shift *`, `Shift /`; converting to the node's own kind is not offered.
+- **Actions are data on `NodeDef`.** `NodeDef::context_actions()` (default empty) returns `NodeAction { label, hotkey:
+  Option<Hotkey>, op: NodeOp }`. `NodeOp` is a small closed enum the editor knows how to apply (`ConvertTo(kind)` for
+  now — *superseded by 0026:* `NodeOp::Convert(Conversion { kind, params, unique_name, pins })`, used by Convert to
+  Parameter); `Hotkey { shift, key: HotkeyKey }` names a logical key (`Plus`, `Minus`, `Star`, `Slash`, `Letter(c)`),
+  and `Hotkey::label()` gives the menu text (`Shift +`, `V`). Stdlib nodes attach actions with the builder's
+  `.action(..)`. The four arithmetic nodes offer "Convert to" the other three with `Shift +`, `Shift -`, `Shift *`,
+  `Shift /`; converting to the node's own kind is not offered.
 - **Menu rows** (`Editor::node_menu`) reuse the `open_icon_menu` convention: `"label\tHotkey"` shows the hotkey
   right-aligned, `""` is a separator. Order: the node's own actions, a separator (only when there are some), then
   the generic selection actions `Copy\tCtrl+C`, `Duplicate\tCtrl+D`, `Delete\tDel` (the existing `Action::Copy`,
@@ -26,6 +27,9 @@ the node is defined, but `shader_graph_core` and `shader_stdlib` must stay free 
 - **Convert** (`Action::ConvertNodes { nodes, kind }`) changes `kind` in place in one `Doc::edit` (one undo step):
   id, position, params, inline input values and wires stay; wires and inline values of pins that the node's new
   signature lacks are dropped. For the four arithmetic nodes (pins `a`, `b`, `out`) nothing is dropped.
+  *Update (decision 0026):* the action is `Action::ConvertNodes { nodes, conv: Conversion }`; a `Conversion` with
+  an empty param list behaves as described here, a non-empty one copies only the listed params (renamed), can
+  generate a unique parameter name and rename output pins.
 - **Key mapping** (`ui::input::pressed_hotkey`): `Shift`+`Equal` / `Minus` / `Digit8` / `Slash` (the main row, as
   on a US layout) and `NumpadAdd` / `NumpadSubtract` / `NumpadMultiply` / `NumpadDivide` with or without Shift all
   map to the `Shift` hotkeys. Like the other shortcuts they are ignored while a text field has the focus or a

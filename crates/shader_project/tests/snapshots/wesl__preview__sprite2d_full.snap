@@ -7,6 +7,11 @@ source: crates/shader_project/tests/snapshots.rs
 import bevy_sprite_render::mesh2d::vertex_output::VertexOutput;
 import bevy_sprite_render::sprite_mesh::functions::{get_final_color, sample_final_color};
 
+// The game's compiled material enables this feature; after a change of parameters, texture bindings or
+// World Position Offset the shader stops compiling here until the game is rebuilt.
+@if(!SG_LAYOUT_886d90f5)
+const_assert material_layout_changed__rebuild_the_game;
+
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // --- builtins ---
