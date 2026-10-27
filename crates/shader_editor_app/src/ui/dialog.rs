@@ -229,8 +229,11 @@ fn submit_on_enter(
     inputs: Query<&EditableText, With<DialogInput>>,
     mut actions: ResMut<Actions>,
 ) {
+    // A held Enter's key repeat never submits: the dialog may open while the Enter that caused it is still down
+    // (a Named Route picked in the palette, design §6.4).
     if ev.input.key_code == KeyCode::Enter
         && ev.input.state.is_pressed()
+        && !ev.input.repeat
         && inputs.contains(ev.focused_entity)
         && let Some(t) = submit_text(&inputs)
     {

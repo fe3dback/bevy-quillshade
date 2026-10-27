@@ -113,7 +113,7 @@ Graph (`GraphCtx`, graph tabs only):
 | Delete, Backspace | delete selection, every tab | graph and curve only |
 | F / Home | fit selection / all, every tab | graph only |
 | C | comment frame, every tab | graph only |
-| Tab | palette at the cursor, if over the canvas | same, graph only (*superseded by 0034:* the palette is on Space; Tab toggles the right sidebar on every tab) |
+| Tab | palette at the cursor, if over the canvas | same, graph only (*superseded by 0034:* the palette is on Space; Tab toggles the right sidebar on every tab; *superseded by 0035:* Tab is Bevy's focus navigation) |
 | Shift + `=` `-` `8` `/`, numpad `+ - * /` | convert the selected nodes | same |
 | V | exclusive preview on release | same |
 | Alt + a plain key (Alt+F) | fired the plain key | nothing |

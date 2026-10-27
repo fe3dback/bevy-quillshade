@@ -59,7 +59,7 @@ zero, changed to 1.0 — see Nodes).
   square with `0` / `1` and a small check mark, green when on, grey when off; "n/a" without a resolvable constant.
   The title shows the constant's name. (*Update, decision 0026:* now a kind of the generic
   `ui::node_preview::NodePreview` mechanism, `ConstPreview`; the "n/a" label is the mechanism's.)
-- **Browser / menu**: `New Global Consts...` (icon-rs `custom-table`), watermark `consts`; no "Show generated WESL"
+- **Browser / menu**: `New Global Consts...` (icon-rs `custom-table`; *superseded by 0035:* `configurations`), watermark `consts`; no "Show generated WESL"
   for tables.
 
 **Consequences.** A fourth asset kind; a table edit rewrites the WESL of every user (unlike curves, whose data lives

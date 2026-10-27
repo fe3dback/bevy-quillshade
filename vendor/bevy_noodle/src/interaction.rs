@@ -24,6 +24,7 @@ use bevy::ui::{ComputedNode, InteractionDisabled, UiScale, ui_transform::UiGloba
 
 use crate::components::*;
 use crate::edit::{DragProgress, EditOrigin, GraphCommandsExt, GraphEdit, SelectMode, ask, ask_move};
+use crate::geometry::endpoint;
 use crate::query::GraphQuery;
 
 /// Pointer interaction for canvases with [`CanvasInteraction`], and picking for edges with an [`EdgeHitbox`].
@@ -83,6 +84,18 @@ pub struct CanvasInteraction {
     /// by the same delta, keeping its layout. Only pointer drags snap.
     /// `None` (the default): nodes follow the pointer freely.
     pub snap: Option<f32>,
+    /// While a wire is dragged (or edges are lifted), its target is the
+    /// candidate port whose centre is nearest to the pointer within this many
+    /// logical window pixels (the same at any zoom), wherever the pointer is
+    /// inside that radius; failing one, the candidate under the pointer. A
+    /// drop then connects (or moves) there. Ports the drag may not end on
+    /// never take it, and with the pointer on one of them (its laid-out
+    /// box), nothing does: a drop there reports it, as without a radius.
+    /// With a hover style, the default style lights only that target during
+    /// the drag. Hover and presses without a drag stay on the port's box (its
+    /// physical size, see `kit::PortSize`). `None` (the default): the target
+    /// is the candidate under the pointer.
+    pub wire_target_radius: Option<f32>,
     /// Pressing a node raises it above its sibling nodes, with a `ZIndex`.
     /// Nodes with a negative `ZIndex` stay where they are (e.g. frames meant
     /// to stay under the others).
@@ -108,12 +121,20 @@ impl Default for CanvasInteraction {
             detach_wires: true,
             move_wires_keys: Vec::new(),
             snap: None,
+            wire_target_radius: None,
             raise_on_press: true,
             additive_keys: additive_keys(),
             zoom_modifiers: vec![ControlLeft, ControlRight, SuperLeft, SuperRight],
             scroll: ScrollMode::Auto,
             pinch_zoom: true,
         }
+    }
+}
+
+impl CanvasInteraction {
+    /// [`wire_target_radius`](Self::wire_target_radius), if it is a usable one.
+    pub(crate) fn target_radius(&self) -> Option<f32> {
+        self.wire_target_radius.filter(|r| r.is_finite() && *r > 0.0)
     }
 }
 
@@ -189,7 +210,7 @@ fn snap_to(point: Vec2, grid: f32) -> Vec2 {
 /// [`MovingEdges`]: the ports they may move to, by the built-in rules and
 /// [`MoveCheck`](crate::MoveCheck) observers. Set by the library.
 #[derive(Component, Debug, Clone, Default, PartialEq, Eq, Deref)]
-pub struct WireCandidates(EntityHashSet);
+pub struct WireCandidates(pub(crate) EntityHashSet);
 
 /// On a [`PendingWire`] or [`MovingEdges`]: the candidate port it would
 /// connect or move to if dropped now.
@@ -329,6 +350,12 @@ impl Ctx<'_, '_> {
         let physical = position / (scale * self.ui_scale.0);
         let normalized = computed.normalize_point(*transform, physical)?;
         Some((normalized + 0.5) * computed.size() * scale)
+    }
+
+    /// How many graph units one window pixel spans at window `position`.
+    fn graph_per_pixel(&self, canvas: Entity, position: Vec2) -> Option<f32> {
+        let unit = self.graph_delta(canvas, position, Vec2::X)?.length();
+        (unit.is_finite() && unit > 0.0).then_some(unit)
     }
 
     /// Window position → graph space.
@@ -511,6 +538,7 @@ fn on_drag(
     kept: Query<&KeptSelection>,
     dragged: Query<&NodeDrag>,
     positions: Query<&NodePosition>,
+    anchors: Query<(&Port, &PortAnchor, Option<&PortTangent>)>,
     hovered: Res<HoverMap>,
 ) {
     let target = (drag.event_target(), drag.original_event_target());
@@ -524,13 +552,24 @@ fn on_drag(
             let Some(pointer) = ctx.graph_point(canvas, position) else {
                 return;
             };
-            // Snap to a port it may connect to under the pointer.
-            let under = hovered.get(&drag.pointer.id).into_iter().flat_map(|h| h.keys());
+            // Snap to a port it may connect to: the nearest within the target radius, else the one under the
+            // pointer.
+            let under: Vec<Entity> =
+                hovered.get(&drag.pointer.id).into_iter().flat_map(|h| h.keys().copied()).collect();
+            let reach = settings.target_radius().and_then(|r| Some(r * ctx.graph_per_pixel(canvas, position)?));
             if let Some(wire) = ctx.graph.wire_of(canvas)
                 && let Ok((pending, moving, mut target, candidates)) = wires.get_mut(wire)
             {
-                let fits = |p: &&Entity| candidates.is_some_and(|c| c.contains(*p));
-                target.set_if_neq(WireTarget(under.copied().find(|p| fits(&p))));
+                let fits = |p: &Entity| candidates.is_some_and(|c| c.contains(p));
+                let from = pending.as_ref().map(|w| w.from).or(moving.as_ref().map(|m| m.from));
+                // With a radius, the pointer on a port it may not end on (of this canvas, not `from`) snaps nowhere,
+                // so the drop there reports that port.
+                let port = |p: &Entity| ctx.graph.port(*p).is_some() && ctx.graph.canvas_of(*p) == Some(canvas);
+                let refused = under.iter().any(|p| Some(*p) != from && !fits(p) && port(p));
+                let near = reach.filter(|_| !refused);
+                let near = near.zip(candidates).and_then(|(r, c)| nearest(c, pointer, r, &anchors, &positions));
+                let hovered = under.iter().copied().find(fits).filter(|_| reach.is_none() || !refused);
+                target.set_if_neq(WireTarget(near.or(hovered)));
                 if let Some(mut pending) = pending {
                     pending.pointer = pointer;
                 }
@@ -569,6 +608,21 @@ fn on_drag(
             ctx.commands.entity(canvas).try_insert(SelectionBox(rect));
         }
     }
+}
+
+/// Of the `candidates` whose centres lie within `reach` of `pointer` (graph
+/// space), the nearest; equally near ones go by entity, so the choice is
+/// stable. Ports not laid out yet are left out.
+fn nearest(
+    candidates: &WireCandidates,
+    pointer: Vec2,
+    reach: f32,
+    anchors: &Query<(&Port, &PortAnchor, Option<&PortTangent>)>,
+    nodes: &Query<&NodePosition>,
+) -> Option<Entity> {
+    let distance = |port: &Entity| Some((endpoint(*port, anchors, nodes)?.0.distance(pointer), *port));
+    let within = candidates.iter().filter_map(distance).filter(|(d, _)| *d <= reach);
+    within.min_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1))).map(|(_, port)| port)
 }
 
 fn on_drag_end(

@@ -13,10 +13,11 @@ use bevy::feathers::theme::ThemeBackgroundColor;
 use bevy::feathers::tokens;
 use bevy::input_focus::tab_navigation::TabGroup;
 use bevy::prelude::*;
-use bevy::ui_widgets::{Activate, ScrollArea};
+use bevy::ui::Pressed;
+use bevy::ui_widgets::{Activate, MenuButton, ScrollArea};
 use bevy_noodle::style::kit;
 
-use crate::config::UserConfig;
+use crate::config::{Panel, UserConfig};
 use crate::state::{Action, Actions, Editor, Unsaved};
 use crate::tab::ViewKind;
 
@@ -135,7 +136,15 @@ impl Plugin for UiPlugin {
         .add_systems(Startup, spawn_layout)
         .add_systems(
             Update,
-            (show_active_view, show_empty_hint, show_doc_kind, show_project, fill_main_menus, main_menu_barrier),
+            (
+                show_active_view,
+                show_empty_hint,
+                show_doc_kind,
+                show_project,
+                fill_main_menus,
+                main_menu_barrier,
+                show_left_sidebar,
+            ),
         )
         .add_observer(activate_action)
         .add_observer(row_hover_on)
@@ -287,9 +296,13 @@ impl MainMenu {
                 (Some(IconId::Undo), "Undo\tCtrl+Z".into(), Action::Undo),
                 (Some(IconId::Redo), "Redo\tCtrl+Shift+Z".into(), Action::Redo),
             ],
+            // Design §3: each panel's mark is its own flag, also while Zen mode hides the panel.
             MainMenu::View => vec![
-                (check(config.show_log), "Show log\t`".into(), Action::ToggleLog),
-                (check(config.show_properties), "Show properties\tTab".into(), Action::ToggleProperties),
+                (check(config.zen_mode), "Zen mode\t`".into(), Action::ToggleZen),
+                menu_separator(),
+                (check(config.show_left_sidebar), "Show project\tCtrl+1".into(), Action::ToggleLeftSidebar),
+                (check(config.show_log), "Show console\tCtrl+2".into(), Action::ToggleLog),
+                (check(config.show_properties), "Show properties\tCtrl+3".into(), Action::ToggleProperties),
             ],
             MainMenu::Assets => {
                 let mut items = browser::create_items();
@@ -333,13 +346,36 @@ pub fn main_menu(menu: MainMenu) -> impl Scene {
 #[derive(Component, Default, Clone)]
 pub struct MainMenuBarrier;
 
-/// Spawns the [`MainMenuBarrier`] while a main menu's popup is shown and removes it once none is.
+/// Spawns the [`MainMenuBarrier`] while a main menu's popup is shown and removes it once none is, and gives each main
+/// menu button Feathers' active look (`Pressed`) exactly while its popup is shown.
+///
+/// The button gets `Pressed` from the press that opens the menu (`ActivateOnPress`) and loses it only on a release
+/// over itself. That release lands on the barrier, spawned under the pointer in the meantime, so the button would keep
+/// looking active after the menu closed and ignore its next press (design §1). Following the popup's visibility here
+/// covers every way the menu closes: an outside click, Esc, an item, another menu.
 pub fn main_menu_barrier(
-    popups: Query<&Visibility, With<MainMenuPopup>>,
+    popups: Query<(&Visibility, &ChildOf), With<MainMenuPopup>>,
+    children: Query<&Children>,
+    buttons: Query<Has<Pressed>, With<MenuButton>>,
     barriers: Query<Entity, With<MainMenuBarrier>>,
     mut commands: Commands,
 ) {
-    let open = popups.iter().any(|v| *v == Visibility::Visible);
+    let mut open = false;
+    for (visibility, menu) in &popups {
+        let shown = *visibility == Visibility::Visible;
+        open |= shown;
+        for button in children.get(menu.parent()).into_iter().flatten() {
+            match buttons.get(*button) {
+                Ok(false) if shown => {
+                    commands.entity(*button).try_insert(Pressed);
+                }
+                Ok(true) if !shown => {
+                    commands.entity(*button).try_remove::<Pressed>();
+                }
+                _ => {}
+            }
+        }
+    }
     if open && barriers.is_empty() {
         commands.spawn_scene(bsn! { @dialog::menu_barrier() MainMenuBarrier });
     } else if !open {
@@ -354,10 +390,11 @@ pub fn fill_main_menus(
     editor: Res<Editor>,
     popups: Query<(Entity, &MainMenuPopup)>,
     added: Query<(), Added<MainMenuPopup>>,
-    mut last: Local<Option<(bool, bool)>>,
+    mut last: Local<Option<[bool; 4]>>,
     mut commands: Commands,
 ) {
-    let key = (editor.config.show_log, editor.config.show_properties);
+    let c = &editor.config;
+    let key = [c.zen_mode, c.show_left_sidebar, c.show_log, c.show_properties];
     if *last == Some(key) && added.is_empty() {
         return;
     }
@@ -408,6 +445,53 @@ fn menu_bar() -> impl Scene {
     }
 }
 
+/// The left sidebar (project tree and assets tree), shown by [`show_left_sidebar`].
+#[derive(Component, Default, Clone)]
+pub struct LeftSidebar;
+
+/// The left sidebar: the project tree and the assets tree, a pane each. `min_width: 0`: below `CENTER_MIN_W` it
+/// shrinks past its content (the rows clip) instead of pushing the window wider.
+pub fn left_sidebar() -> impl Scene {
+    bsn! {
+        LeftSidebar
+        Node {
+            width: px(270),
+            min_width: px(0),
+            flex_direction: FlexDirection::Column,
+            row_gap: px(4),
+            padding: UiRect::all(px(4)),
+            border: UiRect::right(px(1)),
+        }
+        BackgroundColor(PANEL_BG)
+        BorderColor::all(BORDER)
+        Children [
+            @pane_box(pane_title("Project"), Vec::new(), bsn! { @scroll_column() browser::BrowserBody })
+            Node { flex_grow: 3.0, flex_basis: px(0), min_height: px(0) }
+            --
+            @pane_box(pane_title("Game Assets"), Vec::new(), bsn! { @scroll_column() browser::GameAssetsBody })
+            Node { flex_grow: 2.0, flex_basis: px(0), min_height: px(0) }
+        ]
+    }
+}
+
+/// Follows [`Panel::LeftSidebar`] (View → Show project, Zen mode): hidden, the left sidebar takes no space and Tab
+/// skips it ([`areas::display`]). Runs when the flag changed or the sidebar was spawned.
+pub fn show_left_sidebar(
+    editor: Res<Editor>,
+    mut last: Local<Option<bool>>,
+    spawned: Query<(), Added<LeftSidebar>>,
+    mut sidebars: Query<(&mut Node, &mut Visibility), With<LeftSidebar>>,
+) {
+    let shown = editor.config.panel_visible(Panel::LeftSidebar);
+    if *last == Some(shown) && spawned.is_empty() {
+        return;
+    }
+    *last = Some(shown);
+    for (mut node, mut visibility) in &mut sidebars {
+        areas::display(&mut node, &mut visibility, shown);
+    }
+}
+
 /// The project's name: the root directory's name (the whole path when it has none, e.g. `/`).
 pub(crate) fn project_name(root: &Path) -> String {
     root.file_name().map_or_else(|| root.display().to_string(), |n| n.to_string_lossy().into_owned())
@@ -449,25 +533,7 @@ fn spawn_layout(mut commands: Commands) {
             --
             Node { flex_grow: 1.0, flex_direction: FlexDirection::Row, min_height: px(0) }
             Children [
-                // Left sidebar: the project tree and the assets tree, a pane each. `min_width: 0`: below
-                // `CENTER_MIN_W` it shrinks past its content (the rows clip) instead of pushing the window wider.
-                Node {
-                    width: px(270),
-                    min_width: px(0),
-                    flex_direction: FlexDirection::Column,
-                    row_gap: px(4),
-                    padding: UiRect::all(px(4)),
-                    border: UiRect::right(px(1)),
-                }
-                BackgroundColor(PANEL_BG)
-                BorderColor::all(BORDER)
-                Children [
-                    @pane_box(pane_title("Project"), Vec::new(), bsn! { @scroll_column() browser::BrowserBody })
-                    Node { flex_grow: 3.0, flex_basis: px(0), min_height: px(0) }
-                    --
-                    @pane_box(pane_title("Game Assets"), Vec::new(), bsn! { @scroll_column() browser::GameAssetsBody })
-                    Node { flex_grow: 2.0, flex_basis: px(0), min_height: px(0) }
-                ]
+                @left_sidebar()
                 --
                 // Center: tabs bar, editor topbar, editor content, editor statusbar, console/logs. `flex_basis: 0`
                 // here and on the editor content: they take what is left, so the sidebars keep their width and the
@@ -626,25 +692,29 @@ mod tests {
         assert_eq!(plural(0, "node", "nodes"), "0 nodes");
     }
 
-    /// Review Focus 5: the View menu's check marks show the config's flags; Edit sits between File and View.
+    /// Design §3: the View menu lists Zen mode, a separator and the three panels with their hotkeys; each check mark
+    /// is its own flag (Zen on does not clear the panels' marks); Edit sits between File and View.
     #[test]
     fn view_menu_check_marks_follow_config() {
-        let marks = |show_log, show_properties| {
-            let config = UserConfig { show_log, show_properties, ..UserConfig::default() };
+        let marks = |zen_mode, show_left_sidebar, show_log, show_properties| {
+            let config = UserConfig { zen_mode, show_left_sidebar, show_log, show_properties, ..UserConfig::default() };
             MainMenu::View.items(&config)
         };
         let check = Some(IconId::Check);
         assert_eq!(
-            marks(true, true),
+            marks(false, true, true, true),
             [
-                (check, "Show log\t`".to_string(), Action::ToggleLog),
-                (check, "Show properties\tTab".to_string(), Action::ToggleProperties),
+                (None, "Zen mode\t`".to_string(), Action::ToggleZen),
+                (None, String::new(), Action::None),
+                (check, "Show project\tCtrl+1".to_string(), Action::ToggleLeftSidebar),
+                (check, "Show console\tCtrl+2".to_string(), Action::ToggleLog),
+                (check, "Show properties\tCtrl+3".to_string(), Action::ToggleProperties),
             ]
         );
         let icons = |m: Vec<(Option<IconId>, String, Action)>| m.into_iter().map(|i| i.0).collect::<Vec<_>>();
-        assert_eq!(icons(marks(false, true)), [None, check]);
-        assert_eq!(icons(marks(true, false)), [check, None]);
-        assert_eq!(icons(marks(false, false)), [None, None]);
+        assert_eq!(icons(marks(true, true, true, true)), [check, None, check, check, check]);
+        assert_eq!(icons(marks(true, false, true, false)), [check, None, None, check, None]);
+        assert_eq!(icons(marks(false, true, false, true)), [None, None, check, None, check]);
 
         let edit = MainMenu::Edit.items(&UserConfig::default());
         let edit: Vec<_> = edit.into_iter().map(|(_, label, action)| (label, action)).collect();

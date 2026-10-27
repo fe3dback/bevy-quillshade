@@ -32,7 +32,8 @@ home (design `docs/superpowers/specs/2026-10-26-editor-kinds-qa-design.md` §1, 
   `AreaOf(ViewKind)`.
   - `ui::areas::show_active_areas` sets `Node::display` to `Flex` on the active kind's containers and to `None` on the
     others. It uses `Display`, not `Visibility`, because hidden flow children must not take space, and it writes only
-    on a change.
+    on a change. (*superseded by 0035:* it also sets `Visibility::Hidden` on the hidden containers, so Tab navigation
+    skips them.)
   - A strip with nothing for the active kind is not displayed at all: no empty strip and no empty panel. The one
     exception is the right sidebar with no tab open, which shows the header "Properties" and "Nothing open."
   - The right sidebar header shows the active kind's `SIDEBAR_TITLE`: Properties, Generated File, Curve, Constants,

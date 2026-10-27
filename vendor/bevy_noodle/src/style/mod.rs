@@ -7,6 +7,7 @@
 //! | [`SelectionBoxStyle`] on a canvas | a visible selection box                         |
 //! | [`PortHighlight`] + [`PortColor`] | ports reflecting connection and drag state      |
 //! | [`PortHoverStyle`] on a canvas    | highlighted ports reacting to the pointer       |
+//! | [`kit::PortSize`] for a kit port  | a hit area larger (or smaller) than its dot     |
 //! | [`SelectedBorderColor`] on a node | a border following `Selected`                   |
 //!
 //! [`kit`] has ready-made canvas and node scenes to compose with Bevy's `bsn!`.
@@ -23,7 +24,7 @@ use bevy::prelude::*;
 use bevy::ui::{ComputedNode, Selected};
 use bevy::window::SystemCursorIcon;
 
-use crate::interaction::{SelectionBox, WireCandidates, WireTarget};
+use crate::interaction::{CanvasInteraction, SelectionBox, WireCandidates, WireTarget};
 use crate::{NoodleSystems, components::*, query::GraphQuery};
 use render::{Grid, GridMaterial, MaterialsPlugin, WireMaterial, wire_material};
 
@@ -52,7 +53,7 @@ impl Plugin for NoodleDefaultStylePlugin {
 /// How edges are drawn. On a canvas it applies to all its edges; on an edge
 /// it overrides the canvas. Lengths are in graph units.
 ///
-/// ```
+/// ```no_run
 /// use bevy::prelude::*;
 /// use bevy_noodle::style::EdgeStyle;
 /// // Marching ants flowing from output to input, fading blue to pink.
@@ -134,6 +135,11 @@ pub struct PortHighlight;
 /// other states: a dimmed or candidate port grows to `scale` and keeps its
 /// alpha; a drop target, larger already, keeps its size.
 ///
+/// While a wire is dragged on a canvas with a
+/// [`wire_target_radius`](crate::CanvasInteraction::wire_target_radius),
+/// the look marks the wire's target instead, the port it snaps to, and only
+/// it.
+///
 /// Hovering is Bevy's [`Hovered`], which `bevy_picking` keeps up to date for
 /// the mouse. An app that replaces a port entity under the pointer (say,
 /// rebuilding a node) may insert `Hovered(true)` on the new one, so its look
@@ -152,6 +158,14 @@ impl Default for PortHoverStyle {
         Self { scale: 1.3, lighten: 0.15 }
     }
 }
+
+/// A child of a [`PortHighlight`] port drawing its dot, when the dot is
+/// smaller than the port (see [`kit::PortSize`]): the highlight colours and
+/// scales it instead of the port, whose box (the hit area) keeps its size,
+/// and wires trimmed to ports end at its rim.
+#[derive(Component, Reflect, Clone, Copy, Debug, Default)]
+#[reflect(Component, Default)]
+pub struct PortDot;
 
 /// A pannable, zoomable background grid for a canvas.
 #[derive(Component, Reflect, Clone, Copy, Debug, PartialEq)]
@@ -282,7 +296,8 @@ fn draw_edges(
     >,
     moves: Query<&MovingEdges>,
     mut visuals: Query<(&mut Node, &mut ZIndex, &MaterialNode<WireMaterial>, &ChildOf)>,
-    ports: Query<(Option<&PortColor>, &ComputedNode, Option<&UiTransform>)>,
+    ports: Query<(Option<&PortColor>, &ComputedNode, Option<&UiTransform>, Option<&Children>)>,
+    dots: Query<(&ComputedNode, Option<&UiTransform>), With<PortDot>>,
     mut materials: ResMut<Assets<WireMaterial>>,
 ) {
     let lifted: EntityHashSet = moves.iter().flat_map(|m| m.edges.iter().copied()).collect();
@@ -304,10 +319,16 @@ fn draw_edges(
         };
         let (start, end) = (geometry.output, geometry.input);
         let port = |p: Option<Entity>| p.and_then(|p| ports.get(p).ok());
+        let rim = |(computed, transform): (&ComputedNode, Option<&UiTransform>)| {
+            let scale = transform.map_or(1.0, |t| t.scale.x);
+            computed.size().min_element() * computed.inverse_scale_factor() * scale / 2.0
+        };
+        // At the drawn dot: a `PortDot` child's rim (scaled by the port too) if it has one, else the port's.
         let radius = |p| {
-            port(p).map_or(0.0, |(_, computed, transform)| {
-                let scale = transform.map_or(1.0, |t| t.scale.x);
-                computed.size().min_element() * computed.inverse_scale_factor() * scale / 2.0
+            port(p).map_or(0.0, |(_, computed, transform, children)| {
+                let dot = children.into_iter().flatten().find_map(|c| dots.get(*c).ok());
+                let own = rim((computed, transform));
+                dot.map_or(own, |dot| rim(dot) * transform.map_or(1.0, |t| t.scale.x))
             })
         };
         let mut shape = *geometry;
@@ -426,33 +447,41 @@ fn draw_selection_boxes(
 }
 
 fn highlight_ports(
-    mut ports: Query<
+    ports: Query<
         (
             Entity,
             &PortColor,
             Option<&OutgoingEdges>,
             Option<&IncomingEdges>,
             (Option<&Hovered>, Option<&PortHoverStyle>),
-            &mut BackgroundColor,
-            &mut BorderColor,
-            &mut UiTransform,
+            Option<&Children>,
         ),
         With<PortHighlight>,
     >,
+    mut paints: Query<
+        (&mut BackgroundColor, &mut BorderColor, &mut UiTransform),
+        Or<(With<PortHighlight>, With<PortDot>)>,
+    >,
+    dots: Query<(), With<PortDot>>,
     hover_styles: Query<&PortHoverStyle, Without<PortHighlight>>,
     graph: GraphQuery,
     wires: Query<
-        (Option<&PendingWire>, Option<&MovingEdges>, &WireTarget, Option<&WireCandidates>),
+        (Option<&PendingWire>, Option<&MovingEdges>, &WireTarget, Option<&WireCandidates>, Option<&WireOf>),
         Or<(With<PendingWire>, With<MovingEdges>)>,
     >,
+    interactions: Query<&CanvasInteraction>,
 ) {
-    let source = |(wire, moving, ..): (Option<&PendingWire>, Option<&MovingEdges>, _, _)| {
+    let source = |(wire, moving, ..): (Option<&PendingWire>, Option<&MovingEdges>, _, _, _)| {
         wire.map(|w| w.from).or(moving.map(|m| m.from))
     };
     let sources: Vec<Entity> = wires.iter().filter_map(source).collect();
-    for (port, color, outgoing, incoming, (hovered, own), mut fill, mut border, mut transform) in &mut ports {
-        let target = wires.iter().any(|(.., t, _)| t.0 == Some(port));
-        let candidate = wires.iter().any(|(.., c)| c.is_some_and(|c| c.contains(&port)));
+    // Canvases whose dragged wire takes the nearest candidate within a radius: there the hover look marks the
+    // wire's target only, wherever the pointer is.
+    let by_radius = |c: &Entity| interactions.get(*c).is_ok_and(|i| i.target_radius().is_some());
+    let radius_canvases: Vec<Entity> = wires.iter().filter_map(|(.., of)| of.map(|o| o.0)).filter(by_radius).collect();
+    for (port, color, outgoing, incoming, (hovered, own), children) in &ports {
+        let target = wires.iter().any(|(_, _, t, ..)| t.0 == Some(port));
+        let candidate = wires.iter().any(|(_, _, _, c, _)| c.is_some_and(|c| c.contains(&port)));
         let connected = outgoing.is_some_and(|e| !e.is_empty()) || incoming.is_some_and(|e| !e.is_empty());
         let (alpha, scale) = match (target || sources.contains(&port), candidate, sources.is_empty()) {
             (true, ..) => (1.0, 1.4),
@@ -463,16 +492,25 @@ fn highlight_ports(
         let inner = if connected { color.0 } else { color.0.darker(0.35) };
         let (mut inner, mut outer) = (inner.with_alpha(inner.alpha() * alpha), color.0.with_alpha(alpha));
         let mut scale: f32 = scale;
-        // The canvas is looked up only for a hovered port.
+        // The canvas is looked up only for a hovered port or a target.
+        let mut lit = hovered.is_some_and(|h| h.0);
+        if (lit || target) && !radius_canvases.is_empty() {
+            let radius_drag = graph.canvas_of(port).is_some_and(|c| radius_canvases.contains(&c));
+            lit = if radius_drag { target } else { lit };
+        }
         let hover = || own.copied().or_else(|| graph.canvas_of(port).and_then(|c| hover_styles.get(c).ok().copied()));
-        if let Some(hover) = hovered.filter(|h| h.0).and_then(|_| hover()) {
+        if let Some(hover) = lit.then(hover).flatten() {
             (inner, outer) = (inner.lighter(hover.lighten), outer.lighter(hover.lighten));
             scale = scale.max(hover.scale);
         }
-        fill.set_if_neq(BackgroundColor(inner));
-        border.set_if_neq(BorderColor::all(outer));
-        if transform.scale != Vec2::splat(scale) {
-            transform.scale = Vec2::splat(scale);
+        // A port drawn by a dot child is coloured and scaled there: its own box, the hit area, keeps its size.
+        let dot = children.into_iter().flatten().copied().find(|c| dots.contains(*c));
+        if let Ok((mut fill, mut border, mut transform)) = paints.get_mut(dot.unwrap_or(port)) {
+            fill.set_if_neq(BackgroundColor(inner));
+            border.set_if_neq(BorderColor::all(outer));
+            if transform.scale != Vec2::splat(scale) {
+                transform.scale = Vec2::splat(scale);
+            }
         }
     }
 }
@@ -669,6 +707,103 @@ mod tests {
         app.world_mut().entity_mut(port).insert(PortHoverStyle { scale: 2.0, lighten: 0.0 });
         app.update();
         assert_eq!(look(&app, port).2, 2.0);
+    }
+
+    /// With a `wire_target_radius`, the hover look marks the dragged wire's target (which the distance picks, maybe
+    /// not under the pointer) and only it; without a drag it stays on the port under the pointer.
+    #[test]
+    fn with_a_target_radius_the_hover_look_goes_to_the_wire_target() {
+        let style = PortHoverStyle { scale: 1.3, lighten: 0.15 };
+        let (mut app, port) = port_app(Some(style));
+        let canvas = app.world_mut().query_filtered::<Entity, With<NodeCanvas>>().single(app.world()).unwrap();
+        let radius = crate::CanvasInteraction { wire_target_radius: Some(40.0), ..default() };
+        app.world_mut().entity_mut(canvas).insert(radius);
+        app.update();
+        let plain = look(&app, port);
+        assert_eq!(plain.2, 1.0, "no drag, not under the pointer: no hover look");
+        hover(&mut app, port, true);
+        let hovered = look(&app, port);
+        assert_eq!(hovered.2, 1.3, "no drag: the port under the pointer");
+
+        // A wire whose target is another port: the hovered one is not lit.
+        let w = app.world_mut();
+        let node = w.spawn((GraphNode, ChildOf(canvas))).id();
+        let from = w.spawn((Port::input(PortType::ANY), ChildOf(node))).id();
+        let other = w.spawn((Port::input(PortType::ANY), ChildOf(node))).id();
+        let wire = (PendingWire { from, pointer: Vec2::ZERO }, WireTarget(Some(other)), WireOf(canvas));
+        let wire = w.spawn(wire).id();
+        // After the wire's own candidate pass (no graph here to find them in).
+        w.flush();
+        w.entity_mut(wire).insert(WireCandidates(EntityHashSet::from_iter([port, other])));
+        app.update();
+        let (fill, _, scale) = look(&app, port);
+        assert_eq!(scale, 1.2, "a candidate, not the target: no hover scale");
+        // The target, not under the pointer, is lit and at least the target's size.
+        hover(&mut app, port, false);
+        app.world_mut().entity_mut(wire).insert(WireTarget(Some(port)));
+        app.update();
+        let (target_fill, _, target_scale) = look(&app, port);
+        assert!(target_fill.luminance() > fill.luminance(), "lighter");
+        assert_eq!(target_scale, 1.4);
+    }
+
+    /// A port drawn by a smaller [`PortDot`] child: the look goes to the dot, the scale to the port.
+    #[test]
+    fn a_port_dot_takes_the_look() {
+        let style = PortHoverStyle { scale: 1.3, lighten: 0.15 };
+        let (mut app, port) = port_app(Some(style));
+        let w = app.world_mut();
+        w.entity_mut(port).insert((BackgroundColor(Color::NONE), BorderColor::all(Color::NONE)));
+        let dot = (PortDot, Node::default(), BackgroundColor::default(), BorderColor::default(), ChildOf(port));
+        let dot = w.spawn(dot).id();
+        app.update();
+        let fill = |app: &App, e: Entity| app.world().get::<BackgroundColor>(e).unwrap().0;
+        let color = Color::srgb(0.2, 0.4, 0.8);
+        assert_eq!(fill(&app, dot), color.darker(0.35), "the dot is drawn as the port would be");
+        assert_eq!(fill(&app, port), Color::NONE, "the port's box stays undrawn");
+        hover(&mut app, port, true);
+        assert!(fill(&app, dot).luminance() > color.darker(0.35).luminance());
+        let scale = |app: &App, e: Entity| app.world().get::<UiTransform>(e).unwrap().scale.x;
+        assert_eq!(scale(&app, dot), 1.3, "the dot grows");
+        assert_eq!(scale(&app, port), 1.0, "the port's box, its hit area, keeps its size while hovered");
+    }
+
+    /// Where `draw_edges` starts a wire leaving `from` at the graph origin along +x, with `dot` (size, scale) drawing
+    /// the 24 px port, or none.
+    fn wire_start(dot: Option<(f32, f32)>) -> f32 {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, AssetPlugin::default()))
+            .init_asset::<WireMaterial>()
+            .add_systems(Update, draw_edges);
+        let w = app.world_mut();
+        let canvas = w.spawn((NodeCanvas, Node::default(), EdgeStyle::default())).id();
+        let laid_out = |size: f32| ComputedNode { size: Vec2::splat(size), inverse_scale_factor: 1.0, ..default() };
+        let port = |w: &mut World, port: Port| {
+            let node = w.spawn((GraphNode, Node::default(), ChildOf(canvas))).id();
+            w.spawn((port, Node::default(), laid_out(24.0), ChildOf(node))).id()
+        };
+        let (from, to) = (port(w, Port::output(PortType::ANY)), port(w, Port::input(PortType::ANY)));
+        if let Some((size, scale)) = dot {
+            let transform = UiTransform { scale: Vec2::splat(scale), ..default() };
+            w.spawn((PortDot, Node::default(), laid_out(size), transform, ChildOf(from)));
+        }
+        let geometry = EdgeGeometry::between((Vec2::ZERO, Vec2::X), (Vec2::new(200.0, 0.0), Vec2::NEG_X));
+        w.spawn((Edge, EdgeSource(from), EdgeTarget(to), geometry.with_ports(Some(from), Some(to))));
+        app.update();
+        let w = app.world_mut();
+        let (node, material) = w.query::<(&Node, &MaterialNode<WireMaterial>)>().single(w).unwrap();
+        let Val::Px(left) = node.left else { panic!("placed in px") };
+        let material = w.resource::<Assets<WireMaterial>>().get(&material.0).unwrap();
+        left + material.wire.p0p1.x
+    }
+
+    #[test]
+    fn wires_end_at_the_drawn_dot() {
+        assert!((wire_start(None) - 12.0).abs() < 1e-4, "at the port's rim: {}", wire_start(None));
+        let at = wire_start(Some((16.0, 1.0)));
+        assert!((at - 8.0).abs() < 1e-4, "at a 16 px dot's rim: {at}");
+        let at = wire_start(Some((16.0, 1.3)));
+        assert!((at - 10.4).abs() < 1e-4, "at the hovered dot's rim: {at}");
     }
 
     fn app() -> App {

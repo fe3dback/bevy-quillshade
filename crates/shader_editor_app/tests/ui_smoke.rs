@@ -261,10 +261,17 @@ fn hover(app: &mut App, port: Entity, over: bool) {
     app.update();
 }
 
-/// A port's fill and scale, as bevy_noodle's style left them.
-fn port_look(app: &App, port: Entity) -> (Color, f32) {
+/// A port's drawn dot (a `PortDot` child), or the port itself.
+fn dot_of(app: &App, port: Entity) -> Entity {
     let w = app.world();
-    (w.get::<BackgroundColor>(port).unwrap().0, w.get::<UiTransform>(port).unwrap().scale.x)
+    let children = w.get::<Children>(port).map(|c| c.to_vec()).unwrap_or_default();
+    children.into_iter().find(|c| w.get::<PortDot>(*c).is_some()).unwrap_or(port)
+}
+
+/// A port's drawn fill and scale (its dot's), as bevy_noodle's style left them.
+fn port_look(app: &App, port: Entity) -> (Color, f32) {
+    let (w, dot) = (app.world(), dot_of(app, port));
+    (w.get::<BackgroundColor>(dot).unwrap().0, w.get::<UiTransform>(dot).unwrap().scale.x)
 }
 
 /// Design §4.8: a hovered pin's dot is shown 1.3x its size and lighter (bevy_noodle's `PortHoverStyle`).
@@ -282,6 +289,9 @@ fn pin_hover_highlights_the_dot() {
     let (hover_fill, hover_scale) = port_look(&app, pin);
     assert!((hover_scale - 1.3).abs() < 1e-6, "{hover_scale}");
     assert!(hover_fill.luminance() > fill.luminance(), "lighter than the dot");
+    // Design §6.3: only the drawn dot grows; the pin's physical box, its hit area, keeps its size.
+    assert_ne!(dot_of(&app, pin), pin);
+    assert_eq!(app.world().get::<UiTransform>(pin).unwrap().scale, Vec2::ONE, "the hit area is unchanged");
     hover(&mut app, pin, false);
     assert_eq!(port_look(&app, pin), (fill, scale));
 }
@@ -1411,6 +1421,43 @@ fn typing_in_number_input_fires_no_hotkey() {
     assert_eq!(shape(&app), (before.0 - 1, before.1), "the hotkeys work again");
 }
 
+/// Design §6.4: a Named Route picked in the palette with Enter opens the rename dialog while Enter may still be held;
+/// its key repeat must not submit the default name, only a fresh press does.
+#[test]
+fn dialog_enter_ignores_key_repeat() {
+    use bevy::input::ButtonState;
+    use bevy::input::keyboard::{Key, KeyboardInput};
+
+    let (_dir, mut app) = typing_app_with(|app| {
+        app.add_plugins(shader_editor_app::ui::dialog::DialogPlugin);
+    });
+    act(&mut app, Action::OpenAsset(AssetId::new(AssetType::Material, "env/rock_wet")));
+    let param = {
+        let d = app.world().resource::<Editor>().doc().unwrap();
+        d.asset.nodes.iter().find(|(_, n)| n.kind == "param::Scalar").unwrap().0.clone()
+    };
+    act(&mut app, Action::TextDialog(PropTarget::Param { node: param, key: "name".into() }));
+    app.update();
+    let dialog_open = |app: &App| app.world().resource::<Editor>().dialog.is_some();
+    assert!(dialog_open(&app));
+    let w = app.world_mut();
+    let field = w.query_filtered::<Entity, With<shader_editor_app::ui::dialog::DialogInput>>().single(w).unwrap();
+    assert_eq!(app.world().resource::<bevy::input_focus::InputFocus>().get(), Some(field), "the field has focus");
+    app.world_mut().write_message(KeyboardInput {
+        key_code: KeyCode::Enter,
+        logical_key: Key::Enter,
+        state: ButtonState::Pressed,
+        text: None,
+        repeat: true,
+        window: Entity::PLACEHOLDER,
+    });
+    app.update();
+    app.update();
+    assert!(dialog_open(&app), "a repeated Enter does not submit");
+    key(&mut app, KeyCode::Enter, Key::Enter, None);
+    assert!(!dialog_open(&app), "a fresh Enter submits");
+}
+
 /// The mouse button as winit reports it (what `ButtonInput<MouseButton>` follows).
 fn mouse(app: &mut App, state: bevy::input::ButtonState) {
     app.world_mut().write_message(bevy::input::mouse::MouseButtonInput {
@@ -1509,7 +1556,7 @@ fn number_precision_by_kind() {
     assert_eq!(precision(&mut app, "a", 1), (3, false), "a vector component");
 }
 
-/// View → Show log off (design §4): the console/logs keeps only its header bar (the counts and its buttons), the body
+/// View → Show console off (design §3): the console/logs keeps only its header bar (the counts and its buttons), the body
 /// is not displayed and the container shrinks to the header.
 #[test]
 fn hidden_log_keeps_header() {
@@ -1568,53 +1615,373 @@ fn hidden_properties_hides_right_sidebar() {
     assert_eq!(sidebar(&mut app), Display::Flex);
 }
 
-/// Tab is View → Show properties (design §4): with no focus, Tab and Shift+Tab toggle the properties and move no focus
-/// — Bevy's tab navigation would put it on the first button (Tab) or the window's last field (Shift+Tab: typing).
-#[test]
-fn tab_and_shift_tab_toggle_properties_and_move_no_focus() {
-    use bevy::input::ButtonState;
-    use bevy::input::keyboard::{Key, KeyboardInput};
-    use bevy::input_focus::InputFocus;
-    use bevy::input_focus::tab_navigation::{TabGroup, TabIndex};
-
-    let (_dir, mut app) = typing_app();
-    act(&mut app, Action::OpenAsset(AssetId::new(AssetType::Material, "env/rock_wet")));
-    // Visible without the visibility systems: tab navigation skips hidden entities.
-    let shown = InheritedVisibility::VISIBLE;
-    let group = app.world_mut().spawn((Node::default(), TabGroup::default())).id();
-    app.world_mut().spawn((Node::default(), shown, bevy::ui_widgets::Button, TabIndex(0), ChildOf(group)));
-    let field = (bevy::text::EditableText::default(), TabIndex(0));
-    app.world_mut().spawn((Node::default(), shown, field, ChildOf(group)));
-    app.update();
-    let state = |app: &App| {
-        (app.world().resource::<Editor>().config.show_properties, app.world().resource::<InputFocus>().get())
-    };
-    // Bevy starts with the focus on the window: no field, input goes to the window either way.
-    let window = app.world_mut().query_filtered::<Entity, With<Window>>().single(app.world()).unwrap();
-    assert!(matches!(state(&app), (true, None)) || state(&app) == (true, Some(window)), "{:?}", state(&app));
-    key(&mut app, KeyCode::Tab, Key::Tab, None);
-    assert_eq!(state(&app), (false, None), "Tab");
-
-    let shift = |app: &mut App, state| {
-        let input = KeyboardInput {
-            key_code: KeyCode::ShiftLeft,
-            logical_key: Key::Shift,
-            state,
-            text: None,
-            repeat: false,
-            window: Entity::PLACEHOLDER,
-        };
-        app.world_mut().write_message(input);
-        app.update();
-    };
-    shift(&mut app, ButtonState::Pressed);
-    key(&mut app, KeyCode::Tab, Key::Tab, None);
-    shift(&mut app, ButtonState::Released);
-    assert_eq!(state(&app), (true, None), "Shift+Tab: the same toggle, no field focused");
+/// What the [`focus_app`] buttons and hotkeys did: the actions of the activated buttons, in order, and how often the
+/// graph's palette hotkey (Space) started.
+#[derive(Resource, Default)]
+struct Hits {
+    buttons: Vec<Action>,
+    palette: usize,
 }
 
-/// Tab from a field onto a number input that was used before (its text `Static`, as Feathers leaves it after a scrub,
-/// Enter or focus loss) makes it typable, like a fresh one: the keys edit it and reach no hotkey (decision 0034).
+/// [`typing_app`] with the editor topbar under a `TabGroup` (as under the GUI's root), Bevy's button behaviour
+/// (pointer and keyboard activation) and [`Hits`]; rock_wet is open.
+fn focus_app() -> (tempfile::TempDir, App, Entity) {
+    focus_app_with(|_| {})
+}
+
+/// [`focus_app`] with `extra` plugins.
+fn focus_app_with(extra: impl FnOnce(&mut App)) -> (tempfile::TempDir, App, Entity) {
+    use bevy::input_focus::tab_navigation::TabGroup;
+    use bevy::ui_widgets::Activate;
+    use bevy_enhanced_input::prelude::Start;
+    use shader_editor_app::editors::graph::OpenPalette;
+    use shader_editor_app::ui::OnActivate;
+    use shader_editor_app::ui::areas::{AreasPlugin, editor_topbar};
+
+    let (dir, mut app) = typing_app_with(|app| {
+        app.add_plugins((AreasPlugin, bevy::ui_widgets::ButtonPlugin)).init_resource::<Hits>();
+        app.add_observer(|ev: On<Activate>, q: Query<&OnActivate>, mut hits: ResMut<Hits>| {
+            if let Ok(a) = q.get(ev.event_target()) {
+                hits.buttons.push(a.0.clone());
+            }
+        });
+        app.add_observer(|_: On<Start<OpenPalette>>, mut hits: ResMut<Hits>| hits.palette += 1);
+        extra(app);
+    });
+    let root = app.world_mut().spawn_scene(bsn! { Node TabGroup Children [ @editor_topbar() ] }).unwrap().id();
+    act(&mut app, Action::OpenAsset(AssetId::new(AssetType::Material, "env/rock_wet")));
+    propagate_visibility(&mut app);
+    app.world_mut().resource_mut::<bevy::input_focus::InputFocus>().clear();
+    app.update();
+    app.world_mut().resource_mut::<Hits>().buttons.clear();
+    (dir, app, root)
+}
+
+/// What Bevy's visibility propagation does in the GUI (it does not run headless): `InheritedVisibility` from the
+/// `Visibility` of each entity and its ancestors. Tab navigation skips hidden entities.
+fn propagate_visibility(app: &mut App) {
+    fn walk(w: &mut World, e: Entity, parent: bool) {
+        let shown = match w.get::<Visibility>(e) {
+            Some(Visibility::Visible) => true,
+            Some(Visibility::Hidden) => false,
+            _ => parent,
+        };
+        // Changed only when it changes, as Bevy's propagation (`set_if_neq`): `drop_hidden_focus` reads the change.
+        if let Some(mut v) = w.get_mut::<InheritedVisibility>(e) {
+            v.set_if_neq(if shown { InheritedVisibility::VISIBLE } else { InheritedVisibility::HIDDEN });
+        }
+        let children: Vec<Entity> = w.get::<Children>(e).map(|c| c.to_vec()).unwrap_or_default();
+        for c in children {
+            walk(w, c, shown);
+        }
+    }
+    let w = app.world_mut();
+    let roots: Vec<Entity> =
+        w.query_filtered::<Entity, (With<InheritedVisibility>, Without<ChildOf>)>().iter(w).collect();
+    for r in roots {
+        walk(w, r, true);
+    }
+}
+
+/// The tabbable entities under `root` in Tab order: tree order, hidden subtrees skipped (every widget here has
+/// `TabIndex(0)`, asserted: another index would change the order).
+fn tab_order(app: &App, root: Entity) -> Vec<Entity> {
+    use bevy::input_focus::tab_navigation::TabIndex;
+    fn walk(w: &World, e: Entity, out: &mut Vec<Entity>) {
+        if w.get::<InheritedVisibility>(e).is_some_and(|v| !v.get()) {
+            return;
+        }
+        if let Some(t) = w.get::<TabIndex>(e).filter(|t| t.0 >= 0) {
+            assert_eq!(t.0, 0, "tab_order assumes TabIndex(0) everywhere");
+            out.push(e);
+        }
+        for &c in w.get::<Children>(e).into_iter().flatten() {
+            walk(w, c, out);
+        }
+    }
+    let mut out = Vec::new();
+    walk(app.world(), root, &mut out);
+    out
+}
+
+fn focused(app: &App) -> Option<Entity> {
+    app.world().resource::<bevy::input_focus::InputFocus>().get()
+}
+
+/// The topbar button that activates `action`.
+fn button_of(app: &mut App, action: &Action) -> Entity {
+    let w = app.world_mut();
+    let mut q = w.query::<(Entity, &shader_editor_app::ui::OnActivate)>();
+    q.iter(w).find(|(_, a)| a.0 == *action).map(|(e, _)| e).unwrap()
+}
+
+/// A modifier key held (`true`) or released, as winit reports it.
+fn modifier(app: &mut App, key_code: KeyCode, logical_key: bevy::input::keyboard::Key, down: bool) {
+    use bevy::input::ButtonState;
+    use bevy::input::keyboard::KeyboardInput;
+    let state = if down { ButtonState::Pressed } else { ButtonState::Released };
+    let input = KeyboardInput { key_code, logical_key, state, text: None, repeat: false, window: Entity::PLACEHOLDER };
+    app.world_mut().write_message(input);
+    app.update();
+}
+
+fn shift(app: &mut App, down: bool) {
+    modifier(app, KeyCode::ShiftLeft, bevy::input::keyboard::Key::Shift, down);
+}
+
+/// Bevy's default keyboard focus (design §2): from no focus, Tab walks every tabbable widget in order — the Feathers
+/// buttons included — with the focus ring on, and Shift+Tab walks back. Neither toggles the properties.
+#[test]
+fn tab_reaches_buttons() {
+    use bevy::input::keyboard::Key;
+    use bevy::input_focus::InputFocusVisible;
+
+    let (_dir, mut app, root) = focus_app();
+    let order = tab_order(&app, root);
+    assert!(order.len() >= 3, "the topbar has tabbable widgets: {order:?}");
+    let mut visited = Vec::new();
+    for _ in 0..order.len() {
+        key(&mut app, KeyCode::Tab, Key::Tab, None);
+        visited.push(focused(&app).unwrap());
+    }
+    assert_eq!(visited, order, "Tab follows the tab order");
+    assert!(visited.iter().any(|&e| app.world().get::<bevy::ui_widgets::Button>(e).is_some()), "buttons included");
+    assert!(app.world().resource::<InputFocusVisible>().0, "with the focus ring");
+    shift(&mut app, true);
+    key(&mut app, KeyCode::Tab, Key::Tab, None);
+    shift(&mut app, false);
+    assert_eq!(focused(&app), Some(order[order.len() - 2]), "Shift+Tab goes back");
+    assert!(app.world().resource::<Editor>().config.show_properties, "Tab is no hotkey");
+    assert!(app.world().resource::<Hits>().buttons.is_empty(), "focusing a button does not press it");
+}
+
+/// A Tab-focused button is pressed by Enter and by Space, once each; Space presses the button only, it does not open
+/// the palette too (the widget wins, design §2).
+#[test]
+fn enter_and_space_press_focused_button() {
+    use bevy::input::keyboard::Key;
+    use shader_editor_app::state::ViewRequest;
+
+    let (_dir, mut app, root) = focus_app();
+    let fit_all = Action::View(ViewRequest::FitAll);
+    let fit = button_of(&mut app, &fit_all);
+    for _ in 0..tab_order(&app, root).len() {
+        if focused(&app) == Some(fit) {
+            break;
+        }
+        key(&mut app, KeyCode::Tab, Key::Tab, None);
+    }
+    assert_eq!(focused(&app), Some(fit), "Tab reaches the Fit button");
+    key(&mut app, KeyCode::Enter, Key::Enter, None);
+    assert_eq!(app.world().resource::<Hits>().buttons, std::slice::from_ref(&fit_all), "Enter presses it once");
+    key(&mut app, KeyCode::Space, Key::Character(" ".into()), Some(" "));
+    let hits = app.world().resource::<Hits>();
+    assert_eq!(hits.buttons, [fit_all.clone(), fit_all], "Space presses it once");
+    assert_eq!(hits.palette, 0, "Space does not open the palette");
+    assert_eq!(focused(&app), Some(fit), "the button keeps the focus");
+}
+
+/// A clicked toolbar button keeps the focus (Bevy's pointer focus): Space presses it again, not the palette. A click
+/// on the canvas clears the focus (Bevy's "click outside to unfocus"), and Space opens the palette again.
+#[test]
+fn space_opens_palette_after_canvas_click() {
+    use bevy::input::keyboard::Key;
+    use shader_editor_app::state::ViewRequest;
+
+    let (_dir, mut app, _) = focus_app();
+    let fit_all = Action::View(ViewRequest::FitAll);
+    let fit = button_of(&mut app, &fit_all);
+    click(&mut app, fit);
+    app.update();
+    assert_eq!(app.world().resource::<Hits>().buttons, std::slice::from_ref(&fit_all), "the click presses it");
+    assert_eq!(focused(&app), Some(fit), "and focuses it");
+    key(&mut app, KeyCode::Space, Key::Character(" ".into()), Some(" "));
+    assert_eq!(app.world().resource::<Hits>().buttons, [fit_all.clone(), fit_all.clone()], "Space presses it");
+    assert_eq!(app.world().resource::<Hits>().palette, 0, "not the palette");
+
+    let canvas = app.world().resource::<EditorCanvas>().canvas;
+    click(&mut app, canvas);
+    app.update();
+    assert_eq!(focused(&app), None, "a click on the canvas clears the focus");
+    key(&mut app, KeyCode::Space, Key::Character(" ".into()), Some(" "));
+    let hits = app.world().resource::<Hits>();
+    assert_eq!(hits.palette, 1, "Space opens the palette");
+    assert_eq!(hits.buttons, [fit_all.clone(), fit_all], "the button does not act again");
+}
+
+/// The entity is `root` or inside it.
+fn inside(app: &App, e: Entity, root: Entity) -> bool {
+    let w = app.world();
+    std::iter::successors(Some(e), |x| w.get::<ChildOf>(*x).map(ChildOf::parent)).any(|x| x == root)
+}
+
+/// Tab inside an overlay stays inside it (a modal `TabGroup`): a dialog (Feathers' `ModalDialog`) cycles over its
+/// field and buttons, and Space / Enter press nothing behind it.
+#[test]
+fn tab_stays_inside_dialog() {
+    use bevy::input::keyboard::Key;
+    use shader_editor_app::ui::dialog::DialogRoot;
+
+    let (_dir, mut app, root) = focus_app_with(|app| {
+        app.add_plugins((
+            shader_editor_app::ui::dialog::DialogPlugin,
+            bevy::ui_widgets::DialogPlugin,
+            bevy::ui_widgets::ModalDialogPlugin,
+        ));
+    });
+    let background = tab_order(&app, root);
+    let param = {
+        let d = app.world().resource::<Editor>().doc().unwrap();
+        d.asset.nodes.iter().find(|(_, n)| n.kind == "param::Scalar").unwrap().0.clone()
+    };
+    act(&mut app, Action::TextDialog(PropTarget::Param { node: param, key: "name".into() }));
+    propagate_visibility(&mut app);
+    let dialog = {
+        let w = app.world_mut();
+        w.query_filtered::<Entity, With<DialogRoot>>().single(w).unwrap()
+    };
+    let mut seen = Vec::new();
+    for i in 0..5 {
+        key(&mut app, KeyCode::Tab, Key::Tab, None);
+        let f = focused(&app).unwrap();
+        assert!(inside(&app, f, dialog), "Tab {i} stays in the dialog: {f:?}");
+        seen.push(f);
+    }
+    seen.sort();
+    seen.dedup();
+    assert!(seen.len() >= 2, "Tab reaches the dialog's buttons too: {seen:?}");
+    assert!(seen.iter().all(|f| !background.contains(f)));
+    key(&mut app, KeyCode::Space, Key::Character(" ".into()), Some(" "));
+    let hits = app.world().resource::<Hits>();
+    assert!(hits.buttons.iter().all(|a| matches!(a, Action::CloseDialog)), "nothing behind it: {:?}", hits.buttons);
+    assert_eq!(hits.palette, 0);
+}
+
+/// Tab in the palette stays in its field (a modal `TabGroup` on `PaletteRoot`): Enter picks the highlighted node and
+/// presses no button behind the palette.
+#[test]
+fn tab_stays_inside_palette() {
+    use bevy::input::keyboard::Key;
+    use shader_editor_app::ui::palette::{Palette, PalettePlugin, PaletteRoot};
+
+    let (_dir, mut app, _) = focus_app_with(|app| {
+        app.add_plugins(PalettePlugin);
+    });
+    app.world_mut().resource_mut::<Palette>().show(Vec2::new(100.0, 100.0), Vec2::ZERO, None);
+    app.update();
+    app.update();
+    propagate_visibility(&mut app);
+    let palette = {
+        let w = app.world_mut();
+        w.query_filtered::<Entity, With<PaletteRoot>>().single(w).unwrap()
+    };
+    assert!(focused(&app).is_some_and(|f| inside(&app, f, palette)), "the palette's field has the focus");
+    for i in 0..3 {
+        key(&mut app, KeyCode::Tab, Key::Tab, None);
+        let f = focused(&app);
+        assert!(f.is_some_and(|f| inside(&app, f, palette)), "Tab {i} stays in the palette: {f:?}");
+    }
+    let nodes = |app: &App| app.world().resource::<Editor>().doc().unwrap().asset.nodes.len();
+    let before = nodes(&app);
+    key(&mut app, KeyCode::Enter, Key::Enter, None);
+    assert_eq!(nodes(&app), before + 1, "Enter picks a node");
+    assert_eq!(app.world().resource::<Hits>().buttons, [], "and presses no button behind the palette");
+}
+
+/// Ctrl+Tab is Next tab, never Bevy's tab navigation too (the one exception to its default, design §2): after it the
+/// focus is cleared, so Space opens the palette and presses no widget.
+#[test]
+fn ctrl_tab_moves_no_focus() {
+    use bevy::input::keyboard::Key;
+
+    let (_dir, mut app, _) = focus_app();
+    act(&mut app, Action::OpenAsset(AssetId::new(AssetType::Material, "env/water")));
+    propagate_visibility(&mut app);
+    modifier(&mut app, KeyCode::ControlLeft, Key::Control, true);
+    for _ in 0..3 {
+        key(&mut app, KeyCode::Tab, Key::Tab, None);
+    }
+    modifier(&mut app, KeyCode::ControlLeft, Key::Control, false);
+    assert!(app.world().resource::<Editor>().doc().is_some(), "a graph tab is active");
+    assert_eq!(focused(&app), None, "no focus left");
+    assert!(!app.world().resource::<bevy::input_focus::InputFocusVisible>().0, "no focus ring");
+    key(&mut app, KeyCode::Space, Key::Character(" ".into()), Some(" "));
+    let hits = app.world().resource::<Hits>();
+    assert_eq!(hits.palette, 1, "Space opens the palette");
+    assert_eq!(hits.buttons, [], "no widget pressed");
+}
+
+/// Inactive editor areas are hidden (`Visibility::Hidden` next to `Display::None`), so Tab never reaches a widget in
+/// them: Bevy's tab navigation skips hidden entities, not `Display::None` ones.
+#[test]
+fn tab_skips_inactive_areas() {
+    use bevy::input::keyboard::Key;
+    use bevy::input_focus::tab_navigation::TabIndex;
+    use shader_editor_app::editors::AreaOf;
+    use shader_editor_app::tab::ViewKind;
+
+    let (_dir, mut app, root) = focus_app();
+    let curve = {
+        let w = app.world_mut();
+        w.query::<(Entity, &AreaOf)>().iter(w).find(|(_, a)| a.0 == ViewKind::Curve).unwrap().0
+    };
+    let stray = app.world_mut().spawn((Node::default(), bevy::ui_widgets::Button, TabIndex(0), ChildOf(curve))).id();
+    propagate_visibility(&mut app);
+    let order = tab_order(&app, root);
+    for _ in 0..order.len() + 1 {
+        key(&mut app, KeyCode::Tab, Key::Tab, None);
+        assert_ne!(focused(&app), Some(stray), "Tab skips the curve editor's hidden topbar");
+    }
+}
+
+/// A focused widget hidden by a panel toggle loses the focus (`drop_hidden_focus`): a right sidebar checkbox has it,
+/// Ctrl+3 hides the sidebar, and Space then opens the palette instead of toggling the invisible checkbox.
+#[test]
+fn hiding_a_panel_drops_its_focus() {
+    use bevy::input::keyboard::Key;
+    use bevy::ui_widgets::Checkbox;
+    use shader_editor_app::ui::areas::{RightSidebar, right_sidebar};
+
+    let (_dir, mut app, _) = focus_app();
+    app.world_mut().spawn_scene(right_sidebar()).unwrap();
+    act(&mut app, Action::OpenAsset(AssetId::new(AssetType::Material, "env/water")));
+    propagate_visibility(&mut app);
+    app.update();
+    let revision = |app: &App| app.world().resource::<Editor>().doc().unwrap().revision;
+    let before = revision(&app);
+    let checkbox = {
+        let w = app.world_mut();
+        let sidebar = w.query_filtered::<Entity, With<RightSidebar>>().single(w).unwrap();
+        let boxes: Vec<Entity> = w.query_filtered::<Entity, With<Checkbox>>().iter(w).collect();
+        let parents = |e: Entity| std::iter::successors(Some(e), |x| w.get::<ChildOf>(*x).map(ChildOf::parent));
+        boxes.into_iter().find(|b| parents(*b).any(|x| x == sidebar)).expect("a checkbox in the right sidebar")
+    };
+    app.world_mut()
+        .resource_mut::<bevy::input_focus::InputFocus>()
+        .set(checkbox, bevy::input_focus::FocusCause::Navigated);
+    app.update();
+    propagate_visibility(&mut app);
+    app.update();
+    assert_eq!(focused(&app), Some(checkbox), "a visible focused widget keeps the focus");
+
+    modifier(&mut app, KeyCode::ControlLeft, Key::Control, true);
+    key(&mut app, KeyCode::Digit3, Key::Character("3".into()), None);
+    modifier(&mut app, KeyCode::ControlLeft, Key::Control, false);
+    assert!(!app.world().resource::<Editor>().config.show_properties, "Ctrl+3 hid the right sidebar");
+    propagate_visibility(&mut app);
+    app.update();
+    assert_eq!(focused(&app), None, "the hidden checkbox lost the focus");
+
+    key(&mut app, KeyCode::Space, Key::Character(" ".into()), Some(" "));
+    let hits = app.world().resource::<Hits>();
+    assert_eq!(hits.palette, 1, "Space opens the palette");
+    assert_eq!(hits.buttons, [], "no widget pressed");
+    assert_eq!(revision(&app), before, "no edit: the invisible checkbox stayed as it was");
+}
+
+/// Tab onto a number input that was used before (its text `Static`, as Feathers leaves it after a scrub, Enter or
+/// focus loss) makes it typable, like a fresh one: the keys edit it and reach no hotkey (decision 0034). Tab walks
+/// from a field over a button (which keeps the focus, design §2) to it.
 #[test]
 fn tab_onto_used_number_input_types_into_it() {
     use bevy::feathers::controls::FeathersNumberInput;
@@ -1636,6 +2003,8 @@ fn tab_onto_used_number_input_types_into_it() {
     let group = app.world_mut().spawn((Node::default(), TabGroup::default())).id();
     let field = (EditableText::default(), TabIndex(0));
     let field = app.world_mut().spawn((Node::default(), shown, field, ChildOf(group))).id();
+    let button = (bevy::ui_widgets::Button, TabIndex(0));
+    let button = app.world_mut().spawn((Node::default(), shown, button, ChildOf(group))).id();
     let number = app.world_mut().spawn_scene(bsn! { @FeathersNumberInput {} ChildOf(group) }).unwrap().id();
     app.update();
     let text = text_in(&mut app, number);
@@ -1646,8 +2015,11 @@ fn tab_onto_used_number_input_types_into_it() {
     assert!(app.world().resource::<KeyboardGate>().typing, "typing into the first field");
 
     key(&mut app, KeyCode::Tab, Key::Tab, None);
-    assert_eq!(app.world().resource::<InputFocus>().get(), Some(text), "Tab moves to the number input");
-    assert!(app.world().resource::<Editor>().config.show_properties, "Tab from a field is no hotkey");
+    assert_eq!(app.world().resource::<InputFocus>().get(), Some(button), "Tab moves to the button");
+    assert!(!app.world().resource::<KeyboardGate>().typing, "a focused button is no typing");
+    key(&mut app, KeyCode::Tab, Key::Tab, None);
+    assert_eq!(app.world().resource::<InputFocus>().get(), Some(text), "Tab moves on to the number input");
+    assert!(app.world().resource::<Editor>().config.show_properties, "Tab is no hotkey");
     assert!(app.world().resource::<KeyboardGate>().typing, "the Tab-focused number input takes the keyboard");
     type_char(&mut app, '5', KeyCode::Digit5);
     key(&mut app, KeyCode::Delete, Key::Delete, None);
@@ -1658,8 +2030,7 @@ fn tab_onto_used_number_input_types_into_it() {
 }
 
 /// A real click into a field (picking's `PointerPress` inside the frame, after the typing gate ran) focuses it, also
-/// with nothing focused before: Bevy focuses a click with `FocusCause::Navigated`, like Tab navigation, but with the
-/// focus ring hidden — the click is not taken for Tab and dropped.
+/// with nothing focused before, and the field takes the keyboard.
 #[test]
 fn click_into_field_keeps_focus() {
     use bevy::camera::NormalizedRenderTarget;
@@ -2057,8 +2428,9 @@ fn plain_drag_unchanged() {
     );
 }
 
-/// A new wire dropped on a pin it may not connect to says why ("Connection refused: …") and opens no palette; on
-/// empty canvas it opens the palette for the pin.
+/// A new wire dropped on a pin it may not connect to says why ("Connection refused: …") and opens no palette, also
+/// with a pin it may connect to within the snap radius (Lerp `b` beside `alpha`: the pin under the pointer blocks the
+/// snap, design §6.3); on empty canvas it opens the palette for the pin.
 #[test]
 fn plain_wire_dropped_on_refused_pin_says_why() {
     use shader_editor_app::ui::palette::Palette;
@@ -2096,6 +2468,68 @@ fn plain_wire_dropped_on_refused_pin_says_why() {
     drop_on(&mut app, from, None);
     let palette = app.world().resource::<Palette>();
     assert!(palette.open && palette.link.as_ref().is_some_and(|l| l.node == v3 && l.pin == "out"));
+}
+
+/// Design §6.3: a wire dropped 30 logical px from a compatible pin's centre, off its dot (nothing hovered), connects
+/// to it: the canvas takes the nearest candidate pin within 40 px. One undo step.
+#[test]
+fn wire_drop_near_pin_connects() {
+    let (_dir, mut app) = wires_app();
+    let c = add_node(&mut app, "stdlib::Constant", (-600.0, 0.0));
+    let lerp = add_node(&mut app, "stdlib::Lerp", (-300.0, 0.0));
+    lay_out_pins(&mut app);
+    let before = model_wires(&app);
+    let (from, to) = (port(&mut app, &c, "out", true), port(&mut app, &lerp, "a", false));
+    let canvas = app.world().resource::<EditorCanvas>().canvas;
+    let zoom = app.world().get::<CanvasView>(canvas).unwrap().zoom;
+    // 30 px left of the input, away from the node's other pins.
+    let near = port_at(&app, to) - Vec2::new(30.0 / zoom, 0.0);
+    wire_step(&mut app, from, At::Pin(from), WireStep::Start);
+    hover_only(&mut app, None);
+    wire_step(&mut app, from, At::Point(near), WireStep::Drag);
+    assert_eq!(app.world_mut().query::<&WireTarget>().single(app.world()).unwrap().0, Some(to), "snaps to the pin");
+    wire_step(&mut app, from, At::Point(near), WireStep::End);
+    app.update();
+    let (wires, rev) = model_wires(&app);
+    assert!(wires.contains(&format!("{c}.out -> {lerp}.a")), "{wires:?}");
+    assert_eq!(rev, before.1 + 1, "one edit");
+    assert!(!app.world().resource::<shader_editor_app::ui::palette::Palette>().open, "a connection, not a drop");
+    act(&mut app, Action::Undo);
+    assert_eq!(model_wires(&app).0, before.0, "one undo step");
+}
+
+/// Design §6.3: every pin, reroutes included, is a port box of the physical size drawing a dot of the visual size
+/// (centred, border scaled with it); a reroute node fits its two pins.
+#[test]
+fn pins_have_physical_and_visual_sizes() {
+    use shader_editor_app::canvas::{PIN_PHYSICAL, PIN_VISUAL};
+    let (_dir, mut app) = app();
+    act(&mut app, Action::OpenAsset(AssetId::new(AssetType::Material, "fx/hologram")));
+    act(
+        &mut app,
+        Action::AddNode { kind: "stdlib::Reroute".into(), pos: (-400.0, 0.0), link: None, params: Vec::new() },
+    );
+    let reroute = added(&app, "stdlib::Reroute", (-400.0, 0.0));
+    let w = app.world_mut();
+    let pins: Vec<(Entity, PinKey)> = w.query::<(Entity, &PinKey)>().iter(w).map(|(e, k)| (e, k.clone())).collect();
+    assert!(pins.iter().filter(|(_, k)| k.node == reroute).count() == 2, "the reroute's pins are checked too");
+    for (pin, key) in pins {
+        let node = w.get::<Node>(pin).unwrap();
+        assert_eq!((node.width, node.height), (px(PIN_PHYSICAL), px(PIN_PHYSICAL)), "{key:?}");
+        let children = w.get::<Children>(pin).map(|c| c.to_vec()).unwrap_or_default();
+        let dots: Vec<Entity> = children.into_iter().filter(|c| w.get::<PortDot>(*c).is_some()).collect();
+        assert_eq!(dots.len(), 1, "{key:?}");
+        let dot = w.get::<Node>(dots[0]).unwrap();
+        assert_eq!((dot.width, dot.height), (px(PIN_VISUAL), px(PIN_VISUAL)), "{key:?}");
+        let inset = px((PIN_PHYSICAL - PIN_VISUAL) / 2.0);
+        assert_eq!((dot.left, dot.top), (inset, inset), "centred: {key:?}");
+        assert_eq!(dot.border, UiRect::all(px(kit::PORT_BORDER * PIN_VISUAL / kit::PORT_SIZE)));
+    }
+    let node = {
+        let mut q = w.query::<(&NodeKey, &Node)>();
+        q.iter(w).find(|(k, _)| k.0 == reroute).map(|(_, n)| n.clone()).unwrap()
+    };
+    assert_eq!((node.width, node.height), (px(2.0 * PIN_PHYSICAL), px(PIN_PHYSICAL)), "the reroute fits its pins");
 }
 
 /// An output's wires lifted and dropped on empty canvas all go back to their pins.
@@ -2407,7 +2841,7 @@ fn menu_item_icons(app: &mut App) -> Vec<Vec<shader_editor_app::ui::icons::IconI
 }
 
 /// The main menu (design §3 audit, §4): a `FeathersMenu` whose button toggles its popup under it; the View items'
-/// check marks follow the config; an item pushes its action and closes the menu, leaving no focus behind.
+/// check marks follow the config; an item pushes its action and closes the menu, giving the focus back to its button.
 #[test]
 fn main_menu_is_a_feathers_menu_with_check_marks() {
     use bevy::input_focus::InputFocus;
@@ -2430,7 +2864,8 @@ fn main_menu_is_a_feathers_menu_with_check_marks() {
         w.query_filtered::<Entity, With<MenuButton>>().single(w).unwrap()
     };
     assert!(!popup_shown(&mut app), "closed");
-    assert_eq!(menu_item_icons(&mut app), [vec![IconId::Check], vec![IconId::Check]], "both views shown");
+    let check = || vec![IconId::Check];
+    assert_eq!(menu_item_icons(&mut app), [vec![], check(), check(), check()], "Zen off, every panel shown");
 
     click(&mut app, button);
     app.update();
@@ -2449,11 +2884,12 @@ fn main_menu_is_a_feathers_menu_with_check_marks() {
     app.update();
     click(&mut app, items[0].0);
     let pushed = std::mem::take(&mut app.world_mut().resource_mut::<Actions>().0);
-    assert!(matches!(pushed[..], [Action::ToggleLog]), "Show log pushes its toggle: {pushed:?}");
+    assert!(matches!(pushed[..], [Action::ToggleZen]), "Zen mode pushes its toggle: {pushed:?}");
     app.update();
     app.update();
     assert!(!popup_shown(&mut app), "an item closes the menu");
-    assert_eq!(app.world().resource::<InputFocus>().get(), None, "no focus left on the menu button");
+    // Bevy's default (design §2): the item hands the focus back to its menu button (`MenuAction::FocusRoot`).
+    assert_eq!(app.world().resource::<InputFocus>().get(), Some(button), "the focus back on the menu button");
 
     // A click outside an open main menu only closes it; the barrier goes with it.
     click(&mut app, button);
@@ -2470,5 +2906,380 @@ fn main_menu_is_a_feathers_menu_with_check_marks() {
 
     app.world_mut().resource_mut::<Editor>().config.show_log = false;
     app.update();
-    assert_eq!(menu_item_icons(&mut app), [vec![], vec![IconId::Check]], "the check mark follows the config");
+    assert_eq!(menu_item_icons(&mut app), [vec![], check(), vec![], check()], "the check mark follows the config");
+}
+
+/// The texts of each menu item (its label, then its hotkey), in order.
+fn menu_item_texts(app: &mut App) -> Vec<Vec<String>> {
+    let items: Vec<Entity> = menu_items(app).into_iter().map(|(e, _)| e).collect();
+    let w = app.world_mut();
+    let mut children = w.query::<&Children>();
+    let mut texts = w.query::<&Text>();
+    items
+        .into_iter()
+        .map(|item| {
+            let mut found = Vec::new();
+            let mut stack = vec![item];
+            while let Some(e) = stack.pop() {
+                if let Ok(t) = texts.get(w, e)
+                    && !t.0.is_empty()
+                {
+                    found.push(t.0.clone());
+                }
+                if let Ok(c) = children.get(w, e) {
+                    stack.extend(c.iter().rev());
+                }
+            }
+            found
+        })
+        .collect()
+}
+
+/// Design §3: the View menu lists Zen mode, a separator, then the three panels, each with its hotkey; the check marks
+/// follow the four flags, also a panel's own flag while Zen mode hides it.
+#[test]
+fn view_menu_marks_follow_flags() {
+    use bevy::feathers::controls::FeathersMenuDivider;
+    use bevy::ui_widgets::MenuPopup;
+    use shader_editor_app::ui::icons::IconId;
+    use shader_editor_app::ui::{MainMenu, fill_main_menus, main_menu};
+
+    let (_dir, mut app) = menu_app();
+    app.add_systems(Update, fill_main_menus);
+    app.world_mut().spawn_scene(main_menu(MainMenu::View)).unwrap();
+    app.update();
+    app.update();
+    let texts = menu_item_texts(&mut app);
+    assert_eq!(
+        texts,
+        [
+            vec!["Zen mode".to_string(), "`".into()],
+            vec!["Show project".into(), "Ctrl+1".into()],
+            vec!["Show console".into(), "Ctrl+2".into()],
+            vec!["Show properties".into(), "Ctrl+3".into()],
+        ]
+    );
+    // The separator sits between Zen mode and the panels.
+    let rows: Vec<(bool, bool)> = {
+        let w = app.world_mut();
+        let popup = w.query_filtered::<&Children, With<MenuPopup>>().single(w).unwrap().to_vec();
+        let mut kind = w.query::<(Has<FeathersMenuDivider>, Has<bevy::feathers::controls::FeathersMenuItem>)>();
+        popup.into_iter().filter_map(|e| kind.get(w, e).ok()).filter(|(d, i)| *d || *i).collect()
+    };
+    assert_eq!(rows, [(false, true), (true, false), (false, true), (false, true), (false, true)]);
+
+    let check = || vec![IconId::Check];
+    let set = |app: &mut App, f: fn(&mut shader_editor_app::config::UserConfig)| {
+        f(&mut app.world_mut().resource_mut::<Editor>().config);
+        app.update();
+        app.update();
+        menu_item_icons(app)
+    };
+    assert_eq!(set(&mut app, |_| {}), [vec![], check(), check(), check()]);
+    assert_eq!(set(&mut app, |c| c.show_left_sidebar = false), [vec![], vec![], check(), check()]);
+    assert_eq!(set(&mut app, |c| c.zen_mode = true), [check(), vec![], check(), check()]);
+    assert_eq!(set(&mut app, |c| c.show_properties = false), [check(), vec![], check(), vec![]], "in Zen too");
+    assert_eq!(set(&mut app, |c| c.show_log = false), [check(), vec![], vec![], vec![]]);
+}
+
+/// Design §3: Zen mode hides the whole console/logs, its header included (and from Tab: `Visibility::Hidden`); off,
+/// the console comes back as its flag says.
+#[test]
+fn zen_hides_whole_console() {
+    use shader_editor_app::ui::log::{LogBody, LogPane, LogPlugin, console};
+
+    let (_dir, mut app) = app();
+    app.add_plugins(LogPlugin);
+    app.world_mut().spawn_scene(console()).unwrap();
+    app.update();
+    // (display and visibility of the console, display of the pane body around `LogBody`)
+    let state = |app: &mut App| {
+        let w = app.world_mut();
+        let (node, vis) = w.query_filtered::<(&Node, &Visibility), With<LogPane>>().single(w).unwrap();
+        let (display, vis) = (node.display, *vis);
+        let body = w.query_filtered::<&ChildOf, With<LogBody>>().single(w).unwrap().parent();
+        (display, vis, w.get::<Node>(body).unwrap().display)
+    };
+    let shown = (Display::Flex, Visibility::Inherited, Display::Flex);
+    assert_eq!(state(&mut app), shown);
+    act(&mut app, Action::ToggleZen);
+    assert_eq!(state(&mut app).0, Display::None, "Zen: no console, not even its header");
+    assert_eq!(state(&mut app).1, Visibility::Hidden);
+    act(&mut app, Action::ToggleLog);
+    assert_eq!(state(&mut app).0, Display::None, "Ctrl+2 in Zen: still hidden");
+    act(&mut app, Action::ToggleZen);
+    assert_eq!(state(&mut app), (Display::Flex, Visibility::Inherited, Display::None), "Zen off: the header only");
+    act(&mut app, Action::ToggleLog);
+    assert_eq!(state(&mut app), shown);
+    assert_eq!(idle_node_changes::<shader_editor_app::ui::log::LogPane>(&mut app), 0, "no writes when idle");
+}
+
+/// How many `M` entities had their `Node` changed during two idle updates (after one to settle): the layout systems
+/// write only on change, so a steady state is 0. Compares change ticks: a `Changed` query from the test would not see
+/// an update's writes once `App::update` has cleared the trackers.
+fn idle_node_changes<M: Component>(app: &mut App) -> usize {
+    let ticks = |app: &mut App| {
+        let w = app.world_mut();
+        w.query_filtered::<Ref<Node>, With<M>>().iter(w).map(|n| n.last_changed()).collect::<Vec<_>>()
+    };
+    app.update();
+    let before = ticks(app);
+    app.update();
+    app.update();
+    before.iter().zip(ticks(app)).filter(|(a, b)| **a != *b).count()
+}
+
+/// Design §3: Ctrl+1 off, the left sidebar takes no space (and Tab skips it); Zen mode hides it and the right sidebar
+/// whatever their flags say, and Zen off shows exactly the ones whose flags are on.
+#[test]
+fn hidden_left_sidebar_takes_no_space() {
+    use shader_editor_app::ui::areas::{AreasPlugin, RightSidebar, right_sidebar};
+    use shader_editor_app::ui::{LeftSidebar, left_sidebar, show_left_sidebar};
+
+    let (_dir, mut app) = app();
+    app.add_plugins(AreasPlugin).add_systems(Update, show_left_sidebar);
+    app.world_mut().spawn_scene(left_sidebar()).unwrap();
+    app.world_mut().spawn_scene(right_sidebar()).unwrap();
+    act(&mut app, Action::OpenAsset(AssetId::new(AssetType::Material, "env/rock_wet")));
+    let state = |app: &mut App| {
+        let w = app.world_mut();
+        let (left, vis) = w.query_filtered::<(&Node, &Visibility), With<LeftSidebar>>().single(w).unwrap();
+        let (left, vis) = (left.display, *vis);
+        let right = w.query_filtered::<&Node, With<RightSidebar>>().single(w).unwrap().display;
+        (left, vis, right)
+    };
+    let (flex, none) = (Display::Flex, Display::None);
+    assert_eq!(state(&mut app), (flex, Visibility::Inherited, flex));
+    act(&mut app, Action::ToggleLeftSidebar);
+    assert_eq!(state(&mut app), (none, Visibility::Hidden, flex), "Ctrl+1: no left sidebar");
+    act(&mut app, Action::ToggleLeftSidebar);
+    assert_eq!(state(&mut app), (flex, Visibility::Inherited, flex));
+    act(&mut app, Action::ToggleZen);
+    assert_eq!(state(&mut app), (none, Visibility::Hidden, none), "Zen: both sidebars hidden");
+    act(&mut app, Action::ToggleLeftSidebar);
+    assert_eq!(state(&mut app).0, none, "Ctrl+1 in Zen: still hidden");
+    act(&mut app, Action::ToggleZen);
+    assert_eq!(state(&mut app), (none, Visibility::Hidden, flex), "Zen off: the left flag is off now");
+    assert_eq!(idle_node_changes::<LeftSidebar>(&mut app), 0, "no writes when idle");
+    act(&mut app, Action::ToggleLeftSidebar);
+    assert_eq!(idle_node_changes::<LeftSidebar>(&mut app), 0, "shown: no writes when idle either");
+}
+
+/// Design §3: Ctrl+1 is a View hotkey, not the "hold 1 and click the canvas" Constant drop; plain 1 still drops one.
+#[test]
+fn ctrl_1_does_not_arm_constant_drop() {
+    let (_dir, mut app) = gestures_app();
+    act(&mut app, Action::OpenAsset(AssetId::new(AssetType::Material, "env/rock_wet")));
+    let canvas = app.world().resource::<EditorCanvas>().canvas;
+    app.world_mut().entity_mut(canvas).insert(ComputedNode {
+        size: Vec2::new(800.0, 600.0),
+        inverse_scale_factor: 1.0,
+        ..default()
+    });
+    let constants = |app: &App| {
+        let d = app.world().resource::<Editor>().doc().unwrap();
+        d.asset.nodes.values().filter(|n| n.kind == "stdlib::Constant").count()
+    };
+    let n = constants(&app);
+    let drop = |app: &mut App, keys: &[KeyCode]| {
+        let mut input = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
+        keys.iter().for_each(|k| input.press(*k));
+        app.update();
+        click(app, canvas);
+        app.update();
+        app.update();
+        app.world_mut().resource_mut::<ButtonInput<KeyCode>>().release_all();
+        app.update();
+    };
+    drop(&mut app, &[KeyCode::ControlLeft, KeyCode::Digit1]);
+    assert_eq!(constants(&app), n, "Ctrl+1 + click: no Constant");
+    drop(&mut app, &[KeyCode::SuperLeft, KeyCode::Digit1]);
+    assert_eq!(constants(&app), n, "Super+1 + click: no Constant");
+    drop(&mut app, &[KeyCode::Digit1]);
+    assert_eq!(constants(&app), n + 1, "1 + click: a Constant");
+}
+
+/// One frame of bevy_picking: the pointer is over `stack` (topmost first) and, with `action`, presses or releases.
+fn pointer_frame(app: &mut App, stack: &[Entity], action: Option<bevy::picking::pointer::PointerAction>) {
+    use bevy::camera::NormalizedRenderTarget;
+    use bevy::picking::backend::{HitData, PointerHits};
+    use bevy::picking::pointer::{Location, PointerId, PointerInput};
+    let target = NormalizedRenderTarget::None { width: 800, height: 600 };
+    let location = Location { target, position: Vec2::new(5.0, 5.0) };
+    let w = app.world_mut();
+    let hits = stack.iter().enumerate().map(|(i, e)| (*e, HitData::new(Entity::PLACEHOLDER, i as f32, None, None)));
+    w.write_message(PointerHits::new(PointerId::Mouse, hits.collect(), 0.0));
+    if let Some(action) = action {
+        w.write_message(PointerInput::new(PointerId::Mouse, location, action));
+    }
+    app.update();
+}
+
+/// A left click on a menu_bar menu button as in the GUI: the press opens the menu, so the menu's barrier is over the
+/// button from the next frame on and the release lands on it.
+fn click_menu_button(app: &mut App, button: Entity) {
+    use bevy::picking::pointer::{PointerAction, PointerButton};
+    use shader_editor_app::ui::MainMenuBarrier;
+    pointer_frame(app, &[button], Some(PointerAction::Press(PointerButton::Primary)));
+    let w = app.world_mut();
+    let mut stack: Vec<Entity> = w.query_filtered::<Entity, With<MainMenuBarrier>>().iter(w).collect();
+    stack.push(button);
+    pointer_frame(app, &stack, None);
+    pointer_frame(app, &stack, Some(PointerAction::Release(PointerButton::Primary)));
+    pointer_frame(app, &stack, None);
+    app.update();
+}
+
+/// Design §1: a menu_bar menu button looks active (Feathers' `Pressed`) while its menu is open and returns to normal
+/// whenever the menu closes — by an outside click on the barrier, Esc, an item or opening another menu — and a click
+/// opens it again.
+#[test]
+fn main_menu_button_resets_on_every_close() {
+    use bevy::ui::Pressed;
+    use bevy::ui_widgets::MenuButton;
+    use shader_editor_app::ui::{MainMenu, MainMenuPopup, fill_main_menus, main_menu, main_menu_barrier};
+
+    let (_dir, mut app) = menu_app();
+    app.add_systems(Update, (fill_main_menus, main_menu_barrier));
+    for m in [MainMenu::File, MainMenu::View] {
+        app.world_mut().spawn_scene(main_menu(m)).unwrap();
+    }
+    app.update();
+    app.update();
+    // Each menu's button and popup, by the popup's menu.
+    let parts = |app: &mut App, menu: MainMenu| -> (Entity, Entity) {
+        let w = app.world_mut();
+        let popup = w.query::<(Entity, &MainMenuPopup)>().iter(w).find(|(_, p)| p.0 == menu).unwrap().0;
+        let root = w.get::<ChildOf>(popup).unwrap().parent();
+        let button = w.get::<Children>(root).unwrap().iter().find(|c| w.get::<MenuButton>(*c).is_some()).unwrap();
+        (button, popup)
+    };
+    let (file, file_popup) = parts(&mut app, MainMenu::File);
+    let (view, view_popup) = parts(&mut app, MainMenu::View);
+    // (open, looks active)
+    let state = |app: &App, (button, popup): (Entity, Entity)| {
+        let w = app.world();
+        (*w.get::<Visibility>(popup).unwrap() == Visibility::Visible, w.get::<Pressed>(button).is_some())
+    };
+    let closed = (false, false);
+    let (file_menu, view_menu) = ((file, file_popup), (view, view_popup));
+    assert_eq!(state(&app, file_menu), closed);
+
+    // An outside click on the barrier.
+    click_menu_button(&mut app, file);
+    assert_eq!(state(&app, file_menu), (true, true), "open and active");
+    let (under, _) = target_button(&mut app);
+    let b = barrier(&mut app);
+    press_on(&mut app, &[b, under]);
+    assert_eq!(state(&app, file_menu), closed, "an outside click");
+
+    // Esc.
+    click_menu_button(&mut app, file);
+    assert_eq!(state(&app, file_menu), (true, true), "a click opens it again");
+    escape(&mut app);
+    assert_eq!(state(&app, file_menu), closed, "Esc");
+
+    // An item.
+    click_menu_button(&mut app, view);
+    assert_eq!(state(&app, view_menu), (true, true));
+    let item =
+        menu_items(&mut app).into_iter().find(|(e, _)| app.world().get::<ChildOf>(*e).unwrap().parent() == view_popup);
+    let b = barrier(&mut app);
+    press_on(&mut app, &[item.unwrap().0, b]);
+    std::mem::take(&mut app.world_mut().resource_mut::<Actions>().0);
+    assert_eq!(state(&app, view_menu), closed, "an item");
+
+    // Opening another menu: the press on the other button lands on the barrier and closes the open menu; the next
+    // click opens the other one.
+    click_menu_button(&mut app, file);
+    let b = barrier(&mut app);
+    press_on(&mut app, &[b, view]);
+    assert_eq!(state(&app, file_menu), closed, "another menu's button");
+    click_menu_button(&mut app, view);
+    assert_eq!((state(&app, file_menu), state(&app, view_menu)), (closed, (true, true)), "the other menu opens");
+    escape(&mut app);
+    assert_eq!(state(&app, view_menu), closed);
+}
+
+/// The subpane titles under `root`, in display order (a Feathers `subpane_header` is told by its theme token).
+fn subpane_titles(app: &mut App, root: Entity) -> Vec<String> {
+    use bevy::feathers::theme::ThemeBackgroundColor;
+    use bevy::feathers::tokens::SUBPANE_HEADER_BG;
+
+    fn texts(w: &World, e: Entity, out: &mut Vec<String>) {
+        if let Some(t) = w.get::<Text>(e) {
+            out.push(t.0.clone());
+        }
+        for c in w.get::<Children>(e).into_iter().flatten() {
+            texts(w, *c, out);
+        }
+    }
+    fn walk(w: &World, e: Entity, out: &mut Vec<String>) {
+        if w.get::<ThemeBackgroundColor>(e).is_some_and(|c| c.0 == SUBPANE_HEADER_BG) {
+            let mut title = Vec::new();
+            texts(w, e, &mut title);
+            out.push(title.concat());
+            return;
+        }
+        for c in w.get::<Children>(e).into_iter().flatten() {
+            walk(w, *c, out);
+        }
+    }
+    let mut out = Vec::new();
+    walk(app.world(), root, &mut out);
+    out
+}
+
+/// Design §5: with no selection, a material's and a function's right sidebar has no "Info" subpane and ends with
+/// "Hotkeys", then "Description".
+#[test]
+fn graph_sidebar_has_no_info_and_description_is_last() {
+    use shader_editor_app::ui::areas::{AreasPlugin, RightSidebar, right_sidebar};
+    use shader_editor_app::ui::props::PropsPlugin;
+
+    let (_dir, mut app) = app();
+    app.add_plugins((AreasPlugin, PropsPlugin));
+    app.world_mut().spawn_scene(right_sidebar()).unwrap();
+    let sidebar = app.world_mut().query_filtered::<Entity, With<RightSidebar>>().single(app.world()).unwrap();
+    for id in [AssetId::new(AssetType::Material, "env/rock_wet"), AssetId::new(AssetType::Function, "common/wet_mask")]
+    {
+        act(&mut app, Action::OpenAsset(id.clone()));
+        act(&mut app, Action::Select(Default::default()));
+        let titles = subpane_titles(&mut app, sidebar);
+        assert!(titles.ends_with(&["Hotkeys".to_string(), "Description".to_string()]), "{id:?}: {titles:?}");
+        assert!(!titles.iter().any(|t| t == "Info"), "{id:?}: {titles:?}");
+    }
+}
+
+/// Design §6.1: the editor topbar's Comment button (`AddComment(None)`, also hold C off the canvas) puts a frame
+/// around no node at the visible canvas centre, snapped to the grid.
+#[test]
+fn comment_button_adds_frame_at_view_centre() {
+    use shader_editor_app::ui::areas::AreasPlugin;
+
+    let (_dir, mut app) = app();
+    app.add_plugins(AreasPlugin);
+    act(&mut app, Action::OpenAsset(AssetId::new(AssetType::Material, "env/rock_wet")));
+    act(&mut app, Action::Select(Default::default()));
+    let canvas = app.world().resource::<EditorCanvas>().canvas;
+    {
+        let mut view = app.world_mut().get_mut::<CanvasView>(canvas).unwrap();
+        view.pan = Vec2::new(-1003.0, 497.0);
+        view.zoom = 2.0;
+    }
+    // A laid-out canvas of 840x620 logical px (physical 1680x1240 at scale factor 2); no UI layout runs here.
+    let laid_out =
+        ComputedNode { size: Vec2::new(1680.0, 1240.0), inverse_scale_factor: 0.5, ..ComputedNode::default() };
+    app.world_mut().entity_mut(canvas).insert(laid_out);
+    // (840, 620) / 2 = (420, 310) canvas px; minus the pan, over the zoom.
+    let centre = Vec2::new((420.0 + 1003.0) / 2.0, (310.0 - 497.0) / 2.0);
+    let before: Vec<String> =
+        app.world().resource::<Editor>().doc().unwrap().asset.comments.iter().map(|f| f.id.clone()).collect();
+    act(&mut app, Action::AddComment(None));
+    let d = app.world().resource::<Editor>().doc().unwrap();
+    let f = d.asset.comments.iter().find(|f| !before.contains(&f.id)).expect("a new frame");
+    let snapped = shader_editor_app::doc::snap((centre.x, centre.y));
+    assert_eq!(snapped, (710.0, -90.0));
+    assert_eq!(f.rect, (snapped.0, snapped.1, 400.0, 300.0));
+    assert!(f.nodes.is_empty());
 }

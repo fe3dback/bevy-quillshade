@@ -16,10 +16,28 @@ pub struct UserConfig {
     pub recent_projects: Vec<PathBuf>,
     /// Open tabs (`AssetId::source_rel`, e.g. `shaders/env/rock.material.ron`) per project root.
     pub tabs: BTreeMap<PathBuf, ProjectTabs>,
-    /// View → Show log: the console/logs shows its messages, not only its header bar.
+    /// View → Show project (Ctrl+1): the left sidebar is shown.
+    pub show_left_sidebar: bool,
+    /// View → Show console (Ctrl+2): the console/logs shows its messages, not only its header bar.
     pub show_log: bool,
-    /// View → Show properties: the right sidebar is shown.
+    /// View → Show properties (Ctrl+3): the right sidebar is shown.
     pub show_properties: bool,
+    /// View → Zen mode (`` ` ``): hides the left and right sidebars and the whole console/logs, whatever their own
+    /// flags say (design §3). Stored apart from them, so turning it off shows exactly the panels whose flags are on.
+    pub zen_mode: bool,
+}
+
+/// A panel the View flags show or hide ([`UserConfig::panel_visible`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Panel {
+    /// The left sidebar: project tree and assets tree.
+    LeftSidebar,
+    /// The console/logs strip itself, its header included: hidden only by Zen mode.
+    Console,
+    /// The console/logs' messages under its header.
+    Log,
+    /// The right sidebar.
+    Properties,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -36,8 +54,10 @@ impl Default for UserConfig {
             maximized: false,
             recent_projects: Vec::new(),
             tabs: BTreeMap::new(),
+            show_left_sidebar: true,
             show_log: true,
             show_properties: true,
+            zen_mode: false,
         }
     }
 }
@@ -72,6 +92,18 @@ impl UserConfig {
         let tmp = path.with_extension("ron.tmp");
         std::fs::write(&tmp, text)?;
         std::fs::rename(tmp, path)
+    }
+
+    /// Whether `panel` is shown: its own flag, folded with Zen mode, which has priority. The one place the layout
+    /// systems ask.
+    pub fn panel_visible(&self, panel: Panel) -> bool {
+        !self.zen_mode
+            && match panel {
+                Panel::LeftSidebar => self.show_left_sidebar,
+                Panel::Console => true,
+                Panel::Log => self.show_log,
+                Panel::Properties => self.show_properties,
+            }
     }
 
     pub fn touch_recent(&mut self, project: &Path) {
@@ -133,6 +165,64 @@ mod tests {
         let loaded = UserConfig::load(&path);
         assert_eq!(loaded, c);
         assert!(!loaded.show_log && loaded.show_properties);
+    }
+
+    /// Design §3, Review Focus 3: a config file from before the panel toggles opens with every panel shown and Zen
+    /// mode off.
+    #[test]
+    fn old_config_shows_all_panels_without_zen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.ron");
+        std::fs::write(&path, "(\n  window: (800, 600),\n  show_log: false,\n  show_properties: true,\n)\n").unwrap();
+        let old = UserConfig::load(&path);
+        assert_eq!(old.window, (800, 600), "the old file is read");
+        assert!(old.show_left_sidebar && !old.zen_mode);
+        assert!(!old.show_log && old.show_properties);
+        assert!(old.panel_visible(Panel::LeftSidebar) && old.panel_visible(Panel::Console));
+        assert!(!old.panel_visible(Panel::Log) && old.panel_visible(Panel::Properties));
+    }
+
+    /// All four View flags survive a save and a load.
+    #[test]
+    fn view_flags_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.ron");
+        for (left, log, props, zen) in [(false, true, false, true), (true, false, true, false)] {
+            let c = UserConfig {
+                show_left_sidebar: left,
+                show_log: log,
+                show_properties: props,
+                zen_mode: zen,
+                ..UserConfig::default()
+            };
+            c.save(&path).unwrap();
+            let loaded = UserConfig::load(&path);
+            assert_eq!(loaded, c);
+            assert_eq!(
+                (loaded.show_left_sidebar, loaded.show_log, loaded.show_properties, loaded.zen_mode),
+                (left, log, props, zen)
+            );
+        }
+    }
+
+    /// Zen mode hides every panel, whatever its own flag says (design §3); off, each panel follows its flag. The
+    /// console strip (its header) is hidden only by Zen.
+    #[test]
+    fn zen_folds_into_panel_visibility() {
+        let panels = [Panel::LeftSidebar, Panel::Console, Panel::Log, Panel::Properties];
+        let shown = |c: &UserConfig| panels.map(|p| c.panel_visible(p));
+        let mut c = UserConfig::default();
+        assert_eq!(shown(&c), [true, true, true, true]);
+        c.show_log = false;
+        c.show_left_sidebar = false;
+        assert_eq!(shown(&c), [false, true, false, true]);
+        c.zen_mode = true;
+        assert_eq!(shown(&c), [false; 4]);
+        c.show_log = true;
+        c.show_left_sidebar = true;
+        assert_eq!(shown(&c), [false; 4], "the flags change, Zen still hides");
+        c.zen_mode = false;
+        assert_eq!(shown(&c), [true; 4]);
     }
 
     #[test]

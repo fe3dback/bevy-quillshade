@@ -156,10 +156,23 @@ pub fn search<'a>(entries: &'a [Entry], query: &str) -> Vec<&'a Entry> {
 
 /// Like [`search`], as indices into `entries`.
 pub fn search_indices(entries: &[Entry], query: &str) -> Vec<usize> {
-    let mut hits: Vec<(u32, usize)> =
-        entries.iter().enumerate().map(|(i, e)| (score(e, query), i)).filter(|(s, _)| *s > 0).collect();
-    hits.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
-    hits.into_iter().map(|(_, i)| i).collect()
+    search_indices_leading(entries, query, |_| false)
+}
+
+/// Like [`search_indices`], with the matching entries for which `lead` holds first among those of the same score
+/// (the Named Route declaration after a wire from an output, design §6.4: first with an empty query or its own
+/// keyword, never above a better match); the rest keeps its order.
+pub fn search_indices_leading(entries: &[Entry], query: &str, lead: impl Fn(&Entry) -> bool) -> Vec<usize> {
+    let mut hits: Vec<(u32, bool, usize)> =
+        entries.iter().enumerate().map(|(i, e)| (score(e, query), lead(e), i)).filter(|(s, _, _)| *s > 0).collect();
+    hits.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)).then_with(|| a.2.cmp(&b.2)));
+    hits.into_iter().map(|(_, _, i)| i).collect()
+}
+
+/// Whether `kind` is a Named Route declaration (decision 0011): a name for a wire, renamed as soon as the palette
+/// adds it (design §6.4).
+pub fn is_route_declaration(registry: &Registry, kind: &str) -> bool {
+    registry.get(kind).is_some_and(|d| d.role() == NodeRole::RouteDeclaration)
 }
 
 /// Input pin of a fresh node: id, type, polymorphic, also takes material attributes (decision 0023).
@@ -245,6 +258,35 @@ mod tests {
         for entry in &e {
             assert!(search(&e, &entry.name).iter().any(|x| x.kind == entry.kind), "{} not found", entry.name);
         }
+    }
+
+    /// Design §6.4: a lead entry wins ties on the score (first with an empty query or its own keyword), never over a
+    /// better match; the query still filters it.
+    #[test]
+    fn lead_entry_sorts_first_when_it_matches() {
+        let reg = shader_stdlib::registry();
+        let e = all();
+        let lead = |x: &Entry| is_route_declaration(&reg, &x.kind);
+        let first = |q: &str| search_indices_leading(&e, q, lead).first().map(|i| e[*i].kind.clone());
+        assert_eq!(first("").as_deref(), Some("stdlib::NamedRoute"));
+        assert_eq!(first("route").as_deref(), Some("stdlib::NamedRoute"));
+        assert_eq!(first("*").as_deref(), Some("stdlib::Multiply"));
+        // "namedroute" holds d-o-t as a subsequence: that weak match stays below the keyword matches (Reroute's
+        // "dot", DotProduct) and leads only the other subsequence matches.
+        let dot: Vec<&str> = search_indices_leading(&e, "dot", lead).into_iter().map(|i| e[i].kind.as_str()).collect();
+        let at = |kind: &str| dot.iter().position(|k| *k == kind).unwrap();
+        assert!(
+            at("stdlib::Reroute") < at("stdlib::NamedRoute") && at("stdlib::DotProduct") < at("stdlib::NamedRoute")
+        );
+        assert!(
+            dot[at("stdlib::NamedRoute") + 1..]
+                .iter()
+                .all(|k| score(e.iter().find(|x| x.kind == *k).unwrap(), "dot") <= 5)
+        );
+        assert!(!search_indices_leading(&e, "mul", lead).iter().any(|i| lead(&e[*i])));
+        let rest: Vec<usize> = search_indices_leading(&e, "", lead).into_iter().skip(1).collect();
+        let plain: Vec<usize> = search_indices(&e, "").into_iter().filter(|i| !lead(&e[*i])).collect();
+        assert_eq!(rest, plain, "the others keep their order");
     }
 
     #[test]

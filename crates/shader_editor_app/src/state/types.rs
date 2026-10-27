@@ -269,10 +269,14 @@ pub enum Action {
     DiscardTab(usize),
     SaveAndCloseTab(usize),
     NextTab,
-    /// View → Show log (`` ` ``): flips [`UserConfig::show_log`] and saves the user config.
+    /// View → Show project (Ctrl+1): flips [`UserConfig::show_left_sidebar`] and saves the user config.
+    ToggleLeftSidebar,
+    /// View → Show console (Ctrl+2): flips [`UserConfig::show_log`] and saves the user config.
     ToggleLog,
-    /// View → Show properties (Tab): flips [`UserConfig::show_properties`] and saves the user config.
+    /// View → Show properties (Ctrl+3): flips [`UserConfig::show_properties`] and saves the user config.
     ToggleProperties,
+    /// View → Zen mode (`` ` ``): flips [`UserConfig::zen_mode`] and saves the user config.
+    ToggleZen,
     Save,
     SaveAll,
     RegenAll,
@@ -295,6 +299,14 @@ pub enum Action {
         pos: (f32, f32),
         link: Option<Link>,
         /// Preset parameters (a palette entry of one named route).
+        params: Vec<(String, Value)>,
+    },
+    /// [`Action::AddNode`], then the new node's rename dialog ([`Editor::rename_target`], as a header double click):
+    /// a Named Route declaration picked in the palette (design §6.4).
+    AddNodeAndRename {
+        kind: String,
+        pos: (f32, f32),
+        link: Option<Link>,
         params: Vec<(String, Value)>,
     },
     Connect {
@@ -365,6 +377,10 @@ pub enum Action {
     Consts(ConstsAction),
     Texture(TextureAction),
     AutoLayout,
+    /// A comment frame around the selection, or with none a default-size one at this graph position snapped to
+    /// the grid (design §6.1). `None` (the editor topbar's Comment button, hold C with the cursor off the canvas):
+    /// the visible canvas centre, which the graph editor fills in before the action is applied; the origin without
+    /// a canvas.
     AddComment(Option<(f32, f32)>),
     AddReroute {
         from: (NodeId, String),

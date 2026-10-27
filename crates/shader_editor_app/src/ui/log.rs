@@ -1,13 +1,16 @@
-//! Error/warning log (spec §9.5, 13): live validation + operation messages; click focuses the node. View → Show log
-//! off (design §4) leaves only the pane's header bar: the counts, Clear and the show / hide button.
+//! Error/warning log (spec §9.5, 13): live validation + operation messages; click focuses the node. View → Show
+//! console off (design §3) leaves only the pane's header bar: the counts, Clear and the show / hide button; Zen mode
+//! hides the whole console.
 
 use bevy::feathers::rounded_corners::RoundedCorners;
 use bevy::prelude::*;
 use shader_graph_core::Diagnostic;
 
+use super::areas;
 use super::icons::{IconId, UiIcon};
 use super::widgets::{pane_box, pane_title};
 use super::{BORDER, HoverRow, PANEL_BG, TEXT, TEXT_DIM, icon_button, plural, scroll_column, text, tool_button};
+use crate::config::Panel;
 use crate::state::{Action, Actions, Editor, Level};
 
 /// The console/logs container (under the editor statusbar).
@@ -45,7 +48,7 @@ impl Plugin for LogPlugin {
 
 /// The console/logs: a pane, the counts in its title, Clear and the show / hide toggle in its header.
 pub fn console() -> impl Scene {
-    let toggle = icon_button(IconId::ChevronDown, Action::ToggleLog, "Show / hide log (`)");
+    let toggle = icon_button(IconId::ChevronDown, Action::ToggleLog, "Show / hide console (Ctrl+2)");
     let tools: Vec<Box<dyn Scene>> =
         vec![Box::new(tool_button("Clear messages", Action::ClearMessages)), Box::new(bsn! { @{toggle} LogToggle })];
     bsn! {
@@ -65,15 +68,15 @@ pub fn console() -> impl Scene {
     }
 }
 
-/// Follows [`UserConfig::show_log`](crate::config::UserConfig::show_log): hidden, the pane body is not displayed, the
-/// container takes the header's height and the header gets the pane's bottom corners and border. Runs when the flag
-/// changed or the console was spawned.
+/// Follows [`Panel::Log`]: hidden, the pane body is not displayed, the container takes the header's height and the
+/// header gets the pane's bottom corners and border. Zen mode ([`Panel::Console`]) hides the whole console, header
+/// included, out of Tab's reach too ([`areas::display`]). Runs when either changed or the console was spawned.
 #[allow(clippy::too_many_arguments)]
 fn show_log(
     editor: Res<Editor>,
-    mut last: Local<Option<bool>>,
+    mut last: Local<Option<(bool, bool)>>,
     spawned: Query<(), Added<LogPane>>,
-    mut panes: Query<&mut Node, With<LogPane>>,
+    mut panes: Query<(&mut Node, &mut Visibility), With<LogPane>>,
     bodies: Query<&ChildOf, With<LogBody>>,
     headers: Query<&ChildOf, With<LogHeader>>,
     mut nodes: Query<&mut Node, Without<LogPane>>,
@@ -81,16 +84,17 @@ fn show_log(
     children: Query<&Children>,
     mut icons: Query<&mut UiIcon>,
 ) {
-    let shown = editor.config.show_log;
-    if *last == Some(shown) && spawned.is_empty() {
+    let (console, shown) = (editor.config.panel_visible(Panel::Console), editor.config.panel_visible(Panel::Log));
+    if *last == Some((console, shown)) && spawned.is_empty() {
         return;
     }
-    *last = Some(shown);
+    *last = Some((console, shown));
     let height = if shown { px(LOG_HEIGHT) } else { Val::Auto };
-    for mut node in &mut panes {
+    for (mut node, mut visibility) in &mut panes {
         if node.height != height {
             node.height = height;
         }
+        areas::display(&mut node, &mut visibility, console);
     }
     let display = if shown { Display::Flex } else { Display::None };
     for body in &bodies {

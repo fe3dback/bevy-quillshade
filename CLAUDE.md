@@ -187,23 +187,30 @@ and commit messages too:
   visit it. The editor statusbar comes from `TabDoc::status` → `StatusInfo` (filled from a `StatusCtx` by
   `Editor::status_info`). Adding a kind: decision 0031's recipe.
 - **Areas** (`ui/areas.rs`): each area is spawned once in its strip (`EditorTopbar`, `RightSidebar`,
-  `EditorStatusbar`) inside an `AreaOf(ViewKind)` container; `show_active_areas` sets `Node::display` (not
-  `Visibility`, written only on change) so only the active kind's shows and a strip it has nothing for takes no space.
+  `EditorStatusbar`) inside an `AreaOf(ViewKind)` container; `show_active_areas` sets `Node::display` (and
+  `Visibility::Hidden`, which Bevy's tab navigation needs; written only on change) so only the active kind's shows and a
+  strip it has nothing for takes no space.
   Bodies (`*ViewBar`, `*SidebarBody`) are refilled by the kind's systems keyed on what they show (sidebars:
   `(ui.props, active)` via `SidebarKey`), never every frame. Property widgets and their observers stay in
   `ui/props.rs`; editor content views stay in `ui::DocArea`.
-- **Input contexts** (`editors/main_input.rs`, decisions 0032, 0034): bevy_enhanced_input. One `InputRoot` entity
-  carries `MainCtx` (save, undo / redo, close / next tab, open, quit, the View toggles `` ` `` `ToggleLog` / Tab
-  `ToggleProperties`; always active, priority 2) and one context per kind (`GraphCtx` — palette on Space, Esc
+- **Input contexts** (`editors/main_input.rs`, decisions 0032, 0034, 0035): bevy_enhanced_input. One `InputRoot`
+  entity carries `MainCtx` (save, undo / redo, close / next tab, open, quit, the View toggles Ctrl+1
+  `ToggleLeftSidebar` / Ctrl+2 `ToggleLog` / Ctrl+3 `ToggleProperties` / `` ` `` `ToggleZen`; always active,
+  priority 2) and one context per kind (`GraphCtx` — palette on Space, Esc
   `CancelWire`, …; `CurveCtx`, `TextCtx`; priority 1) that `sync_input_context` activates only while the active tab is
   of that kind — so a hotkey needs no "is this my tab" guard. The shared edit actions (`EditCopy`, `EditDelete`, …) are
   bound by each kind that supports them and have one global handler each. Build actions with `hotkey::<A>()`
   (`consume_input` + `require_reset`) and the `ctrl` / `ctrl_shift` / `shift` / `plain` binding helpers ("Ctrl" = Ctrl
-  or Super); handlers observe `On<Start<A>>` (`on_combo` / `on_plain`) and push `state::Action`s. Plain-key handlers
+  or Super); handlers observe `On<Start<A>>` (`on_combo` / `on_plain`) and push `state::Action`s; a hold-to-fire key
+  is `held_hotkey::<A>(bindings, secs)` (a one-shot `Hold`, handlers observe `Fire`: hold C `AddComment`, which arms
+  only on a fresh C press so a C left down after Ctrl+C never fires). Plain-key handlers
   ignore the key while Ctrl, Alt or Super is held (`keys::no_command_mods`). `gate_keyboard` (PreUpdate, before
   `InputFocusSystems::Dispatch`) hides the keyboard from all contexts while typing (text field focused, palette,
-  dialog, menu or popup open; a scrubbed number field only while LMB is held, `typing_into`). Keyboard focus stays on
-  fields (`keep_focus_on_fields`): a button never keeps it, Tab moves it only between fields. Activating a context
+  dialog, menu or popup open; a scrubbed number field only while LMB is held, `typing_into`; Space / Enter while a
+  focused button or checkbox takes them, `PRESS_KEYS`: the widget wins). Keyboard focus is Bevy's default (decision
+  0035): Tab walks every tabbable widget, a canvas click clears the focus; only additions are kept —
+  `tab_into_number_input`, `drop_hidden_focus`, the palette's modal `TabGroup`, `Visibility::Hidden` on hidden areas —
+  plus one exception, Ctrl+Tab (`NextTab`) clears the focus (`drop_focus`). Activating a context
   re-inserts its bindings so a key held across a tab switch does not fire (relies on bevy_enhanced_input internals —
   re-check `tests/input_contexts.rs` on upgrades). Mouse gestures stay picking observers and read modifiers via
   `keys::mods()` (`keys.rs`, below both `ui` and `editors`).
@@ -237,14 +244,21 @@ and commit messages too:
   virtual Internal folder), `game_image.rs` (`GameImageCache`: game images and internal textures decoded with
   `Image::from_buffer`), `droppable.rs` (`DroppableFile` / `Dropped`: dragging images, Texture, Function and Curve
   assets onto a graph; a function dropped into itself is refused through `search::is_self_call`, as in the palette).
-- Canvas details (decisions 0033, 0034): node positions snap to `doc::GRID_SNAP` (10) — pointer drags through the
+- Canvas details (decisions 0033, 0034, 0035): node positions snap to `doc::GRID_SNAP` (10) — pointer drags through the
   bevy_noodle fork's `CanvasInteraction::snap` (the grabbed node; `attach_canvas`), new / pasted nodes in
   `Editor::add_node` / `paste`; loaded positions are never rewritten. Comment frames are `NodeFrame`s: dragging one
   moves the nodes inside it in the same edits. Node emphasis (selection, pulsing preview, diagnostics) is a bevy_ui
   `Outline` written by `node_outlines` every frame, and pin hover the fork's `PortHoverStyle` on the canvas
-  (`rebuild_canvas` carries `Hovered` to a rebuilt pin's new port) — neither rebuilds the canvas. A box that fully
-  encloses a comment frame and selects all of its `Frame::nodes` marks it in `Doc::enclosed_frames`, so Delete
-  removes it with the nodes.
+  (`rebuild_canvas` carries `Hovered` to a rebuilt pin's new port) — neither rebuilds the canvas. Pins are the
+  fork's `kit::port_sized` with a `kit::PortSize` of `canvas::PIN_PHYSICAL` (24: the port box — hit area, wire
+  anchor, row room; node sizes, the reroute's too, derive from it) and `canvas::PIN_VISUAL` (16: the drawn `PortDot`,
+  which wires touch and hover grows),
+  and a dragged or lifted wire takes the nearest pin it may end on within `canvas::WIRE_TARGET_RADIUS` (40) screen px
+  unless the pointer is on a refused pin (the fork's `CanvasInteraction::wire_target_radius`, `attach_canvas`). A
+  comment with nothing selected is a 400x300 frame at the cursor (`Doc::add_frame`, `EMPTY_FRAME_SIZE`;
+  `AddComment(None)` = the view centre, `comment_at_view_centre`), as `doc::bounds(∅)` means "all nodes" (paste). A box
+  that fully encloses a comment frame and selects all of its `Frame::nodes` marks it in `Doc::enclosed_frames`, so
+  Delete removes it with the nodes.
 - UI is pure Bevy UI + Feathers (`bsn!`); **no egui**. Workarounds for Feathers 0.20 bugs are in `fixes.rs`.
 - **Feathers widgets, no look-alikes** (decision 0034): use `ui::widgets` / Feathers containers and controls — never a
   hand-built widget where Feathers 0.20 has one. Panels are `pane_box` (+ `pane_title`) and the right sidebar's groups
@@ -254,14 +268,20 @@ and commit messages too:
   `dialog::open_menu_entries` / `open_icon_menu`) behind a transparent click barrier (`dialog::menu_barrier`), so an
   outside click only closes them; one menu is open at a time. The kept hand-built widgets (tabs, tree rows, log rows,
   palette, tooltip, `scroll_column`) and why are listed in decision 0034.
-- **View settings**: `UserConfig::show_log` / `show_properties` (View menu, `` ` `` / Tab, `Action::ToggleLog` /
-  `ToggleProperties`, saved at once); `log::show_log` and `show_active_areas` key on the flags.
+- **View settings** (decision 0035): `UserConfig::show_left_sidebar` / `show_log` / `show_properties` / `zen_mode`
+  (View menu, Ctrl+1 / 2 / 3 / `` ` ``, `Action::ToggleLeftSidebar` / `ToggleLog` / `ToggleProperties` / `ToggleZen`,
+  saved at once). Zen mode never rewrites the other flags: `UserConfig::panel_visible(Panel)` (`!zen_mode && own
+  flag`) is the single decision point, read by `ui::show_left_sidebar`, `log::show_log` and `show_active_areas`
+  (hidden: `Display::None` + `Visibility::Hidden` through `areas::display`). `Panel::Console` (the console with its
+  header) is hidden only by Zen, `Panel::Log` (its messages) also by `show_log` off.
 - `ui/image_preview.rs` (`ImagePreviewPlugin`, `doc_kind::PreviewDoc`): the zoom / pan / fit / channel / tiling preview
   shared by the image and Texture tabs; one camera per tab, keyed by `(ViewKind, image path)`.
 - Graph editor topbar: static tools plus `GraphTopbarDynamic` (`redraw_graph_topbar`: Preview mode `button_group`,
   generated WESL / Rust buttons). Rename by double click: `Editor::rename_target` / `header_action`, the
   `canvas::NodeHeader` / `FrameTitleStrip` markers, `Action::TextDialog` → `Submit::SetText` (the sidebar's
-  `set_value`).
+  `set_value`). After a wire drop from an output the palette sorts the Named Route declaration first
+  (`palette::results_for`, a tie-break after the search score); a declaration added from the palette opens that rename
+  dialog (`Action::AddNodeAndRename`). A node added from a wire is one undo step (`Editor::connect_checked`).
 - `EditorCorePlugin` runs without a window — logic is tested in `state::tests` and `tests/ui_smoke.rs`.
 - User config: `<OS config dir>/fe3dback/bevy-shader-editor/config.ron` (window size, recent projects, open tabs, View
   flags; `config::os_config_dir`, decision 0018). Version/URL/author/disclaimer constants (`EDITOR_VERSION`, …) are in
@@ -313,7 +333,7 @@ hand-drawn ones, rasterized at runtime with resvg (`crates/shader_editor_app/src
   — renders, saves the PNG and exits. `SHADER_EDITOR_SELECT` takes a node kind (its first node) or a comment frame
   id. `menu:<name>` opens that main menu (`file`, `edit`, `view`, `assets`, `help`); `game_file_menu` opens the RMB
   menu of the first game image that has a Texture asset (its item disabled), `game_file_menu:2` of the first without.
-  `SHADER_EDITOR_INPUT=drag|rmb_click|rmb_pan|mmb_pan|slider|color|pin_rmb|node_rmb|node_dblclick|frame_dblclick|hover|curve_drag|curve_add|texture_zoom|drop_game_file|ctrl_drag_wire|ctrl_wire_hold|wire_drag|wire_hold|alt_click|box_delete|box_delete_partial|type_field`
+  `SHADER_EDITOR_INPUT=drag|rmb_click|rmb_pan|mmb_pan|slider|color|pin_rmb|node_rmb|node_dblclick|frame_dblclick|hover|curve_drag|curve_add|texture_zoom|drop_game_file|ctrl_drag_wire|ctrl_wire_hold|wire_drag|wire_hold|alt_click|box_delete|box_delete_partial|type_field|menu_click|menu_close|tab[:N]`
   (+ `SHADER_EDITOR_INPUT_NODE=<id>`, `SHADER_EDITOR_INPUT_TRACE=1`, `SHADER_EDITOR_ZOOM=<f32>`) plays a scripted mouse
   gesture through winit's messages and logs the outcome (`demo` lines; `slider`/`color` also log the edited value;
   `texture_zoom` works on an image or Texture tab).
@@ -337,13 +357,18 @@ hand-drawn ones, rasterized at runtime with resvg (`crates/shader_editor_app/src
     `ctrl_wire_hold` is `ctrl_drag_wire` keeping Ctrl and the button down (the shot shows the lifted wires
     mid-gesture, design §5.3; logs the lifted wires, the pin they snap to and the count of new wires dragged);
     `SHADER_EDITOR_INPUT_AT=<dx>,<dy>` ends these drags that many logical px from the start pin instead (empty
-    canvas). `alt_click` Alt+clicks the `SHADER_EDITOR_INPUT_PIN` pin. All log the wires at both pins before and after.
+    canvas), `SHADER_EDITOR_INPUT_AT=to:<dx>,<dy>` that far from the target pin (its snap radius, design §6.3).
+    `alt_click` Alt+clicks the `SHADER_EDITOR_INPUT_PIN` pin. All log the wires at both pins before and after.
   - `node_dblclick` double-clicks the middle of an unselected node (or `SHADER_EDITOR_INPUT_NODE`), with
     `SHADER_EDITOR_INPUT_AT=header` its header (the rename dialog of a named / labelled node, design §5.5);
     `frame_dblclick` double-clicks the title strip of the first comment frame (or `SHADER_EDITOR_INPUT_FRAME=<id>`).
     Both log the active tab and the open dialog.
   - `type_field` clicks the right sidebar's Description field of the open graph, types `ab` and logs the focus and
     the field's text.
+  - `menu_click` clicks the menu_bar menu `SHADER_EDITOR_INPUT_MENU=<name>` (default `file`); `menu_close` then clicks
+    the canvas (lands on the menu's barrier). Both log each main menu's open and active (`Pressed`) state.
+  - `tab[:N]` presses Tab N times (default 1, at most 30) and logs after each press the focused entity, its tooltip
+    and action, whether a `Display::None` ancestor hides it and the focus ring; the shot shows the ring.
   - `box_delete` drags a selection box from outside the first comment frame (or `SHADER_EDITOR_INPUT_FRAME=<id>`) past
     its far corner and presses Delete; `box_delete_partial` ends the box in the frame's middle. Both log frames, node
     count, selection and enclosed frames before and after.

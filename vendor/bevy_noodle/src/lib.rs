@@ -107,8 +107,8 @@ pub mod prelude {
     pub use crate::scene::{SnapshotWorldExt, Transient};
     #[cfg(feature = "default_style")]
     pub use crate::style::{
-        CanvasGrid, EdgeStyle, FocusOutline, NoodleDefaultStylePlugin, PortColor, PortHighlight, PortHoverStyle,
-        SelectedBorderColor, SelectionBoxStyle,
+        CanvasGrid, EdgeStyle, FocusOutline, NoodleDefaultStylePlugin, PortColor, PortDot, PortHighlight,
+        PortHoverStyle, SelectedBorderColor, SelectionBoxStyle,
     };
     pub use crate::{
         CanvasContent, CanvasInteraction, CanvasKeyboard, CanvasView, Capacity, Connection, ConnectionCheck,

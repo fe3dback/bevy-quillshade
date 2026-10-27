@@ -68,8 +68,10 @@ fn add_node_from_wire_connects() {
     let edge = d.asset.edge_into(&out, "roughness").expect("auto-connected");
     assert_eq!(d.asset.nodes[&edge.from.0].kind, "stdlib::Constant");
     // One undo removes node and wire.
+    let constant = edge.from.0.clone();
     e.apply(Action::Undo);
     assert!(e.doc().unwrap().asset.edge_into(&out, "roughness").is_none());
+    assert!(!e.doc().unwrap().asset.nodes.contains_key(&constant));
 }
 
 fn add_lerp(e: &mut Editor) -> NodeId {
@@ -940,7 +942,7 @@ fn tabs_are_restored_on_next_launch() {
     assert_eq!(next.active, Some(0));
 }
 
-/// View → Show log / Show properties (design §4): each toggle flips its flag and saves the user config, which the
+/// View → Show console / Show properties (design §3): each toggle flips its flag and saves the user config, which the
 /// next launch reads (Review Focus 5).
 #[test]
 fn toggle_log_and_properties_persist() {
@@ -959,6 +961,38 @@ fn toggle_log_and_properties_persist() {
     assert!(UserConfig::load(&config).show_log, "toggled back");
     let next = Editor::with_config(UserConfig::load(&config), Some(config));
     assert!(next.config.show_log && !next.config.show_properties);
+}
+
+/// Zen mode (design §3, Review Focus 3): it hides every panel while on; Ctrl+3 in Zen flips its own flag only; Zen
+/// off shows exactly the panels whose flags are on. Each step is saved at once.
+#[test]
+fn zen_hides_panels_and_restores_flags() {
+    use crate::config::Panel::{Console, LeftSidebar, Log, Properties};
+    let (dir, mut e) = project();
+    let config = dir.path().join("config/config.ron");
+    e.config_path = Some(config.clone());
+    e.apply(Action::ToggleLog);
+    let shown = |e: &Editor| [LeftSidebar, Console, Log, Properties].map(|p| e.config.panel_visible(p));
+    assert_eq!(shown(&e), [true, true, false, true], "left on, log off, properties on");
+
+    e.apply(Action::ToggleZen);
+    assert!(e.config.zen_mode);
+    assert_eq!(shown(&e), [false; 4], "Zen hides every panel, the console header too");
+    assert_eq!(UserConfig::load(&config), e.config, "Zen saved");
+
+    e.apply(Action::ToggleProperties);
+    assert!(!e.config.show_properties, "Ctrl+3 in Zen flips its flag");
+    assert_eq!(shown(&e), [false; 4], "still hidden");
+    assert_eq!(UserConfig::load(&config), e.config, "the flag saved");
+
+    e.apply(Action::ToggleZen);
+    assert!(!e.config.zen_mode);
+    assert_eq!(shown(&e), [true, true, false, false], "left shown, the log header only, properties hidden");
+    assert_eq!(UserConfig::load(&config), e.config, "Zen off saved");
+
+    e.apply(Action::ToggleLeftSidebar);
+    assert!(!e.config.show_left_sidebar);
+    assert_eq!(UserConfig::load(&config), e.config, "Ctrl+1 saved");
 }
 
 #[test]
@@ -1043,6 +1077,149 @@ fn clicking_a_diagnostic_opens_its_asset() {
     e.apply(Action::FocusDiagnostic(diag));
     assert_eq!(e.doc().map(|d| &d.id), Some(&id));
     assert!(e.doc().unwrap().selection.contains(&node));
+}
+
+const ROUTE_DECL: &str = "stdlib::NamedRoute";
+
+/// The palette's rows for `link` and `query` as (kind, name), in the order it lists them.
+fn palette_rows(e: &Editor, link: Option<&Link>, query: &str) -> Vec<(String, String)> {
+    let entries = crate::ui::palette::entries_for(e, link);
+    let rows = crate::ui::palette::results_for(e, link, &entries, query);
+    rows.into_iter().map(|i| (entries[i].kind.clone(), entries[i].name.clone())).collect()
+}
+
+/// The palette's entries as they were before design §6.4: every node, the route usages, filtered by the wire.
+fn palette_before(e: &Editor, link: Option<&Link>) -> Vec<search::Entry> {
+    let d = e.doc().unwrap();
+    let mut entries = search::entries(&e.registry, &e.functions, d.asset.kind, &d.id.path);
+    entries.extend(search::route_entries(&e.registry, &d.asset));
+    entries.sort_by(|a, b| (&a.category, &a.name).cmp(&(&b.category, &b.name)));
+    if let Some(link) = link {
+        let t = e.pin_type(&link.node, &link.pin, link.from_output).unwrap();
+        let end = if link.from_output { WireEnd::FromOutput(t) } else { WireEnd::FromInput(t) };
+        entries.retain(|x| search::compatible_pin(&e.registry, &e.functions, d.asset.kind, &x.kind, end).is_some());
+    }
+    entries
+}
+
+/// The rows as the palette listed them before design §6.4 (plain search order).
+fn palette_rows_before(e: &Editor, link: Option<&Link>, query: &str) -> Vec<(String, String)> {
+    let entries = palette_before(e, link);
+    search::search(&entries, query).into_iter().map(|x| (x.kind.clone(), x.name.clone())).collect()
+}
+
+fn scalar_output(e: &Editor) -> Link {
+    let param = node_of(e, "param::Scalar");
+    assert_eq!(e.pin_type(&param, "out", true), Some(PinType::Float));
+    Link { node: param, pin: "out".into(), from_output: true }
+}
+
+/// Design §6.4: after a wire from an output the existing Named Route declaration entry wins ties on the score (first
+/// with an empty query or "route", below better matches such as DotProduct for "dot"); entries and filters are
+/// unchanged.
+#[test]
+fn output_wire_drop_palette_starts_with_named_route_declaration() {
+    let (_dir, mut e) = project();
+    e.apply(Action::OpenAsset(AssetId::new(AssetType::Material, "env/rock_wet")));
+    let link = scalar_output(&e);
+    assert_eq!(crate::ui::palette::entries_for(&e, Some(&link)), palette_before(&e, Some(&link)), "same entries");
+    let rows = palette_rows(&e, Some(&link), "");
+    assert_eq!(rows[0].0, ROUTE_DECL);
+    let before = palette_rows_before(&e, Some(&link), "");
+    assert_ne!(before[0].0, ROUTE_DECL, "it was not first before");
+    let rest: Vec<_> = before.iter().filter(|r| r.0 != ROUTE_DECL).cloned().collect();
+    assert_eq!(rows[1..], rest[..], "the others keep their order");
+    assert_eq!(palette_rows(&e, Some(&link), "route")[0].0, ROUTE_DECL);
+    // A tie-break after the score: better matches stay above it ("dot" is a keyword of Reroute and DotProduct, a
+    // mere subsequence of "namedroute"), in the plain order.
+    let dot = palette_rows(&e, Some(&link), "dot");
+    assert_ne!(dot[0].0, ROUTE_DECL, "{dot:?}");
+    let at = |kind: &str| dot.iter().position(|r| r.0 == kind).unwrap();
+    assert!(at("stdlib::DotProduct") < at(ROUTE_DECL), "{dot:?}");
+    assert_eq!(dot, palette_rows_before(&e, Some(&link), "dot"));
+    let mul = palette_rows(&e, Some(&link), "mul");
+    assert!(!mul.iter().any(|r| r.0 == ROUTE_DECL), "the query filters it out: {mul:?}");
+    assert_eq!(mul, palette_rows_before(&e, Some(&link), "mul"));
+}
+
+#[test]
+fn input_wire_drop_palette_unchanged() {
+    let (_dir, mut e) = project();
+    e.apply(Action::OpenAsset(AssetId::new(AssetType::Material, "env/rock_wet")));
+    let out = node_of(&e, "output::Pbr3d");
+    let link = Link { node: out, pin: "roughness".into(), from_output: false };
+    assert_eq!(crate::ui::palette::entries_for(&e, Some(&link)), palette_before(&e, Some(&link)));
+    for q in ["", "route", "mul"] {
+        assert_eq!(palette_rows(&e, Some(&link), q), palette_rows_before(&e, Some(&link), q), "query {q:?}");
+    }
+    assert!(palette_rows(&e, Some(&link), "").iter().skip(1).any(|r| r.0 == ROUTE_DECL), "listed, not first");
+}
+
+#[test]
+fn palette_without_link_unchanged() {
+    let (_dir, mut e) = project();
+    e.apply(Action::OpenAsset(AssetId::new(AssetType::Material, "env/rock_wet")));
+    assert_eq!(crate::ui::palette::entries_for(&e, None), palette_before(&e, None));
+    for q in ["", "route", "mul"] {
+        assert_eq!(palette_rows(&e, None, q), palette_rows_before(&e, None, q), "query {q:?}");
+    }
+    assert_ne!(palette_rows(&e, None, "")[0].0, ROUTE_DECL);
+}
+
+/// Design §6.4: a Named Route declaration picked in the palette (from an output wire or not) is added, wired from
+/// the output in one undo step, and its rename dialog opens; cancelling keeps the default name.
+#[test]
+fn palette_named_route_declaration_opens_rename() {
+    let (_dir, mut e) = project();
+    e.apply(Action::OpenAsset(AssetId::new(AssetType::Material, "env/rock_wet")));
+    let output = scalar_output(&e);
+    let pick = |e: &mut Editor, link: Option<&Link>, kind: &str| -> NodeId {
+        let entries = crate::ui::palette::entries_for(e, link);
+        let entry = entries.iter().find(|x| x.kind == kind).unwrap().clone();
+        let before: BTreeSet<NodeId> = e.doc().unwrap().asset.nodes.keys().cloned().collect();
+        e.apply(crate::ui::palette::pick_action(e, &entry, (123.0, 47.0), link.cloned()));
+        let d = e.doc().unwrap();
+        let new: Vec<_> = d.asset.nodes.keys().filter(|k| !before.contains(*k)).cloned().collect();
+        assert_eq!(new.len(), 1, "{new:?}");
+        new[0].clone()
+    };
+    let rename_open = |e: &Editor, route: &str| {
+        let target = PropTarget::Param { node: route.to_string(), key: "name".into() };
+        matches!(&e.dialog, Some(Dialog::Input { submit: Submit::SetText(t), initial, .. })
+            if *t == target && initial == "route")
+    };
+
+    // From an output wire.
+    let route = pick(&mut e, Some(&output), ROUTE_DECL);
+    let d = e.doc().unwrap();
+    assert_eq!(d.asset.nodes[&route].pos, (120.0, 50.0), "at the drop point, snapped");
+    let edge = d.asset.edge_into(&route, "in").expect("wired from the output");
+    assert_eq!(edge.from, (output.node.clone(), "out".to_string()));
+    assert!(rename_open(&e, &route), "{:?}", e.dialog);
+    let target = PropTarget::Param { node: route.clone(), key: "name".into() };
+    // Cancel: the node keeps its default name.
+    e.apply(Action::CloseDialog);
+    assert_eq!(e.current_value(&target), Some(Value::Str("route".into())));
+    // One undo step removes node and wire.
+    e.apply(Action::Undo);
+    assert!(!e.doc().unwrap().asset.nodes.contains_key(&route));
+    assert!(!e.is_dirty());
+
+    // Without a link (Space / RMB): the dialog opens too; submitting renames it (its own undo step).
+    let route = pick(&mut e, None, ROUTE_DECL);
+    assert!(rename_open(&e, &route), "{:?}", e.dialog);
+    let target = PropTarget::Param { node: route.clone(), key: "name".into() };
+    e.apply(Action::Submit("wet".into()));
+    assert_eq!(e.dialog, None);
+    assert_eq!(e.current_value(&target), Some(Value::Str("wet".into())));
+    e.apply(Action::Undo);
+    assert_eq!(e.current_value(&target), Some(Value::Str("route".into())));
+    e.apply(Action::Undo);
+    assert!(!e.doc().unwrap().asset.nodes.contains_key(&route));
+
+    // Other nodes open no dialog.
+    pick(&mut e, Some(&output), "stdlib::Multiply");
+    assert_eq!(e.dialog, None);
 }
 
 #[test]
@@ -3214,4 +3391,78 @@ fn function_files_unchanged() {
         ops::save(&p, &id, &asset).unwrap();
         assert_eq!(std::fs::read(id.file(&p)).unwrap(), original, "{rel}");
     }
+}
+
+/// The comment frame `AddComment` added (the one not in `before`).
+fn new_frame(e: &Editor, before: &[String]) -> shader_graph_core::model::Frame {
+    e.doc().unwrap().asset.comments.iter().find(|f| !before.contains(&f.id)).cloned().expect("a new comment frame")
+}
+
+fn frame_ids(e: &Editor) -> Vec<String> {
+    e.doc().unwrap().asset.comments.iter().map(|f| f.id.clone()).collect()
+}
+
+/// Design §6.1: with nothing selected, a comment is a 400x300 frame at the cursor snapped to the grid, around no
+/// node (not around the whole graph), in one undo step.
+#[test]
+fn add_comment_without_selection_is_default_size_at_cursor() {
+    let (_dir, mut e) = project();
+    open_rock_wet(&mut e);
+    assert!(e.doc().unwrap().asset.nodes.len() >= 5);
+    e.apply(Action::Select(BTreeSet::new()));
+    let before = frame_ids(&e);
+    e.apply(Action::AddComment(Some((12.3, -7.6))));
+    let f = new_frame(&e, &before);
+    assert_eq!(f.rect, (10.0, -10.0, 400.0, 300.0));
+    assert!(f.nodes.is_empty(), "{:?}", f.nodes);
+    e.apply(Action::Undo);
+    assert_eq!(frame_ids(&e), before, "one undo step");
+    assert!(!e.is_dirty());
+    // Without a cursor: at the origin.
+    e.apply(Action::AddComment(None));
+    assert_eq!(new_frame(&e, &before).rect, (0.0, 0.0, 400.0, 300.0));
+}
+
+/// A comment with a selection wraps the selected nodes; the cursor does not matter.
+#[test]
+fn add_comment_with_selection_wraps_it() {
+    let (_dir, mut e) = project();
+    open_rock_wet(&mut e);
+    let a = add(&mut e, "stdlib::Constant");
+    e.apply(Action::AddNode { kind: "stdlib::Time".into(), pos: (-500.0, 200.0), link: None, params: Vec::new() });
+    let b = e.doc().unwrap().asset.nodes.iter().find(|(_, n)| n.kind == "stdlib::Time").unwrap().0.clone();
+    let (pa, pb) = {
+        let d = e.doc().unwrap();
+        (d.asset.nodes[&a].pos, d.asset.nodes[&b].pos)
+    };
+    e.apply(Action::Select([a.clone(), b.clone()].into()));
+    let before = frame_ids(&e);
+    e.apply(Action::AddComment(Some((5000.0, 5000.0))));
+    let f = new_frame(&e, &before);
+    let (x0, y0, x1, y1) = (pa.0.min(pb.0), pa.1.min(pb.1), pa.0.max(pb.0), pa.1.max(pb.1));
+    assert_eq!(f.rect, (x0 - 30.0, y0 - 50.0, x1 - x0 + 260.0, y1 - y0 + 220.0));
+    let mut members = vec![a, b];
+    members.sort();
+    assert_eq!(f.nodes, members);
+}
+
+/// Design §5: the statusbar counts wires and comments too (the sidebar's "Info" subpane is gone).
+#[test]
+fn graph_status_counts_wires_and_comments() {
+    let (_dir, mut e) = project();
+    open_rock_wet(&mut e);
+    let counts = e.status_info().unwrap().counts;
+    let a = &e.doc().unwrap().asset;
+    let (nodes, wires, comments) = (a.nodes.len(), a.edges.len(), a.comments.len());
+    for want in [
+        crate::ui::plural(nodes, "node", "nodes"),
+        crate::ui::plural(wires, "wire", "wires"),
+        crate::ui::plural(comments, "comment", "comments"),
+    ] {
+        assert!(counts.contains(&want), "{want} in {counts:?}");
+    }
+    e.apply(Action::Select(BTreeSet::new()));
+    e.apply(Action::AddComment(None));
+    let want = crate::ui::plural(comments + 1, "comment", "comments");
+    assert!(e.status_info().unwrap().counts.contains(&want));
 }

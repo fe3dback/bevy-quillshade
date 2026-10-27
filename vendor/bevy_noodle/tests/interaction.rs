@@ -917,3 +917,184 @@ fn lifted_edges_dropped_on_a_refused_port_name_it() {
     assert_eq!(dropped.len(), 1);
     assert_eq!(dropped[0].onto, Some(refused), "an output, where an input's edges cannot go");
 }
+
+// The nearest candidate within a radius: with `wire_target_radius`, a dragged (or lifted) wire's target is the
+// candidate port whose centre is nearest to the pointer within that many window pixels, at any zoom.
+
+/// [`moving`] on a canvas whose wires take the nearest candidate within 40 px, zoomed by `zoom` (pan zero).
+fn near<const N: usize>(app: &mut App, zoom: f32, ports: [Port; N]) -> (Entity, [Entity; N]) {
+    let (canvas, ports) = moving(app, ports);
+    let w = app.world_mut();
+    w.get_mut::<CanvasInteraction>(canvas).unwrap().wire_target_radius = Some(40.0);
+    w.get_mut::<CanvasView>(canvas).unwrap().zoom = zoom;
+    (canvas, ports)
+}
+
+/// Puts `port`'s centre at graph point `at`.
+fn place(w: &mut World, port: Entity, at: Vec2) {
+    w.entity_mut(port).insert(PortAnchor::new(None, at, Some(at)));
+}
+
+/// A drag step from `port` with the pointer at window position `at`.
+fn drag_at(w: &mut World, port: Entity, at: Vec2) {
+    let (button, distance, delta) = (PointerButton::Primary, Vec2::X, Vec2::X);
+    pointer_at(w, port, at, Drag { button, distance, delta });
+}
+
+/// The window position `px` window pixels below graph point `at`, under `zoom` (the canvas is centred on the window's
+/// origin, pan zero).
+fn below(at: Vec2, zoom: f32, px: f32) -> Vec2 {
+    off(at, zoom, Vec2::new(0.0, px))
+}
+
+/// The window position `by` window pixels away from graph point `at`, under `zoom`.
+fn off(at: Vec2, zoom: f32, by: Vec2) -> Vec2 {
+    at * zoom + by - Vec2::new(200.0, 150.0)
+}
+
+fn target(w: &mut World) -> Option<Entity> {
+    w.query::<&WireTarget>().single(w).unwrap().0
+}
+
+fn end_drag(w: &mut World, port: Entity, at: Vec2) {
+    pointer_at(w, port, at, DragEnd { button: PointerButton::Primary, distance: Vec2::X });
+}
+
+#[test]
+fn wire_target_radius_is_off_by_default() {
+    assert_eq!(CanvasInteraction::default().wire_target_radius, None);
+}
+
+#[test]
+fn wires_take_a_candidate_within_the_radius_in_screen_pixels_at_any_zoom() {
+    for zoom in [1.0, 0.5, 2.0] {
+        let mut app = app();
+        let (_, [out, inp]) = near(&mut app, zoom, [Port::output(NUM), Port::input(NUM)]);
+        let w = app.world_mut();
+        lift(w, out);
+        // Nothing under the pointer: the distance alone decides.
+        hover(w, None);
+        // 35 px, diagonally (21, 28).
+        let at = off(Vec2::new(100.0, 0.0), zoom, Vec2::new(-21.0, 28.0));
+        drag_at(w, out, at);
+        assert_eq!(target(w), Some(inp), "35 px from the input at zoom {zoom}");
+        end_drag(w, out, at);
+        let edges: Vec<_> = w.query::<(&EdgeSource, &EdgeTarget)>().iter(w).map(|(s, t)| (s.0, t.0)).collect();
+        assert_eq!(edges, [(out, inp)], "the drop connects there at zoom {zoom}");
+        assert_eq!(w.resource_mut::<Messages<WireDropped>>().drain().count(), 0);
+    }
+}
+
+#[test]
+fn wires_beyond_the_radius_do_not_snap() {
+    for zoom in [1.0, 0.5, 2.0] {
+        let mut app = app();
+        let (_, [out, _]) = near(&mut app, zoom, [Port::output(NUM), Port::input(NUM)]);
+        let w = app.world_mut();
+        lift(w, out);
+        hover(w, None);
+        // 45 px, diagonally (27, -36).
+        let at = off(Vec2::new(100.0, 0.0), zoom, Vec2::new(27.0, -36.0));
+        drag_at(w, out, at);
+        assert_eq!(target(w), None, "45 px at zoom {zoom}");
+        end_drag(w, out, at);
+        assert_eq!(w.query::<&Edge>().iter(w).count(), 0);
+        let dropped: Vec<_> = w.resource_mut::<Messages<WireDropped>>().drain().collect();
+        assert_eq!((dropped.len(), dropped[0].onto), (1, None), "an off-target drop");
+    }
+}
+
+#[test]
+fn the_nearest_candidate_wins() {
+    let mut app = app();
+    let (_, [out, far, close]) = near(&mut app, 1.0, [Port::output(NUM), Port::input(NUM), Port::input(NUM)]);
+    let w = app.world_mut();
+    place(w, far, Vec2::new(100.0, 35.0));
+    place(w, close, Vec2::new(100.0, 0.0));
+    lift(w, out);
+    // Picking hovers the farther one (say, its larger dot): the distance still decides.
+    hover(w, Some(far));
+    drag_at(w, out, below(Vec2::new(100.0, 0.0), 1.0, 10.0));
+    assert_eq!(target(w), Some(close), "10 px beats 25 px");
+}
+
+/// A refused port at 5 px and a candidate at 30 px, dropped there:
+/// `refused_hovered` decides whether picking hovers the refused port.
+fn refused_and_accepted(refused_hovered: bool) -> (Option<Entity>, [Entity; 2], Vec<WireDropped>) {
+    let mut app = app();
+    let ports = [Port::output(NUM), Port::input(NUM), Port::input(NUM)];
+    let (_, [out, refused, accepted]) = near(&mut app, 1.0, ports);
+    app.world_mut().add_observer(move |mut check: On<ConnectionCheck>| {
+        if check.ports.input == refused {
+            check.reject();
+        }
+    });
+    let w = app.world_mut();
+    place(w, refused, Vec2::new(100.0, 0.0));
+    place(w, accepted, Vec2::new(100.0, 35.0));
+    lift(w, out);
+    assert!(!candidate(w, refused) && candidate(w, accepted));
+    hover(w, refused_hovered.then_some(refused));
+    let at = below(Vec2::new(100.0, 0.0), 1.0, 5.0);
+    drag_at(w, out, at);
+    let snapped = target(w);
+    end_drag(w, out, at);
+    let dropped = w.resource_mut::<Messages<WireDropped>>().drain().collect();
+    (snapped, [refused, accepted], dropped)
+}
+
+#[test]
+fn a_refused_port_under_the_pointer_blocks_the_snap() {
+    let (target, [refused, _], dropped) = refused_and_accepted(true);
+    assert_eq!(target, None, "on the refused port's box, the candidate 30 px away does not snap");
+    assert_eq!(dropped.len(), 1);
+    assert_eq!(dropped[0].onto, Some(refused), "the drop names it");
+}
+
+#[test]
+fn a_refused_port_near_the_pointer_never_takes_the_target() {
+    let (target, [_, accepted], dropped) = refused_and_accepted(false);
+    assert_eq!(target, Some(accepted), "off the refused port's box, the candidate within 40 px wins");
+    assert_eq!(dropped.len(), 0, "and the drop connects");
+}
+
+#[test]
+fn lifted_edges_take_a_candidate_within_the_radius() {
+    let mut app = app();
+    #[derive(Resource, Default)]
+    struct Requests(Vec<GraphEdit>);
+    app.init_resource::<Requests>();
+    app.add_observer(|r: On<EditRequested>, mut requests: ResMut<Requests>| requests.0.push(r.edit.clone()));
+    let ports = [Port::output(NUM), Port::input(NUM), Port::input(NUM)];
+    let (canvas, [out, from, to]) = near(&mut app, 2.0, ports);
+    let w = app.world_mut();
+    let edge = edge(w, canvas, out, from);
+    w.resource_mut::<Requests>().0.clear();
+    lift(w, from);
+    assert_eq!(moving_edges(w).len(), 1);
+    hover(w, None);
+    let at = off(Vec2::new(200.0, 0.0), 2.0, Vec2::new(28.0, -21.0));
+    drag_at(w, from, at);
+    assert_eq!(target(w), Some(to));
+    let snapped = geometry(&mut app, edge);
+    assert_eq!((snapped.end, snapped.input), (Vec2::new(200.0, 0.0), Some(to)), "the loose end snaps to it");
+    let w = app.world_mut();
+    end_drag(w, from, at);
+    let requests = std::mem::take(&mut w.resource_mut::<Requests>().0);
+    assert_eq!(requests, [GraphEdit::MoveEdges { from, to, edges: vec![edge] }]);
+}
+
+#[test]
+fn without_a_radius_only_the_hovered_port_is_the_target() {
+    let mut app = app();
+    let (canvas, [out, inp]) = moving(&mut app, [Port::output(NUM), Port::input(NUM)]);
+    let w = app.world_mut();
+    assert_eq!(w.get::<CanvasInteraction>(canvas).unwrap().wire_target_radius, None);
+    lift(w, out);
+    hover(w, None);
+    drag_at(w, out, below(Vec2::new(100.0, 0.0), 1.0, 5.0));
+    assert_eq!(target(w), None, "5 px off the port, not over it");
+    hover(w, Some(inp));
+    drag_at(w, out, below(Vec2::new(100.0, 0.0), 1.0, 5.0));
+    assert_eq!(target(w), Some(inp));
+}

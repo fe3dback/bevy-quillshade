@@ -2,6 +2,7 @@
 //! `SHADER_EDITOR_INPUT=drag|rmb_click|rmb_pan|mmb_pan|slider|color|pin_rmb|node_rmb|node_dblclick|frame_dblclick`
 //! `|hover|curve_drag|curve_add|texture_zoom|drop_game_file`
 //! `|ctrl_drag_wire|ctrl_wire_hold|wire_drag|wire_hold|alt_click|box_delete|box_delete_partial|type_field`
+//! `|menu_click|menu_close|tab[:N]`
 //! (with `SHADER_EDITOR_SCREENSHOT` and `SHADER_EDITOR_OPEN`; `SHADER_EDITOR_ZOOM=<f32>` sets the canvas zoom
 //! first). `slider` drags the topmost number input with a soft limit (an inline ranged field on a node wholly inside
 //! the visible canvas, or the Hue of a selected comment in the right sidebar) across most of its on-screen width and
@@ -25,12 +26,18 @@
 //! (the screenshot shows the dragged wire over the target pin), `ctrl_wire_hold` is `ctrl_drag_wire` keeping Ctrl
 //! and the button down (the screenshot shows the lifted wires mid-gesture, design §5.3; the lifted wires and the pin
 //! they snap to are logged); with `SHADER_EDITOR_INPUT_AT=<dx>,<dy>` these drags end that many logical px from the
-//! pin dragged from instead of on the target pin. `alt_click` Alt+clicks the `SHADER_EDITOR_INPUT_PIN` pin; all of
+//! pin dragged from instead of on the target pin, with `SHADER_EDITOR_INPUT_AT=to:<dx>,<dy>` that far from the
+//! target pin. `alt_click` Alt+clicks the `SHADER_EDITOR_INPUT_PIN` pin; all of
 //! them log the wires at both pins before and after (decision 0032).
 //! `box_delete` drags a selection box from 20 px outside the first comment frame (or `SHADER_EDITOR_INPUT_FRAME`) to
 //! 20 px past its far corner and presses Delete, `box_delete_partial` the same with a box ending in the frame's
 //! middle; both log frames, node count and selection before and after (design §4.5). `type_field` clicks the
-//! right sidebar's Description field of an open graph, types `ab` and logs the focus and the field's text. The input
+//! right sidebar's Description field of an open graph, types `ab` and logs the focus and the field's text.
+//! `menu_click` clicks the menu_bar's menu `SHADER_EDITOR_INPUT_MENU=<name>` (default `file`), `menu_close` then
+//! clicks the middle of the canvas (on the menu's barrier); both log each main menu's open and active (`Pressed`)
+//! state (design §1). `tab:N` presses Tab N times (default 1, at most 30) and logs after each press the focused
+//! entity, its tooltip and action and whether a `Display::None` ancestor hides it; the screenshot shows the focus
+//! ring (design §2). The input
 //! goes through the same window messages winit writes, so picking, bevy_noodle and the editor see a real gesture; the
 //! outcome is logged.
 
@@ -42,11 +49,13 @@ use bevy::input::touch::TouchPhase;
 use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
 use bevy::ui::ui_transform::UiGlobalTransform;
+use bevy::ui_widgets::MenuButton;
 use bevy::window::{CursorMoved, PrimaryWindow, WindowEvent};
 use bevy_noodle::prelude::*;
 
 use crate::canvas::{EditorCanvas, FrameKey, FrameTitleStrip, NodeHeader, NodeKey, PinKey};
 use crate::state::{Editor, PropTarget};
+use crate::ui::MainMenu;
 use crate::ui::curve_view::CurveHandle;
 use crate::ui::image_preview::PreviewArea;
 use crate::ui::palette::Palette;
@@ -172,12 +181,17 @@ pub fn scripted_input(
     mut events: MessageWriter<WindowEvent>,
     (mut moved, mut wheel): (MessageWriter<CursorMoved>, MessageWriter<MouseWheel>),
     (mut buttons, mut keyboard): (MessageWriter<MouseButtonInput>, MessageWriter<KeyboardInput>),
-    (focus, texts, lifts, wires, parents): (
+    (focus, texts, lifts, wires, parents, menus, menu_parts, layout, acts, ring): (
         Res<bevy::input_focus::InputFocus>,
         Query<&bevy::text::EditableText>,
         Query<(&MovingEdges, &WireTarget)>,
-        Query<(), With<PendingWire>>,
+        Query<&WireTarget, With<PendingWire>>,
         Query<&ChildOf>,
+        Query<(&MainMenu, &Children, &UiGlobalTransform, &ComputedNode)>,
+        Query<(Option<&Visibility>, Has<bevy::ui::Pressed>, Has<MenuButton>)>,
+        Query<&Node>,
+        Query<&crate::ui::OnActivate>,
+        Res<bevy::input_focus::InputFocusVisible>,
     ),
 ) {
     let Ok(name) = std::env::var("SHADER_EDITOR_INPUT") else { return };
@@ -435,12 +449,19 @@ pub fn scripted_input(
                     };
                     s.pins = vec![from.clone(), to.clone()];
                     let hold = name.starts_with("ctrl_").then_some(KeyCode::ControlLeft);
-                    // `SHADER_EDITOR_INPUT_AT=<dx>,<dy>`: end that far from the pin dragged from (empty canvas).
-                    let offset = std::env::var("SHADER_EDITOR_INPUT_AT").ok().and_then(|v| {
+                    // `SHADER_EDITOR_INPUT_AT=<dx>,<dy>`: end that far from the pin dragged from (empty canvas);
+                    // `to:<dx>,<dy>`: that far from the target pin (its snap radius, design §6.3).
+                    let at_env = std::env::var("SHADER_EDITOR_INPUT_AT").ok();
+                    let (base, offset) = match at_env.as_deref().map(|v| v.strip_prefix("to:").ok_or(v)) {
+                        Some(Ok(v)) => (logical(tt, tc), Some(v)),
+                        Some(Err(v)) => (at, Some(v)),
+                        None => (at, None),
+                    };
+                    let offset = offset.and_then(|v| {
                         let (x, y) = v.split_once(',')?;
                         Some(Vec2::new(x.trim().parse().ok()?, y.trim().parse().ok()?))
                     });
-                    let end = offset.map_or(logical(tt, tc), |o| at + o);
+                    let end = offset.map_or(logical(tt, tc), |o| base + o);
                     // A last move onto the pin itself: picking hovers it before the release.
                     let mut steps = drag(at, MouseButton::Left, end - at);
                     steps.insert(steps.len() - 1, Step::Wait);
@@ -474,6 +495,25 @@ pub fn scripted_input(
                 steps.extend([Step::Wait, Step::Wait, Step::Key(KeyCode::Delete, true), Step::Wait]);
                 steps.push(Step::Key(KeyCode::Delete, false));
                 steps
+            }
+            "menu_click" | "menu_close" => {
+                let wanted = std::env::var("SHADER_EDITOR_INPUT_MENU").unwrap_or_else(|_| "file".into());
+                let Some((.., t, c)) = menus.iter().find(|m| m.0.label().eq_ignore_ascii_case(&wanted)) else {
+                    error!("demo {name}: no main menu {wanted:?}");
+                    return;
+                };
+                let click =
+                    |at| [Step::Move(at), Step::Press(MouseButton::Left), Step::Wait, Step::Release(MouseButton::Left)];
+                let mut steps: Vec<Step> =
+                    click(logical(t, c)).into_iter().chain((0..10).map(|_| Step::Wait)).collect();
+                if name == "menu_close" {
+                    steps.extend(click(logical(ct, cc)));
+                }
+                steps
+            }
+            tab if tab == "tab" || tab.starts_with("tab:") => {
+                let n = tab.strip_prefix("tab:").and_then(|n| n.parse().ok()).unwrap_or(1usize).min(30);
+                (0..n).flat_map(|_| [Step::Key(KeyCode::Tab, true), Step::Key(KeyCode::Tab, false)]).collect()
             }
             "rmb_pan" => drag(canvas_min + 20.0, MouseButton::Right, Vec2::new(150.0, 80.0)),
             "mmb_pan" => drag(canvas_min + 20.0, MouseButton::Middle, Vec2::new(150.0, 80.0)),
@@ -515,6 +555,21 @@ pub fn scripted_input(
                 events.write(e.into());
             }
             Some(Step::Key(key_code, down)) => {
+                if key_code == KeyCode::Tab && !down {
+                    // The focus the press (the frame before) moved.
+                    let f = focus.get();
+                    let tip = f.and_then(|f| tips.get(f).ok()).map(|t| t.0.0.clone());
+                    let action = f.and_then(|f| acts.get(f).ok()).map(|a| a.0.clone());
+                    let hidden = f.is_some_and(|f| {
+                        std::iter::once(f)
+                            .chain(parents.iter_ancestors(f))
+                            .any(|a| layout.get(a).is_ok_and(|n| n.display == Display::None))
+                    });
+                    info!(
+                        "demo {name}: focus {f:?} tip {tip:?} action {action:?} display-hidden {hidden} ring {}",
+                        ring.0
+                    );
+                }
                 keyboard.write(KeyboardInput {
                     key_code,
                     logical_key: Key::Unidentified(NativeKey::Unidentified),
@@ -564,7 +619,19 @@ pub fn scripted_input(
                     let (from, to) = (pin(lifted.from), target.0.and_then(pin));
                     info!("demo {name}: lifted {} wires from {from:?}, snapped to {to:?}", lifted.edges.len());
                 }
-                info!("demo {name}: dragged new wires {}", wires.iter().count());
+                let snapped: Vec<_> = wires.iter().map(|t| t.0.and_then(pin)).collect();
+                info!("demo {name}: dragged new wires {}, snapped to {snapped:?}", snapped.len());
+            }
+            None if s.frame == START + 40 && name.starts_with("menu_") => {
+                for (menu, children, ..) in &menus {
+                    // The popup's visibility and the button's `Pressed`.
+                    let (mut open, mut active) = (false, false);
+                    for (visibility, pressed, button) in children.iter().filter_map(|c| menu_parts.get(c).ok()) {
+                        open |= !button && visibility == Some(&Visibility::Visible);
+                        active |= button && pressed;
+                    }
+                    info!("demo {name}: menu {} open {open} active {active}", menu.label());
+                }
             }
             None if s.frame == START + 40 && name == "drop_game_file" => {
                 let Some(d) = editor.doc() else { return };

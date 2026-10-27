@@ -2,19 +2,19 @@
 
 use bevy::feathers::containers::flex_spacer;
 use bevy::prelude::*;
-use bevy_enhanced_input::prelude::{Actions as InputActions, Complete, InputAction, Start};
-use bevy_noodle::prelude::GraphQuery;
+use bevy_enhanced_input::prelude::{Actions as InputActions, Complete, Fire, InputAction, Start};
+use bevy_noodle::prelude::{CanvasView, GraphQuery};
 use shader_graph_core::model::{Asset, AssetKind, BlendMode, MaterialKind, PbrOutputMode, PreviewMode, Shading};
 use shader_graph_core::registry::{NodeRole, ParamKind};
 use shader_graph_core::{Hotkey, HotkeyKey, Value};
 use shader_project::{AssetId, AssetSet, AssetType, Project, assets, ops};
 
 use super::main_input::{
-    EditCopy, EditCut, EditDelete, EditDuplicate, EditSelectAll, add_kind, ctrl, hotkey, on_combo, on_plain, plain,
-    shift,
+    EditCopy, EditCut, EditDelete, EditDuplicate, EditSelectAll, add_kind, ctrl, held_hotkey, hotkey, on_combo,
+    on_plain, plain, shift,
 };
 use super::{EditorAreas, EditorInput, SidebarKey, StatusCtx, StatusInfo, fill_sidebar_with};
-use crate::canvas::{EditorCanvas, frame_color};
+use crate::canvas::{EditorCanvas, frame_color, view_center};
 use crate::doc::{Doc, node_signature, route_declarations};
 use crate::doc_kind::{TabDoc, asset_title, io_error};
 use crate::inline::{Inline, inline_for_param, inline_for_pin};
@@ -43,7 +43,7 @@ impl EditorAreas for GraphEditor {
             Children [
                 @icon_tool_button(IconId::AutoLayout, "Auto-layout", Action::AutoLayout, "Auto-layout (Ctrl+L)")
                 --
-                @icon_tool_button(IconId::Comment, "Comment", Action::AddComment(None), "Add a comment frame (C)")
+                @icon_tool_button(IconId::Comment, "Comment", Action::AddComment(None), COMMENT_TIP)
                 --
                 @icon_tool_button(IconId::Fit, "Fit", Action::View(ViewRequest::FitAll), "Fit the graph (Home)")
                 --
@@ -59,7 +59,14 @@ impl EditorAreas for GraphEditor {
     }
 
     fn build(app: &mut App) {
-        app.add_systems(Update, (redraw_graph_topbar.after(crate::apply_actions), redraw_sidebar));
+        app.add_systems(
+            Update,
+            (
+                comment_at_view_centre.before(crate::apply_actions),
+                redraw_graph_topbar.after(crate::apply_actions),
+                redraw_sidebar,
+            ),
+        );
     }
 
     fn input(app: &mut App) {
@@ -68,7 +75,9 @@ impl EditorAreas for GraphEditor {
         on_plain::<FitSelection>(app, Action::View(ViewRequest::FitSelection));
         on_plain::<FitAll>(app, Action::View(ViewRequest::FitAll));
         app.init_resource::<PreviewKey>()
+            .init_resource::<CommentKey>()
             .add_observer(paste_at_cursor)
+            .add_observer(comment_press)
             .add_observer(comment_at_cursor)
             .add_observer(open_palette)
             .add_observer(node_hotkey::<ConvertPlus>)
@@ -114,7 +123,7 @@ impl EditorInput for GraphEditor {
                 --
                 @{hotkey::<FitAll>(plain([Home]))}
                 --
-                @{hotkey::<AddComment>(plain([KeyC]))}
+                @{held_hotkey::<AddComment>(plain([KeyC]), COMMENT_HOLD_SECS)}
                 --
                 @{hotkey::<OpenPalette>(plain([Space]))}
                 --
@@ -157,12 +166,18 @@ pub struct FitAll;
 #[action_output(bool)]
 pub struct CancelWire;
 
-/// C: a comment frame at the cursor (around the selection).
+/// Hold C: a comment frame at the cursor (around the selection), design §6.2.
 #[derive(InputAction)]
 #[action_output(bool)]
 pub struct AddComment;
 
-/// Space: the node palette at the cursor (Tab is View → Show properties, design §4).
+/// How long C is held before [`AddComment`] fires (design §6.2).
+pub const COMMENT_HOLD_SECS: f32 = 0.5;
+
+/// The Comment button's tooltip (design §6.2).
+const COMMENT_TIP: &str = "Add a comment frame (hold C)";
+
+/// Space: the node palette at the cursor (design §4).
 #[derive(InputAction)]
 #[action_output(bool)]
 pub struct OpenPalette;
@@ -195,14 +210,46 @@ fn paste_at_cursor(_: On<Start<GraphPaste>>, cursor: CanvasCursor, mut actions: 
     actions.push(Action::Paste(cursor.graph_pos()));
 }
 
+/// Hold C (design §6.2): only C pressed with no Ctrl, Alt or Super arms the hold. A C still down when Ctrl is let go
+/// (a Ctrl+C: the copy consumed the C until then) starts the action too, but does not arm it.
+#[derive(Resource, Default)]
+struct CommentKey {
+    armed: bool,
+}
+
+fn comment_press(_: On<Start<AddComment>>, keys: Res<ButtonInput<KeyCode>>, mut key: ResMut<CommentKey>) {
+    key.armed = keys.just_pressed(KeyCode::KeyC) && no_command_mods(&keys);
+}
+
+/// C held long enough: a comment at the cursor; with the cursor off the canvas `None`, the visible canvas centre
+/// like the Comment button (controller ruling over design §6.1's origin).
 fn comment_at_cursor(
-    _: On<Start<AddComment>>,
+    _: On<Fire<AddComment>>,
     keys: Res<ButtonInput<KeyCode>>,
     cursor: CanvasCursor,
+    mut key: ResMut<CommentKey>,
     mut actions: ResMut<Actions>,
 ) {
-    if no_command_mods(&keys) {
+    if std::mem::take(&mut key.armed) && no_command_mods(&keys) {
         actions.push(Action::AddComment(cursor.graph_pos()));
+    }
+}
+
+/// The editor topbar's Comment button and hold C off the canvas push `AddComment(None)`: with no selection the frame
+/// goes at the visible canvas centre (design §6.1), filled in here before the action is applied.
+fn comment_at_view_centre(
+    mut actions: ResMut<Actions>,
+    ec: Option<Res<EditorCanvas>>,
+    views: Query<(&CanvasView, &ComputedNode)>,
+) {
+    if !actions.0.iter().any(|a| matches!(a, Action::AddComment(None))) {
+        return;
+    }
+    let Some(centre) = ec.and_then(|ec| views.get(ec.canvas).ok()).map(|(v, c)| view_center(v, c)) else { return };
+    for a in &mut actions.0 {
+        if let Action::AddComment(at @ None) = a {
+            *at = Some((centre.x, centre.y));
+        }
     }
 }
 
@@ -362,7 +409,7 @@ fn topbar_items(id: &AssetId, material: bool, mode: PreviewMode, previewing: boo
     out.push(Box::new(icon_button(IconId::Code, wesl, "Show generated WESL")));
     if material {
         let rust = Action::ShowGenerated(id.clone(), Lang::Rust);
-        out.push(Box::new(icon_button(IconId::Crate, rust, "Show generated Rust")));
+        out.push(Box::new(icon_button(IconId::Rust, rust, "Show generated Rust")));
     }
     out
 }
@@ -417,7 +464,7 @@ fn sidebar_rows(editor: &Editor, d: &Doc) -> Vec<Box<dyn Scene>> {
         let selected = format!("{} selected", plural(d.selection.len(), "node", "nodes"));
         let rows: Vec<Box<dyn Scene>> = vec![
             Box::new(text(selected, TEXT, 14.0)),
-            Box::new(text("C: comment around them | Auto-layout arranges them.", TEXT_DIM, 12.0)),
+            Box::new(text("Hold C: comment around them | Auto-layout arranges them.", TEXT_DIM, 12.0)),
         ];
         vec![subpane_box("Selection", rows)]
     } else {
@@ -426,13 +473,14 @@ fn sidebar_rows(editor: &Editor, d: &Doc) -> Vec<Box<dyn Scene>> {
 }
 
 /// Hotkey hints of the graph canvas (decision 0032), shown with no selection.
-const GRAPH_HOTKEYS: [&str; 3] = [
+const GRAPH_HOTKEYS: [&str; 4] = [
     "Space or right-click on the canvas opens the node palette.",
+    "Add a comment frame (hold C).",
     "Alt+click a pin or a wire: break its wires. Ctrl+drag from a pin onto another pin of the same side: move its wires.",
     "Hold 1-4, S, V, T, M, A, L, U, R, D, O, E, N, P or I and click the canvas: drop that node.",
 ];
 
-/// No selection: the asset's settings (material, preview, description), its size and the canvas hotkeys.
+/// No selection: the asset's settings (material, preview), the canvas hotkeys and its description.
 fn asset_subpanes(editor: &Editor, d: &Doc) -> Vec<Box<dyn Scene>> {
     let mut out = Vec::new();
     let mut asset: Vec<Box<dyn Scene>> = Vec::new();
@@ -483,21 +531,15 @@ fn asset_subpanes(editor: &Editor, d: &Doc) -> Vec<Box<dyn Scene>> {
     common_subpanes(d, out)
 }
 
-/// The subpanes every graph asset shows after its own: description, size, canvas hotkeys.
+/// The subpanes every graph asset shows after its own: canvas hotkeys, then the description last (design §5; the
+/// counts are in the editor statusbar).
 fn common_subpanes(d: &Doc, mut out: Vec<Box<dyn Scene>>) -> Vec<Box<dyn Scene>> {
+    let hotkeys = GRAPH_HOTKEYS.map(|tip| -> Box<dyn Scene> { Box::new(text(tip, TEXT_DIM, 12.0)) });
+    out.push(subpane_box("Hotkeys", hotkeys.into()));
     out.push(subpane_box(
         "Description",
         vec![text_w(PropTarget::Description, d.asset.meta.description.clone(), false)],
     ));
-    let size = format!(
-        "{}, {}, {}",
-        plural(d.asset.nodes.len(), "node", "nodes"),
-        plural(d.asset.edges.len(), "wire", "wires"),
-        plural(d.asset.comments.len(), "comment", "comments")
-    );
-    out.push(subpane_box("Info", vec![Box::new(text(size, TEXT_DIM, 12.0))]));
-    let hotkeys = GRAPH_HOTKEYS.map(|tip| -> Box<dyn Scene> { Box::new(text(tip, TEXT_DIM, 12.0)) });
-    out.push(subpane_box("Hotkeys", hotkeys.into()));
     out
 }
 
@@ -688,7 +730,11 @@ impl TabDoc for Doc {
     }
 
     fn status(&self, ctx: &StatusCtx) -> Option<StatusInfo> {
-        let mut counts = vec![plural(self.asset.nodes.len(), "node", "nodes")];
+        let mut counts = vec![
+            plural(self.asset.nodes.len(), "node", "nodes"),
+            plural(self.asset.edges.len(), "wire", "wires"),
+            plural(self.asset.comments.len(), "comment", "comments"),
+        ];
         counts.extend(ctx.wesl_lines.map(|n| plural(n, "WESL line", "WESL lines")));
         Some(StatusInfo::new(Doc::is_dirty(self), ctx, counts))
     }

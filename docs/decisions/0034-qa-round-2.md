@@ -34,7 +34,8 @@ bevy_noodle locally, because the Ctrl+drag look could not be built cleanly on it
 - **Feathers containers and controls** (design §3, helpers in `ui/widgets.rs`):
   - Left sidebar: the project tree and the assets tree each in a `pane` (`pane_box`: `pane_header` with title and
     tools, `pane_body`). Right sidebar: one pane titled with the kind's `SIDEBAR_TITLE`, its content in `subpane`s
-    (`subpane_box`), e.g. a material: Material, Preview, Description, Info, Hotkeys; one node: Node, Parameters,
+    (`subpane_box`), e.g. a material: Material, Preview, Description, Info, Hotkeys (*superseded by 0035:* no Info;
+    Material, Preview, Hotkeys, Description); one node: Node, Parameters,
     Input defaults, Problems. Console/logs: a pane whose header holds the counts, Clear messages and the show / hide
     chevron. `group()` is unused. `section()`, `header()`, `header_row()` and `chip()` are gone.
   - `button_group(Vec<GroupButton>)`: joined `FeathersButton`s, corners Left / None / Right (All when single), 1 px
@@ -101,10 +102,13 @@ bevy_noodle locally, because the Ctrl+drag look could not be built cleanly on it
     scrubbed field does not defer the canvas rebuild. Clicked into, the field is `Editable` and takes every key. A
     number input that Tab reaches from a field while its text is `Static` (it was scrubbed, or lost the focus, before)
     is made `Editable` with its text selected by `keep_focus_on_fields`, like a fresh one: otherwise typing would
-    neither edit it nor be gated, and the keys would fire hotkeys. `Static` as "not editing" is a Feathers convention;
+    neither edit it nor be gated, and the keys would fire hotkeys (*superseded by 0035:* `tab_into_number_input` does
+    this for a Tab from any widget). `Static` as "not editing" is a Feathers convention;
     re-check it on a Bevy upgrade.
   - Colour sliders (`FeathersColorSlider` in the colour picker) stay.
-- **Keyboard focus** (`main_input::keep_focus_on_fields`, an observer on `FocusGained`):
+- **Keyboard focus** (`main_input::keep_focus_on_fields`, an observer on `FocusGained`). *Superseded by 0035* (the
+  first two points): focus is Bevy's default, `keep_focus_on_fields` is gone, Tab reaches buttons and Enter / Space
+  press them.
   - A `Button` / `Checkbox` never keeps the focus (any cause but `Auto`), unless it is inside an open popup
     (`MenuPopup` / `Popover`, the `Popups` system param). Otherwise Space / Enter re-activated the last clicked button
     and Tab walked a focus ring over the buttons. So **Tab to a button + Enter is gone**; Tab moves the focus only from
@@ -118,14 +122,16 @@ bevy_noodle locally, because the Ctrl+drag look could not be built cleanly on it
     gets no key of the same frame's batch (dispatch fixes the target per batch).
 - **menu_bar Edit and View, View settings** (design §4):
   - Edit: Undo (`Ctrl+Z`), Redo (`Ctrl+Shift+Z`); the icon-only Undo / Redo buttons stay. View: "Show log" (`` ` ``)
-    and "Show properties" (Tab), a check icon while on, none while off.
+    and "Show properties" (Tab), a check icon while on, none while off. *Superseded by 0035:* View lists Zen mode
+    (`` ` ``), Show project (Ctrl+1), Show console (Ctrl+2), Show properties (Ctrl+3).
   - `UserConfig::show_log` / `show_properties` in `config.ron`, default `true`; the struct's `#[serde(default)]` loads
     old files with both shown. `Action::ToggleLog` / `ToggleProperties` flip the flag and `save_config()` at once.
   - The layout keys on the flags themselves (no `UiRev` counter): `log::show_log` gives the hidden log's `LogPane`
     height Auto, hides the pane body, rounds the header and flips its chevron; `show_active_areas` (key `(active,
     kind, show_properties)`) hides the right sidebar and the editor content takes the width.
   - Hotkeys in `MainCtx` (`on_plain`): `` ` `` toggles the log, Tab the properties (Shift+Tab too: Shift is allowed on
-    plain keys); Ctrl+Tab stays Next tab (the combination consumes Tab). The graph palette moves from Tab to **Space**
+    plain keys); Ctrl+Tab stays Next tab (the combination consumes Tab). *Superseded by 0035:* Ctrl+1/2/3 and `` ` ``
+    Zen mode; Tab is Bevy's focus navigation. The graph palette moves from Tab to **Space**
     (user decision); RMB on empty canvas still opens it.
 - **Graph editor topbar** (design §5.2, §5.4): a dynamic part (`GraphTopbarDynamic`, `redraw_graph_topbar` keyed on
   `(active, AssetId, is_material, preview.mode, previewing)`): for materials the Preview mode `button_group` Unlit /
@@ -134,7 +140,8 @@ bevy_noodle locally, because the Ctrl+drag look could not be built cleanly on it
   previewed (a dangling id counts as none) but still showing the stored mode (the selected icon stays bright, the
   tooltips name their mode: "Preview: Lit - preview a node first (V)"); then right-aligned icon-only "Show
   generated WESL" (`IconId::Code`, materials and functions) and "Show generated Rust" (new `IconId::Crate` =
-  `icon_rs::PART`: icon-rs has no Rust or package glyph; materials only). No RON / source button (user decision). The
+  `icon_rs::PART`: icon-rs has no Rust or package glyph; materials only; *superseded by 0035:* our "rs" glyph,
+  `IconId::Rust`). No RON / source button (user decision). The
   sidebar's Preview → Mode row is gone; the "No node previewed - select a node and press V" hint stays.
 - **Snap 10** (design §5.1): `doc::GRID_SNAP` = 10. Old positions stay until touched (no migration). The snap tests
   were re-based with inputs that still tell a restarted snap from a continued one.
@@ -207,10 +214,12 @@ bevy_noodle locally, because the Ctrl+drag look could not be built cleanly on it
   - Pin hover: `style::PortHoverStyle { scale: 1.3, lighten: 0.15 }` on the canvas; `PortHighlight` requires
     `Hovered`, which picking keeps up to date (also during drags). The **port dot itself grows** (at least 1.3×, a
     drop target keeps 1.4) and lightens, alpha kept; wires end at the larger rim, and the hovered port's hit area is
-    1.3× (a small hysteresis). `rebuild_canvas` puts `Hovered(true)` on a rebuilt pin's new port (only the app knows
+    1.3× (a small hysteresis; *superseded by 0035:* the hit area is the port's physical box and never scales, only
+    the drawn `PortDot` grows). `rebuild_canvas` puts `Hovered(true)` on a rebuilt pin's new port (only the app knows
     it replaces the old one); picking corrects it a frame later. `kit::PORT_SIZE` / `PORT_BORDER` are public.
     Replaces `PinHalo`, `pin_halos`, `PinHovered`, `CarriedHover`, `confirm_carried_hover`. The larger hit area of
-    decision 0033 is still not built.
+    decision 0033 is still not built (*superseded by 0035:* `kit::PortSize` physical 24 / visual 16 and the 40 px
+    wire reach).
   - `WireDropped::onto` / `EdgesDropped::onto`: the port hovered at a refused drop. The plain-drag "Connection
     refused: …" notice and the Ctrl-drop message read it; the app no longer reads `HoverMap`.
   - Kept in the app, as they work around nothing in noodle: `RightPress` (RMB click vs pan, 3 px slop),
@@ -231,7 +240,8 @@ bevy_noodle locally, because the Ctrl+drag look could not be built cleanly on it
     switching never rewrites the settings; undo / redo / reload to a custom sampler leaves Easy
     (`TextureDoc::after_history`). The texture topbar is keyed on `(layout, fits_easy)`, apart from the form.
   - **Texture icon**: icon-rs has nothing that reads as a texture (appearance, patterns, layers… reviewed), so
-    `icons/texture.svg` is ours (a Solid rounded tile with a 3x3 checker). It marks Texture assets, Texture tabs, the
+    `icons/texture.svg` is ours (a Solid rounded tile with a 3x3 checker; *superseded by 0035:* icon-rs `copper-zone`,
+    the SVG is deleted). It marks Texture assets, Texture tabs, the
     virtual Internal rows (they open a Texture tab) and "Create Texture Asset"; game images and image tabs keep
     `IconId::Image`.
   - Tooltips use " - ", not an em dash: the UI font has no U+2014.
@@ -242,7 +252,8 @@ bevy_noodle locally, because the Ctrl+drag look could not be built cleanly on it
 **Superseded.**
 - Decision 0032: the Ctrl+drag *mechanism* (bevy_noodle draws a new wire, `wire_dropped` reads `HoverMap` and turns
   a drop on a same-direction pin into `MoveWires` while Ctrl is held at drop time) and "a Ctrl drop on empty canvas
-  does nothing" for unconnected pins; the graph palette on Tab (now Space; Tab toggles the right sidebar); the typing
+  does nothing" for unconnected pins; the graph palette on Tab (now Space; Tab toggles the right sidebar, *superseded
+  by 0035:* Tab is focus navigation); the typing
   gate's definition (it now also covers menus and popups). The semantics of `MoveWires` are unchanged.
 - Decision 0033: the 5-unit grid (now 10), the snap lead and its `snap_drag` mechanism, the `CARRIED` frame carry,
   the `PinHalo` hover, and the selected yellow (now white).
@@ -277,7 +288,7 @@ bevy_noodle locally, because the Ctrl+drag look could not be built cleanly on it
   and logs its node's position: on rock_wet it scrubs `n05.default` 0.3 → 0.36 at fit zoom and `n06.default`
   1 → 8 at zoom 1, the node staying put.
 - Parked, not done in this round:
-  - Icons: the Rust button is a generic cube; the Sprite2d material icon is the game image's picture.
+  - Icons: the Rust button is a generic cube (done in 0035); the Sprite2d material icon is the game image's picture.
   - At the 800 px minimum window the consts table clips its Value column; wrapped texture topbar rows sit tight on the
     view.
   - Code: `log::show_log` has 10 parameters; unreachable Bool arms in `props::value_widget` /

@@ -153,13 +153,17 @@ Edge                    relates an output port to an input port; has EdgeGeometr
   ports may take them.
 - **Snap** dragged nodes to a grid with `CanvasInteraction::snap`: the
   grabbed node lands on grid points, the rest of the selection follows it.
+- **Reach**: with `CanvasInteraction::wire_target_radius` (say 40 px), a
+  dragged or lifted wire snaps to the nearest port it may end on within that
+  many screen pixels of the pointer, and a drop connects (or moves) there.
 - **Frames**: a node with `NodeFrame` (a comment box) moves the nodes lying
   inside it when it is dragged, in the same edits.
 - **Redirect** edits in `On<EditRequested>` observers: rewrite or `reject()`
   them, and do side effects there.
 - **React** to `EditApplied`: its `GraphChange` says what changed.
 - **Style** from `Selected`, the dragged wire's `WireCandidates` and `WireTarget`, and `SelectionBox`.
-  With `default_style`, `PortHoverStyle` on a canvas makes the mouse-hovered port larger and lighter.
+  With `default_style`, `PortHoverStyle` on a canvas makes the mouse-hovered port larger and lighter, and
+  `kit::port_sized` with a `kit::PortSize` gives a port a hit area (`physical`) other than its drawn dot (`visual`).
 - **Controls inside nodes** (sliders, text fields, menus) keep their own
   presses and drags.
 

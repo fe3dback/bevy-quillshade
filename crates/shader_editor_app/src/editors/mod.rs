@@ -145,8 +145,9 @@ pub fn fill_sidebar_with<B: Component>(
     }
 }
 
-/// A per-kind area container: `Display::Flex` while the active tab is of this kind, `Display::None` otherwise (not
-/// `Visibility`: hidden flow children must not take space).
+/// A per-kind area container: `Display::Flex` while the active tab is of this kind, `Display::None` otherwise (hidden
+/// flow children must not take space), and `Visibility::Hidden` too (Bevy's tab navigation skips only hidden
+/// entities).
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AreaOf(pub ViewKind);
 

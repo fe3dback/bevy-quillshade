@@ -33,6 +33,19 @@
   `scale` times its size. Without it, ports look as before.
 - `style::kit::PORT_SIZE` and `PORT_BORDER`: the size and border of the
   `kit::port` dot.
+- `CanvasInteraction::wire_target_radius` (`None` by default): while a wire is
+  dragged or edges are lifted, the target is the candidate port whose centre
+  is nearest to the pointer within that many logical window pixels (at any
+  zoom), else the candidate under the pointer; the drop connects or moves
+  there. With the pointer on a port it may not end on, nothing snaps (the drop
+  reports that port). With a `PortHoverStyle`, the default style lights only
+  the target during such a drag.
+- `style::kit::PortSize { physical, visual }` and
+  `style::kit::port_sized(port, color, size)`: a port whose box (hit area, wire
+  anchor, layout) and drawn dot differ in size; the dot is then a `PortDot`
+  child, which `PortHighlight` colours and scales (the box keeps its size) and
+  wires end at. `kit::port` is `port_sized` at the default size (both
+  `PORT_SIZE`).
 - `NodeFrame`: a node that carries the nodes lying entirely inside it (decided
   when a drag starts) when it is dragged with the pointer or the keyboard, in
   the same `MoveNodes` edits. The `comment_frames` example uses it instead of

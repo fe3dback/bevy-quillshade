@@ -138,3 +138,60 @@ move). The library knows the hover at the drop.
 - Tests: `tests/interaction.rs` (`wires_dropped_on_a_refused_port_name_it`,
   `lifted_edges_dropped_on_a_refused_port_name_it`).
 - Docs: the events' docs, CHANGELOG (Unreleased).
+
+### Nearest candidate within a radius, port physical / visual size (shader editor QA round 3, Task 3)
+
+Why: a wire had to be dropped exactly on a 12 px dot to connect: the target was only the candidate port picking
+hovers. The user asked for a reach (UE-like): the nearest pin the wire may end on, within 40 screen px, takes it; and
+for ports easier to hit without large dots: a port's box (hit area) apart from its drawn dot. Upstream 0.5 has no snap
+distance for wire drags (only the hovered port) and one fixed dot size. With the new options unset, behaviour is
+identical to upstream.
+
+- `CanvasInteraction::wire_target_radius: Option<f32>` (default `None`), in logical window pixels. In `on_drag`, for
+  a `PendingWire` or `MovingEdges`: the `WireCandidates` (so `ConnectionCheck` / `MoveCheck` have decided: a refused
+  port never takes it) whose centres (`geometry::endpoint`: node position + measured offset, as the wire geometry
+  uses) lie within the radius of the pointer, nearest first (ties by entity, so the choice is stable), become the
+  `WireTarget`; with none within it, the candidate under the pointer, as upstream (a port larger than the radius at a
+  high zoom still takes the wire). With the pointer on a port of the canvas it may not end on (its laid-out box, in
+  `HoverMap`; not `from`), nothing snaps, so a drop there reports that port as without a radius (`WireDropped::onto`
+  / `EdgesDropped::onto`). The radius is turned into graph units at the pointer through the same mapping as the
+  pointer itself (`Ctx::graph_per_pixel`: zoom, outer transforms, `UiScale`), so it is the same on screen at any
+  zoom. A non-positive or non-finite radius is ignored. The drop (`on_drag_end`) is unchanged: it connects / moves to
+  the `WireTarget`. Picking is untouched: without a drag, hover and presses stay on the port's box.
+- `highlight_ports`: on a canvas with a usable radius, while its wire is dragged, the `PortHoverStyle` look goes to
+  the wire's target (also when it is not under the pointer) and only to it; elsewhere, and on other canvases, hover
+  works as before.
+- `style::kit::PortSize { physical, visual }` (default: both `PORT_SIZE`) and
+  `style::kit::port_sized(port, color, size)`. `physical` is the port's node: picking (hover, press, drags, drops),
+  the wire anchor (centre) and the room in its row; it stays centred on the node's border and
+  its row. `visual` is only the drawn dot: when it differs, the port node is undrawn (no fill, no border) and a child
+  `style::PortDot` (prelude; `Pickable` ignoring it, absolute, centred, border `PORT_BORDER * visual / PORT_SIZE`)
+  draws it. `highlight_ports` colours and scales the `PortDot` child when there is one (the port's box, its hit area,
+  keeps its size while hovered or targeted), the port otherwise. `draw_edges` trims wires (`trim_to_ports`) to the
+  dot's rim (its size × its scale × the port's scale), so they touch the drawn dot. At equal sizes nothing changes:
+  `kit::port` is `port_sized(.., PortSize::default())`, the same `Node` drawing itself, no child. A kit function
+  rather than a canvas component: ports are scenes built before they join a canvas. The private `PORT_RADIUS`
+  constant is gone.
+- `WireCandidates`' field is `pub(crate)` (a style unit test builds one).
+- Tests: `tests/interaction.rs` (`wire_target_radius_is_off_by_default`,
+  `wires_take_a_candidate_within_the_radius_in_screen_pixels_at_any_zoom` (35 px diagonally at zoom 1, 0.5, 2:
+  target, drop connects), `wires_beyond_the_radius_do_not_snap` (45 px diagonally: off-target `WireDropped`),
+  `the_nearest_candidate_wins` (10 px over 25 px, the farther one hovered),
+  `a_refused_port_under_the_pointer_blocks_the_snap` (on a refused port 5 px away, a candidate 30 px away: no target,
+  the drop names the refused port), `a_refused_port_near_the_pointer_never_takes_the_target` (the same off its box:
+  the candidate), `lifted_edges_take_a_candidate_within_the_radius` (zoom 2, diagonal, snapped geometry, one
+  `MoveEdges`), `without_a_radius_only_the_hovered_port_is_the_target`),
+  `style::tests::with_a_target_radius_the_hover_look_goes_to_the_wire_target`,
+  `style::tests::a_port_dot_takes_the_look` (the dot is coloured and scaled, the port's box keeps scale 1),
+  `style::tests::wires_end_at_the_drawn_dot` (12 at a 24 px port, 8 at its 16 px dot, 10.4 at that dot hovered),
+  `style::kit::tests::the_default_port_size_is_the_upstream_port`,
+  `style::kit::tests::a_port_is_its_physical_box_and_draws_a_visual_dot_inside_it`.
+- Docs: README ("Reach", "Style"), CHANGELOG (Unreleased), the style module table, the field's, `PortHoverStyle`'s,
+  `PortSize`'s and `PortDot`'s docs.
+
+### Doc examples compile only (shader editor CI)
+
+- The two runnable doc examples (`style::kit` module docs, `style::EdgeStyle`) are `no_run`, like the README's. In the
+  editor's workspace Bevy is built with `dynamic_linking`, so a doctest binary links `libstd` dynamically; rustdoc runs
+  merged doctests from a temp dir without the toolchain's library path, and on CI they failed to start
+  (`libstd-….so: cannot open shared object file`). `no_run` still compiles them against the API.

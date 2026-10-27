@@ -31,8 +31,8 @@ const SAVE: Icon = custom("save", Kind::Line, include_str!("../../icons/save.svg
 const SAVE_ALL: Icon = custom("save-all", Kind::Line, include_str!("../../icons/save-all.svg"));
 const FIT: Icon = custom("fit", Kind::Line, include_str!("../../icons/fit.svg"));
 const AUTO_LAYOUT: Icon = custom("auto-layout", Kind::Line, include_str!("../../icons/auto-layout.svg"));
-/// A checkered tile: a Texture asset (an image with its loader and sampler settings), next to the game image's picture.
-const TEXTURE: Icon = custom("texture", Kind::Solid, include_str!("../../icons/texture.svg"));
+/// The letters "rs" as strokes: the generated Rust crate.
+const RUST_RS: Icon = custom("rust-rs", Kind::Line, include_str!("../../icons/rust_rs.svg"));
 
 const fn custom(name: &'static str, kind: Kind, svg: &'static str) -> Icon {
     Icon { name, kind, title: name, svg, svg_dark: svg }
@@ -83,7 +83,7 @@ pub enum IconId {
     /// [`IconId::Pbr`].
     Layers,
     /// The generated Rust crate ("Show generated Rust"); generated WESL keeps [`IconId::Code`].
-    Crate,
+    Rust,
 }
 
 impl IconId {
@@ -126,7 +126,7 @@ impl IconId {
         IconId::ChevronDown,
         IconId::ChevronUp,
         IconId::Layers,
-        IconId::Crate,
+        IconId::Rust,
     ];
 
     fn source(self) -> Icon {
@@ -157,7 +157,7 @@ impl IconId {
             IconId::OpenExternal => icon_rs::OPEN_EXTERNAL,
             IconId::Curve => icon_rs::SPLINE,
             IconId::Close => icon_rs::CLOSE,
-            IconId::Consts => icon_rs::CUSTOM_TABLE,
+            IconId::Consts => icon_rs::CONFIGURATIONS,
             IconId::Check => icon_rs::CHECK,
             IconId::Plus => icon_rs::PLUS,
             IconId::Info => icon_rs::INFO,
@@ -165,11 +165,11 @@ impl IconId {
             IconId::Help => icon_rs::HELP,
             IconId::Warning => icon_rs::WARNING_FILLED,
             IconId::Image => icon_rs::IMAGE,
-            IconId::Texture => TEXTURE,
+            IconId::Texture => icon_rs::COPPER_ZONE,
             IconId::ChevronDown => icon_rs::CHEVRON_DOWN,
             IconId::ChevronUp => icon_rs::CHEVRON_UP,
             IconId::Layers => icon_rs::LAYERS,
-            IconId::Crate => icon_rs::PART,
+            IconId::Rust => RUST_RS,
         }
     }
 
@@ -375,7 +375,7 @@ mod tests {
     fn custom_icons_use_only_palette_colours() {
         let p = Palette::LIGHT;
         let slots = [p.ink, p.top, p.soft, p.mid, p.shade, p.accent];
-        for icon in [FOLDER_OPEN, MATERIAL_UNLIT, SAVE, SAVE_ALL, FIT, AUTO_LAYOUT, TEXTURE] {
+        for icon in [FOLDER_OPEN, MATERIAL_UNLIT, SAVE, SAVE_ALL, FIT, AUTO_LAYOUT, RUST_RS] {
             let mut rest = icon.svg;
             while let Some(at) = rest.find("=\"#") {
                 let hex = icon_rs::Rgb::from_hex(&rest[at + 2..at + 9]).unwrap();

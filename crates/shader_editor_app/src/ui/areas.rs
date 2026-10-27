@@ -13,6 +13,7 @@ use shader_graph_core::Diagnostic;
 use super::tooltip::Tooltip;
 use super::widgets::{pane_box, pane_title};
 use super::{BORDER, OnActivate, PANEL_BG, TEXT_DIM, TOPBAR_BG, plural, scroll_column, text};
+use crate::config::Panel;
 use crate::editors::{AreaOf, EditorAreas, KindVisitor, StatusInfo, for_each_kind};
 use crate::state::{Action, Editor};
 use crate::tab::ViewKind;
@@ -188,54 +189,60 @@ pub fn editor_statusbar() -> impl Scene {
     }
 }
 
-fn display(node: &mut Node, shown: bool) {
+/// Shows or hides an area or strip: `Display::None` so it takes no space, and `Visibility::Hidden` because Bevy's tab
+/// navigation skips only hidden entities (`InheritedVisibility`), not `Display::None` ones. Both written on change only.
+pub(crate) fn display(node: &mut Node, visibility: &mut Visibility, shown: bool) {
     let want = if shown { Display::Flex } else { Display::None };
     if node.display != want {
         node.display = want;
     }
+    let want = if shown { Visibility::Inherited } else { Visibility::Hidden };
+    if *visibility != want {
+        *visibility = want;
+    }
 }
 
 /// Shows the active kind's areas only; a strip only when that kind has something in it (the right sidebar also
-/// while no tab is open, with its placeholder, and never while View → Show properties is off: the editor content
-/// takes its width). The right sidebar header follows the active kind. Runs when the active tab or its kind or
-/// [`UserConfig::show_properties`](crate::config::UserConfig::show_properties) changed, or areas were spawned.
+/// while no tab is open, with its placeholder, and never while View → Show properties is off or Zen mode is on:
+/// the editor content takes its width). The right sidebar header follows the active kind. Runs when the active tab or
+/// its kind or [`Panel::Properties`] changed, or areas were spawned.
 pub fn show_active_areas(
     editor: Res<Editor>,
     mut last: Local<Option<(Option<usize>, Option<ViewKind>, bool)>>,
     spawned: Query<(), Added<AreaOf>>,
-    (mut areas, parents): (Query<(Entity, &AreaOf, &mut Node)>, Query<&ChildOf>),
+    (mut areas, parents): (Query<(Entity, &AreaOf, &mut Node, &mut Visibility)>, Query<&ChildOf>),
     mut strips: Query<
-        (Entity, &mut Node, Has<RightSidebar>),
+        (Entity, &mut Node, &mut Visibility, Has<RightSidebar>),
         (Or<(With<EditorTopbar>, With<RightSidebar>)>, Without<AreaOf>),
     >,
     mut placeholder: Query<
-        &mut Node,
+        (&mut Node, &mut Visibility),
         (With<SidebarPlaceholder>, Without<AreaOf>, Without<EditorTopbar>, Without<RightSidebar>),
     >,
     mut title: Query<&mut Text, With<SidebarTitle>>,
 ) {
     let active: Option<ViewKind> = editor.tab().map(|t| t.doc().view());
-    let properties = editor.config.show_properties;
+    let properties = editor.config.panel_visible(Panel::Properties);
     let key = (editor.active, active, properties);
     if *last == Some(key) && spawned.is_empty() {
         return;
     }
     *last = Some(key);
     let mut used = Vec::new();
-    for (entity, area, mut node) in &mut areas {
+    for (entity, area, mut node, mut visibility) in &mut areas {
         let shown = Some(area.0) == active;
         if shown {
             // The strip may hold the area deeper down (the right sidebar's pane body).
             used.extend(parents.iter_ancestors(entity));
         }
-        display(&mut node, shown);
+        display(&mut node, &mut visibility, shown);
     }
-    for (strip, mut node, sidebar) in &mut strips {
+    for (strip, mut node, mut visibility, sidebar) in &mut strips {
         let content = used.contains(&strip) || (sidebar && active.is_none());
-        display(&mut node, content && (properties || !sidebar));
+        display(&mut node, &mut visibility, content && (properties || !sidebar));
     }
-    for mut node in &mut placeholder {
-        display(&mut node, active.is_none());
+    for (mut node, mut visibility) in &mut placeholder {
+        display(&mut node, &mut visibility, active.is_none());
     }
     let want = sidebar_title(active);
     for mut t in &mut title {
@@ -257,7 +264,7 @@ type StatusKey = (u64, Option<usize>, u64, u64);
 fn redraw_statusbar(
     editor: Res<Editor>,
     assets: Res<AssetServer>,
-    mut strip: Query<(Entity, &mut Node), With<EditorStatusbar>>,
+    mut strip: Query<(Entity, &mut Node, &mut Visibility), With<EditorStatusbar>>,
     mut last: Local<Option<StatusKey>>,
     mut commands: Commands,
 ) {
@@ -266,14 +273,14 @@ fn redraw_statusbar(
     if last.as_ref() == Some(&key) {
         return;
     }
-    let Ok((strip, mut node)) = strip.single_mut() else { return };
+    let Ok((strip, mut node, mut visibility)) = strip.single_mut() else { return };
     *last = Some(key);
     commands.entity(strip).despawn_children();
     let Some(status) = editor.status_info() else {
-        display(&mut node, false);
+        display(&mut node, &mut visibility, false);
         return;
     };
-    display(&mut node, true);
+    display(&mut node, &mut visibility, true);
     let font =
         TextFont { font: FontSource::Handle(assets.load(fonts::MONO)), font_size: FontSize::Px(12.0), ..default() };
     spawn_status(&mut commands, strip, &status, editor.active_first_diagnostic().cloned(), font);

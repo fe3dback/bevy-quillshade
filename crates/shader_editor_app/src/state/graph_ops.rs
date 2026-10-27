@@ -82,8 +82,16 @@ impl Editor {
         self.ui.props += 1;
     }
 
-    pub(super) fn add_node(&mut self, kind: &str, pos: (f32, f32), link: Option<Link>, params: &[(String, Value)]) {
-        let Some(d) = self.doc_mut() else { return };
+    /// Adds a `kind` node at `pos` (snapped), connected to `link` when it has a compatible pin, in one undo step, and
+    /// selects it. Returns its id (`None` without an active graph).
+    pub(super) fn add_node(
+        &mut self,
+        kind: &str,
+        pos: (f32, f32),
+        link: Option<Link>,
+        params: &[(String, Value)],
+    ) -> Option<NodeId> {
+        let d = self.doc_mut()?;
         let asset_kind = d.asset.kind;
         let id = d.add_node_with(kind, snap(pos), params);
         if let Some(link) = link {
@@ -102,18 +110,15 @@ impl Editor {
                 } else {
                     ((id.clone(), pin), (link.node, link.pin))
                 };
-                // Merge into the creation step: undo removes node and wire together.
-                let d = self.doc_mut().expect("active graph");
-                if d.undo() {
-                    d.redo();
-                }
-                self.connect(from, to);
+                // One undo step for node and wire.
+                self.connect_checked(from, to, true);
             }
         }
         let d = self.doc_mut().expect("active graph");
-        d.set_selection([id]);
+        d.set_selection([id.clone()]);
         d.selected_frame = None;
         self.ui.props += 1;
+        Some(id)
     }
 
     /// A drop from a sidebar tree onto the active graph (design §4.3, §4.11). A game file is resolved through its
@@ -141,7 +146,8 @@ impl Editor {
                     let msg = format!("Function `{path}` cannot call itself (recursion)");
                     return self.push_msg(Level::Warning, msg);
                 }
-                return self.add_node(&format!("{FUNCTION_PREFIX}{path}"), pos, None, &[]);
+                self.add_node(&format!("{FUNCTION_PREFIX}{path}"), pos, None, &[]);
+                return;
             }
         };
         let target = node.and_then(|node| {
@@ -159,11 +165,20 @@ impl Editor {
                 }
                 self.ui.props += 1;
             }
-            None => self.add_node(node_kind, pos, None, &[(param.to_string(), Value::Str(value))]),
+            None => {
+                self.add_node(node_kind, pos, None, &[(param.to_string(), Value::Str(value))]);
+            }
         }
     }
 
     pub(super) fn connect(&mut self, from: (NodeId, String), to: (NodeId, String)) {
+        self.connect_checked(from, to, false);
+    }
+
+    /// Connects `from` → `to` in the active graph when [`connection_error`] allows it, else logs "Connection refused:
+    /// …" and changes nothing. With `into_last_step` the wire joins the last undo step (the node [`Self::add_node`]
+    /// just added) instead of being a step of its own.
+    fn connect_checked(&mut self, from: (NodeId, String), to: (NodeId, String), into_last_step: bool) {
         let Some(d) = self.doc() else { return };
         if let Some(e) =
             connection_error(&d.asset, (&from.0, &from.1), (&to.0, &to.1), &self.registry, &self.functions, &d.id.path)
@@ -171,9 +186,19 @@ impl Editor {
             self.push_msg(Level::Warning, format!("Connection refused: {e}"));
             return;
         }
-        if let Some(d) = self.doc_mut() {
-            d.edit(|a| a.connect((&from.0, &from.1), (&to.0, &to.1)));
+        let Some(d) = self.doc_mut() else { return };
+        let current = into_last_step.then(|| d.asset.clone());
+        if current.is_some() {
+            // Pops the last step (restores the model before it); the edit below records it again with the wire.
+            let undone = d.undo();
+            debug_assert!(undone, "no undo step to join the wire to");
         }
+        d.edit(|a| {
+            if let Some(current) = current {
+                *a = current;
+            }
+            a.connect((&from.0, &from.1), (&to.0, &to.1));
+        });
     }
 
     /// Moves the wires of the pin `from` (an output when `output`) to the pin `to` of the same direction (Ctrl+LMB

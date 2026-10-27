@@ -101,7 +101,8 @@ const NODE_HOTKEYS: [(KeyCode, &str); 18] = {
     ]
 };
 
-/// The node a held plain key places; none while Ctrl, Alt or Super is held (decision 0032).
+/// The node a held plain key places; none while Ctrl, Alt or Super is held (decision 0032), so Ctrl+1..3 (View) drop
+/// nothing. Ctrl released while 1 is still held, then a click, does drop a Constant: that is "hold 1 + click".
 fn hotkey_node(keys: &ButtonInput<KeyCode>) -> Option<&'static str> {
     if !no_command_mods(keys) {
         return None;

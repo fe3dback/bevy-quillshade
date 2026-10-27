@@ -203,8 +203,10 @@ how to hook the generated crate into the game. Open / New Project show the syste
 xdg-desktop-portal); cancel it to type or paste the path instead (Browse... reopens it).
 
 The menu_bar holds the logo and the main menu — **File** (Open Project, New Project, Close Project, Save, Save All,
-Quit), **Edit** (Undo, Redo), **View** (Show log, Show properties: checked while on; the log hidden keeps only its
-header bar with the counts, the properties hidden leave the width to the editor content; both are remembered),
+Quit), **Edit** (Undo, Redo), **View** (Zen mode, then Show project, Show console, Show properties: checked while
+on; the project hidden leaves its width to the editor, the console hidden keeps only its header bar with the counts,
+the properties hidden leave the width to the editor content; Zen mode hides the left and right sidebars and the whole
+console, whatever their own marks say, and turned off shows exactly the checked ones; all four are remembered),
 **Assets** (create a Pbr3d/Unlit3d/Sprite2d material, a function, a curve, a global constant table, a folder;
 Regenerate) and **Help** (Quick Start: how to hook a game up, one tab per step; Project Page; About: version, link,
 author, license) — then Undo / Redo and, on the right, the project name and its error count (the full path is the
@@ -215,8 +217,8 @@ a material's Preview mode group, then on the right icon-only generated WESL and 
 Select all, Delete, preview mode, generated WESL; constant table: path; generated file: path, Copy, Source,
 Open externally; game image: path, size, channel, tiling, zoom; Texture asset: Easy / Advanced, presets, channel,
 tiling, zoom). Under the editor content, the editor statusbar of a graph, curve or constant table shows
-`● unsaved`, the asset's error / warning count (click: show the first problem) and its size (nodes and generated WESL
-lines, points, constants).
+`● unsaved`, the asset's error / warning count (click: show the first problem) and its size (nodes, wires, comments
+and generated WESL lines, points, constants).
 
 On the left is the asset browser — the **Project** panel (the `shaders/` tree: double click opens an asset; RMB on a
 folder or on the empty space below the tree creates a Pbr3d/Unlit3d/Sprite2d material, a function, a curve, a global
@@ -288,16 +290,18 @@ has "Open in the default application". Icons come from [icon-rs](https://crates.
 drawn by hand in `crates/shader_editor_app/icons/`.
 Validation runs live: nodes with errors are outlined in red, with warnings — in yellow.
 
-On the canvas (decisions 0033, 0034) node positions snap to a 10-unit grid when touched: a dragged node jumps from
+On the canvas (decisions 0033–0035) node positions snap to a 10-unit grid when touched: a dragged node jumps from
 grid point to grid point (in a multi-node drag the node under the pointer snaps and the others keep their offsets to
 it), and new, pasted and duplicated nodes land on the grid; positions loaded from a file stay as they are until moved.
 A selected node has a 3 px white outline. Named Route declarations and their usages, Constant nodes with a label and
 `Global*` nodes get a header colour from their name (route, label or constant), so a route's declaration and usages
-match. The pin under the pointer grows and lightens (also while dragging a wire onto it). **Comment frames** (C):
-dragging one moves the nodes that lie inside it when the drag starts (nested frames too); a selected frame gets a Hue
-field (0..360) and a "Default colour" button in the right sidebar; a box selection that fully encloses a frame and
-covers all of its nodes marks it, and Delete then removes the frame with the nodes (one undo step; Cut keeps the
-frame, and so does a frame around the material output, which is never deleted).
+match. A pin's dot is 16 px inside a 24 px hit box; the dot under the pointer grows and lightens (also the pin a
+dragged wire snaps to). **Comment frames** (hold C: around the selection, or with nothing selected an empty 400x300
+frame at the cursor; the Comment button puts that one at the view centre): dragging one moves the nodes that lie
+inside it when the drag starts (nested frames too); a selected frame gets a Hue field (0..360) and a "Default colour"
+button in the right sidebar; a box selection that fully encloses a frame and covers all of its nodes marks it, and
+Delete then removes the frame with the nodes (one undo step; Cut keeps the frame, and so does a frame around the
+material output, which is never deleted).
 
 Values are also edited right on the nodes (UE-style): an unconnected input shows a number field, X/Y fields, or a
 color button (Float3/Float4/Color) that opens a color picker (values are linear; exact components are edited in
@@ -402,7 +406,7 @@ the title the same way.
 | Palette filtered by wire type + auto-connect | release a wire on empty space |
 | Node under the cursor: Constant/2/3/4Vector, Scalar/Vector parameter, TextureSample, Multiply, Add, Lerp, TexCoord, Reroute, Divide, OneMinus, Power, Normalize, Panner, If | `1` `2` `3` `4` `S` `V` `T` `M` `A` `L` `U` `R` `D` `O` `E` `N` `P` `I` + LMB |
 | Rename a node (name / label) / a comment frame | double click on its header / title |
-| Comment frame around the selection | C |
+| Comment frame around the selection (nothing selected: an empty 400x300 frame at the cursor) | hold C (0.5 s; a tap does nothing) |
 | Delete a comment frame together with its nodes | box-select around the whole frame, Delete |
 | Reroute point on a wire / delete a wire | double click / RMB click or Alt+LMB on the wire |
 | Pin menu: polymorphic type / reset value / disconnect | RMB click on an input pin |
@@ -410,10 +414,11 @@ the title the same way.
 | Convert the selected Add / Subtract / Multiply / Divide nodes to Add / Subtract / Multiply / Divide | Shift + `+` / `-` / `*` / `/` (main row or numpad, Shift optional on the numpad) |
 | Exclusive preview of the selected node on / off (materials) | `V` (on release) |
 | Disconnect every wire of a pin / a wire | Alt+LMB on the pin / on the wire |
-| New wire from a pin (from a connected input too: connecting replaces its wire) | LMB drag from the pin |
-| Move a wire to another input / all wires of an output to another output (all or nothing, one undo step) | Ctrl+LMB drag from the pin onto the other pin (the wires follow the cursor; they snap only to pins they can move to) |
+| New wire from a pin (from a connected input too: connecting replaces its wire) | LMB drag from the pin onto another pin (the wire snaps to the nearest pin it can connect to within 40 px of the cursor) |
+| Move a wire to another input / all wires of an output to another output (all or nothing, one undo step) | Ctrl+LMB drag from the pin onto the other pin (the wires follow the cursor; they snap only to pins they can move to, the nearest within 40 px) |
 | Cancel a wire drag (a new wire or wires being moved) | Esc |
 | Named route: a wire without a visible wire (Named Route + one usage per place) | palette: "Named Route", then "Named Route Usage: {name}" |
+| Name a wire: a Named Route fed by it (listed first unless the query matches another node better; its rename dialog opens, as for every Named Route added from the palette) | release a wire from an output on empty space, pick "Named Route" |
 | Auto-layout the selection (or the whole graph) | Ctrl+L |
 | Close tab / next tab | Ctrl+W (or MMB on the tab) / Ctrl+Tab |
 | Close several tabs (all, others, left/right, unmodified) | RMB on a tab |
@@ -429,12 +434,16 @@ the title the same way.
 | Curve: nudge the selected points | arrow keys (Shift: ×10) |
 | Curve: point menu / plot menu (add point, select all, preview mode) | RMB on a point / on empty space |
 | Open project / quit | Ctrl+O / Ctrl+Q |
-| Show / hide the log (console/logs) / the properties (right sidebar) | `` ` `` (or the chevron in the log header) / Tab |
+| Show / hide the project (left sidebar) / the console messages / the properties (right sidebar) | Ctrl+1 / Ctrl+2 (or the chevron in the console header) / Ctrl+3 |
+| Zen mode: hide both sidebars and the whole console (Ctrl+1/2/3 still set what comes back) | `` ` `` |
+| Move the keyboard focus over buttons and fields / press the focused button | Tab, Shift+Tab / Enter, Space |
 
 Hotkeys belong to the active tab's editor kind (graph, curve, generated file) or are global (save, undo, tabs, open,
 quit, the View toggles); none fires while a text field, the palette, a dialog, a menu or a select's list has the
-keyboard, and Ctrl, Alt or Super held blocks the single-key ones (decisions 0032, 0034). Keyboard focus stays on text
-fields: a clicked button does not keep it, and Tab moves it only from one field to the next. Pan — drag with the right
+keyboard, and Ctrl, Alt or Super held blocks the single-key ones (decisions 0032, 0034). Keyboard focus is Bevy's
+default (decision 0035): a click focuses the button or field under it, a click on the canvas clears it; while a button
+has the focus, Space and Enter press it instead of acting as hotkeys (so after a toolbar click or a menu pick, click
+the canvas before Space opens the palette); Ctrl+Tab clears the focus. Pan — drag with the right
 (or middle) mouse button (an RMB press that does not move is a click), zoom — wheel, box select — LMB on empty space;
 the minimap in the bottom left is clickable. Unsaved
 tabs are marked with `*` (browser rows with an orange dot); on close and on an external change of the file (git

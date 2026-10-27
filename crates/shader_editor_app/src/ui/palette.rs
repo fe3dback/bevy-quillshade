@@ -1,6 +1,7 @@
 //! Node palette popup (spec §9.3): right click / Space on the canvas or a wire dropped on empty space.
 
 use bevy::feathers::controls::{FeathersTextInput, FeathersTextInputContainer};
+use bevy::input_focus::tab_navigation::TabGroup;
 use bevy::input_focus::{AutoFocus, InputFocus};
 use bevy::prelude::*;
 use bevy::text::EditableText;
@@ -76,20 +77,7 @@ fn spawn_or_close(
     if exists {
         return;
     }
-    // Entries for this asset, filtered by the wire's type.
-    let d = editor.doc().expect("checked");
-    let mut entries = search::entries(&editor.registry, &editor.functions, d.asset.kind, &d.id.path);
-    entries.extend(search::route_entries(&editor.registry, &d.asset));
-    entries.sort_by(|a, b| (&a.category, &a.name).cmp(&(&b.category, &b.name)));
-    if let Some(link) = &palette.link
-        && let Some(t) = editor.pin_type(&link.node, &link.pin, link.from_output)
-    {
-        let end = if link.from_output { WireEnd::FromOutput(t) } else { WireEnd::FromInput(t) };
-        entries.retain(|e| {
-            search::compatible_pin(&editor.registry, &editor.functions, d.asset.kind, &e.kind, end).is_some()
-        });
-    }
-    palette.entries = entries;
+    palette.entries = entries_for(&editor, palette.link.as_ref());
     palette.query = None;
     let size = window.single().map(|w| Vec2::new(w.width(), w.height())).unwrap_or(Vec2::new(1600.0, 900.0));
     let x = palette.screen.x.min(size.x - 340.0).max(0.0);
@@ -98,10 +86,13 @@ fn spawn_or_close(
         Some(_) => "Compatible nodes (auto-connect)",
         None => "Add node",
     };
+    // A modal tab group: Tab cycles inside the palette (Bevy's tab navigation; Feathers dialogs and menu popups are
+    // modal groups too), so it never focuses a button behind it that Enter / Space would press.
     commands.spawn_scene(bsn! {
         PaletteRoot
         Node { position_type: PositionType::Absolute, left: px(0), top: px(0), width: percent(100), height: percent(100) }
         GlobalZIndex(90)
+        TabGroup { modal: true }
         Children [
             Node {
                 position_type: PositionType::Absolute,
@@ -131,7 +122,46 @@ fn spawn_or_close(
     });
 }
 
-fn filter(mut palette: ResMut<Palette>, inputs: Query<&EditableText, With<PaletteInput>>) {
+/// Entries of the palette on the active graph, by category and name: every node it may add, filtered by the wire's
+/// type when opened from one.
+pub fn entries_for(editor: &Editor, link: Option<&Link>) -> Vec<Entry> {
+    let Some(d) = editor.doc() else { return Vec::new() };
+    let mut entries = search::entries(&editor.registry, &editor.functions, d.asset.kind, &d.id.path);
+    entries.extend(search::route_entries(&editor.registry, &d.asset));
+    entries.sort_by(|a, b| (&a.category, &a.name).cmp(&(&b.category, &b.name)));
+    if let Some(link) = link
+        && let Some(t) = editor.pin_type(&link.node, &link.pin, link.from_output)
+    {
+        let end = if link.from_output { WireEnd::FromOutput(t) } else { WireEnd::FromInput(t) };
+        entries.retain(|e| {
+            search::compatible_pin(&editor.registry, &editor.functions, d.asset.kind, &e.kind, end).is_some()
+        });
+    }
+    entries
+}
+
+/// The palette's rows for `query`: indices into `entries`, best first. After a wire from an output the Named Route
+/// declaration wins ties on the score (design §6.4: name the wire), so it is first with an empty query or "route" but
+/// never above a better match; otherwise the plain search order.
+pub fn results_for(editor: &Editor, link: Option<&Link>, entries: &[Entry], query: &str) -> Vec<usize> {
+    let from_output = link.is_some_and(|l| l.from_output);
+    search::search_indices_leading(entries, query, |e| {
+        from_output && search::is_route_declaration(&editor.registry, &e.kind)
+    })
+}
+
+/// What picking `entry` does: add its node at `pos` (graph units), connected to `link`. A Named Route declaration
+/// then opens its rename dialog (design §6.4: a route always needs a name).
+pub fn pick_action(editor: &Editor, entry: &Entry, pos: (f32, f32), link: Option<Link>) -> Action {
+    let (kind, params) = (entry.kind.clone(), entry.params.clone());
+    if search::is_route_declaration(&editor.registry, &kind) {
+        Action::AddNodeAndRename { kind, pos, link, params }
+    } else {
+        Action::AddNode { kind, pos, link, params }
+    }
+}
+
+fn filter(mut palette: ResMut<Palette>, editor: Res<Editor>, inputs: Query<&EditableText, With<PaletteInput>>) {
     if !palette.open {
         return;
     }
@@ -139,17 +169,16 @@ fn filter(mut palette: ResMut<Palette>, inputs: Query<&EditableText, With<Palett
     if palette.query.as_deref() == Some(q.as_str()) {
         return;
     }
-    let results: Vec<usize> = search::search_indices(&palette.entries, &q).into_iter().take(MAX_ROWS).collect();
+    let results = results_for(&editor, palette.link.as_ref(), &palette.entries, &q);
+    let results: Vec<usize> = results.into_iter().take(MAX_ROWS).collect();
     palette.results = results;
     palette.query = Some(q);
     palette.highlight = 0;
 }
 
-fn pick(palette: &mut Palette, actions: &mut Actions, i: usize) {
+fn pick(palette: &mut Palette, editor: &Editor, actions: &mut Actions, i: usize) {
     if let Some(e) = palette.results.get(i).and_then(|r| palette.entries.get(*r)) {
-        let pos = (palette.graph.x, palette.graph.y);
-        let (kind, params) = (e.kind.clone(), e.params.clone());
-        actions.push(Action::AddNode { kind, pos, link: palette.link.clone(), params });
+        actions.push(pick_action(editor, e, (palette.graph.x, palette.graph.y), palette.link.clone()));
     }
     palette.open = false;
 }
@@ -157,6 +186,7 @@ fn pick(palette: &mut Palette, actions: &mut Actions, i: usize) {
 fn keys(
     keys: Res<ButtonInput<KeyCode>>,
     mut palette: ResMut<Palette>,
+    editor: Res<Editor>,
     mut actions: ResMut<Actions>,
     mut focus: ResMut<InputFocus>,
 ) {
@@ -173,7 +203,7 @@ fn keys(
         palette.highlight = (palette.highlight + n - 1) % n;
     } else if keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::NumpadEnter) {
         let i = palette.highlight;
-        pick(&mut palette, &mut actions, i);
+        pick(&mut palette, &editor, &mut actions, i);
         focus.clear();
     }
 }
@@ -212,10 +242,11 @@ fn click_row(
     ev: On<PointerClick>,
     rows: Query<&PaletteRow>,
     mut palette: ResMut<Palette>,
+    editor: Res<Editor>,
     mut actions: ResMut<Actions>,
 ) {
     if let Ok(r) = rows.get(ev.event_target()) {
-        pick(&mut palette, &mut actions, r.0);
+        pick(&mut palette, &editor, &mut actions, r.0);
     }
 }
 

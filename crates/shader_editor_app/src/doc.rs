@@ -245,16 +245,19 @@ impl Doc {
         comments.filter(|f| f.nodes.iter().all(|n| nodes.contains(n))).map(|f| f.id.clone()).collect()
     }
 
-    pub fn add_frame(&mut self, title: &str, nodes: &BTreeSet<NodeId>) -> String {
+    /// Adds a comment frame around `nodes` (one edit); around no node it is [`EMPTY_FRAME_SIZE`] with its top-left
+    /// corner at `at` (design §6.1). Returns its id.
+    pub fn add_frame(&mut self, title: &str, nodes: &BTreeSet<NodeId>, at: (f32, f32)) -> String {
         let id = format!("c{}", new_node_id());
-        let rect =
-            bounds(&self.asset, nodes).map(|(x0, y0, x1, y1)| (x0 - 30.0, y0 - 50.0, x1 - x0 + 260.0, y1 - y0 + 220.0));
+        // `bounds` of an empty set is the whole graph.
+        let around = if nodes.is_empty() { None } else { bounds(&self.asset, nodes) };
+        let rect = around.map(|(x0, y0, x1, y1)| (x0 - 30.0, y0 - 50.0, x1 - x0 + 260.0, y1 - y0 + 220.0));
         let fid = id.clone();
         self.edit(|a| {
             a.comments.push(Frame {
                 id: fid,
                 title: title.into(),
-                rect: rect.unwrap_or((0.0, 0.0, 400.0, 300.0)),
+                rect: rect.unwrap_or((at.0, at.1, EMPTY_FRAME_SIZE.0, EMPTY_FRAME_SIZE.1)),
                 nodes: nodes.iter().cloned().collect(),
                 color: None,
                 hue: None,
@@ -263,6 +266,9 @@ impl Doc {
         id
     }
 }
+
+/// Size of a comment frame added around no node, in graph units (design §6.1).
+pub const EMPTY_FRAME_SIZE: (f32, f32) = (400.0, 300.0);
 
 /// Node positions snap to multiples of this many graph units when touched (design §4.1); positions loaded from a
 /// file are kept as they are.

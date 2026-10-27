@@ -103,13 +103,22 @@ impl Editor {
                     self.activate(n);
                 }
             }
-            // The layout follows the flags themselves (`ui::log`, `ui::areas`), no revision to bump.
+            // The layout follows the flags themselves (`ui::log`, `ui::areas`, `ui::show_left_sidebar`), no revision to
+            // bump. In Zen mode a panel's flag still flips; the panel shows once Zen is off (design §3).
+            Action::ToggleLeftSidebar => {
+                self.config.show_left_sidebar = !self.config.show_left_sidebar;
+                self.save_config();
+            }
             Action::ToggleLog => {
                 self.config.show_log = !self.config.show_log;
                 self.save_config();
             }
             Action::ToggleProperties => {
                 self.config.show_properties = !self.config.show_properties;
+                self.save_config();
+            }
+            Action::ToggleZen => {
+                self.config.zen_mode = !self.config.zen_mode;
                 self.save_config();
             }
             Action::Save => {
@@ -192,7 +201,14 @@ impl Editor {
                     d.enclosed_frames = d.enclosed(&frames, &d.selection);
                 }
             }
-            Action::AddNode { kind, pos, link, params } => self.add_node(&kind, pos, link, &params),
+            Action::AddNode { kind, pos, link, params } => {
+                self.add_node(&kind, pos, link, &params);
+            }
+            Action::AddNodeAndRename { kind, pos, link, params } => {
+                if let Some(target) = self.add_node(&kind, pos, link, &params).and_then(|id| self.rename_target(&id)) {
+                    self.apply_action(Action::TextDialog(target));
+                }
+            }
             Action::Drop { item, pos, node } => self.drop_item(item, pos, node),
             Action::Connect { from, to } => self.connect(from, to),
             Action::Disconnect { to } => {
@@ -257,21 +273,12 @@ impl Editor {
             Action::ConvertNodes { nodes, conv } => self.convert_nodes(&nodes, &conv),
             Action::TogglePreview(node) => self.toggle_preview(node),
             Action::AutoLayout => self.auto_layout(),
+            // Around the selection; with none, a default-size frame at `at` on the grid (the graph editor resolves
+            // `None` to the visible canvas centre; headless it is the origin).
             Action::AddComment(at) => {
                 if let Some(d) = self.doc_mut() {
                     let sel = d.selection.clone();
-                    if sel.is_empty() {
-                        let (x, y) = crate::doc::snap(at.unwrap_or((0.0, 0.0)));
-                        let id = d.add_frame("Comment", &sel);
-                        d.edit(|a| {
-                            if let Some(f) = a.comments.iter_mut().find(|f| f.id == id) {
-                                f.rect.0 = x;
-                                f.rect.1 = y;
-                            }
-                        });
-                    } else {
-                        d.add_frame("Comment", &sel);
-                    }
+                    d.add_frame("Comment", &sel, crate::doc::snap(at.unwrap_or((0.0, 0.0))));
                 }
             }
             Action::AddReroute { from, to, pos } => {

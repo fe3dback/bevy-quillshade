@@ -89,6 +89,8 @@ fn attach_canvas(world: &mut World) {
                 vec![KeyCode::ControlLeft, KeyCode::ControlRight, KeyCode::SuperLeft, KeyCode::SuperRight];
             // Dragged nodes snap to the grid (design §4.1); comment frames carry their nodes (`canvas::frame_scene`).
             interaction.snap = Some(doc::GRID_SNAP);
+            // A dragged or lifted wire takes the nearest pin it may end on within 40 screen px (design §6.3).
+            interaction.wire_target_radius = Some(canvas::WIRE_TARGET_RADIUS);
         }
         // A hovered pin's dot grows and lightens (design §4.8), also under a dragged wire.
         let hover = PortHoverStyle { scale: canvas::PIN_HOVER_SCALE, lighten: canvas::PIN_HOVER_LIGHTEN };

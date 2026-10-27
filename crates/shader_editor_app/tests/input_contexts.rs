@@ -390,36 +390,186 @@ fn ctrl_c_on_graph_fires_only_copy() {
     let (_dir, mut app) = app(|e| e.open_asset(&material()));
     tap(&mut app, &[KeyCode::ControlLeft, KeyCode::KeyC]);
     assert_eq!(seen(&mut app), vec![Action::Copy]);
-    tap(&mut app, &[KeyCode::KeyC]);
-    assert_eq!(seen(&mut app), vec![Action::AddComment(None)], "the plain C still adds a comment");
+    timed(&mut app);
+    hold(&mut app, &[KeyCode::KeyC], 0.6);
+    release(&mut app, &[KeyCode::KeyC]);
+    // No canvas here, so the cursor is off it: `None`, the visible canvas centre (see `ui_smoke.rs`).
+    assert_eq!(seen(&mut app), vec![Action::AddComment(None)], "the held plain C still adds a comment");
 }
 
-fn flags(app: &App) -> (bool, bool) {
-    let c = &app.world().resource::<Editor>().config;
-    (c.show_log, c.show_properties)
+/// Frames of `FRAME` seconds from now on, so a held key's time is known (bevy_enhanced_input's `Hold` reads it).
+fn timed(app: &mut App) {
+    use bevy::time::TimeUpdateStrategy;
+    app.insert_resource(TimeUpdateStrategy::ManualDuration(std::time::Duration::from_secs_f32(FRAME)));
 }
 
-/// View hotkeys (design §4) are global: `` ` `` toggles the log, Tab the properties, on a graph tab and with no tab.
+const FRAME: f32 = 0.05;
+
+/// Presses `keys` and keeps them down for `secs` (of [`timed`] frames).
+fn hold(app: &mut App, keys: &[KeyCode], secs: f32) {
+    press(app, keys, (secs / FRAME).round() as usize);
+}
+
+/// Keeps the held keys down `secs` longer.
+fn wait(app: &mut App, secs: f32) {
+    for _ in 0..(secs / FRAME).round() as usize {
+        app.update();
+    }
+}
+
+fn comment_count(app: &App) -> usize {
+    app.world().resource::<Editor>().doc().unwrap().asset.comments.len()
+}
+
+/// Design §6.2: a C tap adds no comment; the hotkey needs C held for 0.5 s.
 #[test]
-fn backquote_toggles_log_tab_toggles_properties() {
+fn tap_c_adds_no_comment() {
+    let (_dir, mut app) = app(|e| e.open_asset(&material()));
+    timed(&mut app);
+    let n = comment_count(&app);
+    hold(&mut app, &[KeyCode::KeyC], 0.2);
+    release(&mut app, &[KeyCode::KeyC]);
+    wait(&mut app, 1.0);
+    assert_eq!(seen(&mut app), vec![]);
+    assert_eq!(comment_count(&app), n);
+}
+
+/// Design §6.2: holding C adds one comment once 0.5 s are up, while C is still down, and only one per press.
+#[test]
+fn hold_c_adds_one_comment() {
+    let (_dir, mut app) = app(|e| e.open_asset(&material()));
+    timed(&mut app);
+    let n = comment_count(&app);
+    hold(&mut app, &[KeyCode::KeyC], 0.4);
+    assert_eq!(comment_count(&app), n, "not yet");
+    wait(&mut app, 0.2);
+    assert_eq!(comment_count(&app), n + 1, "at 0.6 s, C still down");
+    wait(&mut app, 0.9);
+    assert_eq!(comment_count(&app), n + 1, "still one at 1.5 s");
+    release(&mut app, &[KeyCode::KeyC]);
+    assert_eq!(seen(&mut app), vec![Action::AddComment(None)], "cursor off the canvas: its visible centre");
+    // The next press is a new hold.
+    hold(&mut app, &[KeyCode::KeyC], 0.6);
+    release(&mut app, &[KeyCode::KeyC]);
+    assert_eq!(comment_count(&app), n + 2);
+}
+
+/// Review Focus 2: Ctrl+C held 0.5 s or longer copies and never adds a comment, Ctrl released first included.
+#[test]
+fn ctrl_c_held_never_adds_comment() {
+    let (_dir, mut app) = app(|e| e.open_asset(&material()));
+    timed(&mut app);
+    let n = comment_count(&app);
+    press(&mut app, &[KeyCode::ControlLeft], 1);
+    hold(&mut app, &[KeyCode::KeyC], 0.6);
+    release(&mut app, &[KeyCode::ControlLeft]);
+    release(&mut app, &[KeyCode::KeyC]);
+    assert_eq!(seen(&mut app), vec![Action::Copy]);
+    assert_eq!(comment_count(&app), n);
+    // C kept down long after Ctrl is let go is still the Ctrl+C press.
+    press(&mut app, &[KeyCode::ControlLeft], 1);
+    hold(&mut app, &[KeyCode::KeyC], 0.2);
+    release(&mut app, &[KeyCode::ControlLeft]);
+    wait(&mut app, 1.0);
+    release(&mut app, &[KeyCode::KeyC]);
+    assert_eq!(seen(&mut app), vec![Action::Copy]);
+    assert_eq!(comment_count(&app), n);
+}
+
+/// Review Focus 1: C held while a text field has the focus adds nothing, nor once the field lets go of it.
+#[test]
+fn hold_c_while_typing_adds_nothing() {
+    let (_dir, mut app) = app(|e| e.open_asset(&material()));
+    timed(&mut app);
+    let n = comment_count(&app);
+    let field = app.world_mut().spawn(EditableText::default()).id();
+    app.world_mut().insert_resource(InputFocus::from_entity(field));
+    app.update();
+    hold(&mut app, &[KeyCode::KeyC], 0.6);
+    assert_eq!(comment_count(&app), n);
+    app.world_mut().resource_mut::<InputFocus>().clear();
+    wait(&mut app, 1.0);
+    release(&mut app, &[KeyCode::KeyC]);
+    assert_eq!(seen(&mut app), vec![]);
+    assert_eq!(comment_count(&app), n);
+}
+
+/// The View flags: (left sidebar, log, properties, Zen mode).
+fn flags(app: &App) -> (bool, bool, bool, bool) {
+    let c = &app.world().resource::<Editor>().config;
+    (c.show_left_sidebar, c.show_log, c.show_properties, c.zen_mode)
+}
+
+/// The defaults: every panel shown, Zen off.
+const DEFAULT_FLAGS: (bool, bool, bool, bool) = (true, true, true, false);
+
+/// View hotkeys (design §3) are global: `` ` `` toggles Zen mode on a graph tab and with no tab; Ctrl+Tab is Next tab.
+#[test]
+fn backquote_toggles_zen() {
     let on_graph = |e: &mut Editor| e.open_asset(&material());
     let no_tab = |_: &mut Editor| {};
     for (name, setup) in [("graph tab", &on_graph as &dyn Fn(&mut Editor)), ("no tab", &no_tab)] {
         let (_dir, mut app) = app(setup);
-        assert_eq!(flags(&app), (true, true), "{name}");
+        assert_eq!(flags(&app), DEFAULT_FLAGS, "{name}");
         tap(&mut app, &[KeyCode::Backquote]);
-        assert_eq!(seen(&mut app), vec![Action::ToggleLog], "{name}");
-        assert_eq!(flags(&app), (false, true), "{name}");
-        tap(&mut app, &[KeyCode::Tab]);
-        assert_eq!(seen(&mut app), vec![Action::ToggleProperties], "{name}");
-        assert_eq!(flags(&app), (false, false), "{name}");
+        assert_eq!(seen(&mut app), vec![Action::ToggleZen], "{name}");
+        assert_eq!(flags(&app), (true, true, true, true), "{name}");
         tap(&mut app, &[KeyCode::Backquote]);
-        tap(&mut app, &[KeyCode::Tab]);
-        assert_eq!(flags(&app), (true, true), "{name}");
-        // Ctrl+Tab is Next tab only.
+        assert_eq!(flags(&app), DEFAULT_FLAGS, "{name}");
         tap(&mut app, &[KeyCode::ControlLeft, KeyCode::Tab]);
-        assert_eq!(seen(&mut app), vec![Action::ToggleLog, Action::ToggleProperties, Action::NextTab], "{name}");
-        assert_eq!(flags(&app), (true, true), "{name}");
+        assert_eq!(seen(&mut app), vec![Action::ToggleZen, Action::NextTab], "{name}");
+        assert_eq!(flags(&app), DEFAULT_FLAGS, "{name}");
+        tap(&mut app, &[KeyCode::ControlLeft, KeyCode::Backquote]);
+        assert_eq!(seen(&mut app), vec![], "{name}: Ctrl+` is not Zen");
+    }
+}
+
+/// Ctrl+1 / Ctrl+2 / Ctrl+3 (Super the same, as macOS Cmd) flip the left sidebar, the log and the properties, each
+/// once per press (design §3), on a graph tab and with no tab.
+#[test]
+fn ctrl_digits_toggle_panels() {
+    let on_graph = |e: &mut Editor| e.open_asset(&material());
+    let no_tab = |_: &mut Editor| {};
+    for (name, setup) in [("graph tab", &on_graph as &dyn Fn(&mut Editor)), ("no tab", &no_tab)] {
+        let (_dir, mut app) = app(setup);
+        tap(&mut app, &[KeyCode::ControlLeft, KeyCode::Digit1]);
+        assert_eq!(seen(&mut app), vec![Action::ToggleLeftSidebar], "{name}");
+        assert_eq!(flags(&app), (false, true, true, false), "{name}");
+        tap(&mut app, &[KeyCode::ControlLeft, KeyCode::Digit2]);
+        assert_eq!(seen(&mut app), vec![Action::ToggleLog], "{name}");
+        assert_eq!(flags(&app), (false, false, true, false), "{name}");
+        tap(&mut app, &[KeyCode::ControlRight, KeyCode::Digit3]);
+        assert_eq!(seen(&mut app), vec![Action::ToggleProperties], "{name}");
+        assert_eq!(flags(&app), (false, false, false, false), "{name}");
+        tap(&mut app, &[KeyCode::SuperLeft, KeyCode::Digit1]);
+        assert_eq!(seen(&mut app), vec![Action::ToggleLeftSidebar], "{name}: Super+1");
+        assert_eq!(flags(&app), (true, false, false, false), "{name}");
+        // Held for many frames: still one flip.
+        press(&mut app, &[KeyCode::ControlLeft, KeyCode::Digit2], 10);
+        release(&mut app, &[KeyCode::ControlLeft, KeyCode::Digit2]);
+        assert_eq!(seen(&mut app), vec![Action::ToggleLog], "{name}: held");
+        // In Zen mode the flags still flip.
+        tap(&mut app, &[KeyCode::Backquote]);
+        tap(&mut app, &[KeyCode::ControlLeft, KeyCode::Digit3]);
+        assert_eq!(seen(&mut app), vec![Action::ToggleZen, Action::ToggleProperties], "{name}: Zen");
+        assert_eq!(flags(&app), (true, true, true, true), "{name}");
+        // Plain digits are no view keys.
+        tap(&mut app, &[KeyCode::Digit1]);
+        assert_eq!(seen(&mut app), vec![], "{name}: plain 1");
+    }
+}
+
+/// Tab and Shift+Tab are Bevy's focus navigation only (design §2): no hotkey, the properties stay as they are.
+#[test]
+fn tab_does_not_toggle_properties() {
+    let on_graph = |e: &mut Editor| e.open_asset(&material());
+    let no_tab = |_: &mut Editor| {};
+    for (name, setup) in [("graph tab", &on_graph as &dyn Fn(&mut Editor)), ("no tab", &no_tab)] {
+        let (_dir, mut app) = app(setup);
+        tap(&mut app, &[KeyCode::Tab]);
+        tap(&mut app, &[KeyCode::ShiftLeft, KeyCode::Tab]);
+        assert_eq!(seen(&mut app), vec![], "{name}");
+        assert_eq!(flags(&app), DEFAULT_FLAGS, "{name}");
     }
 }
 
@@ -427,7 +577,7 @@ fn backquote_toggles_log_tab_toggles_properties() {
 #[derive(Resource, Default)]
 struct PaletteKey(usize);
 
-/// The node palette moved from Tab to Space (user decision, design §4); Tab is Show properties now.
+/// The node palette moved from Tab to Space (user decision, design §4); Tab is no hotkey.
 #[test]
 fn space_opens_palette_tab_does_not() {
     use bevy_enhanced_input::prelude::Start;
@@ -440,39 +590,58 @@ fn space_opens_palette_tab_does_not() {
     assert_eq!(seen(&mut app), vec![]);
     tap(&mut app, &[KeyCode::Tab]);
     assert_eq!(app.world().resource::<PaletteKey>().0, 1, "not Tab");
-    assert_eq!(seen(&mut app), vec![Action::ToggleProperties]);
+    assert_eq!(seen(&mut app), vec![]);
 }
 
-/// Review Focus 1: `` ` `` and Tab change nothing while a text field has the focus or a dialog is open.
+/// Review Focus 1: `` ` ``, Ctrl+1 / 2 / 3, Tab and Space change nothing while a text field has the focus, a dialog or
+/// the palette is open.
 #[test]
-fn view_keys_gated_while_typing() {
+fn view_keys_ignored_while_typing() {
+    let view_keys = |app: &mut App| {
+        tap(app, &[KeyCode::Backquote]);
+        for digit in [KeyCode::Digit1, KeyCode::Digit2, KeyCode::Digit3] {
+            tap(app, &[KeyCode::ControlLeft, digit]);
+            tap(app, &[KeyCode::SuperLeft, digit]);
+        }
+        tap(app, &[KeyCode::Tab]);
+    };
     let (_dir, mut app) = app(|e| e.open_asset(&material()));
     let field = app.world_mut().spawn(EditableText::default()).id();
     app.world_mut().insert_resource(InputFocus::from_entity(field));
     app.update();
-    tap(&mut app, &[KeyCode::Backquote]);
-    tap(&mut app, &[KeyCode::Tab]);
+    view_keys(&mut app);
     tap(&mut app, &[KeyCode::Space]);
     assert_eq!(seen(&mut app), vec![]);
-    assert_eq!(flags(&app), (true, true), "text field");
+    assert_eq!(flags(&app), DEFAULT_FLAGS, "text field");
     app.world_mut().resource_mut::<InputFocus>().clear();
 
     let message = Dialog::Message { title: "t".into(), message: "m".into() };
     app.world_mut().resource_mut::<Editor>().dialog = Some(message);
     app.update();
-    tap(&mut app, &[KeyCode::Backquote]);
-    tap(&mut app, &[KeyCode::Tab]);
+    view_keys(&mut app);
     assert_eq!(seen(&mut app), vec![]);
-    assert_eq!(flags(&app), (true, true), "dialog");
+    assert_eq!(flags(&app), DEFAULT_FLAGS, "dialog");
+    app.world_mut().resource_mut::<Editor>().dialog = None;
+
+    let mut palette = Palette::default();
+    palette.show(Vec2::ZERO, Vec2::ZERO, None);
+    app.world_mut().insert_resource(palette);
+    app.update();
+    view_keys(&mut app);
+    assert_eq!(seen(&mut app), vec![]);
+    assert_eq!(flags(&app), DEFAULT_FLAGS, "palette");
+    app.world_mut().resource_mut::<Palette>().open = false;
+    app.update();
+    tap(&mut app, &[KeyCode::ControlLeft, KeyCode::Digit2]);
+    assert_eq!(seen(&mut app), vec![Action::ToggleLog], "typing over: the keys work again");
 }
 
-/// Keyboard focus stays on fields and open popups (`keep_focus_on_fields`): a clicked or navigated button loses it,
-/// so Space (the palette) and Enter do not activate it again — a select's trigger too, which its closing list focuses
-/// again; Tab navigation outside typing lands nowhere; a field clicked into, a field reached by Tab from a field,
-/// items of an open popup and `AutoFocus` keep it. Bevy focuses a click with `FocusCause::Navigated` as well, with
-/// the focus ring hidden; Tab navigation shows it.
+/// Keyboard focus is Bevy's (design §2): whatever Bevy focuses keeps the focus — a button clicked, reached by Tab or
+/// focused on purpose (`AutoFocus`), a select's trigger and the items of its open list, a field reached by Tab while
+/// nothing was typed, any `TabIndex` entity. Bevy focuses a click with `FocusCause::Navigated` as well, with the focus
+/// ring hidden; Tab navigation shows it.
 #[test]
-fn focus_stays_on_fields_and_open_popups() {
+fn focus_is_never_dropped() {
     use bevy::input_focus::{FocusCause, InputFocusVisible, process_recorded_focus_changes};
     use bevy::ui_widgets::popover::Popover;
     use bevy::ui_widgets::{Button, MenuItem, MenuPopup};
@@ -518,9 +687,9 @@ fn focus_stays_on_fields_and_open_popups() {
         app.world().resource::<InputFocus>().get()
     };
     let button = app.world_mut().spawn(Button).id();
-    assert_eq!(focused(&mut app, button, By::Click), None, "clicked");
-    assert_eq!(focused(&mut app, button, By::Tab), None, "Tab");
-    assert!(!app.world().resource::<InputFocusVisible>().0, "no focus ring left");
+    assert_eq!(focused(&mut app, button, By::Click), Some(button), "clicked");
+    assert_eq!(focused(&mut app, button, By::Tab), Some(button), "Tab");
+    assert!(app.world().resource::<InputFocusVisible>().0, "the focus ring stays on");
     assert_eq!(focused(&mut app, button, By::Auto), Some(button), "AutoFocus");
 
     // A Feathers select: a `FeathersMenu` with its trigger button next to its list.
@@ -528,8 +697,8 @@ fn focus_stays_on_fields_and_open_popups() {
     let trigger = app.world_mut().spawn((Button, ChildOf(select))).id();
     let list = app.world_mut().spawn((MenuPopup::default(), ChildOf(select))).id();
     let item = app.world_mut().spawn((MenuItem, ChildOf(list))).id();
-    assert_eq!(focused(&mut app, item, By::Tab), Some(item), "the open list keeps it");
-    assert_eq!(focused(&mut app, trigger, By::Tab), None, "the trigger after the list closed");
+    assert_eq!(focused(&mut app, item, By::Tab), Some(item), "the open list");
+    assert_eq!(focused(&mut app, trigger, By::Tab), Some(trigger), "the trigger after the list closed");
     let picker = app.world_mut().spawn(Popover::default()).id();
     let mode = app.world_mut().spawn((Button, ChildOf(picker))).id();
     assert_eq!(focused(&mut app, mode, By::Click), Some(mode), "a button in a popover");
@@ -538,10 +707,10 @@ fn focus_stays_on_fields_and_open_popups() {
 
     let field = app.world_mut().spawn(EditableText::default()).id();
     let next = app.world_mut().spawn(EditableText::default()).id();
-    assert_eq!(focused(&mut app, field, By::Tab), None, "Tab while not typing");
+    assert_eq!(focused(&mut app, field, By::Tab), Some(field), "Tab while not typing");
     let other = app.world_mut().spawn_empty().id();
-    assert_eq!(focused(&mut app, other, By::Tab), None, "anything, Tab while not typing");
-    assert_eq!(focused(&mut app, field, By::Click), Some(field), "clicked into a field while not typing");
+    assert_eq!(focused(&mut app, other, By::Tab), Some(other), "anything, Tab while not typing");
+    assert_eq!(focused(&mut app, field, By::Click), Some(field), "clicked into a field");
     assert_eq!(focused(&mut app, next, By::Tab), Some(next), "Tab from a field to the next");
 }
 
@@ -560,10 +729,11 @@ fn open_menus_and_popups_block_hotkeys() {
     let blocked = |app: &mut App, what: &str| {
         app.update();
         tap(app, &[KeyCode::Backquote]);
+        tap(app, &[KeyCode::ControlLeft, KeyCode::Digit2]);
         tap(app, &[KeyCode::Tab]);
         tap(app, &[KeyCode::Space]);
         assert_eq!(seen(app), vec![], "{what}");
-        assert_eq!(flags(app), (true, true), "{what}");
+        assert_eq!(flags(app), DEFAULT_FLAGS, "{what}");
         assert_eq!(app.world().resource::<PaletteKey>().0, 0, "{what}");
     };
     let menu = app.world_mut().spawn(MenuRoot).id();
@@ -582,12 +752,12 @@ fn open_menus_and_popups_block_hotkeys() {
     app.update();
     tap(&mut app, &[KeyCode::Backquote]);
     tap(&mut app, &[KeyCode::Space]);
-    assert_eq!(seen(&mut app), vec![Action::ToggleLog], "closed");
+    assert_eq!(seen(&mut app), vec![Action::ToggleZen], "closed");
     assert_eq!(app.world().resource::<PaletteKey>().0, 1);
 }
 
-/// Review Focus 1: typing a name into the rename dialog (design §5.5) fires no hotkey — not Space (palette), Tab
-/// (properties), `c` (comment) or `` ` `` (log). Its text input has the focus (`AutoFocus`), as in the editor.
+/// Review Focus 1: typing a name into the rename dialog (design §5.5) fires no hotkey — not Space (palette), `c`
+/// (comment) or `` ` `` (log); Tab is no hotkey. Its text input has the focus (`AutoFocus`), as in the editor.
 #[test]
 fn typing_in_rename_dialog_fires_no_hotkey() {
     use bevy_enhanced_input::prelude::Start;
@@ -618,9 +788,38 @@ fn typing_in_rename_dialog_fires_no_hotkey() {
     }
     assert_eq!(seen(&mut app), vec![]);
     assert_eq!(app.world().resource::<PaletteKey>().0, 0, "no palette");
-    assert_eq!(flags(&app), (true, true), "log and properties stay");
+    assert_eq!(flags(&app), DEFAULT_FLAGS, "the panels stay");
     let e = app.world().resource::<Editor>();
     assert_eq!(e.dialog, dialog, "the dialog stays open");
     let d = e.doc().unwrap();
     assert_eq!((d.revision, d.asset.comments.len()), (revision, comments), "no comment, no edit");
+}
+
+/// Space held on a focused button presses the button, not the palette (design §2). Clicking the canvas while Space is
+/// still held clears the focus and reopens the keyboard gate: every active context is re-armed — the graph's too, not
+/// only `MainCtx` — so the held Space does not start `OpenPalette`; released and pressed again, it does.
+#[test]
+fn held_space_from_button_does_not_open_palette_after_focus_clears() {
+    use bevy::ui_widgets::Button;
+    use bevy_enhanced_input::prelude::Start;
+    use shader_editor_app::editors::graph::OpenPalette;
+    use shader_editor_app::editors::main_input::KeyboardGate;
+
+    let (_dir, mut app) = app(|e| e.open_asset(&material()));
+    app.init_resource::<PaletteKey>().add_observer(|_: On<Start<OpenPalette>>, mut n: ResMut<PaletteKey>| n.0 += 1);
+    let button = app.world_mut().spawn(Button).id();
+    app.world_mut().insert_resource(InputFocus::from_entity(button));
+    app.update();
+    press(&mut app, &[KeyCode::Space], 2);
+    assert!(app.world().resource::<KeyboardGate>().typing, "Space held on a focused button closes the gate");
+    app.world_mut().resource_mut::<InputFocus>().clear();
+    app.update();
+    assert!(!app.world().resource::<KeyboardGate>().typing, "the focus cleared reopens the gate");
+    app.update();
+    app.update();
+    release(&mut app, &[KeyCode::Space]);
+    assert_eq!(app.world().resource::<PaletteKey>().0, 0, "the held Space opens no palette");
+    tap(&mut app, &[KeyCode::Space]);
+    assert_eq!(app.world().resource::<PaletteKey>().0, 1, "pressed again, it does");
+    assert_eq!(seen(&mut app), vec![]);
 }

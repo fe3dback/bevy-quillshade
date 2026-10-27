@@ -315,9 +315,9 @@ fn pin_row(
         Node {
             justify_content: justify,
             align_items: AlignItems::Center,
-            min_height: px(22),
+            min_height: px(PIN_PHYSICAL),
             margin: UiRect::horizontal(px(-10)),
-            padding: UiRect::horizontal(px(10)),
+            padding: UiRect::horizontal(px(PIN_ROW_PADDING)),
         }
         Children [
             Text(label)
@@ -333,12 +333,27 @@ fn pin_row(
     }
 }
 
-/// A pin's port: bevy_noodle's `kit::port` dot with the model key. Its hover look (design §4.8) is bevy_noodle's
-/// `PortHoverStyle`; hit testing, wire drags and drop targets stay bevy_noodle's own (no enlarged hit area: a
-/// pickable area over the dot loses it to wires near it and is no drop target, decision 0033).
+/// A pin's port: bevy_noodle's kit port of [`PIN_PHYSICAL`] / [`PIN_VISUAL`] size, with the model key. Its hover
+/// look (design §4.8) is bevy_noodle's `PortHoverStyle`; hit testing, wire drags and drop targets stay bevy_noodle's
+/// own: the physical box is the hover / press area (no separate pickable area over it, decision 0033), and a dragged
+/// wire takes the nearest pin within [`WIRE_TARGET_RADIUS`] (`CanvasInteraction::wire_target_radius`, set in
+/// `attach_canvas`).
 fn pin_port(port: Port, color: Color, key: PinKey) -> impl Scene {
-    bsn! { @kit::port(port, color) key }
+    let size = kit::PortSize { physical: PIN_PHYSICAL, visual: PIN_VISUAL };
+    bsn! { @kit::port_sized(port, color, size) key }
 }
+
+/// A pin's physical size (design §6.3): its port's box, where it is hovered and pressed (also while hovered: it does
+/// not grow), where wires are anchored, and the room it takes (a pin row is as tall; node sizes derive from it).
+pub const PIN_PHYSICAL: f32 = 24.0;
+/// A pin's visual size (design §6.3): only the drawn dot, centred in the physical box, its border scaled with it;
+/// wires are drawn up to its rim and the hover look grows it.
+pub const PIN_VISUAL: f32 = 16.0;
+/// Horizontal padding of a pin row: the kit's 10 px plus what the physical box reaches further into the node than the
+/// kit's port, so a label keeps the kit's distance from it.
+const PIN_ROW_PADDING: f32 = 10.0 + (PIN_PHYSICAL - kit::PORT_SIZE) / 2.0;
+/// A dragged or lifted wire snaps to the nearest pin it may end on within this many logical screen px (design §6.3).
+pub const WIRE_TARGET_RADIUS: f32 = 40.0;
 
 /// The node a material previews (decision 0022).
 fn previewed_node(asset: &Asset) -> Option<&str> {
@@ -370,7 +385,14 @@ fn node_scene(
             GraphNode
             NodePosition(pos)
             key
-            Node { width: px(20), height: px(20), border: UiRect::all(px(1.5)), border_radius: BorderRadius::MAX }
+            // A pill fitting its two pins: their physical boxes sit on its ends (centred on the border), with a
+            // physical size of body between them to grab the node by.
+            Node {
+                width: px(2.0 * PIN_PHYSICAL),
+                height: px(PIN_PHYSICAL),
+                border: UiRect::all(px(1.5)),
+                border_radius: BorderRadius::MAX,
+            }
             BackgroundColor(Color::srgb_u8(44, 46, 52))
             SelectedBorderColor { selected: SELECTED }
             ChildOf(canvas)
@@ -1065,11 +1087,8 @@ fn keep_center_on_resize(
     *last = size;
 }
 
-/// Graph-space center of the visible canvas.
-pub fn view_center(world: &World, canvas: Entity) -> Vec2 {
-    let (Some(view), Some(c)) = (world.get::<CanvasView>(canvas), world.get::<ComputedNode>(canvas)) else {
-        return Vec2::ZERO;
-    };
+/// Graph-space center of the visible canvas (its view and laid-out node).
+pub fn view_center(view: &CanvasView, c: &ComputedNode) -> Vec2 {
     view.canvas_to_graph(c.size() * c.inverse_scale_factor() / 2.0)
 }
 
