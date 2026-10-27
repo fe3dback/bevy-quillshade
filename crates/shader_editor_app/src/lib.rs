@@ -30,6 +30,7 @@ pub mod game_image;
 pub mod highlight;
 pub mod history;
 pub mod inline;
+pub mod keys;
 pub mod search;
 pub mod state;
 pub mod tab;
@@ -81,9 +82,17 @@ fn attach_canvas(world: &mut World) {
     if let Some(canvas) = found {
         if let Some(mut interaction) = world.get_mut::<CanvasInteraction>(canvas) {
             interaction.pan_button = Some(PointerButton::Secondary);
-            // UE: dragging from a connected input starts a new wire; Ctrl+drag moves wires (decision 0032).
+            // UE: dragging from a connected input starts a new wire; Ctrl+drag lifts the pin's wires to move them
+            // (decision 0032, design §5.3), "Ctrl" being Ctrl or Super as in the hotkeys.
             interaction.detach_wires = false;
+            interaction.move_wires_keys =
+                vec![KeyCode::ControlLeft, KeyCode::ControlRight, KeyCode::SuperLeft, KeyCode::SuperRight];
+            // Dragged nodes snap to the grid (design §4.1); comment frames carry their nodes (`canvas::frame_scene`).
+            interaction.snap = Some(doc::GRID_SNAP);
         }
+        // A hovered pin's dot grows and lightens (design §4.8), also under a dragged wire.
+        let hover = PortHoverStyle { scale: canvas::PIN_HOVER_SCALE, lighten: canvas::PIN_HOVER_LIGHTEN };
+        world.entity_mut(canvas).insert(hover);
         world.insert_resource(EditorCanvas::new(canvas));
     }
 }
@@ -234,13 +243,16 @@ fn open_startup_project(mut editor: ResMut<Editor>, startup: Res<StartupProject>
 /// file in a text tab, after the asset's graph; `@game/textures/rock_albedo.ktx2`: a game image's tab;
 /// `@internal/default`: a built-in texture's read-only Texture tab); `SHADER_EDITOR_SELECT=stdlib::Lerp` selects the
 /// first node of that kind, or the comment frame of that id (`c01`).
-/// `SHADER_EDITOR_DEMO=palette|wire|dialog|about|quick_start[:N]|texture_channel:N|open_project|welcome|menu|tab_menu` additionally opens that popup before the
-/// shot (`menu`: the main menu's File; `welcome`: closes the project).
+/// `SHADER_EDITOR_DEMO=palette|wire|dialog|about|quick_start[:N]|texture_channel:N|open_project|welcome|menu[:name]|tab_menu|game_file_menu[:2]`
+/// additionally opens that popup before the shot (`menu`: the main menu's File, `menu:view`: its View, …;
+/// `game_file_menu`: the RMB menu of the first game image with a Texture asset — its item disabled —, `:2` of the
+/// first without one; `welcome`: closes the project).
 fn debug_screenshot(
     mut frames: Local<u32>,
     mut editor: ResMut<Editor>,
     mut palette: ResMut<ui::palette::Palette>,
     mut actions: ResMut<Actions>,
+    menus: Query<(Entity, &ui::MainMenu)>,
     mut commands: Commands,
     mut exit: MessageWriter<AppExit>,
 ) {
@@ -270,7 +282,7 @@ fn debug_screenshot(
         {
             // A node kind, or the id of a comment frame.
             if let Some(n) = d.asset.nodes.iter().find(|(_, n)| n.kind == sel).map(|(k, _)| k.clone()) {
-                d.selection = [n].into();
+                d.set_selection([n]);
             } else if d.asset.comments.iter().any(|f| f.id == sel) {
                 d.selected_frame = Some(sel);
             }
@@ -292,26 +304,38 @@ fn debug_screenshot(
             Ok("about") => actions.push(Action::About),
             Ok("quick_start") => actions.push(Action::QuickStart(0)),
             Ok(d) if d.starts_with("texture_channel:") => {
-                actions.push(Action::TextureChannel(d["texture_channel:".len()..].parse::<usize>().ok()))
+                actions.push(Action::PreviewChannel(d["texture_channel:".len()..].parse::<usize>().ok()))
             }
             Ok(d) if d.starts_with("quick_start:") => actions
                 .push(Action::QuickStart(d["quick_start:".len()..].parse::<usize>().unwrap_or(1).saturating_sub(1))),
             Ok("open_project") => actions.push(Action::OpenProjectDialog),
             Ok("welcome") => actions.push(Action::CloseProject(state::Unsaved::Discard)),
-            Ok("menu") => ui::dialog::open_icon_menu(&mut commands, Vec2::new(6.0, 30.0), ui::MainMenu::File.items()),
+            Ok(d) if d == "menu" || d.starts_with("menu:") => {
+                let name = d.strip_prefix("menu:").unwrap_or("file");
+                if let Some((menu, _)) = menus.iter().find(|(_, m)| m.label().eq_ignore_ascii_case(name)) {
+                    let open = bevy::ui_widgets::MenuAction::Open(bevy::input_focus::tab_navigation::NavAction::First);
+                    commands.trigger(bevy::ui_widgets::MenuEvent { source: menu, action: open });
+                }
+            }
             Ok("tab_menu") => ui::dialog::open_icon_menu(&mut commands, Vec2::new(260.0, 60.0), ui::tabs::tab_menu(0)),
-            Ok("game_file_menu") => {
-                // RMB menus of the first game image with a Texture asset (disabled item) and the first without.
+            Ok(d) if d == "game_file_menu" || d == "game_file_menu:2" => {
+                // The RMB menu of the first game image with a Texture asset (disabled item) or, `:2`, without one.
                 let has = |f: &&String| shader_project::game_assets::texture_for_file(&editor.disk, f).is_some();
-                let with = editor.game_files.iter().find(has);
-                let without = editor.game_files.iter().find(|f| !has(f));
-                for (i, f) in [with, without].into_iter().flatten().enumerate() {
+                let file = if d.ends_with(":2") {
+                    editor.game_files.iter().find(|f| !has(f))
+                } else {
+                    editor.game_files.iter().find(has)
+                };
+                if let Some(f) = file {
                     let row = ui::tree::TreeRow {
                         tree: ui::tree::TreeId::GameAssets,
                         item: ui::tree::TreeItem::GameFile(f.clone()),
                     };
-                    let pos = Vec2::new(240.0, 300.0 + 60.0 * i as f32);
-                    ui::dialog::open_menu_entries(&mut commands, pos, ui::tree::row_menu(&editor, &row));
+                    ui::dialog::open_menu_entries(
+                        &mut commands,
+                        Vec2::new(240.0, 300.0),
+                        ui::tree::row_menu(&editor, &row),
+                    );
                 }
             }
             _ => {}

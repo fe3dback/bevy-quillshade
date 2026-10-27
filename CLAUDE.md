@@ -27,7 +27,7 @@ changing codegen, file format or editor architecture. Manual pre-release UI chec
 ## Commands
 
 ```sh
-cargo test --workspace                                   # everything (unit, pipeline, snapshots + WESL compile, UI smoke)
+cargo test --workspace                                   # everything: unit, pipeline, snapshots + WESL, UI smoke
 cargo test -p shader_graph_core <test_name>              # single unit test in a crate
 cargo test -p shader_project --test pipeline <test_name> # single integration test
 cargo clippy --workspace --all-targets -- -D warnings
@@ -58,6 +58,11 @@ assets, so check `git status` first.
 Cargo workspace; root package is only the `shader-editor` binary (`src/main.rs`, clap). `examples/sample_game` is a
 **separate workspace** (excluded from the root one) — build it from its own directory, ideally with
 `CARGO_TARGET_DIR=<repo>/target/sample`.
+`vendor/bevy_noodle` is a local fork of bevy_noodle 0.5.0 (workspace member, path dependency, same crate name,
+decision 0034): canvas / gesture behaviour (drags, snapping, wire gestures, port looks) goes **into the fork**, never
+into app-side workarounds; every fork change is appended to its `FORK.md` ("Changes from upstream", what and why), is
+off by default and keeps upstream's tests passing, so an upgrade is: vendor the new release, re-apply the `FORK.md`
+entries. The fork's own strict `clippy.toml` applies there (no `unwrap` / `expect` / indexing outside tests).
 
 Crate dependency chain (lower crates never depend on higher ones; only the last one depends on Bevy):
 
@@ -117,9 +122,9 @@ atomic write. Key facts that span several files:
   `build_ir` step 6 (unconnected struct input → default constructor) and step 7 (a function signature using it). Pbr3d
   `PbrSettings::output` = `Wrapped` turns `output::Pbr3d` into `attributes` + WPO, expanded into the same per-field
   output keys as `Default`. Only `Lerp` (`PinDef::attributes`) accepts the struct among polymorphic nodes.
-- **Node context actions** (decision 0021) are data on `NodeDef` (node RMB menu, `Shift + - * /` convert, `V`). A material
-  can store a **node preview** (`Asset::preview`, decision 0022): the node's output replaces the material output in the
-  generated WESL (W107/W108); `Node::label` is an optional title for Constant nodes.
+- **Node context actions** (decision 0021) are data on `NodeDef` (node RMB menu, `Shift + - * /` convert, `V`). A
+  material can store a **node preview** (`Asset::preview`, decision 0022): the node's output replaces the material
+  output in the generated WESL (W107/W108); `Node::label` is an optional title for Constant nodes.
 - **Type conversions** (broadcast, truncation, Color↔Float4, Int→Float) are applied in codegen on the edge, not as
   inserted nodes (`shader_graph_core::types::conversion`); truncation emits W104.
 - **Functions** are separate WESL modules imported by materials via relative `super::` paths (`codegen_wesl::paths`) —
@@ -161,7 +166,8 @@ and commit messages too:
 └────────────────┴───────────────────────────────────────┴─────────────────────┘
 ```
 
-- **menu_bar** — global: logo, main menu (File / Assets / Help), global actions; never buttons of one editor kind.
+- **menu_bar** — global: logo, main menu (File / Edit / View / Assets / Help), global actions; never buttons of one
+  editor kind.
 - **left sidebar** — global: **project tree** (`shaders/**` assets) above **assets tree** (the game's `assets/`,
   read-only, plus the virtual Internal folder).
 - **tabs bar** — open tabs; visually separate from the editor topbar below it.
@@ -186,18 +192,21 @@ and commit messages too:
   Bodies (`*ViewBar`, `*SidebarBody`) are refilled by the kind's systems keyed on what they show (sidebars:
   `(ui.props, active)` via `SidebarKey`), never every frame. Property widgets and their observers stay in
   `ui/props.rs`; editor content views stay in `ui::DocArea`.
-- **Input contexts** (`editors/main_input.rs`, decision 0032): bevy_enhanced_input. One `InputRoot` entity carries
-  `MainCtx` (save, undo / redo, close / next tab, open, quit; always active, priority 2) and one context per kind
-  (`GraphCtx`, `CurveCtx`, `TextCtx`; priority 1) that `sync_input_context` activates only while the active tab is of
-  that kind — so a hotkey needs no "is this my tab" guard. The shared edit actions (`EditCopy`, `EditDelete`, …) are
+- **Input contexts** (`editors/main_input.rs`, decisions 0032, 0034): bevy_enhanced_input. One `InputRoot` entity
+  carries `MainCtx` (save, undo / redo, close / next tab, open, quit, the View toggles `` ` `` `ToggleLog` / Tab
+  `ToggleProperties`; always active, priority 2) and one context per kind (`GraphCtx` — palette on Space, Esc
+  `CancelWire`, …; `CurveCtx`, `TextCtx`; priority 1) that `sync_input_context` activates only while the active tab is
+  of that kind — so a hotkey needs no "is this my tab" guard. The shared edit actions (`EditCopy`, `EditDelete`, …) are
   bound by each kind that supports them and have one global handler each. Build actions with `hotkey::<A>()`
   (`consume_input` + `require_reset`) and the `ctrl` / `ctrl_shift` / `shift` / `plain` binding helpers ("Ctrl" = Ctrl
   or Super); handlers observe `On<Start<A>>` (`on_combo` / `on_plain`) and push `state::Action`s. Plain-key handlers
-  ignore the key while Ctrl, Alt or Super is held (`no_command_mods`). `gate_keyboard` (PreUpdate) hides the keyboard
-  from all contexts while typing (text field focused, palette or dialog open). Activating a context re-inserts its
-  bindings so a key held across a tab switch does not fire (relies on bevy_enhanced_input internals — re-check
-  `tests/input_contexts.rs` on upgrades). Mouse gestures stay picking observers and read modifiers via
-  `main_input::mods()`.
+  ignore the key while Ctrl, Alt or Super is held (`keys::no_command_mods`). `gate_keyboard` (PreUpdate, before
+  `InputFocusSystems::Dispatch`) hides the keyboard from all contexts while typing (text field focused, palette,
+  dialog, menu or popup open; a scrubbed number field only while LMB is held, `typing_into`). Keyboard focus stays on
+  fields (`keep_focus_on_fields`): a button never keeps it, Tab moves it only between fields. Activating a context
+  re-inserts its bindings so a key held across a tab switch does not fire (relies on bevy_enhanced_input internals —
+  re-check `tests/input_contexts.rs` on upgrades). Mouse gestures stay picking observers and read modifiers via
+  `keys::mods()` (`keys.rs`, below both `ui` and `editors`).
 
 - The model (`shader_graph_core::Asset` inside `doc::Doc`) is the source of truth. Widgets push `state::Action`s →
   `Editor::apply` mutates documents → the bevy_noodle canvas is **rebuilt from the model** on revision change (only when
@@ -207,6 +216,12 @@ and commit messages too:
   bevy_noodle's scene history.
 - Connection validity is decided by `doc::connection_error` via a custom `ConnectionCheck` (bevy_noodle ports are all
   `PortType::ANY`).
+- Ctrl+drag from a pin is the fork's move-wires gesture (`CanvasInteraction::move_wires_keys`, design §5.3): it lifts
+  the pin's wires (`MovingEdges`) without touching the model; candidate pins come from a `MoveCheck` observer running
+  `Editor::plan_move_wires` (`canvas::check_move`), and the drop's `GraphEdit::MoveEdges` is vetoed and turned into one
+  `Action::MoveWires` (`canvas::request_move_wires`); a refused drop on a pin logs why
+  (`ui::input::lifted_wires_dropped`). Esc (`GraphCtx` `CancelWire`) ends any wire drag by despawning
+  `GraphQuery::wire_of(canvas)`, as noodle's own cancel does.
 - Tabs are `tab::Tab` (graph `Doc`, read-only `TextDoc` of a generated file, `CurveDoc`, `ConstsDoc`, read-only
   `ImageDoc` of a game image decoded through `game_image::GameImageCache`, `TextureDoc` of a Texture asset — read-only
   for a built-in `@internal/…` texture), each implementing `doc_kind::TabDoc` (title, icon, watermark, dirty, save,
@@ -222,16 +237,34 @@ and commit messages too:
   virtual Internal folder), `game_image.rs` (`GameImageCache`: game images and internal textures decoded with
   `Image::from_buffer`), `droppable.rs` (`DroppableFile` / `Dropped`: dragging images, Texture, Function and Curve
   assets onto a graph; a function dropped into itself is refused through `search::is_self_call`, as in the palette).
-- Canvas details (decision 0033): node positions snap to `doc::GRID_SNAP` (5) — pointer drags in the `snap_drag`
-  observer (the lead node only), new / pasted nodes in `Editor::add_node` / `paste`; loaded positions are never
-  rewritten. Node emphasis (selection, pulsing preview, diagnostics) is a bevy_ui `Outline` written by
-  `node_outlines` every frame, and pin hover a `PinHalo` child — neither rebuilds the canvas. A box that fully
+- Canvas details (decisions 0033, 0034): node positions snap to `doc::GRID_SNAP` (10) — pointer drags through the
+  bevy_noodle fork's `CanvasInteraction::snap` (the grabbed node; `attach_canvas`), new / pasted nodes in
+  `Editor::add_node` / `paste`; loaded positions are never rewritten. Comment frames are `NodeFrame`s: dragging one
+  moves the nodes inside it in the same edits. Node emphasis (selection, pulsing preview, diagnostics) is a bevy_ui
+  `Outline` written by `node_outlines` every frame, and pin hover the fork's `PortHoverStyle` on the canvas
+  (`rebuild_canvas` carries `Hovered` to a rebuilt pin's new port) — neither rebuilds the canvas. A box that fully
   encloses a comment frame and selects all of its `Frame::nodes` marks it in `Doc::enclosed_frames`, so Delete
   removes it with the nodes.
 - UI is pure Bevy UI + Feathers (`bsn!`); **no egui**. Workarounds for Feathers 0.20 bugs are in `fixes.rs`.
+- **Feathers widgets, no look-alikes** (decision 0034): use `ui::widgets` / Feathers containers and controls — never a
+  hand-built widget where Feathers 0.20 has one. Panels are `pane_box` (+ `pane_title`) and the right sidebar's groups
+  `subpane_box`; joined buttons are `button_group` (`GroupButton`, `Caption`); labelled bools the captioned
+  `widgets::checkbox`; numbers `FeathersNumberInput` with a `SoftLimit` (`props::number_ranged` / `number_input`;
+  `HardLimit` only for a real bound). Menus are Feathers menus (`ui::main_menu` + `fill_main_menus`,
+  `dialog::open_menu_entries` / `open_icon_menu`) behind a transparent click barrier (`dialog::menu_barrier`), so an
+  outside click only closes them; one menu is open at a time. The kept hand-built widgets (tabs, tree rows, log rows,
+  palette, tooltip, `scroll_column`) and why are listed in decision 0034.
+- **View settings**: `UserConfig::show_log` / `show_properties` (View menu, `` ` `` / Tab, `Action::ToggleLog` /
+  `ToggleProperties`, saved at once); `log::show_log` and `show_active_areas` key on the flags.
+- `ui/image_preview.rs` (`ImagePreviewPlugin`, `doc_kind::PreviewDoc`): the zoom / pan / fit / channel / tiling preview
+  shared by the image and Texture tabs; one camera per tab, keyed by `(ViewKind, image path)`.
+- Graph editor topbar: static tools plus `GraphTopbarDynamic` (`redraw_graph_topbar`: Preview mode `button_group`,
+  generated WESL / Rust buttons). Rename by double click: `Editor::rename_target` / `header_action`, the
+  `canvas::NodeHeader` / `FrameTitleStrip` markers, `Action::TextDialog` → `Submit::SetText` (the sidebar's
+  `set_value`).
 - `EditorCorePlugin` runs without a window — logic is tested in `state::tests` and `tests/ui_smoke.rs`.
-- User config: `<OS config dir>/fe3dback/bevy-shader-editor/config.ron` (window size, recent projects, open tabs;
-  `config::os_config_dir`, decision 0018). Version/URL/author/disclaimer constants (`EDITOR_VERSION`, …) are in
+- User config: `<OS config dir>/fe3dback/bevy-shader-editor/config.ron` (window size, recent projects, open tabs, View
+  flags; `config::os_config_dir`, decision 0018). Version/URL/author/disclaimer constants (`EDITOR_VERSION`, …) are in
   `shader_editor_app`'s `lib.rs`; the logos are `assets/logo*.png`, compiled in (`ui::logo`).
 
 ### Icons (decision 0013)
@@ -253,9 +286,10 @@ hand-drawn ones, rasterized at runtime with resvg (`crates/shader_editor_app/src
   `<svg>` element of a similar icon-rs icon: 24x24 viewBox, `fill="none" stroke="#262626"
   stroke-linejoin="round" stroke-linecap="round"`, `stroke-width` 1.75 for line icons / 1.1 for solid ones, drawing
   inside 1.5..22.5. Colors only from `Palette::LIGHT`: ink `#262626`; faces `#ffffff #d4d4d4 #a4a4a4 #747474` (solid
-  only); accent `#2563eb` (the accent slot, rendered in `ui::ACCENT`) for the one modifier detail (the plus, the arrow), single marks stay ink-only. No `id`s, no
-  gradients/`<defs>`. Then add `const X: Icon = custom("name", Kind::Line, include_str!("../../icons/name.svg"));`,
-  the `IconId` variant, and the const to the `custom_icons_use_only_palette_colours` test list.
+  only); accent `#2563eb` (the accent slot, rendered in `ui::ACCENT`) for the one modifier detail (the plus, the arrow),
+  single marks stay ink-only. No `id`s, no gradients/`<defs>`. Then add
+  `const X: Icon = custom("name", Kind::Line, include_str!("../../icons/name.svg"));`, the `IconId` variant, and the
+  const to the `custom_icons_use_only_palette_colours` test list.
 - **Review a new icon** before using it: render it at 16 and 32 px on the dark panel color, e.g. with a scratch crate
   using `icon-rs` + `resvg` (`icon.recolor(&Palette::DARK)` → `usvg::Tree` → `resvg::render`), next to a neighbouring
   icon-rs icon to compare weight; then check it in the real UI with `SHADER_EDITOR_SCREENSHOT` (see Visual checks).
@@ -275,23 +309,41 @@ hand-drawn ones, rasterized at runtime with resvg (`crates/shader_editor_app/src
 ### Visual checks (debug env hooks)
 
 - Editor: `SHADER_EDITOR_SCREENSHOT=out.png [SHADER_EDITOR_OPEN=env/rock_wet.material.ron[#wesl|#rust]|@game/textures/rock_albedo.ktx2|@internal/default]
-  [SHADER_EDITOR_SELECT=stdlib::Lerp|c01] [SHADER_EDITOR_DEMO=palette|wire|dialog|about|quick_start[:N]|texture_channel:N|open_project|welcome|menu|tab_menu|game_file_menu] cargo run -- examples/sample_game`
+  [SHADER_EDITOR_SELECT=stdlib::Lerp|c01] [SHADER_EDITOR_DEMO=palette|wire|dialog|about|quick_start[:N]|texture_channel:N|open_project|welcome|menu[:<name>]|tab_menu|game_file_menu[:2]] cargo run -- examples/sample_game`
   — renders, saves the PNG and exits. `SHADER_EDITOR_SELECT` takes a node kind (its first node) or a comment frame
-  id. `SHADER_EDITOR_INPUT=drag|rmb_click|rmb_pan|mmb_pan|slider|color|pin_rmb|node_rmb|node_dblclick|hover|curve_drag|curve_add|texture_zoom|drop_game_file|ctrl_drag_wire|wire_drag|wire_hold|alt_click|box_delete|box_delete_partial`
+  id. `menu:<name>` opens that main menu (`file`, `edit`, `view`, `assets`, `help`); `game_file_menu` opens the RMB
+  menu of the first game image that has a Texture asset (its item disabled), `game_file_menu:2` of the first without.
+  `SHADER_EDITOR_INPUT=drag|rmb_click|rmb_pan|mmb_pan|slider|color|pin_rmb|node_rmb|node_dblclick|frame_dblclick|hover|curve_drag|curve_add|texture_zoom|drop_game_file|ctrl_drag_wire|ctrl_wire_hold|wire_drag|wire_hold|alt_click|box_delete|box_delete_partial|type_field`
   (+ `SHADER_EDITOR_INPUT_NODE=<id>`, `SHADER_EDITOR_INPUT_TRACE=1`, `SHADER_EDITOR_ZOOM=<f32>`) plays a scripted mouse
   gesture through winit's messages and logs the outcome (`demo` lines; `slider`/`color` also log the edited value;
-  with `SHADER_EDITOR_SELECT=c01` on rock_wet, `slider` drags that comment's Hue slider).
+  `texture_zoom` works on an image or Texture tab).
+  - `slider` drags the topmost number input with a soft limit across most of its on-screen width (scaled by the
+    canvas zoom) and logs its value and its node's position (a scrub must not move the node): an inline field on a
+    node counts only when it lies wholly inside the visible canvas (at the default fit zoom of rock_wet that is
+    `n05.default`; at `SHADER_EDITOR_ZOOM=1` `n06.default`) — the hook does not pan, so bring the field on screen
+    with `SHADER_EDITOR_ZOOM`. With `SHADER_EDITOR_SELECT=c01` on rock_wet it drags that comment's Hue field in the
+    right sidebar.
   - `drop_game_file` drags the tree row `SHADER_EDITOR_INPUT_FILE` — a Game Assets file as `<path under assets/>`
     (default: the first one) or a Project asset as `shaders/<path>.<kind>.ron` (e.g.
     `shaders/common/pulse.curve.ron`) — onto `SHADER_EDITOR_INPUT_NODE` (default: the canvas centre) and logs the
     graph's texture / curve references and function calls; it may create a Texture asset, so run it on a copy of the
     sample game.
-  - `hover` rests on the menu_bar's Undo button (its tooltip) or, with `SHADER_EDITOR_INPUT_PIN=<node>.<pin>`, on that
-    pin (hovered pins are logged).
+  - `hover` rests on the menu_bar's Undo button (its tooltip), on the widget whose tooltip starts with
+    `SHADER_EDITOR_INPUT_TIP=<prefix>` or, with `SHADER_EDITOR_INPUT_PIN=<node>.<pin>`, on that pin (hovered pins are
+    logged).
   - `ctrl_drag_wire` holds Ctrl and drags from `SHADER_EDITOR_INPUT_PIN=<node>.<pin>` (default: the topmost connected
     input) onto `SHADER_EDITOR_INPUT_TO=<node>.<pin>` (default: the nearest pin of the same direction on another node);
     `wire_drag` is the same without Ctrl, `wire_hold` keeps the button down (the shot shows the dragged wire);
-    `alt_click` Alt+clicks the `SHADER_EDITOR_INPUT_PIN` pin. All log the wires at both pins before and after.
+    `ctrl_wire_hold` is `ctrl_drag_wire` keeping Ctrl and the button down (the shot shows the lifted wires
+    mid-gesture, design §5.3; logs the lifted wires, the pin they snap to and the count of new wires dragged);
+    `SHADER_EDITOR_INPUT_AT=<dx>,<dy>` ends these drags that many logical px from the start pin instead (empty
+    canvas). `alt_click` Alt+clicks the `SHADER_EDITOR_INPUT_PIN` pin. All log the wires at both pins before and after.
+  - `node_dblclick` double-clicks the middle of an unselected node (or `SHADER_EDITOR_INPUT_NODE`), with
+    `SHADER_EDITOR_INPUT_AT=header` its header (the rename dialog of a named / labelled node, design §5.5);
+    `frame_dblclick` double-clicks the title strip of the first comment frame (or `SHADER_EDITOR_INPUT_FRAME=<id>`).
+    Both log the active tab and the open dialog.
+  - `type_field` clicks the right sidebar's Description field of the open graph, types `ab` and logs the focus and
+    the field's text.
   - `box_delete` drags a selection box from outside the first comment frame (or `SHADER_EDITOR_INPUT_FRAME=<id>`) past
     its far corner and presses Delete; `box_delete_partial` ends the box in the frame's middle. Both log frames, node
     count, selection and enclosed frames before and after.
@@ -303,12 +355,12 @@ hand-drawn ones, rasterized at runtime with resvg (`crates/shader_editor_app/src
 ## File format (`*.material.ron` / `*.function.ron`; curves: decision 0015; textures: decision 0024)
 
 Serialized `Asset { format_version, kind, name, nodes, edges, comments, meta, preview }` (`preview` omitted when
-default, decision 0022) with struct names, 2-space indent,
-nodes in a `BTreeMap` by id. Asset name comes from the file name (file wins over the `name` field); names must match
-`[a-z][a-z0-9_]*` (keywords are fine: generated identifiers and paths are prefixed `inp_`/`out_`/`fun_`/`dir_`/`mat_`/`crv_`,
-decision 0020; only user path components are prefixed — `autogen/stdlib/`, `autogen/functions/` and `autogen/curves/`
-stay unprefixed; only Custom/user-node input names keep the keyword check). Loading probes `format_version` first; bump it on incompatible changes and
-add a migration in `Asset::from_ron` (current version: 1). See decision 0003.
+default, decision 0022) with struct names, 2-space indent, nodes in a `BTreeMap` by id. Asset name comes from the file
+name (file wins over the `name` field); names must match `[a-z][a-z0-9_]*` (keywords are fine: generated identifiers and
+paths are prefixed `inp_`/`out_`/`fun_`/`dir_`/`mat_`/`crv_`, decision 0020; only user path components are prefixed —
+`autogen/stdlib/`, `autogen/functions/` and `autogen/curves/` stay unprefixed; only Custom/user-node input names keep
+the keyword check). Loading probes `format_version` first; bump it on incompatible changes and add a migration in
+`Asset::from_ron` (current version: 1). See decision 0003.
 
 ## Rules
 

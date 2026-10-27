@@ -1,5 +1,5 @@
-//! User config (spec §9 "State", decision 0018): window size, recent projects, open tabs. Lives outside the project,
-//! in `<OS config dir>/fe3dback/bevy-shader-editor/config.ron`.
+//! User config (spec §9 "State", decision 0018): window size, recent projects, open tabs, the View menu's flags. Lives
+//! outside the project, in `<OS config dir>/fe3dback/bevy-shader-editor/config.ron`.
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -16,6 +16,10 @@ pub struct UserConfig {
     pub recent_projects: Vec<PathBuf>,
     /// Open tabs (`AssetId::source_rel`, e.g. `shaders/env/rock.material.ron`) per project root.
     pub tabs: BTreeMap<PathBuf, ProjectTabs>,
+    /// View → Show log: the console/logs shows its messages, not only its header bar.
+    pub show_log: bool,
+    /// View → Show properties: the right sidebar is shown.
+    pub show_properties: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -27,7 +31,14 @@ pub struct ProjectTabs {
 
 impl Default for UserConfig {
     fn default() -> Self {
-        UserConfig { window: (1600, 960), maximized: false, recent_projects: Vec::new(), tabs: BTreeMap::new() }
+        UserConfig {
+            window: (1600, 960),
+            maximized: false,
+            recent_projects: Vec::new(),
+            tabs: BTreeMap::new(),
+            show_log: true,
+            show_properties: true,
+        }
     }
 }
 
@@ -100,6 +111,28 @@ mod tests {
         c.save(&path).unwrap();
         assert_eq!(UserConfig::load(&path), c);
         assert_eq!(UserConfig::load(&dir.path().join("missing.ron")), UserConfig::default());
+    }
+
+    /// Review Focus 3, 5: a config file from before the View menu opens with the log and the properties shown; the
+    /// flags survive a save and a load.
+    #[test]
+    fn view_flags_default_and_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.ron");
+        std::fs::write(
+            &path,
+            "(\n  window: (800, 600),\n  maximized: false,\n  recent_projects: [],\n  tabs: {},\n)\n",
+        )
+        .unwrap();
+        let old = UserConfig::load(&path);
+        assert_eq!(old.window, (800, 600), "the old file is read");
+        assert!(old.show_log && old.show_properties);
+        let c = UserConfig { show_log: false, ..UserConfig::default() };
+        c.save(&path).unwrap();
+        assert!(std::fs::read_to_string(&path).unwrap().contains("show_log: false"));
+        let loaded = UserConfig::load(&path);
+        assert_eq!(loaded, c);
+        assert!(!loaded.show_log && loaded.show_properties);
     }
 
     #[test]

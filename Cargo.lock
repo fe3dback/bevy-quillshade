@@ -1361,10 +1361,10 @@ checksum = "bff34eb29ff4b8a8688bc7299f14fb6b597461ca80fec03ed7d22939ab33e48f"
 [[package]]
 name = "bevy_noodle"
 version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bd278e647c7cd32c4a06000f0092ee1249554571df7c5aec0d24e20ac9a030fc"
 dependencies = [
  "bevy",
+ "ron",
+ "serde",
 ]
 
 [[package]]

@@ -1,14 +1,19 @@
 //! Image editor kind: a read-only game image (design §4.4, [`ImageDoc`]).
 
 use bevy::prelude::*;
+use shader_graph_core::texture::{AddressMode, SamplerSettings, TextureSettings};
 use shader_project::{AssetId, Project};
 
-use super::{EditorAreas, SidebarKey, fill_sidebar};
-use crate::doc_kind::TabDoc;
+use super::{EditorAreas, SidebarKey, fill_sidebar_with};
+use crate::doc_kind::{PreviewDoc, TabDoc};
+use crate::game_image::Channel;
 use crate::state::{Action, Editor};
 use crate::tab::{GAME_KEY_PREFIX, ImageDoc, Tab, ViewKind};
 use crate::ui::icons::IconId;
+use crate::ui::image_preview::PREVIEW_HOTKEYS;
 use crate::ui::image_view::ImageViewBar;
+use crate::ui::props::hotkey_row;
+use crate::ui::widgets::subpane_box;
 use crate::ui::{TEXT, TEXT_DIM, button, text};
 
 /// The image editor's window areas.
@@ -18,12 +23,12 @@ impl EditorAreas for ImageEditor {
     const VIEW: ViewKind = ViewKind::Image;
     const SIDEBAR_TITLE: &'static str = "Image";
 
-    /// The bar row, filled by `ui::image_view::redraw`.
+    /// The bar row, filled by `ui::image_view::redraw_bar`.
     fn topbar() -> Option<impl Scene> {
         Some(bsn! { @super::bar_row() ImageViewBar })
     }
 
-    /// The file and the Texture asset pointing at it.
+    /// The file, the Texture asset pointing at it, the preview's hotkeys.
     fn sidebar() -> Option<impl Scene> {
         Some(bsn! { @super::sidebar_body() ImageSidebarBody })
     }
@@ -35,7 +40,7 @@ impl EditorAreas for ImageEditor {
 
 /// The image editor's right sidebar body.
 #[derive(Component, Default, Clone)]
-pub struct ImageSidebarBody;
+struct ImageSidebarBody;
 
 fn redraw_sidebar(
     editor: Res<Editor>,
@@ -44,20 +49,50 @@ fn redraw_sidebar(
     mut commands: Commands,
 ) {
     let Some(Tab::Image(i)) = editor.tab() else { return key.forget() };
-    let Some(body) = key.changed(&editor, &body) else { return };
-    let mut rows: Vec<Box<dyn Scene>> = Vec::new();
-    image_rows(&editor, i, &mut rows);
-    fill_sidebar(&mut commands, body, rows);
+    fill_sidebar_with(&mut commands, &body, &mut key, SidebarKey::now(&editor), || image_rows(&editor, i));
 }
 
-/// A game image tab (design §4.4): the file and the Texture asset pointing at it (size and format are in the view's
-/// header, they come from the decoded image).
-fn image_rows(editor: &Editor, i: &ImageDoc, out: &mut Vec<Box<dyn Scene>>) {
+/// A game image tab (design §4.4): the file and the Texture asset pointing at it (size and format are in the editor
+/// topbar, they come from the decoded image), the preview's hotkeys.
+fn image_rows(editor: &Editor, i: &ImageDoc) -> Vec<Box<dyn Scene>> {
+    let mut out: Vec<Box<dyn Scene>> = Vec::new();
     out.push(Box::new(text(i.base_title(), TEXT, 15.0)));
     out.push(Box::new(text("Game image, read-only", TEXT_DIM, 12.0)));
     match editor.texture_for_file(&i.path) {
         Some(id) => out.push(Box::new(text(format!("Texture asset: {}", id.source_rel()), TEXT_DIM, 12.0))),
         None => out.push(Box::new(button("Create Texture Asset", Action::CreateTextureForFile(i.path.clone()), false))),
+    }
+    let hotkeys = PREVIEW_HOTKEYS.iter().map(|&(keys, what)| -> Box<dyn Scene> { Box::new(hotkey_row(keys, what)) });
+    vec![subpane_box("Image", out), subpane_box("Hotkeys", hotkeys.collect())]
+}
+
+impl PreviewDoc for ImageDoc {
+    /// The file with Bevy's default loader settings; tiled, with a Repeat sampler, so the 3x3 shows whether the image
+    /// tiles (a game image has no sampler of its own; the default one clamps).
+    fn preview_image(&self) -> (&str, TextureSettings) {
+        let repeat = SamplerSettings {
+            address_mode_u: AddressMode::Repeat,
+            address_mode_v: AddressMode::Repeat,
+            address_mode_w: AddressMode::Repeat,
+            ..SamplerSettings::image_plugin_default()
+        };
+        (&self.path, TextureSettings { sampler: self.tiled.then_some(repeat), ..TextureSettings::default() })
+    }
+
+    fn channel(&self) -> Channel {
+        self.channel
+    }
+
+    fn set_channel(&mut self, channel: Channel) {
+        self.channel = channel;
+    }
+
+    fn tiled(&self) -> bool {
+        self.tiled
+    }
+
+    fn set_tiled(&mut self, tiled: bool) {
+        self.tiled = tiled;
     }
 }
 

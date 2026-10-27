@@ -81,12 +81,15 @@ impl Editor {
                 let msg = if n == 0 {
                     "Regenerated: no changes".to_string()
                 } else {
-                    format!("Regenerated: {n} file(s) written")
+                    format!("Regenerated: {} written", plural(n, "file", "files"))
                 };
                 if errors > 0 {
                     self.push_msg(
                         Level::Warning,
-                        format!("{msg}; {errors} error(s) - affected assets kept their previous output"),
+                        format!(
+                            "{msg}; {} - affected assets kept their previous output",
+                            plural(errors, "error", "errors")
+                        ),
                     );
                 } else {
                     self.info(msg);
@@ -138,8 +141,8 @@ impl Editor {
                 self.regen_only.insert(id.clone(), regen_only);
                 self.note_wesl_lines(&report, true);
                 if errors > 0 {
-                    let msg =
-                        format!("Preview: {errors} error(s) in {} - its generated files were kept", id.source_rel());
+                    let errors = plural(errors, "error", "errors");
+                    let msg = format!("Preview: {errors} in {} - its generated files were kept", id.source_rel());
                     self.push_msg(Level::Warning, msg);
                 } else {
                     self.info(format!("Preview: regenerated {}", id.source_rel()));
@@ -176,11 +179,7 @@ impl Editor {
     pub fn status_info(&self) -> Option<StatusInfo> {
         let doc = self.tab()?.doc();
         let id = doc.asset();
-        let diagnostics: Vec<Diagnostic> = id
-            .into_iter()
-            .flat_map(|id| self.diags.get(id).into_iter().chain(self.regen_only.get(id)).flatten())
-            .cloned()
-            .collect();
+        let diagnostics: Vec<Diagnostic> = id.into_iter().flat_map(|id| self.asset_diagnostics(id)).cloned().collect();
         let wesl_lines = id.and_then(|id| self.wesl_lines.get(id).copied());
         let ctx = StatusCtx { diagnostics: &diagnostics, wesl_lines };
         doc.status(&ctx)
@@ -189,8 +188,12 @@ impl Editor {
     /// The first diagnostic of the active tab's asset, in console/logs order (live ones, then regeneration-only
     /// codes): what a click on the editor statusbar's problem count focuses.
     pub fn active_first_diagnostic(&self) -> Option<&Diagnostic> {
-        let id = self.tab()?.doc().asset()?;
-        self.diags.get(id).into_iter().chain(self.regen_only.get(id)).flatten().next()
+        self.asset_diagnostics(self.tab()?.doc().asset()?).next()
+    }
+
+    /// The diagnostics of asset `id`, in console/logs order: live ones, then regeneration-only codes.
+    pub fn asset_diagnostics(&self, id: &AssetId) -> impl Iterator<Item = &Diagnostic> {
+        self.diags.get(id).into_iter().chain(self.regen_only.get(id)).flatten()
     }
 
     /// All diagnostics for display: live ones plus regeneration-only codes.
@@ -201,8 +204,7 @@ impl Editor {
         ids.sort_by_key(|id| (Some(*id) != active.as_ref(), (*id).clone()));
         ids.dedup();
         for id in ids {
-            out.extend(self.diags.get(id).into_iter().flatten().cloned());
-            out.extend(self.regen_only.get(id).into_iter().flatten().cloned());
+            out.extend(self.asset_diagnostics(id).cloned());
         }
         out
     }
@@ -211,8 +213,7 @@ impl Editor {
     pub fn node_diags(&self) -> BTreeMap<NodeId, Vec<&Diagnostic>> {
         let mut m: BTreeMap<NodeId, Vec<&Diagnostic>> = BTreeMap::new();
         let Some(d) = self.doc() else { return m };
-        for diag in self.diags.get(&d.id).into_iter().flatten().chain(self.regen_only.get(&d.id).into_iter().flatten())
-        {
+        for diag in self.asset_diagnostics(&d.id) {
             if let Some(n) = &diag.node {
                 m.entry(n.clone()).or_default().push(diag);
             }

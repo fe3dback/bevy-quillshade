@@ -68,11 +68,9 @@ impl Editor {
             },
             Action::About => self.dialog = Some(Dialog::About),
             Action::QuickStart(step) => self.dialog = Some(Dialog::QuickStart(step)),
-            Action::TextureChannel(c) => {
-                if let Some(t) = self.texture_doc_mut() {
-                    t.channel = c.filter(|c| *c < 3);
-                    // The header's channel buttons show the choice.
-                    t.relayout();
+            Action::PreviewChannel(c) => {
+                if let Some(p) = self.preview_doc_mut() {
+                    p.set_channel(c.filter(|c| *c < 3));
                 }
             }
             Action::OpenUrl(url) => self.external.push(PathBuf::from(url)),
@@ -104,6 +102,15 @@ impl Editor {
                     let n = self.active.map_or(0, |a| (a + 1) % self.tabs.len());
                     self.activate(n);
                 }
+            }
+            // The layout follows the flags themselves (`ui::log`, `ui::areas`), no revision to bump.
+            Action::ToggleLog => {
+                self.config.show_log = !self.config.show_log;
+                self.save_config();
+            }
+            Action::ToggleProperties => {
+                self.config.show_properties = !self.config.show_properties;
+                self.save_config();
             }
             Action::Save => {
                 if let Some(i) = self.active
@@ -165,9 +172,8 @@ impl Editor {
                 if let Some(d) = self.doc_mut()
                     && (d.selection != sel || d.selected_frame.is_some() || !d.enclosed_frames.is_empty())
                 {
-                    d.selection = sel;
+                    d.set_selection(sel);
                     d.selected_frame = None;
-                    d.enclosed_frames.clear();
                     self.ui.props += 1;
                 }
             }
@@ -297,6 +303,19 @@ impl Editor {
                     label: "Folder path inside shaders/".into(),
                     initial: if dir.is_empty() { "new_folder".into() } else { format!("{dir}/new_folder") },
                     submit: Submit::Folder,
+                });
+            }
+            Action::TextDialog(target) => {
+                let (title, label) = match target {
+                    PropTarget::FrameTitle(_) => ("Comment", "Title"),
+                    _ => ("Rename node", "Name"),
+                };
+                let initial = self.current_value(&target).map(|v| v.as_str().to_string()).unwrap_or_default();
+                self.dialog = Some(Dialog::Input {
+                    title: title.into(),
+                    label: label.into(),
+                    initial,
+                    submit: Submit::SetText(target),
                 });
             }
             Action::RenameDialog(id) => {

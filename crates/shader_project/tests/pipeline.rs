@@ -264,7 +264,7 @@ fn curves_generate_rename_and_report_missing() {
     let edited = shader_graph_core::Curve::new("pulse", vec![(0.0, 1.0), (1.0, 0.0)]);
     ops::save_curve(&p, &id, &edited).unwrap();
     let r = regenerate(&p, &RegenOptions::default()).unwrap();
-    let changed: Vec<String> = r.changes.iter().map(|c| c.path().display().to_string()).collect();
+    let changed: Vec<String> = r.changes.iter().map(|c| p.rel(c.path())).collect();
     assert_eq!(changed.len(), 1, "{changed:?}");
     assert!(changed[0].contains("curves/dir_common/crv_pulse.wesl"), "{changed:?}");
     assert_eq!(read(&bands), before);
@@ -358,7 +358,7 @@ fn global_consts_are_inlined_and_their_users_follow() {
     ops::save_consts(&p, &id, &table).unwrap();
     let scope = shader_project::Scope::Affected([id.clone()].into());
     let r = regenerate(&p, &RegenOptions { scope, ..Default::default() }).unwrap();
-    let changed: Vec<String> = r.changes.iter().map(|c| c.path().display().to_string()).collect();
+    let changed: Vec<String> = r.changes.iter().map(|c| p.rel(c.path())).collect();
     assert_eq!(changed.len(), 1, "{changed:?}");
     assert!(changed[0].ends_with("dir_fx/mat_global_tint.wesl"), "{changed:?}");
     assert!(read(&tint).contains("0.75f"));

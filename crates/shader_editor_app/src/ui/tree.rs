@@ -215,7 +215,7 @@ pub fn row_menu(editor: &Editor, row: &TreeRow) -> Vec<MenuEntry> {
                 .texture_for_file(path)
                 .map(|other| format!("{} already points at this file", other.source_rel()));
             vec![MenuEntry {
-                icon: Some(IconId::Image),
+                icon: Some(IconId::Texture),
                 label: "Create Texture Asset".into(),
                 action: Action::CreateTextureForFile(path.clone()),
                 disabled,

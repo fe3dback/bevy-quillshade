@@ -10,10 +10,12 @@
 A counterpart of the UE5 Material Editor: material and function graphs are stored as RON next to the game
 (`shaders/**`), and the editor generates WESL from them (`assets/shaders/autogen/**`) plus the Rust crate
 `crates/shaders` with material types, baked material handles and `ShadersPlugin`. The UI is Bevy UI +
-Feathers, the canvas is [bevy_noodle](https://github.com/gold-silver-copper/bevy_noodle). Codegen and
+Feathers, the canvas is a local fork of [bevy_noodle](https://github.com/gold-silver-copper/bevy_noodle)
+(`vendor/bevy_noodle`, see its `FORK.md`). Codegen and
 validation also work without the GUI (CLI for CI).
 
-Specification — [`docs/techdoc.md`](docs/techdoc.md), manual UI checklist — [`docs/ui-checklist.md`](docs/ui-checklist.md), implementation decisions —
+Specification — [`docs/techdoc.md`](docs/techdoc.md), manual UI checklist —
+[`docs/ui-checklist.md`](docs/ui-checklist.md), implementation decisions —
 [`docs/decisions/`](docs/decisions/README.md).
 
 ## Installation
@@ -104,7 +106,12 @@ fn load(mut loader: BakedMaterialsLoader) {
 }
 
 // Material handles exist from the start (reserved); `load()` fills `BakedTextures` at once.
-fn spawn(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, baked: Res<BakedMaterials>, tex: Res<BakedTextures>) {
+fn spawn(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    baked: Res<BakedMaterials>,
+    tex: Res<BakedTextures>,
+) {
     let mesh = meshes.add(Sphere::new(1.0).mesh().uv(48, 24).with_generated_tangents().unwrap());
     commands.spawn((Mesh3d(mesh), MeshMaterial3d(baked.env.rock_wet.clone())));
     // Sprite2d materials go into `SpriteMaterial(..)`.
@@ -134,53 +141,53 @@ fn loading_screen(mut progress: MessageReader<BakedMaterialsProgress>) {
 - **Baked materials** (design §3). Regeneration writes `assets/shaders/autogen/baked.ron`: every valid Texture asset (id
   → image path + loader settings, used or not) plus the internal textures, and every material (id → parameter defaults
   by `inp_*` name, Texture asset id of every texture binding). The crate embeds it as `shaders::COMPILED_MANIFEST`. A
-  Texture asset with an error (E011, E012, E013, E014) is left out and the bindings using it get `@internal/default` (its
-  `BakedTextures` field stays, so the game still compiles, and holds the default texture at runtime); a
-  material that fails to build keeps its previous entry, like its Rust module (if a foreign file blocks `baked.ron`,
-  E008, the crate compiles that file instead). `shaders::BakedMaterials` (a resource) holds a handle per material,
-  nested by folder: `baked.env.rock_wet`, `baked.kw.dir_loop.mat_type`; `shaders::BakedTextures` an image handle per
-  texture: `tex.textures.rock_albedo`, `tex.internal.default`. Field names are the plain folder / asset names; a Rust
-  keyword gets its prefix (`dir_`, `mat_`, `tex_`), and a folder and an asset with the same name in one folder are both
-  prefixed (`env.dir_water.x`, `env.mat_water`). Both resources also map asset ids — the path under `shaders/`
-  without the extension, as in the manifest — to handles, for game data that names materials or textures (decision
-  0030): `baked.get::<RockWetMaterial>("env/rock_wet")` (typed; `None` for an unknown id or another material type; the
-  map itself is `baked.by_path: HashMap<String, UntypedHandle>`) and `tex.get("textures/rock_albedo")` /
+  Texture asset with an error (E011, E012, E013, E014) is left out and the bindings using it get `@internal/default`
+  (its `BakedTextures` field stays, so the game still compiles, and holds the default texture at runtime); a material
+  that fails to build keeps its previous entry, like its Rust module (if a foreign file blocks `baked.ron`, E008, the
+  crate compiles that file instead). `shaders::BakedMaterials` (a resource) holds a handle per material, nested by
+  folder: `baked.env.rock_wet`, `baked.kw.dir_loop.mat_type`; `shaders::BakedTextures` an image handle per texture:
+  `tex.textures.rock_albedo`, `tex.internal.default`. Field names are the plain folder / asset names; a Rust keyword
+  gets its prefix (`dir_`, `mat_`, `tex_`), and a folder and an asset with the same name in one folder are both prefixed
+  (`env.dir_water.x`, `env.mat_water`). Both resources also map asset ids — the path under `shaders/` without the
+  extension, as in the manifest — to handles, for game data that names materials or textures (decision 0030):
+  `baked.get::<RockWetMaterial>("env/rock_wet")` (typed; `None` for an unknown id or another material type; the map
+  itself is `baked.by_path: HashMap<String, UntypedHandle>`) and `tex.get("textures/rock_albedo")` /
   `tex.by_path: HashMap<String, Handle<Image>>` (filled by `load()`, follows hot reloads, and also holds a texture
   created in the editor after the build that a material uses). `by_path` is reserved at the root: a root folder
   `by_path/` becomes `dir_by_path`.
-- **Loading** (design §3.3): `ShadersPlugin` registers the materials and creates `BakedMaterials` with reserved
-  handles (usable in `Startup`) and `BakedTextures` with default handles. `shaders::BakedMaterialsLoader` (a
-  `SystemParam`) `load()`s once (idempotent; returns the number of textures being loaded, `BakedMaterialsProgress`
-  `total`; optional — without a call `ShadersPlugin` starts in the first `PreUpdate`, decision 0027): it starts loading every texture of the compiled manifest with its Texture
-  asset settings (`ImageLoaderSettings`: sampler, `is_srgb`, `expand_grayscale`) and fills `BakedTextures` at once (a
-  system chained after it sees the real handles); on the next `PreUpdate` every material is built from the compiled
-  values and inserted behind its handle (Bevy shows it once its images are loaded), and `baked.ron` itself is loaded as
-  an asset. `progress()` / `is_ready()` give the state;
-  the messages `BakedMaterialsProgress { loaded, failed, total }` (written whenever a count changes; `total` = valid
-  Texture assets + internal textures) and `BakedMaterialsReady` (once, when `loaded + failed == total`) report it. A texture
-  that fails to load (file deleted after regeneration, corrupt image) is logged as an error naming its id and path,
-  counted as `failed`, and every material using it is rebuilt with `@internal/default`; `BakedMaterialsReady` is still
-  sent. Use `BakedTextures` instead of `AssetServer::load` for files that have a Texture asset: Bevy keeps the
-  settings of the first load of a path, so a plain `load` may drop the asset's settings.
+- **Loading** (design §3.3): `ShadersPlugin` registers the materials and creates `BakedMaterials` with reserved handles
+  (usable in `Startup`) and `BakedTextures` with default handles. `shaders::BakedMaterialsLoader` (a `SystemParam`)
+  `load()`s once (idempotent; returns the number of textures being loaded, `BakedMaterialsProgress` `total`; optional —
+  without a call `ShadersPlugin` starts in the first `PreUpdate`, decision 0027): it starts loading every texture of the
+  compiled manifest with its Texture asset settings (`ImageLoaderSettings`: sampler, `is_srgb`, `expand_grayscale`) and
+  fills `BakedTextures` at once (a system chained after it sees the real handles); on the next `PreUpdate` every
+  material is built from the compiled values and inserted behind its handle (Bevy shows it once its images are loaded),
+  and `baked.ron` itself is loaded as an asset. `progress()` / `is_ready()` give the state; the messages
+  `BakedMaterialsProgress { loaded, failed, total }` (written whenever a count changes; `total` = valid Texture assets +
+  internal textures) and `BakedMaterialsReady` (once, when `loaded + failed == total`) report it. A texture that fails
+  to load (file deleted after regeneration, corrupt image) is logged as an error naming its id and path, counted as
+  `failed`, and every material using it is rebuilt with `@internal/default`; `BakedMaterialsReady` is still sent. Use
+  `BakedTextures` instead of `AssetServer::load` for files that have a Texture asset: Bevy keeps the settings of the
+  first load of a path, so a plain `load` may drop the asset's settings.
 - **Hot reload** (design §3.2, §3.3 step 4): the compiled manifest is the base, `baked.ron` is an overlay applied when
   it loads and whenever it changes on disk — that needs Bevy's `file_watcher` feature, which the game enables itself
-  (see the `Cargo.toml` above; the editor never adds it). Without a rebuild of the game these changes apply:
-  parameter values and the texture of a binding (the material is rebuilt behind the same handle); a Texture asset
-  pointed at another file (loaded with its settings and swapped in `BakedTextures` and in the materials — entities
-  that took the old image, e.g. a spawned `Sprite`, keep it); a sampler change (set on the loaded image, the
-  materials using it are refreshed); a texture created in the editor and used by a material (loaded by path, but not
-  in `BakedTextures`); another TextureSample / TextureObject node wired in place of the one the game was built with
-  (texture bindings are matched by number, decision 0029). These need a rebuild (`cargo run` again): `is_srgb` /
-  `expand_grayscale` (Bevy keeps the first load's settings), adding / removing / renaming / retyping a parameter or a
-  texture binding, adding or removing World Position Offset, adding / removing / renaming a material or changing its
-  kind or blend settings, new `BakedTextures` fields. A material whose bindings changed stops rendering until the
-  rebuild instead of crashing the game: each generated material passes its `LAYOUT_FEATURE` (`SG_LAYOUT_<hash>`) as
-  a shader def, and the WESL does not compile without its own (Bevy logs "no definition in scope for identifier:
-  `material_layout_changed__rebuild_the_game`", the game logs that the material changed; decision 0029). Anything out of sync with the
-  compiled code — a material or key the code does not know, a key the manifest lacks or retypes — keeps the compiled
-  value and logs one warning per key ("rebuild the game"); a `baked.ron` that does not parse or has another version
-  logs a warning and changes nothing. Textures loaded by a hot reload are not counted in `BakedMaterialsProgress`
-  after `BakedMaterialsReady`; one that fails falls back to `@internal/default` as above.
+  (see the `Cargo.toml` above; the editor never adds it). Without a rebuild of the game these changes apply: parameter
+  values and the texture of a binding (the material is rebuilt behind the same handle); a Texture asset pointed at
+  another file (loaded with its settings and swapped in `BakedTextures` and in the materials — entities that took the
+  old image, e.g. a spawned `Sprite`, keep it); a sampler change (set on the loaded image, the materials using it are
+  refreshed); a texture created in the editor and used by a material (loaded by path, but not in `BakedTextures`);
+  another TextureSample / TextureObject node wired in place of the one the game was built with (texture bindings are
+  matched by number, decision 0029). These need a rebuild (`cargo run` again): `is_srgb` / `expand_grayscale` (Bevy
+  keeps the first load's settings), adding / removing / renaming / retyping a parameter or a texture binding, adding or
+  removing World Position Offset, adding / removing / renaming a material or changing its kind or blend settings, new
+  `BakedTextures` fields. A material whose bindings changed stops rendering until the rebuild instead of crashing the
+  game: each generated material passes its `LAYOUT_FEATURE` (`SG_LAYOUT_<hash>`) as a shader def, and the WESL does not
+  compile without its own (Bevy logs "no definition in scope for identifier:
+  `material_layout_changed__rebuild_the_game`", the game logs that the material changed; decision 0029). Anything out of
+  sync with the compiled code — a material or key the code does not know, a key the manifest lacks or retypes — keeps
+  the compiled value and logs one warning per key ("rebuild the game"); a `baked.ron` that does not parse or has another
+  version logs a warning and changes nothing. Textures loaded by a hot reload are not counted in
+  `BakedMaterialsProgress` after `BakedMaterialsReady`; one that fails falls back to `@internal/default` as above.
 
 Full example — [`examples/sample_game`](examples/sample_game): one mesh per reference
 material, using only `BakedMaterialsLoader` / `BakedMaterials` / `BakedTextures` (no `assets.load`, no material
@@ -196,17 +203,20 @@ how to hook the generated crate into the game. Open / New Project show the syste
 xdg-desktop-portal); cancel it to type or paste the path instead (Browse... reopens it).
 
 The menu_bar holds the logo and the main menu — **File** (Open Project, New Project, Close Project, Save, Save All,
-Quit), **Assets** (create a Pbr3d/Unlit3d/Sprite2d material, a function, a curve, a global constant table, a folder;
+Quit), **Edit** (Undo, Redo), **View** (Show log, Show properties: checked while on; the log hidden keeps only its
+header bar with the counts, the properties hidden leave the width to the editor content; both are remembered),
+**Assets** (create a Pbr3d/Unlit3d/Sprite2d material, a function, a curve, a global constant table, a folder;
 Regenerate) and **Help** (Quick Start: how to hook a game up, one tab per step; Project Page; About: version, link,
 author, license) — then Undo / Redo and, on the right, the project name and its error count (the full path is the
 tooltip).
 
-Under the tabs bar, the editor topbar holds the buttons of the active tab's kind (graph: Auto-layout, Comment, Fit;
-curve: path, Select all, Delete, preview mode, generated WESL; constant table: path and count; generated file: path,
-Copy, Source, Open externally; game image: path and size; Texture asset: Easy / Advanced, presets, channel, tiling,
-zoom). Under the editor content, the editor statusbar of a graph, curve or constant table shows `● unsaved`, the
-asset's error / warning count (click: show the first problem) and its size (nodes and generated WESL lines, points,
-constants).
+Under the tabs bar, the editor topbar holds the buttons of the active tab's kind (graph: Auto-layout, Comment, Fit,
+a material's Preview mode group, then on the right icon-only generated WESL and — for a material — Rust; curve: path,
+Select all, Delete, preview mode, generated WESL; constant table: path; generated file: path, Copy, Source,
+Open externally; game image: path, size, channel, tiling, zoom; Texture asset: Easy / Advanced, presets, channel,
+tiling, zoom). Under the editor content, the editor statusbar of a graph, curve or constant table shows
+`● unsaved`, the asset's error / warning count (click: show the first problem) and its size (nodes and generated WESL
+lines, points, constants).
 
 On the left is the asset browser — the **Project** panel (the `shaders/` tree: double click opens an asset; RMB on a
 folder or on the empty space below the tree creates a Pbr3d/Unlit3d/Sprite2d material, a function, a curve, a global
@@ -236,18 +246,22 @@ sets its curve, anywhere else it adds a `Sample Curve` reading it. Each drop is 
 
 Double-click an image to open it in a read-only **image tab**: the image fitted to the view (transparent parts over a
 checkerboard), `WxH | format | mips` in its editor topbar, a load / decode error as text (decoded by Bevy, like the game
-would); it follows changes of the file and is restored on the next launch.
+would); it follows changes of the file and is restored on the next launch. Its preview is the Texture tab's (below):
+wheel zoom, drag pan, double-click fit, R | G | B | All and "Tile 3x3" (repeated: a game image has no sampler of its
+own); each tab keeps its own zoom.
 
 Double-click a Texture asset to open its **Texture tab**: on the left a form with the image path (relative to `assets/`,
 applied on Enter; refused when another Texture asset already points at the file — on disk or in an open, unsaved tab, so
 a file a tab moved away from stays taken until that tab is saved — or when the path breaks the E012 rules; "Create
 Texture Asset" follows the same rule), sRGB and Expand grayscale (both need a rebuild in the game; grayscale expansion
 is not previewed — the editor always expands) and the sampler. **Easy** mode (the editor topbar's Easy | Advanced; the
-default unless the sampler is one no preset describes) has no form: "Use for" **Pixel art** (Nearest, Clamp to edge),
-**UI** (bilinear, Clamp to edge), **3D** (trilinear, Repeat) or **Ground** (trilinear + 16x anisotropy, Repeat) sets the
-whole sampler for that use (sRGB stays; one undo step). **Advanced** is the form: path, sRGB, Expand grayscale,
-"Default" (= the app's default sampler: with Bevy's `ImagePlugin::default()` Linear filters and Clamp to edge, *not*
-Repeat; turning it off starts from those values) and every sampler field. The image path, size, format and mip count are
+default unless the sampler is one no preset describes — then Easy is disabled) has no form: "Use for" **Default** (no
+sampler stored: the game's default, with Bevy's `ImagePlugin::default()` Linear and Clamp to edge), **Pixel art**
+(Nearest, Clamp to edge), **UI** (bilinear, Clamp to edge), **3D** (trilinear, Repeat) or **Ground** (trilinear + 16x
+anisotropy, Repeat) sets the whole sampler for that use (sRGB stays; one undo step); one of them is always selected,
+read back from the sampler in the file. **Advanced** is the form: path, sRGB, Expand grayscale, "Default" (= the app's
+default sampler: with Bevy's `ImagePlugin::default()` Linear filters and Clamp to edge, *not* Repeat; turning it off
+starts from those values) and every sampler field. The image path, size, format and mip count are
 in the right sidebar. The preview is decoded with the current, unsaved settings: the wheel zooms around the pointer
 (Nearest vs Linear shows up close), a drag pans, a double click fits again, "Tile 3x3" repeats the image so the address
 modes show, **R | G | B | All** shows one channel in grey (compressed formats: tinted) or the image (preview only).
@@ -262,45 +276,51 @@ does not load); it follows unsaved edits of an open Texture tab, and a `TextureS
 or texture parameter shows that node's texture.
 
 Tabs and menus show icons too; Undo / Redo are icon-only buttons — hover a menu_bar or editor topbar button for its
-name and hotkey.
-Tabs are compact and wrap onto more rows when there are many; a tab shows the file name only (`rock_wet`), the full
-path when several open tabs share that name, and the full path as its tooltip. RMB on a tab: Close / Close All / Close Others / Close to the Left / Close to the Right / Close Unmodified. The bottom-right corner of the main view shows the open document's type (`pbr3d`, `unlit3d`, `sprite2d`,
-`function`, `curve`, `consts`, `image`, `texture`, or `wesl`/`rust` for a generated file) as a faint watermark over
-the view.
+name and hotkey. Main and RMB menus are Feathers menus: while one is open it has the keyboard (Up / Down, Home / End,
+Enter or Space activate, Esc closes); a click outside only closes it.
+Tabs are compact and wrap onto more rows when there are many; a tab shows the file name only (`rock_wet`), the full path
+when several open tabs share that name, and the full path as its tooltip. RMB on a tab: Close / Close All / Close
+Others / Close to the Left / Close to the Right / Close Unmodified. The bottom-right corner of the main view shows the
+open document's type (`pbr3d`, `unlit3d`, `sprite2d`, `function`, `curve`, `consts`, `image`, `texture`, or
+`wesl`/`rust` for a generated file) as a faint watermark over the view.
 Generated-file tabs refresh after every regeneration; Ctrl+C there copies the whole file, and the editor topbar
 has "Open in the default application". Icons come from [icon-rs](https://crates.io/crates/icon-rs), plus a few
 drawn by hand in `crates/shader_editor_app/icons/`.
 Validation runs live: nodes with errors are outlined in red, with warnings — in yellow.
 
-On the canvas (decision 0033) node positions snap to a 5-unit grid when touched: a dragged node jumps from grid point
-to grid point (in a multi-node drag the lead node snaps and the others keep their offsets to it), and new, pasted and
-duplicated nodes land on the grid; positions loaded from a file stay as they are until moved. A selected node has a
-3 px yellow outline. Named Route declarations and their usages, Constant nodes with a label and `Global*` nodes get a
-header colour from their name (route, label or constant), so a route's declaration and usages match. The pin under
-the pointer is highlighted (also while dragging a wire onto it). **Comment frames** (C) get a Hue slider and a
-"Default colour" button in the right sidebar when selected; a box selection that fully encloses a frame and covers
-all of its nodes marks it, and Delete then removes the frame with the nodes (one undo step; Cut keeps the frame, and so
-does a frame around the material output, which is never deleted).
+On the canvas (decisions 0033, 0034) node positions snap to a 10-unit grid when touched: a dragged node jumps from
+grid point to grid point (in a multi-node drag the node under the pointer snaps and the others keep their offsets to
+it), and new, pasted and duplicated nodes land on the grid; positions loaded from a file stay as they are until moved.
+A selected node has a 3 px white outline. Named Route declarations and their usages, Constant nodes with a label and
+`Global*` nodes get a header colour from their name (route, label or constant), so a route's declaration and usages
+match. The pin under the pointer grows and lightens (also while dragging a wire onto it). **Comment frames** (C):
+dragging one moves the nodes that lie inside it when the drag starts (nested frames too); a selected frame gets a Hue
+field (0..360) and a "Default colour" button in the right sidebar; a box selection that fully encloses a frame and
+covers all of its nodes marks it, and Delete then removes the frame with the nodes (one undo step; Cut keeps the
+frame, and so does a frame around the material output, which is never deleted).
 
-Values are also edited right on the nodes (UE-style): an unconnected input shows a slider (inputs with a known
-range, e.g. Lerp Alpha), a number field, X/Y fields, or a color button (Float3/Float4/Color) that opens a color picker (values are linear;
-exact components are edited in Properties); a wire hides the editor. Constants and parameters edit their value under the
-title (ScalarParameter's slider spans Slider Min..Max). RMB on an input pin: the type of polymorphic inputs
-(Float…Float4, e.g. Lerp A/B), Reset to default, Disconnect. RMB on a node: its own actions with their hotkeys
+Values are also edited right on the nodes (UE-style): an unconnected input shows a number field, X/Y fields, or a
+color button (Float3/Float4/Color) that opens a color picker (values are linear; exact components are edited in
+Properties); a wire hides the editor. Dragging a number field changes its value (one undo step per drag); inputs with
+a known range (e.g. Lerp Alpha) show it as a bar and drag only within it, but a click into the field types any value,
+also one outside the range. Constants and parameters edit their value under the title (ScalarParameter's range is its
+Slider Min..Max). RMB on an input pin: the type of polymorphic
+inputs (Float…Float4, e.g. Lerp A/B), Reset to default, Disconnect. RMB on a node: its own actions with their hotkeys
 (Add / Subtract / Multiply / Divide: Convert to one of the other three, keeping wires and values; `TextureSample` /
-`TextureObject`: **Convert to Parameter** (not in functions) → `TextureSampleParameter2D` / `TextureObjectParameter` with the texture as
-its default, the mip mode and sampler type kept and a unique name `texture`, `texture_1`, …; back with **Convert to
-Texture Sample** / **Convert to Texture Object**, which drops name and group), then Exclusive
-preview (materials only), Copy / Duplicate / Delete; an unselected node is selected first. A node action's hotkey works
-on the selected nodes without the menu (decision 0021).
+`TextureObject`: **Convert to Parameter** (not in functions) → `TextureSampleParameter2D` / `TextureObjectParameter`
+with the texture as its default, the mip mode and sampler type kept and a unique name `texture`, `texture_1`, …; back
+with **Convert to Texture Sample** / **Convert to Texture Object**, which drops name and group), then Exclusive preview
+(materials only), Copy / Duplicate / Delete; an unselected node is selected first. A node action's hotkey works on the
+selected nodes without the menu (decision 0021).
 
 **Exclusive node preview** (decision 0022, like UE's "Start Previewing Node"): `V` on the one selected node (on release;
 `V` + LMB still drops a Vector parameter) or "Exclusive preview" in its menu shows that node's output on the material
 instead of the material output — the running game picks it up through hot reload. The node gets a 6 px outline pulsing
 between orange and dark red and a warning icon, the tab title says `(preview)`; `V` again or "Stop preview" turns it
-off. Toggling (and the mode select in Properties → Preview: `Unlit` / `Lit` / `Full`) is an undoable edit that marks the
-tab unsaved **and** regenerates that material's files from the in-memory graph at once, without saving — including the
-asset's other unsaved edits; closing the tab without saving regenerates them from disk again. Only nodes with an output
+off. Toggling (and the editor topbar's Preview mode group `Unlit` / `Lit` / `Full`, disabled until a node is
+previewed but still showing the stored mode) is an undoable edit that marks the tab unsaved **and** regenerates that material's files from the
+in-memory graph at once, without saving — including the asset's other unsaved edits; closing the tab without saving
+regenerates them from disk again. Only nodes with an output
 that converts to a color can be previewed; the preview is stored in the `.ron` on save, so `regen` / `check` produce
 what the editor showed (W107).
 
@@ -312,9 +332,9 @@ first/last point the curve holds the end values. The node shows a small read-onl
 while `T` is not connected; "n/a" when no curve is selected). Renaming a curve updates the nodes that use it.
 
 **Global constants** (`+Global Consts`, decision 0017) are tables of named values shared by every shader: the tab
-has an add form (name, type, Add or Enter) and the table (type select, value, delete). Types: `f32` (number field
-taking any value + a slider over `0..1` that widens to a value outside it), `vec2`/`vec3`/`vec4` (color picker +
-R/G/B/A fields, any value can be typed), `bool` (read as `1.0` / `0.0`),
+has an add form (name, type, Add or Enter) and the table (type select, value, delete). Types: `f32` (a number field
+taking any value, dragged over `0..1`, a range that widens to a typed value outside it), `vec2`/`vec3`/`vec4`
+(color picker + R/G/B/A fields, any value can be typed), `bool` (read as `1.0` / `0.0`),
 `compileFlag` (a real `bool`, connects only to logic nodes: If (Bool), And, Or, Not). Names are unique in the whole
 project. The nodes `GlobalConstF32`, `GlobalConstVec2/3/4`, `GlobalBool`, `GlobalCompileFlag` (Constants) pick a
 constant of their type from any table in Properties and show its value read-only (number, color square, green `1` /
@@ -364,6 +384,12 @@ own, a material as one binding per node of origin, however often the function is
 function / curve / constant table (or switches to its tab); Properties shows the same as an "Open …" button. User
 nodes are not editor assets and do nothing.
 
+**Double click on a node header** renames a node with a name or label — a parameter, a function's input / output, a
+Named Route declaration (its name; its usages follow), a Constant / Constant2–4Vector (its label; empty clears it) — in
+a small dialog (Enter applies, Esc cancels; one undo step, a bad name shows up as the usual diagnostic). Other nodes'
+headers act as their body: open the file they refer to, or nothing. **Double click on a comment frame's title** edits
+the title the same way.
+
 | Action | Keys |
 | --- | --- |
 | Save (and regenerate) / all | Ctrl+S / Ctrl+Shift+S |
@@ -372,9 +398,10 @@ nodes are not editor assets and do nothing.
 | Select all (nodes / curve points) | Ctrl+A |
 | Delete selection | Delete, Backspace |
 | Focus selection / whole graph | F / Home |
-| Node palette (search by name, category, synonyms: `*`, `+`, `lerp`) | Tab, RMB click on the canvas |
+| Node palette (search by name, category, synonyms: `*`, `+`, `lerp`) | Space, RMB click on the canvas |
 | Palette filtered by wire type + auto-connect | release a wire on empty space |
 | Node under the cursor: Constant/2/3/4Vector, Scalar/Vector parameter, TextureSample, Multiply, Add, Lerp, TexCoord, Reroute, Divide, OneMinus, Power, Normalize, Panner, If | `1` `2` `3` `4` `S` `V` `T` `M` `A` `L` `U` `R` `D` `O` `E` `N` `P` `I` + LMB |
+| Rename a node (name / label) / a comment frame | double click on its header / title |
 | Comment frame around the selection | C |
 | Delete a comment frame together with its nodes | box-select around the whole frame, Delete |
 | Reroute point on a wire / delete a wire | double click / RMB click or Alt+LMB on the wire |
@@ -384,7 +411,8 @@ nodes are not editor assets and do nothing.
 | Exclusive preview of the selected node on / off (materials) | `V` (on release) |
 | Disconnect every wire of a pin / a wire | Alt+LMB on the pin / on the wire |
 | New wire from a pin (from a connected input too: connecting replaces its wire) | LMB drag from the pin |
-| Move a wire to another input / all wires of an output to another output (all or nothing, one undo step) | Ctrl+LMB drag from the pin onto the other pin |
+| Move a wire to another input / all wires of an output to another output (all or nothing, one undo step) | Ctrl+LMB drag from the pin onto the other pin (the wires follow the cursor; they snap only to pins they can move to) |
+| Cancel a wire drag (a new wire or wires being moved) | Esc |
 | Named route: a wire without a visible wire (Named Route + one usage per place) | palette: "Named Route", then "Named Route Usage: {name}" |
 | Auto-layout the selection (or the whole graph) | Ctrl+L |
 | Close tab / next tab | Ctrl+W (or MMB on the tab) / Ctrl+Tab |
@@ -393,7 +421,7 @@ nodes are not editor assets and do nothing.
 | Open a game image / a built-in texture | double click in Game Assets / in Project → Internal |
 | Add a `TextureSample` for an image, or set a texture node's texture | drag an image (Game Assets), a Texture asset or `Internal` → `default` (Project) onto the canvas / onto the node |
 | Add a function call / a `Sample Curve`, or set a `Sample Curve`'s curve | drag a Function / Curve asset (Project) onto the canvas / onto the node |
-| Texture tab preview: zoom / pan / fit | wheel (around the pointer) / drag / double click |
+| Image / Texture tab preview: zoom / pan / fit | wheel (around the pointer) / drag / double click |
 | Open the function / curve / constant table a node refers to | double click on the node |
 | Scroll a generated file horizontally | Shift+wheel |
 | Curve: add a point / move / multi-select | double click on empty space / drag a point / Shift+click |
@@ -401,14 +429,17 @@ nodes are not editor assets and do nothing.
 | Curve: nudge the selected points | arrow keys (Shift: ×10) |
 | Curve: point menu / plot menu (add point, select all, preview mode) | RMB on a point / on empty space |
 | Open project / quit | Ctrl+O / Ctrl+Q |
+| Show / hide the log (console/logs) / the properties (right sidebar) | `` ` `` (or the chevron in the log header) / Tab |
 
 Hotkeys belong to the active tab's editor kind (graph, curve, generated file) or are global (save, undo, tabs, open,
-quit); none fires while a text field, the palette or a dialog has the keyboard, and Ctrl, Alt or Super held blocks
-the single-key ones (decision 0032). Pan — drag with the right (or middle) mouse button (an RMB press that does not
-move is a click), zoom — wheel, box select — LMB on empty space; the minimap in the bottom left is clickable. Unsaved
+quit, the View toggles); none fires while a text field, the palette, a dialog, a menu or a select's list has the
+keyboard, and Ctrl, Alt or Super held blocks the single-key ones (decisions 0032, 0034). Keyboard focus stays on text
+fields: a clicked button does not keep it, and Tab moves it only from one field to the next. Pan — drag with the right
+(or middle) mouse button (an RMB press that does not move is a click), zoom — wheel, box select — LMB on empty space;
+the minimap in the bottom left is clickable. Unsaved
 tabs are marked with `*` (browser rows with an orange dot); on close and on an external change of the file (git
-checkout) the editor asks what to do. Window size, recent projects and open
-tabs are stored in `<config dir>/fe3dback/bevy-shader-editor/config.ron`, where the config dir is `%APPDATA%` on Windows,
+checkout) the editor asks what to do. Window size, recent projects, open tabs and the View toggles are stored in
+`<config dir>/fe3dback/bevy-shader-editor/config.ron`, where the config dir is `%APPDATA%` on Windows,
 `~/Library/Application Support` on macOS and `$XDG_CONFIG_HOME` (else `~/.config`) elsewhere (decision 0018).
 
 ## File formats
@@ -434,7 +465,8 @@ Asset(
 - Node `kind`: `stdlib::*`, `param::*`, `output::*`, `function::<path>` (function call),
   `user::<id>` (user node).
 - Constant nodes (`stdlib::Constant`, `Constant2Vector`/`3Vector`/`4Vector`) may have an optional `label: "…"` on the
-  node (omitted when empty). It is editor-only: it replaces the value in the node title and never affects generated code.
+  node (omitted when empty). It is editor-only: it replaces the value in the node title and never affects generated
+  code.
 - A comment frame `Frame(id, title, rect: (x, y, w, h), nodes)` may end with an optional `color: Some((r, g, b, a))`
   and an optional `hue: Some(200.0)` (degrees; set from the right sidebar, drawn at the editor's fixed saturation /
   lightness, takes precedence over `color`). Both are omitted when unset; frames are editor-only. `nodes` lists the
@@ -447,8 +479,8 @@ Asset(
 - A function (`*.function.ron`, `kind: Function`) declares inputs with `output::FunctionInput` nodes and
   outputs with `output::FunctionOutput` nodes. Changing a function regenerates the dependent materials.
   FunctionInput params: `name`, `type`, `default`, `required`, `order` (Sort Priority) and, for a `Float` input only,
-  `min` / `max` (Slider Min / Max): when `min < max`, that input of every call node gets an inline slider with this
-  range (editor only, no codegen effect; omitted from the file unless set).
+  `min` / `max` (Slider Min / Max): when `min < max`, that input of every call node gets an inline number field
+  dragged within this range (editor only, no codegen effect; omitted from the file unless set).
 - A curve (`*.curve.ron`): `Curve(format_version: 1, name: "pulse", points: [(0.0, 0.0), (0.25, 1.0), (1.0, 0.0)])`
   — points sorted by `t`, clamped to `0..1`. It is generated into `autogen/curves/dir_<dir>/crv_<name>.wesl` (a
   const array of `(t, value, slope)` and `sample_curve_simple` / `sample_curve_catmullrom`); shaders import the one
@@ -483,7 +515,17 @@ Asset(
   )
   ```
 - User node (`shaders/.nodes/*.ron`):
-  `UserNode(id: "soft_clamp", name: "SoftClamp", category: "User", inputs: [UserPin(name: "x", ty: Float3)], output: Float3, template: "return x / (vec3<f32>(1.0) + abs(x));")`.
+
+  ```ron
+  UserNode(
+    id: "soft_clamp",
+    name: "SoftClamp",
+    category: "User",
+    inputs: [UserPin(name: "x", ty: Float3)],
+    output: Float3,
+    template: "return x / (vec3<f32>(1.0) + abs(x));",
+  )
+  ```
 - Asset, directory, parameter, function port and global constant names are `snake_case` (`[a-z][a-z0-9_]*`, no
   `__`, no trailing `_`); keywords are allowed because generated code prefixes them. Input names of Custom nodes
   and user nodes are the exception: they appear verbatim in your WGSL, so they must not be Rust/WGSL keywords or
@@ -491,7 +533,8 @@ Asset(
 - Autogen files start with the marker `AUTOGENERATED by shader-editor v1 … do not edit`; the editor does not
   overwrite files without the marker (E008), binary ones included, nor files it cannot read (E008). Binary files
   cannot carry the marker, so `assets/shaders/internal/` is owned through its marker file `.autogen`; a non-empty
-  `internal/` without it, or a regular file at that path, is left alone (E008). Writes are atomic and happen only when the content changes; orphaned files are deleted.
+  `internal/` without it, or a regular file at that path, is left alone (E008). Writes are atomic and happen only when
+  the content changes; orphaned files are deleted.
 
 ## Diagnostics
 
@@ -547,16 +590,17 @@ match their `.png`.
 | `shader_codegen_rust` | generation of `crates/shaders` and of the baked manifest `baked.ron` (decision 0025) |
 | `shader_project` | project layout, regeneration pipeline, atomic writes, asset operations, watcher, game image scan |
 | `shader_editor_app` | GUI on Bevy + Feathers + bevy_noodle |
+| `bevy_noodle` (`vendor/bevy_noodle`) | local fork of bevy_noodle 0.5.0, the node-graph canvas; changes from upstream in its `FORK.md` |
 
 ## Limitations
 
 WPO is not visible to the prepass/shadows; function outputs of type Texture2D are not supported; user nodes have a
-single output; Static Switch is out of v1; sliders on nodes drag at the wrong speed and the color picker opens off its
-button when the canvas is zoomed (Bevy 0.20 bugs, see decision 0012); Custom-node and user-node input names cannot be
-keywords (they are used unprefixed in the WGSL you write, decision 0020); `MaterialAttributes (PBR)` cannot be used by
-Custom nodes, user nodes or parameters, and only Pbr3d has the `Wrapped` output (decision 0023). Textures: only `.png`
-and `.ktx2` (Bevy 0.20 cannot read `.ktx` v1; use lowercase extensions — E012 accepts `.PNG`, but Bevy picks the loader
-by a case-sensitive extension match); `is_srgb` / `expand_grayscale` changes need a rebuild of the game (Bevy
+single output; Static Switch is out of v1; number fields on nodes drag at the wrong speed and the color picker opens off
+its button when the canvas is zoomed (Bevy 0.20 bugs, see decision 0012); Custom-node and user-node input names cannot
+be keywords (they are used unprefixed in the WGSL you write, decision 0020); `MaterialAttributes (PBR)` cannot be used
+by Custom nodes, user nodes or parameters, and only Pbr3d has the `Wrapped` output (decision 0023). Textures: only
+`.png` and `.ktx2` (Bevy 0.20 cannot read `.ktx` v1; use lowercase extensions — E012 accepts `.PNG`, but Bevy picks the
+loader by a case-sensitive extension match); `is_srgb` / `expand_grayscale` changes need a rebuild of the game (Bevy
 keeps the first load's settings), and the editor cannot preview `expand_grayscale: false`; a function that samples a
 texture (MipValueMode None / Bias) cannot be used in World Position Offset — its `textureSample` would end up in the
 vertex shader, which WGSL forbids, and live validation does not report it (a material's own texture nodes switch to

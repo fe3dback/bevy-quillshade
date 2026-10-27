@@ -1,4 +1,4 @@
-//! Node palette popup (spec §9.3): right click / Tab on the canvas or a wire dropped on empty space.
+//! Node palette popup (spec §9.3): right click / Space on the canvas or a wire dropped on empty space.
 
 use bevy::feathers::controls::{FeathersTextInput, FeathersTextInputContainer};
 use bevy::input_focus::{AutoFocus, InputFocus};

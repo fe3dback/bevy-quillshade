@@ -1,0 +1,16 @@
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+allow-indexing-slicing-in-tests = true
+# Bevy methods that panic (or make a queued command fail, which panics under
+# Bevy's default error handler) when an entity or resource is gone.
+disallowed-methods = [
+    { path = "bevy::ecs::world::World::entity", replacement = "bevy::ecs::world::World::get_entity" },
+    { path = "bevy::ecs::world::World::entity_mut", replacement = "bevy::ecs::world::World::get_entity_mut" },
+    { path = "bevy::ecs::world::World::resource", replacement = "bevy::ecs::world::World::get_resource" },
+    { path = "bevy::ecs::world::World::resource_mut", replacement = "bevy::ecs::world::World::get_resource_mut" },
+    { path = "bevy::ecs::world::World::resource_scope", replacement = "bevy::ecs::world::World::try_resource_scope" },
+    { path = "bevy::ecs::system::EntityCommands::insert", replacement = "bevy::ecs::system::EntityCommands::try_insert" },
+    { path = "bevy::ecs::system::EntityCommands::remove", replacement = "bevy::ecs::system::EntityCommands::try_remove" },
+    { path = "bevy::ecs::system::EntityCommands::despawn", replacement = "bevy::ecs::system::EntityCommands::try_despawn" },
+]

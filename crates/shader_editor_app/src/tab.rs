@@ -13,8 +13,8 @@ use shader_project::{AssetId, Project, assets};
 use crate::consts_doc::ConstsDoc;
 use crate::curve_doc::CurveDoc;
 use crate::doc::Doc;
-use crate::doc_kind::TabDoc;
-use crate::game_image::FileStamp;
+use crate::doc_kind::{PreviewDoc, TabDoc};
+use crate::game_image::{Channel, FileStamp};
 use crate::texture_doc::TextureDoc;
 
 /// The view that shows a tab's content.
@@ -114,11 +114,15 @@ pub struct ImageDoc {
     stamp: Option<FileStamp>,
     /// Bumped whenever the file changes.
     pub revision: u64,
+    /// The preview shows only this channel in grey (editor-only, as on a Texture tab).
+    pub channel: Channel,
+    /// The preview repeats the image 3x3 (editor-only).
+    pub tiled: bool,
 }
 
 impl ImageDoc {
     pub fn open(project: &Project, path: &str) -> ImageDoc {
-        let mut doc = ImageDoc { path: path.to_string(), stamp: None, revision: 0 };
+        let mut doc = ImageDoc { path: path.to_string(), stamp: None, revision: 0, channel: None, tiled: false };
         doc.reload(project);
         doc
     }
@@ -206,6 +210,23 @@ impl Tab {
         let title = self.doc().base_title();
         let name = title.rsplit('/').next().unwrap_or(&title);
         name.split('.').next().unwrap_or(name).to_string()
+    }
+
+    /// The content as a [`PreviewDoc`], on a tab with the shared image preview (image, Texture).
+    pub fn preview(&self) -> Option<&dyn PreviewDoc> {
+        match self {
+            Tab::Image(i) => Some(i),
+            Tab::Texture(t) => Some(t),
+            _ => None,
+        }
+    }
+
+    pub fn preview_mut(&mut self) -> Option<&mut dyn PreviewDoc> {
+        match self {
+            Tab::Image(i) => Some(i),
+            Tab::Texture(t) => Some(t),
+            _ => None,
+        }
     }
 
     pub fn graph(&self) -> Option<&Doc> {

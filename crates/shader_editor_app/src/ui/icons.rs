@@ -31,6 +31,8 @@ const SAVE: Icon = custom("save", Kind::Line, include_str!("../../icons/save.svg
 const SAVE_ALL: Icon = custom("save-all", Kind::Line, include_str!("../../icons/save-all.svg"));
 const FIT: Icon = custom("fit", Kind::Line, include_str!("../../icons/fit.svg"));
 const AUTO_LAYOUT: Icon = custom("auto-layout", Kind::Line, include_str!("../../icons/auto-layout.svg"));
+/// A checkered tile: a Texture asset (an image with its loader and sampler settings), next to the game image's picture.
+const TEXTURE: Icon = custom("texture", Kind::Solid, include_str!("../../icons/texture.svg"));
 
 const fn custom(name: &'static str, kind: Kind, svg: &'static str) -> Icon {
     Icon { name, kind, title: name, svg, svg_dark: svg }
@@ -73,10 +75,19 @@ pub enum IconId {
     Help,
     Warning,
     Image,
+    /// A Texture asset (design §6.1); game images keep [`IconId::Image`].
+    Texture,
+    ChevronDown,
+    ChevronUp,
+    /// The node preview's Full mode (every output slot, decision 0022); Unlit / Lit use [`IconId::Unlit`] /
+    /// [`IconId::Pbr`].
+    Layers,
+    /// The generated Rust crate ("Show generated Rust"); generated WESL keeps [`IconId::Code`].
+    Crate,
 }
 
 impl IconId {
-    pub const ALL: [IconId; 34] = [
+    pub const ALL: [IconId; 39] = [
         IconId::File,
         IconId::Folder,
         IconId::FolderOpen,
@@ -111,6 +122,11 @@ impl IconId {
         IconId::Help,
         IconId::Warning,
         IconId::Image,
+        IconId::Texture,
+        IconId::ChevronDown,
+        IconId::ChevronUp,
+        IconId::Layers,
+        IconId::Crate,
     ];
 
     fn source(self) -> Icon {
@@ -149,6 +165,11 @@ impl IconId {
             IconId::Help => icon_rs::HELP,
             IconId::Warning => icon_rs::WARNING_FILLED,
             IconId::Image => icon_rs::IMAGE,
+            IconId::Texture => TEXTURE,
+            IconId::ChevronDown => icon_rs::CHEVRON_DOWN,
+            IconId::ChevronUp => icon_rs::CHEVRON_UP,
+            IconId::Layers => icon_rs::LAYERS,
+            IconId::Crate => icon_rs::PART,
         }
     }
 
@@ -168,7 +189,7 @@ impl IconId {
         match id.ty {
             AssetType::Curve => IconId::Curve,
             AssetType::Consts => IconId::Consts,
-            AssetType::Texture => IconId::Image,
+            AssetType::Texture => IconId::Texture,
             AssetType::Material | AssetType::Function => IconId::for_asset(kind),
         }
     }
@@ -211,13 +232,14 @@ pub struct UiIcon {
     accent: bool,
 }
 
-/// An icon tinted `color` (the ink of glyph and line icons; only the alpha of solid and sketch icons).
+/// An icon tinted `color` (the ink of glyph and line icons; only the alpha of solid and sketch icons). The accent
+/// detail fades with `color`'s alpha too (a disabled button's dimmed icon).
 pub fn icon(id: IconId, size: f32, color: Color) -> impl Scene {
     let accent: Vec<Box<dyn Scene>> = if id.has_accent_layer() {
-        let layer = UiIcon { id, size, accent: true };
+        let (layer, tint) = (UiIcon { id, size, accent: true }, ACCENT.with_alpha(color.alpha()));
         vec![Box::new(bsn! {
             Node { position_type: PositionType::Absolute, width: percent(100), height: percent(100) }
-            ImageNode { color: ACCENT }
+            ImageNode { color: tint }
             layer
             Pickable::IGNORE
         })]
@@ -353,7 +375,7 @@ mod tests {
     fn custom_icons_use_only_palette_colours() {
         let p = Palette::LIGHT;
         let slots = [p.ink, p.top, p.soft, p.mid, p.shade, p.accent];
-        for icon in [FOLDER_OPEN, MATERIAL_UNLIT, SAVE, SAVE_ALL, FIT, AUTO_LAYOUT] {
+        for icon in [FOLDER_OPEN, MATERIAL_UNLIT, SAVE, SAVE_ALL, FIT, AUTO_LAYOUT, TEXTURE] {
             let mut rest = icon.svg;
             while let Some(at) = rest.find("=\"#") {
                 let hex = icon_rs::Rgb::from_hex(&rest[at + 2..at + 9]).unwrap();
@@ -361,5 +383,14 @@ mod tests {
                 rest = &rest[at + 9..];
             }
         }
+    }
+
+    /// Design §6.1: Texture assets have their own icon; game images keep the image one.
+    #[test]
+    fn texture_icon_differs_from_image() {
+        assert!(IconId::ALL.contains(&IconId::Texture));
+        assert_ne!(IconId::Texture.source().name, IconId::Image.source().name);
+        let texture = AssetId::new(AssetType::Texture, "textures/rock");
+        assert_eq!(IconId::for_id(&texture, None), IconId::Texture);
     }
 }

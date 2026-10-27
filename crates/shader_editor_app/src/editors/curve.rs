@@ -6,18 +6,19 @@ use shader_graph_core::curve::Curve;
 use shader_project::{AssetId, AssetSet, Project, assets, ops};
 
 use super::main_input::{
-    EditCopy, EditCut, EditDelete, EditDuplicate, EditPaste, EditSelectAll, add_kind, ctrl, hotkey, mods,
-    no_command_mods, plain,
+    EditCopy, EditCut, EditDelete, EditDuplicate, EditPaste, EditSelectAll, add_kind, ctrl, hotkey, plain,
 };
-use super::{EditorAreas, EditorInput, SidebarKey, StatusCtx, StatusInfo, fill_sidebar};
+use super::{EditorAreas, EditorInput, SidebarKey, StatusCtx, StatusInfo, fill_sidebar_with};
 use crate::curve_doc::CurveDoc;
 use crate::doc_kind::{TabDoc, asset_title, io_error};
+use crate::keys::{mods, no_command_mods};
 use crate::state::{Action, Actions, CurveAction, Editor, PropTarget};
 use crate::tab::ViewKind;
 use crate::ui::curve_view::CurveViewBar;
 use crate::ui::icons::IconId;
-use crate::ui::props::{hotkey_row, labeled, number, section};
-use crate::ui::{TEXT, TEXT_DIM, text};
+use crate::ui::props::{hotkey_row, labeled, number};
+use crate::ui::widgets::subpane_box;
+use crate::ui::{TEXT, TEXT_DIM, plural, text};
 
 /// The curve editor's window areas.
 pub struct CurveEditor;
@@ -110,7 +111,7 @@ fn nudge<const X: i8, const Y: i8>(
 
 /// The curve editor's right sidebar body.
 #[derive(Component, Default, Clone)]
-pub struct CurveSidebarBody;
+struct CurveSidebarBody;
 
 fn redraw_sidebar(
     editor: Res<Editor>,
@@ -119,10 +120,7 @@ fn redraw_sidebar(
     mut commands: Commands,
 ) {
     let Some(c) = editor.curve_doc() else { return key.forget() };
-    let Some(body) = key.changed(&editor, &body) else { return };
-    let mut rows: Vec<Box<dyn Scene>> = Vec::new();
-    curve_rows(c, &mut rows);
-    fill_sidebar(&mut commands, body, rows);
+    fill_sidebar_with(&mut commands, &body, &mut key, SidebarKey::now(&editor), || curve_rows(c));
 }
 
 /// Hotkeys of the curve view, shown in its right sidebar.
@@ -141,31 +139,35 @@ const CURVE_HOTKEYS: [(&str, &str); 12] = [
     ("Right-click", "Menu"),
 ];
 
-/// A curve tab: the selected point and the hotkeys (select all / delete, preview mode and generated WESL are in the
-/// editor topbar).
-fn curve_rows(c: &CurveDoc, out: &mut Vec<Box<dyn Scene>>) {
-    out.push(Box::new(text(c.id.source_rel(), TEXT, 15.0)));
-    out.push(Box::new(text(format!("Type: Curve, {} point(s)", c.curve.points.len()), TEXT_DIM, 12.0)));
+/// A curve tab: the curve, the selected point and the hotkeys (select all / delete, preview mode and generated WESL
+/// are in the editor topbar).
+fn curve_rows(c: &CurveDoc) -> Vec<Box<dyn Scene>> {
+    let curve: Vec<Box<dyn Scene>> = vec![
+        Box::new(text(c.id.source_rel(), TEXT, 15.0)),
+        Box::new(text(format!("Type: Curve, {}", plural(c.curve.points.len(), "point", "points")), TEXT_DIM, 12.0)),
+    ];
+    let mut out = vec![subpane_box("Curve", curve)];
     match c.selection.len() {
         0 => {}
         1 => {
             let i = *c.selection.first().expect("one");
             if let Some((t, v)) = c.curve.points.get(i) {
-                out.push(Box::new(section(format!("Point {}", i + 1))));
                 let target = PropTarget::CurvePoint(i);
-                out.push(Box::new(labeled("T".into(), number(target.clone(), 0, *t, None))));
-                out.push(Box::new(labeled("Value".into(), number(target, 1, *v, None))));
+                let rows: Vec<Box<dyn Scene>> = vec![
+                    Box::new(labeled("T".into(), number(target.clone(), 0, *t, None))),
+                    Box::new(labeled("Value".into(), number(target, 1, *v, None))),
+                ];
+                out.push(subpane_box(&format!("Point {}", i + 1), rows));
             }
         }
         n => {
-            out.push(Box::new(section("Selection")));
-            out.push(Box::new(text(format!("{n} points selected"), TEXT, 13.0)));
+            let selected: Box<dyn Scene> = Box::new(text(format!("{n} points selected"), TEXT, 13.0));
+            out.push(subpane_box("Selection", vec![selected]));
         }
     }
-    out.push(Box::new(section("Hotkeys")));
-    for (keys, what) in CURVE_HOTKEYS {
-        out.push(Box::new(hotkey_row(keys, what)));
-    }
+    let hotkeys = CURVE_HOTKEYS.map(|(keys, what)| -> Box<dyn Scene> { Box::new(hotkey_row(keys, what)) });
+    out.push(subpane_box("Hotkeys", hotkeys.into()));
+    out
 }
 
 impl TabDoc for CurveDoc {
@@ -241,7 +243,7 @@ impl TabDoc for CurveDoc {
     }
 
     fn status(&self, ctx: &StatusCtx) -> Option<StatusInfo> {
-        let counts = vec![format!("{} points", self.curve.points.len())];
+        let counts = vec![plural(self.curve.points.len(), "point", "points")];
         Some(StatusInfo::new(CurveDoc::is_dirty(self), ctx, counts))
     }
 }

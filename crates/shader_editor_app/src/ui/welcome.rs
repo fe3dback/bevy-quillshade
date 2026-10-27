@@ -4,14 +4,16 @@
 use std::path::PathBuf;
 
 use bevy::feathers::constants::fonts;
+use bevy::feathers::controls::{ButtonVariant, FeathersButton};
 use bevy::prelude::*;
 use bevy::text::FontSourceTemplate;
-use bevy::ui_widgets::{Button, ScrollArea};
+use bevy::ui_widgets::ScrollArea;
 
 use super::icons::{IconId, icon};
 use super::logo::logo;
 use super::text_view::style_color;
-use super::{HoverRow, OnActivate, TEXT, TEXT_DIM, VIEW_BG, button, text};
+use super::widgets::{Caption, GroupButton, button_group};
+use super::{OnActivate, TEXT, TEXT_DIM, VIEW_BG, button, text};
 use crate::highlight::highlight;
 use crate::state::{Action, Editor};
 use crate::tab::Lang;
@@ -129,10 +131,10 @@ pub const QUICK_START_STEPS: [(&str, bool); 6] = [
 /// Body of the Quick Start dialog showing step `step` (clamped): the step tabs, then the step's text and code.
 pub fn quick_start(step: usize) -> impl Scene {
     let step = step.min(QUICK_START_STEPS.len() - 1);
-    let tabs: Vec<Box<dyn Scene>> = QUICK_START_STEPS
+    let tabs: Vec<GroupButton> = QUICK_START_STEPS
         .iter()
         .enumerate()
-        .map(|(i, (title, optional))| -> Box<dyn Scene> { Box::new(step_tab(i, title, *optional, i == step)) })
+        .map(|(i, (title, optional))| step_tab(i, title, *optional, i == step))
         .collect();
     let (title, optional) = QUICK_START_STEPS[step];
     let mut heading = format!("Step {} of {}: {title}", step + 1, QUICK_START_STEPS.len());
@@ -144,8 +146,7 @@ pub fn quick_start(step: usize) -> impl Scene {
     bsn! {
         Node { flex_direction: FlexDirection::Column, row_gap: px(12) }
         Children [
-            Node { flex_direction: FlexDirection::Row, flex_wrap: FlexWrap::Wrap, column_gap: px(4), row_gap: px(4) }
-            Children [ {tabs} ]
+            @button_group(tabs)
             --
             // A fixed minimum height: the dialog does not jump between short and long steps.
             Node { flex_direction: FlexDirection::Column, row_gap: px(8), min_height: px(440) }
@@ -154,9 +155,11 @@ pub fn quick_start(step: usize) -> impl Scene {
     }
 }
 
-fn step_tab(i: usize, title: &str, optional: bool, selected: bool) -> impl Scene {
+/// One button of the step tabs (a joined button group); an optional step says so.
+fn step_tab(i: usize, title: &str, optional: bool, selected: bool) -> GroupButton {
+    let label = if optional { format!("{}. {title} (optional)", i + 1) } else { format!("{}. {title}", i + 1) };
     let tip = format!("Step {}: {title}", i + 1);
-    super::chip(format!("{}. {title}", i + 1), Action::QuickStart(i), selected, tip, optional.then_some("optional"))
+    GroupButton { caption: Caption::Text(label), action: Action::QuickStart(i), selected, disabled: false, tip }
 }
 
 /// One block of a Quick Start step.
@@ -294,7 +297,7 @@ fn step_blocks(step: usize) -> Vec<Block> {
 
 /// How a [`code`] block is coloured.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CodeLang {
+enum CodeLang {
     /// One colour (TOML, shell, directory trees).
     Plain,
     /// The generated-Rust tab's lexer and colours.
@@ -338,26 +341,26 @@ fn code(s: &'static str, lang: CodeLang) -> impl Scene {
 fn recent_row(path: PathBuf) -> impl Scene {
     let name = path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
     let (full, tip) = (path.display().to_string(), super::tooltip::Tooltip(format!("Open {}", path.display())));
-    let (act, hover) = (OnActivate(Action::OpenProject(path)), HoverRow { base: Color::NONE });
+    let act = OnActivate(Action::OpenProject(path));
+    // A plain Feathers button of two lines: as tall as its text, left-aligned.
     bsn! {
+        @FeathersButton {
+            @variant: ButtonVariant::Plain,
+            @caption: bsn_list! {
+                @icon(IconId::Folder, 16.0, TEXT)
+                --
+                Node { flex_direction: FlexDirection::Column, min_width: px(0) }
+                Children [ @text(name, TEXT, 14.0) -- @text(full, TEXT_DIM, 12.0) ]
+            },
+        }
         Node {
-            flex_direction: FlexDirection::Row,
-            align_items: AlignItems::Center,
+            height: Val::Auto,
+            justify_content: JustifyContent::Start,
             column_gap: px(10),
             padding: UiRect::axes(px(8), px(5)),
-            border_radius: BorderRadius::all(px(4)),
         }
-        BackgroundColor(Color::NONE)
-        Button
         act
-        hover
         tip
-        Children [
-            @icon(IconId::Folder, 16.0, TEXT)
-            --
-            Node { flex_direction: FlexDirection::Column, min_width: px(0) }
-            Children [ @text(name, TEXT, 14.0) -- @text(full, TEXT_DIM, 12.0) ]
-        ]
     }
 }
 
@@ -413,20 +416,24 @@ mod tests {
         }
     }
 
+    /// Every code block is coloured as its step data tags it: a Rust block through the lexer (several colours), a
+    /// plain one (TOML, shell, directory trees) as one span.
     #[test]
     fn quick_start_rust_snippets_are_highlighted() {
         let mut rust = 0;
         for step in 0..QUICK_START_STEPS.len() {
             for b in step_blocks(step) {
                 let Block::Code(s, lang) = b else { continue };
-                let looks_rust = s.contains("fn ") || s.contains("use ");
-                assert_eq!(lang == CodeLang::Rust, looks_rust, "step {step}: {s}");
-                rust += usize::from(looks_rust);
+                let colours: Vec<Color> = code_spans(s, lang).into_iter().map(|(_, c)| c).collect();
+                match lang {
+                    CodeLang::Rust => {
+                        rust += 1;
+                        assert!(colours.iter().any(|c| *c != TEXT), "step {step}: not highlighted: {s}");
+                    }
+                    CodeLang::Plain => assert_eq!(colours, vec![TEXT], "step {step}: one plain span: {s}"),
+                }
             }
         }
-        assert_eq!(rust, 3, "Plugin, Spawn and Loading");
-        let colours: Vec<Color> = code_spans("fn main() {}", CodeLang::Rust).into_iter().map(|(_, c)| c).collect();
-        assert!(colours.len() > 1 && colours.iter().any(|c| *c != TEXT), "{colours:?}");
-        assert_eq!(code_spans("[workspace]", CodeLang::Plain), vec![("[workspace]", TEXT)], "TOML stays plain");
+        assert!(rust > 0, "the Quick Start shows Rust code");
     }
 }

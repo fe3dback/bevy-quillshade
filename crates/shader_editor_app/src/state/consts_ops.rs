@@ -3,11 +3,13 @@ use super::*;
 /// Text of the confirmation before an edit breaking the readers of global constants `names`.
 pub(super) fn usage_message(what: &str, names: &[String], usages: &[(AssetId, usize)]) -> String {
     let nodes: usize = usages.iter().map(|u| u.1).sum();
-    let list: Vec<String> = usages.iter().map(|(id, n)| format!("{} ({n} node(s))", id.source_rel())).collect();
+    let list: Vec<String> =
+        usages.iter().map(|(id, n)| format!("{} ({})", id.source_rel(), plural(*n, "node", "nodes"))).collect();
     let consts = names.iter().map(|n| format!("`{n}`")).collect::<Vec<_>>().join(", ");
     format!(
-        "{what} breaks {nodes} node(s) reading {consts} in:\n{}\nTheir references are cleared (they will output 1.0) \
-         and the changes are saved.",
+        "{what} breaks {} reading {consts} in:\n{}\nTheir references are cleared (they will output 1.0) and the \
+         changes are saved.",
+        plural(nodes, "node", "nodes"),
         list.join("\n")
     )
 }

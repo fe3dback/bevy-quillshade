@@ -1,6 +1,7 @@
 //! Open asset tabs with dirty markers (spec §9 "State"). MMB closes a tab, RMB opens its close menu. Tabs are
 //! compact, labelled with the short file name ([`labels`]) and wrap onto more rows when they do not fit.
 
+use bevy::feathers::controls::{ButtonVariant, FeathersToolButton};
 use bevy::prelude::*;
 use bevy::ui_widgets::Button;
 
@@ -31,7 +32,7 @@ fn tab(i: usize, label: String, full: String, kind: IconId, active: bool) -> imp
     // The active tab has the editor topbar's colour: it joins the strip of its editor kind below the tabs bar.
     let base = if active { TOPBAR_BG } else { Color::srgb_u8(48, 50, 57) };
     let (hover, act, idx, tip) = (HoverRow { base }, OnActivate(Action::ActivateTab(i)), TabIndexOf(i), Tooltip(full));
-    let (close, close_hover) = (OnActivate(Action::CloseTab(i)), HoverRow { base: Color::NONE });
+    let close = OnActivate(Action::CloseTab(i));
     let close_tip = Tooltip("Close (Ctrl+W, middle click)".into());
     let color = if active { TEXT } else { TEXT_DIM };
     bsn! {
@@ -53,13 +54,11 @@ fn tab(i: usize, label: String, full: String, kind: IconId, active: bool) -> imp
             --
             @text(label, color, 12.0)
             --
-            Node { padding: UiRect::all(px(2)), border_radius: BorderRadius::all(px(3)) }
-            BackgroundColor(Color::NONE)
-            Button
+            // A plain Feathers tool button, only as large as its icon.
+            @FeathersToolButton { @variant: ButtonVariant::Plain, @caption: bsn! { @icon(IconId::Close, 12.0, color) } }
+            Node { height: Val::Auto, min_width: px(0), padding: UiRect::all(px(2)), border_radius: BorderRadius::all(px(3)) }
             close
-            close_hover
             close_tip
-            Children [ @icon(IconId::Close, 12.0, color) ]
         ]
     }
 }

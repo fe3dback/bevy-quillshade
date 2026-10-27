@@ -73,6 +73,11 @@ impl PinType {
         self.dim().is_some() || self == PinType::Int
     }
 
+    /// The concrete type labelled `s` ([`PinType::label`]).
+    pub fn from_label(s: &str) -> Option<PinType> {
+        PinType::ALL_CONCRETE.into_iter().find(|t| t.label() == s)
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             PinType::Float => "Float",

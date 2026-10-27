@@ -100,6 +100,37 @@ fn inline_drag_is_one_undo_step() {
     assert_eq!(input(&e), None);
 }
 
+/// Review Focus 4: a drag's merged edits (`SetValue { merge: true }`, what a non-final number input change
+/// becomes) ending with a final `SetComponent` are one undo step, on a node input and on a global constant alike.
+#[test]
+fn number_drag_is_one_undo_step() {
+    let (_dir, mut e) = project();
+    let lerp = add_lerp(&mut e);
+    let alpha = PropTarget::Input { node: lerp.clone(), pin: "alpha".into() };
+    let input = |e: &Editor| e.doc().unwrap().asset.nodes[&lerp].inputs.get("alpha").cloned();
+    for v in [0.2, 0.4, 0.6] {
+        e.apply(Action::SetValue { target: alpha.clone(), value: Value::Float(v), merge: true });
+    }
+    e.apply(Action::SetComponent { target: alpha.clone(), comp: 0, value: 0.7, is_final: true });
+    assert_eq!(input(&e), Some(Value::Float(0.7)));
+    e.apply(Action::Undo);
+    assert_eq!(input(&e), None, "one undo restores the value before the drag");
+
+    e.apply(Action::OpenAsset(tuning()));
+    let amount = PropTarget::Const("glow_amount".into());
+    let before = e.current_value(&amount);
+    for v in [2.0, 3.0] {
+        e.apply(Action::SetValue { target: amount.clone(), value: Value::Float(v), merge: true });
+    }
+    e.apply(Action::SetComponent { target: amount.clone(), comp: 0, value: 4.0, is_final: true });
+    // The next edit is a step of its own.
+    e.apply(Action::SetComponent { target: amount.clone(), comp: 0, value: 5.0, is_final: true });
+    e.apply(Action::Undo);
+    assert_eq!(e.current_value(&amount), Some(Value::Float(4.0)));
+    e.apply(Action::Undo);
+    assert_eq!(e.current_value(&amount), before);
+}
+
 fn lerp_types(e: &Editor, lerp: &str) -> Vec<PinType> {
     let d = e.doc().unwrap();
     let sig = node_signature(&d.asset, lerp, &e.registry, &e.functions, &d.id.path).unwrap();
@@ -296,6 +327,95 @@ fn open_referenced_twice_reuses_tab() {
     e.apply(Action::OpenAsset(target.clone()));
     assert_eq!(e.tabs.len(), tabs + 1);
     assert_eq!(active_asset(&e), target);
+}
+
+/// Design §5.5: what a node header's double click renames.
+#[test]
+fn rename_target_kinds() {
+    let (_dir, mut e) = project();
+    e.apply(Action::OpenAsset(AssetId::new(AssetType::Material, "env/rock_wet")));
+    let param = node_of(&e, "param::Scalar");
+    assert_eq!(e.rename_target(&param), Some(PropTarget::Param { node: param.clone(), key: "name".into() }));
+    let constant = add(&mut e, "stdlib::Constant");
+    assert_eq!(e.rename_target(&constant), Some(PropTarget::NodeLabel(constant.clone())), "unlabelled Constant");
+    let lerp = node_of(&e, "stdlib::Lerp");
+    assert_eq!(e.rename_target(&lerp), None);
+    let call = node_of(&e, "function::common/wet_mask");
+    assert_eq!(e.rename_target(&call), None, "a function call opens its function instead");
+    assert_eq!(e.header_action(&call), Some(Action::OpenAsset(AssetId::new(AssetType::Function, "common/wet_mask"))));
+    assert_eq!(e.header_action(&lerp), None);
+    // A Named Route declaration has a name; its usages refer to it by node id, so a rename keeps them.
+    let route = add(&mut e, "stdlib::NamedRoute");
+    let route_name = PropTarget::Param { node: route.clone(), key: "name".into() };
+    assert_eq!(e.rename_target(&route), Some(route_name.clone()));
+    assert_eq!(e.header_action(&route), Some(Action::TextDialog(route_name)));
+    let usage = add(&mut e, "stdlib::NamedRouteUsage");
+    assert_eq!(e.rename_target(&usage), None, "a usage shows its declaration's name");
+    assert_eq!(
+        e.header_action(&param),
+        Some(Action::TextDialog(PropTarget::Param { node: param, key: "name".into() }))
+    );
+    e.apply(Action::OpenAsset(AssetId::new(AssetType::Function, "common/wet_mask")));
+    let input = node_of(&e, "output::FunctionInput");
+    assert_eq!(e.rename_target(&input), Some(PropTarget::Param { node: input, key: "name".into() }));
+    let output = node_of(&e, "output::FunctionOutput");
+    assert_eq!(e.rename_target(&output), Some(PropTarget::Param { node: output, key: "name".into() }));
+}
+
+/// Opens the rename dialog of `target` and submits `text`, as the dialog's OK / Enter does.
+fn rename_through_dialog(e: &mut Editor, target: PropTarget, text: &str) {
+    e.apply(Action::TextDialog(target.clone()));
+    assert!(
+        matches!(&e.dialog, Some(Dialog::Input { submit: Submit::SetText(t), .. }) if *t == target),
+        "{:?}",
+        e.dialog
+    );
+    e.apply(Action::Submit(text.into()));
+    assert_eq!(e.dialog, None);
+}
+
+#[test]
+fn rename_dialog_submit_is_one_undo_step() {
+    let (_dir, mut e) = project();
+    e.apply(Action::OpenAsset(AssetId::new(AssetType::Material, "env/rock_wet")));
+    let param = node_of(&e, "param::Scalar");
+    let target = PropTarget::Param { node: param.clone(), key: "name".into() };
+    let before = e.current_value(&target).unwrap();
+    e.apply(Action::TextDialog(target.clone()));
+    let Some(Dialog::Input { title, label, initial, .. }) = &e.dialog else { panic!("{:?}", e.dialog) };
+    assert_eq!((title.as_str(), label.as_str()), ("Rename node", "Name"));
+    assert_eq!(*initial, before.as_str(), "prefilled with the current name");
+    let props = e.ui.props;
+    rename_through_dialog(&mut e, target.clone(), "gloss");
+    assert_eq!(e.current_value(&target), Some(Value::Str("gloss".into())));
+    assert!(e.ui.props > props, "the right sidebar shows the new name");
+    e.apply(Action::Undo);
+    assert_eq!(e.current_value(&target), Some(before), "one undo step");
+    assert!(!e.is_dirty());
+
+    // A comment title goes the same way.
+    let title = PropTarget::FrameTitle("c01".into());
+    e.apply(Action::TextDialog(title.clone()));
+    let Some(Dialog::Input { title: t, label, .. }) = &e.dialog else { panic!("{:?}", e.dialog) };
+    assert_eq!((t.as_str(), label.as_str()), ("Comment", "Title"));
+    rename_through_dialog(&mut e, title.clone(), "Wet rocks");
+    assert_eq!(e.current_value(&title), Some(Value::Str("Wet rocks".into())));
+}
+
+#[test]
+fn rename_dialog_empty_label_clears() {
+    let (_dir, mut e) = project();
+    e.apply(Action::OpenAsset(AssetId::new(AssetType::Material, "env/rock_wet")));
+    let constant = add(&mut e, "stdlib::Constant");
+    let target = PropTarget::NodeLabel(constant.clone());
+    rename_through_dialog(&mut e, target.clone(), "rim");
+    assert_eq!(e.doc().unwrap().asset.nodes[&constant].label, "rim");
+    e.apply(Action::TextDialog(target.clone()));
+    assert!(matches!(&e.dialog, Some(Dialog::Input { initial, .. }) if initial == "rim"));
+    e.apply(Action::Submit("  ".into()));
+    assert_eq!(e.doc().unwrap().asset.nodes[&constant].label, "", "no label");
+    let title = crate::canvas::node_title(&e, &e.doc().unwrap().asset, &constant);
+    assert_ne!(title, "rim", "the title shows the value again");
 }
 
 #[test]
@@ -517,6 +637,26 @@ fn deleting_previewed_node_clears_preview() {
     assert!(d.asset.preview.node.is_none());
     assert_eq!(d.asset.preview.mode, PreviewMode::Lit, "the mode is remembered");
     assert!(!std::fs::read_to_string(&wesl).unwrap().contains("// preview of node"));
+}
+
+/// Design §5.4: a Preview mode button of the graph editor topbar is one undoable edit of the asset.
+#[test]
+fn preview_mode_from_topbar_is_undoable() {
+    use crate::editors::graph::preview_mode_action;
+
+    let (_dir, mut e) = project();
+    let lerp = add_lerp(&mut e);
+    e.apply(Action::TogglePreview(lerp.clone()));
+    let mode = |e: &Editor| e.doc().unwrap().asset.preview.mode;
+    assert_eq!(mode(&e), PreviewMode::Unlit);
+    e.apply(preview_mode_action(PreviewMode::Full));
+    assert_eq!(mode(&e), PreviewMode::Full);
+    assert!(e.is_dirty());
+    e.apply(Action::Undo);
+    assert_eq!(mode(&e), PreviewMode::Unlit, "one undo step");
+    assert_eq!(e.doc().unwrap().asset.preview.node.as_deref(), Some(lerp.as_str()), "the preview stays on");
+    e.apply(Action::Redo);
+    assert_eq!(mode(&e), PreviewMode::Full);
 }
 
 #[test]
@@ -798,6 +938,27 @@ fn tabs_are_restored_on_next_launch() {
         ]
     );
     assert_eq!(next.active, Some(0));
+}
+
+/// View → Show log / Show properties (design §4): each toggle flips its flag and saves the user config, which the
+/// next launch reads (Review Focus 5).
+#[test]
+fn toggle_log_and_properties_persist() {
+    let (dir, mut e) = project();
+    let config = dir.path().join("config/config.ron");
+    e.config_path = Some(config.clone());
+    assert!(e.config.show_log && e.config.show_properties, "shown by default");
+    e.apply(Action::ToggleLog);
+    assert!(!e.config.show_log && e.config.show_properties);
+    assert_eq!(UserConfig::load(&config), e.config, "saved");
+    e.apply(Action::ToggleProperties);
+    assert!(!e.config.show_properties);
+    let saved = UserConfig::load(&config);
+    assert!(!saved.show_log && !saved.show_properties);
+    e.apply(Action::ToggleLog);
+    assert!(UserConfig::load(&config).show_log, "toggled back");
+    let next = Editor::with_config(UserConfig::load(&config), Some(config));
+    assert!(next.config.show_log && !next.config.show_properties);
 }
 
 #[test]
@@ -1260,7 +1421,7 @@ fn deleting_a_table_clears_the_references_to_its_constants() {
     let (_dir, mut e) = project();
     e.apply(Action::DeleteDialog(tuning()));
     let Some(Dialog::Confirm { message, .. }) = &e.dialog else { panic!("no dialog") };
-    assert!(message.contains("fx/global_tint.material.ron (6 node(s))"), "{message}");
+    assert!(message.contains("fx/global_tint.material.ron (6 nodes)"), "{message}");
     assert!(!message.contains("generated files"), "{message}");
     e.apply(confirm(&e));
     assert!(!tuning().file(e.project.as_ref().unwrap()).exists());
@@ -1340,13 +1501,15 @@ fn status_of_graph_counts_nodes_and_diagnostics() {
     e.apply(Action::OpenAsset(rock.clone()));
     let status = e.status_info().expect("a graph tab has a statusbar");
     assert!(!status.dirty);
-    assert!(!status.counts.iter().any(|c| c.ends_with("WESL lines")), "not generated yet: {:?}", status.counts);
+    let wesl_lines = |n| crate::ui::plural(n, "WESL line", "WESL lines");
+    let any_wesl = |c: &String| c.ends_with(" WESL line") || c.ends_with(" WESL lines");
+    assert!(!status.counts.iter().any(any_wesl), "not generated yet: {:?}", status.counts);
     // An unconnected node: a warning of this asset.
     e.apply(Action::AddNode { kind: "stdlib::Time".into(), pos: (0.0, 0.0), link: None, params: Vec::new() });
     e.validate();
     let status = e.status_info().unwrap();
     assert!(status.dirty);
-    assert_eq!(status.counts[0], format!("{} nodes", e.doc().unwrap().asset.nodes.len()));
+    assert_eq!(status.counts[0], crate::ui::plural(e.doc().unwrap().asset.nodes.len(), "node", "nodes"));
     let own: Vec<&Diagnostic> = e.diags.get(&rock).into_iter().flatten().collect();
     assert_eq!(status.errors, own.iter().filter(|d| d.is_error()).count());
     assert_eq!(status.warnings, own.iter().filter(|d| !d.is_error()).count());
@@ -1355,7 +1518,7 @@ fn status_of_graph_counts_nodes_and_diagnostics() {
     e.apply(Action::RegenAll);
     let wesl = std::fs::read_to_string(dir.path().join("assets/shaders/autogen/dir_env/mat_rock_wet.wesl")).unwrap();
     let status = e.status_info().unwrap();
-    assert!(status.counts.contains(&format!("{} WESL lines", wesl.lines().count())), "{:?}", status.counts);
+    assert!(status.counts.contains(&wesl_lines(wesl.lines().count())), "{:?}", status.counts);
 
     // A preview writes the asset's WESL from memory (a scoped regeneration): the count follows the file.
     let lerp = add_lerp(&mut e);
@@ -1363,7 +1526,7 @@ fn status_of_graph_counts_nodes_and_diagnostics() {
     press_v(&mut e);
     let previewed = std::fs::read_to_string(rock_wet_wesl(&e)).unwrap();
     assert_ne!(previewed.lines().count(), wesl.lines().count());
-    let lines = format!("{} WESL lines", previewed.lines().count());
+    let lines = wesl_lines(previewed.lines().count());
     assert!(e.status_info().unwrap().counts.contains(&lines), "{:?}", e.status_info().unwrap().counts);
     e.apply(Action::DiscardTab(e.active.unwrap()));
 
@@ -1371,12 +1534,12 @@ fn status_of_graph_counts_nodes_and_diagnostics() {
     let mut next = Editor::default();
     next.open_project(dir.path()).unwrap();
     next.apply(Action::OpenAsset(rock.clone()));
-    assert!(next.status_info().unwrap().counts.contains(&format!("{} WESL lines", wesl.lines().count())));
+    assert!(next.status_info().unwrap().counts.contains(&wesl_lines(wesl.lines().count())));
     let path = dir.path().join("assets/shaders/autogen/dir_env/mat_rock_wet.wesl");
     std::fs::write(&path, format!("{wesl}// one more\n")).unwrap();
     next.apply(Action::ShowGenerated(rock.clone(), Lang::Wesl));
     next.apply(Action::ActivateTab(0));
-    let lines = format!("{} WESL lines", wesl.lines().count() + 1);
+    let lines = wesl_lines(wesl.lines().count() + 1);
     assert!(next.status_info().unwrap().counts.contains(&lines), "{:?}", next.status_info().unwrap().counts);
 }
 
@@ -1386,12 +1549,12 @@ fn status_of_curve_and_consts() {
     e.apply(Action::OpenAsset(pulse()));
     let points = e.curve_doc().unwrap().curve.points.len();
     let status = e.status_info().expect("a curve tab has a statusbar");
-    assert_eq!(status.counts, vec![format!("{points} points")]);
+    assert_eq!(status.counts, vec![crate::ui::plural(points, "point", "points")]);
     assert!(!status.dirty);
     e.apply(Action::OpenAsset(tuning()));
     let rows = e.consts_doc().unwrap().table.consts.len();
     let status = e.status_info().expect("a consts tab has a statusbar");
-    assert_eq!(status.counts, vec![format!("{rows} constants")]);
+    assert_eq!(status.counts, vec![crate::ui::plural(rows, "constant", "constants")]);
 }
 
 #[test]
@@ -1413,9 +1576,10 @@ fn no_status_for_read_only_kinds() {
     e.apply(Action::OpenAsset(AssetId::new(AssetType::Texture, "textures/rock_albedo")));
     assert!(e.texture_doc().is_some());
     assert_eq!(e.status_info(), None, "texture");
-    e.close_tab(usize::MAX, true);
-    e.close_tab(usize::MAX, true);
-    e.close_tab(usize::MAX, true);
+    while !e.tabs.is_empty() {
+        e.close_tab(e.tabs.len() - 1, true);
+    }
+    assert_eq!(e.active, None);
     assert_eq!(e.status_info(), None, "no tab");
 }
 
@@ -2088,7 +2252,7 @@ fn drop_image_creates_texture_asset_and_node() {
     let added = nodes_of(&e, "stdlib::TextureSample");
     assert_eq!(added.len(), 1);
     let d = e.doc().unwrap();
-    assert_eq!(d.asset.nodes[&added[0]].pos, (10.0, 35.0), "snapped to the 5-unit grid");
+    assert_eq!(d.asset.nodes[&added[0]].pos, (10.0, 30.0), "snapped to the 10-unit grid");
     assert_eq!(param_of(&e, &added[0], "texture"), Some(Value::Str("textures/env/rock_albedo".into())));
     assert_eq!(e.doc().unwrap().selection, [added[0].clone()].into());
     assert_eq!(e.referenced_asset(&added[0]), Some(id));
@@ -2200,7 +2364,7 @@ fn drop_function_adds_call_node() {
         nodes_of(&e, kind).into_iter().filter(|n| e.doc().unwrap().selection.contains(n)).collect();
     assert_eq!(nodes_of(&e, kind).len(), before + 1);
     assert_eq!(added.len(), 1, "the new call node is selected");
-    assert_eq!(e.doc().unwrap().asset.nodes[&added[0]].pos, (10.0, 35.0), "snapped to the 5-unit grid");
+    assert_eq!(e.doc().unwrap().asset.nodes[&added[0]].pos, (10.0, 30.0), "snapped to the 10-unit grid");
     e.apply(Action::Undo);
     assert_eq!(nodes_of(&e, kind).len(), before, "one undo step");
 }
@@ -2271,7 +2435,7 @@ fn drop_curve_on_sample_curve_sets_param() {
     assert_eq!(e.doc().unwrap().asset.nodes.len(), count + 1);
 }
 
-/// Design §4.1: new nodes land on the 5-unit grid; a paste moves its first node onto it and keeps the layout.
+/// Design §4.1: new nodes land on the 10-unit grid; a paste moves its first node onto it and keeps the layout.
 #[test]
 fn added_and_pasted_nodes_are_snapped() {
     let (_dir, mut e) = project();
@@ -2287,7 +2451,7 @@ fn added_and_pasted_nodes_are_snapped() {
     // Off-grid like a node of an older file (positions are not rewritten on load).
     let moved = vec![(a.clone(), (3.3, 4.4)), (b.clone(), (103.3, 54.4))];
     e.apply(Action::Moved { nodes: moved, frames: Vec::new() });
-    let on_grid = |p: (f32, f32)| p.0 % 5.0 == 0.0 && p.1 % 5.0 == 0.0;
+    let on_grid = |p: (f32, f32)| p.0 % 10.0 == 0.0 && p.1 % 10.0 == 0.0;
     let check = |e: &Editor| {
         let d = e.doc().unwrap();
         let mut pasted: Vec<(f32, f32)> = d.selection.iter().map(|id| d.asset.nodes[id].pos).collect();
@@ -2301,7 +2465,7 @@ fn added_and_pasted_nodes_are_snapped() {
     e.apply(Action::Select([a.clone(), b.clone()].into()));
     e.apply(Action::Copy);
     e.apply(Action::Paste(Some((33.0, 1.0))));
-    assert_eq!(check(&e), (35.0, 0.0));
+    assert_eq!(check(&e), (30.0, 0.0));
     e.apply(Action::Paste(None));
     check(&e);
     e.apply(Action::Select([a].into()));
@@ -2315,7 +2479,7 @@ fn added_and_pasted_nodes_are_snapped() {
     e.apply(Action::AddReroute { from: (b, "out".into()), to: (out, "metallic".into()), pos: (-41.0, 22.6) });
     let d = e.doc().unwrap();
     let r = d.asset.nodes.iter().find(|(k, _)| !before.contains(k)).unwrap().1;
-    assert_eq!((r.kind.as_str(), r.pos), ("stdlib::Reroute", (-40.0, 25.0)));
+    assert_eq!((r.kind.as_str(), r.pos), ("stdlib::Reroute", (-40.0, 20.0)));
     e.apply(Action::Select(BTreeSet::new()));
     e.apply(Action::AddComment(Some((12.3, -7.6))));
     let f = e.doc().unwrap().asset.comments.last().unwrap();
@@ -2465,7 +2629,7 @@ fn texture_tab_presets_mode_and_channels() {
     assert!(texture_doc(&e).easy, "a default sampler opens in Easy mode");
     e.apply(Action::Texture(TextureAction::Preset(FilterPreset::Ground)));
     let s = texture_doc(&e).asset.settings.sampler.unwrap();
-    assert_eq!(s, FilterPreset::Ground.sampler());
+    assert_eq!(Some(s), FilterPreset::Ground.sampler());
     assert_eq!(s.address_mode_u, AddressMode::Repeat);
     e.apply(Action::Texture(TextureAction::Preset(FilterPreset::Ground)));
     e.apply(Action::Texture(TextureAction::Preset(FilterPreset::PixelArt)));
@@ -2480,11 +2644,152 @@ fn texture_tab_presets_mode_and_channels() {
     assert!(!texture_doc(&e).easy && texture_doc(&e).layout != layout, "the form is rebuilt");
     assert!(!e.is_dirty(), "the mode is not part of the asset");
 
-    e.apply(Action::TextureChannel(Some(1)));
+    e.apply(Action::PreviewChannel(Some(1)));
     assert_eq!(texture_doc(&e).channel, Some(1));
-    e.apply(Action::TextureChannel(Some(7)));
+    e.apply(Action::PreviewChannel(Some(7)));
     assert_eq!(texture_doc(&e).channel, None, "out of range: the whole image");
+    e.apply(Action::SetValue {
+        target: PropTarget::PreviewTiled,
+        value: shader_graph_core::Value::Bool(true),
+        merge: false,
+    });
+    assert!(texture_doc(&e).tiled);
     assert!(!e.is_dirty());
+}
+
+/// Design §6.3: the Easy preset is stored only through the sampler it writes, so every preset comes back selected
+/// after save and reopen; "Default" writes no `sampler` key at all (the untouched file, byte for byte).
+#[test]
+fn easy_preset_round_trips_through_file() {
+    use crate::texture_doc::FilterPreset;
+    let (dir, mut e) = project();
+    let id = AssetId::new(AssetType::Texture, "textures/sprite");
+    let file = dir.path().join("shaders/textures/sprite.texture.ron");
+    let untouched = std::fs::read(&file).unwrap();
+    assert!(!String::from_utf8_lossy(&untouched).contains("sampler"));
+    e.apply(Action::OpenAsset(id.clone()));
+    assert!(texture_doc(&e).easy, "no sampler opens in Easy");
+    assert_eq!(FilterPreset::of(&texture_doc(&e).asset.settings), Some(FilterPreset::Default), "Default selected");
+    // Default last: back to the untouched file.
+    for p in FilterPreset::ALL.into_iter().skip(1).chain([FilterPreset::Default]) {
+        e.apply(Action::Texture(TextureAction::Preset(p)));
+        e.apply(Action::Save);
+        assert!(!e.is_dirty(), "{p:?} saved");
+        e.apply(Action::CloseTab(e.active.unwrap()));
+        assert!(e.tabs.is_empty());
+        e.apply(Action::OpenAsset(id.clone()));
+        let t = texture_doc(&e);
+        assert!(t.easy, "{p:?} reopens in Easy");
+        assert_eq!(FilterPreset::of(&t.asset.settings), Some(p), "{p:?} reopens selected");
+    }
+    assert_eq!(std::fs::read(&file).unwrap(), untouched, "Default: byte-identical, no sampler key");
+}
+
+/// Design §6.3: a sampler customised in Advanced matches no preset, so Easy is refused (the button is disabled) and
+/// the settings are never rewritten by switching.
+#[test]
+fn set_easy_refused_for_custom_sampler() {
+    use crate::texture_doc::{FilterPreset, TextureField};
+    use shader_graph_core::Value;
+    let (_dir, mut e) = project();
+    e.apply(Action::OpenAsset(AssetId::new(AssetType::Texture, "textures/sprite")));
+    e.apply(Action::Texture(TextureAction::SetEasy(false)));
+    let custom =
+        TextureField::LodMaxClamp.set(&FilterPreset::ThreeD.apply(&texture_doc(&e).asset.settings), &Value::Float(4.0));
+    e.apply(Action::Texture(TextureAction::SetSettings(custom.clone())));
+    assert_eq!(FilterPreset::of(&custom), None);
+    let layout = texture_doc(&e).layout;
+    e.apply(Action::Texture(TextureAction::SetEasy(true)));
+    assert!(!texture_doc(&e).easy, "refused: Easy would hide the custom sampler");
+    assert_eq!(texture_doc(&e).asset.settings, custom, "settings untouched");
+    assert_eq!(texture_doc(&e).layout, layout, "nothing to rebuild");
+    // Back on a preset, Easy is allowed again.
+    e.apply(Action::Texture(TextureAction::Preset(FilterPreset::ThreeD)));
+    e.apply(Action::Texture(TextureAction::SetEasy(true)));
+    assert!(texture_doc(&e).easy);
+}
+
+/// Design §6.3: undo, redo and an external reload that bring back a sampler matching no preset leave Easy (the form
+/// shows the custom values); ones that keep a preset keep the mode.
+#[test]
+fn history_and_reload_leave_easy_for_custom_sampler() {
+    use crate::texture_doc::{FilterPreset, TextureField};
+    use shader_graph_core::Value;
+    let (dir, mut e) = project();
+    let id = AssetId::new(AssetType::Texture, "textures/sprite");
+    e.apply(Action::OpenAsset(id.clone()));
+    e.apply(Action::Texture(TextureAction::SetEasy(false)));
+    let lod = Value::Float(4.0);
+    let custom = TextureField::LodMaxClamp.set(&texture_doc(&e).asset.settings, &lod);
+    e.apply(Action::Texture(TextureAction::SetSettings(custom.clone())));
+    let default = Value::Bool(true);
+    e.apply(Action::SetValue {
+        target: PropTarget::Texture(TextureField::DefaultSampler),
+        value: default,
+        merge: false,
+    });
+    e.apply(Action::Texture(TextureAction::SetEasy(true)));
+    assert!(texture_doc(&e).easy, "Default fits Easy");
+
+    // Undo brings the custom sampler back: Advanced, with the form rebuilt.
+    let layout = texture_doc(&e).layout;
+    e.apply(Action::Undo);
+    assert_eq!(texture_doc(&e).asset.settings, custom);
+    assert!(!texture_doc(&e).easy, "undo to a custom sampler leaves Easy");
+    assert_ne!(texture_doc(&e).layout, layout);
+
+    // Redo to a preset keeps Advanced (the mode is the user's); a redo to the custom sampler leaves Easy.
+    e.apply(Action::Redo);
+    assert_eq!(FilterPreset::of(&texture_doc(&e).asset.settings), Some(FilterPreset::Default));
+    assert!(!texture_doc(&e).easy);
+    e.apply(Action::Undo);
+    e.apply(Action::Undo);
+    assert_eq!(FilterPreset::of(&texture_doc(&e).asset.settings), Some(FilterPreset::Default), "the untouched asset");
+    e.apply(Action::Texture(TextureAction::SetEasy(true)));
+    e.apply(Action::Redo);
+    assert_eq!(texture_doc(&e).asset.settings, custom);
+    assert!(!texture_doc(&e).easy, "redo to a custom sampler leaves Easy");
+
+    // An undo to a preset in Easy stays in Easy.
+    e.apply(Action::Redo);
+    e.apply(Action::Texture(TextureAction::SetEasy(true)));
+    e.apply(Action::Texture(TextureAction::Preset(FilterPreset::Ground)));
+    e.apply(Action::Undo);
+    assert!(texture_doc(&e).easy, "undo to Default keeps Easy");
+
+    // An external edit of the (saved) file to a custom sampler: reloaded, out of Easy.
+    e.apply(Action::Save);
+    assert!(texture_doc(&e).easy && !e.is_dirty());
+    let file = dir.path().join("shaders/textures/sprite.texture.ron");
+    let text = "TextureAsset(\n  format_version: 1,\n  path: \"textures/sprite.png\",\n  settings: TextureSettings(\n    \
+                sampler: Some(SamplerSettings(\n      lod_max_clamp: 4.0,\n    )),\n  ),\n)\n";
+    std::fs::write(&file, text).unwrap();
+    e.apply(Action::Reload(id));
+    assert_eq!(FilterPreset::of(&texture_doc(&e).asset.settings), None, "reloaded");
+    assert!(!texture_doc(&e).easy, "a reload to a custom sampler leaves Easy");
+}
+
+/// Design §6.2: an image tab has the preview's view state (channel, tiling): editor-only, not undoable, not dirty.
+#[test]
+fn image_tab_preview_state() {
+    let (dir, mut e) = project();
+    let path = "textures/rock.png";
+    std::fs::create_dir_all(dir.path().join("assets/textures")).unwrap();
+    std::fs::write(dir.path().join("assets").join(path), b"x").unwrap();
+    e.apply(Action::OpenGameImage(path.into()));
+    let image = |e: &Editor| e.tab().and_then(Tab::image).map(|i| (i.channel, i.tiled)).unwrap();
+    assert_eq!(image(&e), (None, false));
+    e.apply(Action::PreviewChannel(Some(2)));
+    e.apply(Action::SetValue {
+        target: PropTarget::PreviewTiled,
+        value: shader_graph_core::Value::Bool(true),
+        merge: false,
+    });
+    assert_eq!(image(&e), (Some(2), true));
+    assert_eq!(e.current_value(&PropTarget::PreviewTiled), Some(shader_graph_core::Value::Bool(true)));
+    assert!(!e.tab().unwrap().doc().is_dirty());
+    e.apply(Action::Undo);
+    assert_eq!(image(&e), (Some(2), true), "not undoable");
 }
 
 /// A click on the editor statusbar's problem count focuses what the first console/logs row of this asset focuses.
@@ -2636,6 +2941,76 @@ fn move_wires_rejects_cycle() {
     reject(&mut e, move_wires(&k, "out", true, (&z, "out")), "output move");
 }
 
+/// The wire an input move replaces is not part of the check: `Add.a` fed a Float4 takes a Float moved onto it.
+#[test]
+fn move_wires_validates_without_replaced_wire() {
+    let (_dir, mut e) = project();
+    e.apply(Action::OpenAsset(AssetId::new(AssetType::Material, "env/rock_wet")));
+    let (v4, sum) = (add(&mut e, "stdlib::Constant4Vector"), add(&mut e, "stdlib::Add"));
+    let (f, lerp) = (add(&mut e, "stdlib::Constant"), add(&mut e, "stdlib::Lerp"));
+    connect(&mut e, &v4, "out", &sum, "a");
+    connect(&mut e, &f, "out", &lerp, "b");
+    let before = edges(&e);
+    let from = (lerp.clone(), "b".to_string());
+    let to = (sum.clone(), "a".to_string());
+    let planned = e.plan_move_wires(&from, false, &to).expect("the replaced Float4 wire is ignored");
+    assert_eq!(planned.edge_into(&sum, "a").unwrap().from, (f.clone(), "out".into()));
+    assert!(planned.edge_into(&lerp, "b").is_none());
+    assert!(!planned.edges.iter().any(|x| x.from.0 == v4), "the Float4 wire is replaced");
+    e.apply(move_wires(&lerp, "b", false, (&sum, "a")));
+    assert_eq!(e.doc().unwrap().asset.edges, planned.edges, "applies the plan");
+    e.apply(Action::Undo);
+    assert_eq!(edges(&e), before, "one undo step");
+}
+
+/// The dry run a Ctrl+drag repeats while it hovers pins (Task 10) changes nothing and reports nothing.
+#[test]
+fn plan_move_wires_is_pure() {
+    let (_dir, mut e) = project();
+    e.apply(Action::OpenAsset(AssetId::new(AssetType::Material, "env/rock_wet")));
+    let (a, b, c) = (add(&mut e, "stdlib::Constant"), add(&mut e, "stdlib::Lerp"), add(&mut e, "stdlib::Lerp"));
+    connect(&mut e, &a, "out", &b, "a");
+    let (before, rev, messages, props) = (edges(&e), e.doc().unwrap().revision, e.messages.len(), e.ui.props);
+    let ok = e.plan_move_wires(&(b.clone(), "a".into()), false, &(c.clone(), "b".into()));
+    assert!(ok.is_ok_and(|x| x.edge_into(&c, "b").is_some()));
+    let refused = e.plan_move_wires(&(b.clone(), "a".into()), false, &(a.clone(), "out".into()));
+    assert!(refused.is_err_and(|why| why.contains("is not an input")));
+    assert_eq!(edges(&e), before);
+    assert_eq!(e.doc().unwrap().revision, rev, "no revision bump");
+    assert_eq!((e.messages.len(), e.ui.props), (messages, props), "no message, no redraw");
+}
+
+/// The statusbar's WESL line counts follow the asset: moved on rename, dropped on delete.
+#[test]
+fn wesl_lines_follow_delete_and_rename() {
+    let (_dir, mut e) = project();
+    e.regenerate();
+    let id = AssetId::new(AssetType::Material, "env/rock_wet");
+    assert!(e.wesl_lines.contains_key(&id));
+    e.apply(Action::MoveTo(id.clone(), "env2".into()));
+    let moved = AssetId::new(AssetType::Material, "env2/rock_wet");
+    assert!(!e.wesl_lines.contains_key(&id), "the old id has no entry");
+    assert!(e.wesl_lines.contains_key(&moved), "the new id has one");
+    e.apply(Action::Delete(moved.clone()));
+    assert!(!e.wesl_lines.contains_key(&moved), "dropped on delete");
+}
+
+/// The editor statusbar keys on `ui.tabs` instead of the tab's config key: another tab at the same index, or the
+/// same tab renamed, must bump it.
+#[test]
+fn tabs_revision_follows_tab_identity() {
+    let (_dir, mut e) = project();
+    e.apply(Action::OpenAsset(AssetId::new(AssetType::Material, "env/rock_wet")));
+    let (active, rev) = (e.active, e.ui.tabs);
+    e.apply(Action::CloseTab(0));
+    e.apply(Action::OpenAsset(pulse()));
+    assert_eq!(e.active, active, "same index");
+    assert_ne!(e.ui.tabs, rev, "another tab");
+    let rev = e.ui.tabs;
+    e.apply(Action::MoveTo(pulse(), "moved".into()));
+    assert_ne!(e.ui.tabs, rev, "renamed");
+}
+
 #[test]
 fn connect_replaces_existing_input_edge() {
     let (_dir, mut e) = project();
@@ -2759,7 +3134,7 @@ fn frame_hue_edit_is_undoable() {
     e.apply(Action::Undo);
     assert_eq!(hue(&e), None);
 
-    // A slider drag is one undo step; "Default colour" clears the hue.
+    // A Hue drag is one undo step; "Default colour" clears the hue.
     for (v, is_final) in [(10.0, false), (20.0, false), (30.0, true)] {
         e.apply(Action::SetComponent { target: PropTarget::FrameHue(f.clone()), comp: 0, value: v, is_final });
     }

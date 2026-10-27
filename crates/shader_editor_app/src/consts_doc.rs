@@ -33,7 +33,7 @@ pub struct ConstsDoc {
     /// Bumped on every change of the table.
     pub revision: u64,
     /// Changes when the view must be rebuilt: rows added/removed, a type changed, undo/redo, reload, the form
-    /// reset ([`ConstsDoc::relayout`]). Value edits keep it (a rebuild would despawn the slider or field being
+    /// reset ([`ConstsDoc::relayout`]). Value edits keep it (a rebuild would despawn the number field being
     /// dragged or typed into).
     pub layout: u64,
 }
@@ -62,7 +62,7 @@ impl ConstsDoc {
         self.saved = self.table.to_ron();
     }
 
-    /// Applies `f` as one undoable step; consecutive edits with the same `key` share one step (a slider drag).
+    /// Applies `f` as one undoable step; consecutive edits with the same `key` share one step (a number drag).
     fn edit(&mut self, key: Option<&str>, relayout: bool, f: impl FnOnce(&mut GlobalConsts)) {
         let before = self.table.clone();
         f(&mut self.table);

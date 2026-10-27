@@ -2,7 +2,6 @@
 //! Hotkeys are the editor kinds' input contexts (`editors::main_input`, decision 0032).
 
 use bevy::ecs::system::SystemParam;
-use bevy::picking::hover::HoverMap;
 use bevy::prelude::*;
 use bevy::ui::ui_transform::UiGlobalTransform;
 use bevy::window::WindowCloseRequested;
@@ -13,18 +12,18 @@ use super::dialog::open_menu;
 use super::palette::Palette;
 use super::props::PropField;
 use super::tree::TreeRow;
-use crate::canvas::{EditorCanvas, NodeKey, PinKey, link_of, window_to_graph};
+use crate::canvas::{EditorCanvas, FrameKey, FrameTitleStrip, NodeHeader, NodeKey, PinKey, link_of, window_to_graph};
 use crate::doc::connection_error;
 use crate::droppable::Dropped;
-use crate::editors::main_input::{mods, no_command_mods};
-use crate::state::{Action, Actions, Editor};
+use crate::editors::graph::PreviewKey;
+use crate::keys::{mods, no_command_mods};
+use crate::state::{Action, Actions, Editor, PropTarget};
 
 pub struct InputPlugin;
 
 impl Plugin for InputPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<RightPress>()
-            .init_resource::<PreviewKey>()
             .add_systems(Update, (close_requested, draw_minimap))
             .add_observer(remember_right_press)
             .add_observer(middle_pan)
@@ -32,7 +31,9 @@ impl Plugin for InputPlugin {
             .add_observer(edge_click)
             .add_observer(pin_click)
             .add_observer(node_click)
+            .add_observer(frame_click)
             .add_observer(wire_dropped)
+            .add_observer(lifted_wires_dropped)
             .add_observer(drop_on_canvas);
     }
 }
@@ -72,31 +73,6 @@ impl CanvasCursor<'_, '_> {
     /// Graph position of the cursor, as the actions take it.
     pub fn graph_pos(&self) -> Option<(f32, f32)> {
         self.at().map(|(_, g)| (g.x, g.y))
-    }
-}
-
-/// `V` toggles the node preview on release, unless `V` + click dropped a `param::Vector` meanwhile
-/// (decision 0021).
-#[derive(Resource, Default)]
-pub(crate) struct PreviewKey {
-    held: bool,
-    placed: bool,
-}
-
-impl PreviewKey {
-    pub(crate) fn press(&mut self) {
-        *self = Self { held: true, placed: false };
-    }
-
-    fn placed(&mut self) {
-        self.placed = self.held;
-    }
-
-    /// True when the release toggles the preview.
-    pub(crate) fn release(&mut self) -> bool {
-        let toggle = self.held && !self.placed;
-        *self = Self::default();
-        toggle
     }
 }
 
@@ -183,7 +159,8 @@ fn canvas_click(
     editor: Res<Editor>,
     right: Res<RightPress>,
     mut palette: ResMut<Palette>,
-    mut preview: ResMut<PreviewKey>,
+    // Initialised with the graph's input context (absent in headless tests without one).
+    mut preview: Option<ResMut<PreviewKey>>,
     mut actions: ResMut<Actions>,
 ) {
     let Some(ec) = ec else { return };
@@ -203,7 +180,9 @@ fn canvas_click(
             if let Some(kind) = hotkey_node(&keys)
                 && editor.asset_kind(&editor.doc().expect("checked").id).is_some()
             {
-                if keys.pressed(KeyCode::KeyV) {
+                if keys.pressed(KeyCode::KeyV)
+                    && let Some(preview) = preview.as_mut()
+                {
                     preview.placed();
                 }
                 actions.push(Action::AddNode { kind: kind.into(), pos: (at.x, at.y), link: None, params: Vec::new() });
@@ -216,11 +195,6 @@ fn canvas_click(
 /// Alt held: UE's "break" modifier (Alt+LMB on a pin or a wire).
 fn alt(keys: &ButtonInput<KeyCode>) -> bool {
     mods(keys).contains(ModKeys::ALT)
-}
-
-/// Ctrl (or Super, as in the hotkeys) held: a wire drag moves the pin's wires (decision 0032).
-fn ctrl(keys: &ButtonInput<KeyCode>) -> bool {
-    mods(keys).intersects(ModKeys::CONTROL | ModKeys::SUPER)
 }
 
 /// Right click (not a pan) on an input pin opens its menu (type of polymorphic inputs, reset, disconnect);
@@ -251,14 +225,15 @@ fn pin_click(
 
 /// Right click (not a pan) on a node body opens the node menu (decision 0021); an unselected node is selected
 /// first, so the generic rows (copy, duplicate, delete) act on it. A double click on the body opens the file the
-/// node refers to (function, curve, constant table; decision 0023).
+/// node refers to (function, curve, constant table; decision 0023); on the header it renames a node with a name or
+/// label first ([`Editor::header_action`], design §5.5).
 #[allow(clippy::too_many_arguments)]
 fn node_click(
     click: On<PointerClick>,
     ec: Option<Res<EditorCanvas>>,
     nodes: Query<&NodeKey>,
     pins: Query<(), With<PinKey>>,
-    fields: Query<(), With<PropField>>,
+    (fields, headers): (Query<(), With<PropField>>, Query<(), With<NodeHeader>>),
     parents: Query<&ChildOf>,
     editor: Res<Editor>,
     right: Res<RightPress>,
@@ -270,13 +245,23 @@ fn node_click(
         return;
     }
     if click.button == PointerButton::Primary && click.count >= 2 {
+        // From the clicked entity up to the node.
+        let path = || {
+            std::iter::once(click.original_event_target())
+                .chain(parents.iter_ancestors(click.original_event_target()))
+                .take_while(|e| *e != click.event_target())
+        };
         // Inline editors inside the node keep their own clicks.
-        let on_field = std::iter::once(click.original_event_target())
-            .chain(parents.iter_ancestors(click.original_event_target()))
-            .take_while(|e| *e != click.event_target())
-            .any(|e| fields.contains(e));
-        if !on_field && let Some(id) = editor.referenced_asset(node) {
-            actions.push(Action::OpenAsset(id));
+        if path().any(|e| fields.contains(e)) {
+            return;
+        }
+        let action = if path().any(|e| headers.contains(e)) {
+            editor.header_action(node)
+        } else {
+            editor.referenced_asset(node).map(Action::OpenAsset)
+        };
+        if let Some(a) = action {
+            actions.push(a);
         }
         return;
     }
@@ -292,6 +277,21 @@ fn node_click(
         actions.push(Action::Select([node.clone()].into()));
     }
     open_menu(&mut commands, click.pointer.position, editor.node_menu(node));
+}
+
+/// A double click on a comment frame's title strip edits its title (design §5.5).
+fn frame_click(
+    click: On<PointerClick>,
+    frames: Query<&FrameKey>,
+    strips: Query<(), With<FrameTitleStrip>>,
+    editor: Res<Editor>,
+    mut actions: ResMut<Actions>,
+) {
+    let Ok(FrameKey(id)) = frames.get(click.event_target()) else { return };
+    let on_title = strips.contains(click.original_event_target());
+    if click.button == PointerButton::Primary && click.count >= 2 && on_title && editor.doc().is_some() {
+        actions.push(Action::TextDialog(PropTarget::FrameTitle(id.clone())));
+    }
 }
 
 /// A sidebar row (a game image, a Texture asset, a built-in texture) dragged onto the graph canvas (design §4.3).
@@ -362,18 +362,14 @@ fn edge_click(
 }
 
 /// A wire dropped on empty space opens the palette filtered by its type (auto-connect on pick).
-/// Dropped onto an incompatible port: say why (E002/E003) instead of opening the palette.
-/// With Ctrl held (UE "move wires", decision 0032) a drop on another pin of the same direction moves the wires of
-/// the pin the drag started from there (bevy_noodle has no wire target on such a pin, so the drop lands here);
-/// a drop on empty space does nothing.
-#[allow(clippy::too_many_arguments)]
+/// Dropped onto an incompatible port (bevy_noodle names it, `WireDropped::onto`): say why (E002/E003) instead of
+/// opening the palette. (A Ctrl+drag lifts the pin's wires instead of dragging a new one, decision 0032:
+/// bevy_noodle's move gesture, `canvas::check_move`.)
 fn wire_dropped(
     ev: On<WireDropped>,
     ec: Option<Res<EditorCanvas>>,
     keys_q: Query<&PinKey>,
     window: Query<&Window>,
-    hover: Res<HoverMap>,
-    keys: Res<ButtonInput<KeyCode>>,
     editor: Res<Editor>,
     mut palette: ResMut<Palette>,
     mut actions: ResMut<Actions>,
@@ -383,20 +379,7 @@ fn wire_dropped(
         return;
     }
     let Ok(key) = keys_q.get(ev.from) else { return };
-    let target = hover.values().flat_map(|m| m.keys()).find_map(|e| keys_q.get(*e).ok().filter(|k| *k != key));
-    let moving = ctrl(&keys);
-    match target {
-        Some(t) if moving && t.output == key.output => {
-            return actions.push(Action::MoveWires {
-                node: key.node.clone(),
-                pin: key.pin.clone(),
-                output: key.output,
-                to: (t.node.clone(), t.pin.clone()),
-            });
-        }
-        None if moving => return,
-        _ => {}
-    }
+    let target = ev.onto.and_then(|e| keys_q.get(e).ok());
     if let (Some(t), Some(d)) = (target, editor.doc()) {
         let (from, to) = if key.output { (key, t) } else { (t, key) };
         let reason = if from.output && !to.output {
@@ -417,6 +400,28 @@ fn wire_dropped(
     }
     let screen = window.iter().next().and_then(|w| w.cursor_position()).unwrap_or(Vec2::splat(200.0));
     palette.show(screen, ev.position, Some(link_of(key)));
+}
+
+/// Wires a Ctrl+drag lifted, dropped where they cannot move (decision 0032, design §5.3): over a pin of the same
+/// direction the move is refused for (bevy_noodle names it, `EdgesDropped::onto`), say why ("Wires not moved: …",
+/// the reason `Action::MoveWires` would log); elsewhere nothing happens (no palette). The wires are back at their pin
+/// either way.
+fn lifted_wires_dropped(
+    ev: On<EdgesDropped>,
+    ec: Option<Res<EditorCanvas>>,
+    keys_q: Query<&PinKey>,
+    editor: Res<Editor>,
+    mut actions: ResMut<Actions>,
+) {
+    if ec.is_none_or(|ec| ev.canvas != ec.canvas) {
+        return;
+    }
+    let Ok(key) = keys_q.get(ev.from) else { return };
+    let Some(to) = ev.onto.and_then(|e| keys_q.get(e).ok()).filter(|t| t.output == key.output) else { return };
+    let (from, to) = ((key.node.clone(), key.pin.clone()), (to.node.clone(), to.pin.clone()));
+    if let Err(why) = editor.plan_move_wires(&from, key.output, &to) {
+        actions.push(Action::Notify(why));
+    }
 }
 
 fn close_requested(mut ev: MessageReader<WindowCloseRequested>, mut actions: ResMut<Actions>) {
@@ -595,16 +600,5 @@ mod tests {
         keys.press(KeyCode::ShiftLeft);
         keys.press(KeyCode::KeyD);
         assert_eq!(hotkey_node(&keys), Some("stdlib::Divide"));
-    }
-
-    #[test]
-    fn preview_key_toggles_on_release_unless_a_node_was_placed() {
-        let mut k = PreviewKey::default();
-        k.press();
-        assert!(k.release());
-        k.press();
-        k.placed();
-        assert!(!k.release());
-        assert!(!k.release(), "release without press");
     }
 }

@@ -93,8 +93,8 @@ pub enum PropTarget {
     ConstDraftType,
     /// A settings field of the active Texture tab (design §4.4).
     Texture(TextureField),
-    /// The active Texture tab's preview repeats the image 3x3 (editor-only).
-    TextureTiled,
+    /// The active image or Texture tab's preview repeats the image 3x3 (editor-only, design §6.2).
+    PreviewTiled,
 }
 
 /// Which text a dialog's input submits to.
@@ -106,6 +106,8 @@ pub enum Submit {
     MoveTo(AssetId),
     OpenProject,
     NewProject,
+    /// Sets a text value of the active graph (a node's name / label, a comment's title; design §5.5).
+    SetText(PropTarget),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -247,9 +249,9 @@ pub enum Action {
     About,
     /// Opens Help → Quick Start on this step, or switches the open one to it.
     QuickStart(usize),
-    /// The active Texture tab's preview shows only channel 0 / 1 / 2 (R / G / B) in grey, or (`None`) the image;
-    /// editor-only, also on a built-in texture.
-    TextureChannel(Option<usize>),
+    /// The active image or Texture tab's preview shows only channel 0 / 1 / 2 (R / G / B) in grey, or (`None`) the
+    /// image; editor-only, also on a built-in texture (design §6.2).
+    PreviewChannel(Channel),
     /// Opens a web page in the default browser.
     OpenUrl(String),
     CloseProject(Unsaved),
@@ -267,6 +269,10 @@ pub enum Action {
     DiscardTab(usize),
     SaveAndCloseTab(usize),
     NextTab,
+    /// View → Show log (`` ` ``): flips [`UserConfig::show_log`] and saves the user config.
+    ToggleLog,
+    /// View → Show properties (Tab): flips [`UserConfig::show_properties`] and saves the user config.
+    ToggleProperties,
     Save,
     SaveAll,
     RegenAll,
@@ -328,7 +334,7 @@ pub enum Action {
         value: f32,
         is_final: bool,
     },
-    /// An edit made on the canvas finished (slider released, field committed, picker closed): ends undo
+    /// An edit made on the canvas finished (number drag released, field committed, picker closed): ends undo
     /// merging and redraws Properties, which is not redrawn during merged edits.
     CommitInline,
     /// Type of a node's polymorphic inputs, stored as the type of their inline values (RMB pin menu).
@@ -369,6 +375,9 @@ pub enum Action {
     NewAssetDialog(NewKind),
     NewFolderDialog,
     RenameDialog(AssetId),
+    /// Asks for the text of a node's name / label or a comment's title (double click, design §5.5); the dialog
+    /// submits it as a [`Action::SetValue`] of `target`.
+    TextDialog(PropTarget),
     MoveDialog(AssetId),
     DeleteDialog(AssetId),
     DeleteFolderDialog(String),
@@ -415,6 +424,7 @@ pub struct Message {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct UiRev {
     pub browser: u64,
+    /// The tabs bar; bumped whenever a tab is opened, closed, activated or renamed (the editor statusbar keys on it).
     pub tabs: u64,
     pub props: u64,
     pub log: u64,

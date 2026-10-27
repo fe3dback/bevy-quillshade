@@ -67,9 +67,16 @@ impl ParamDef {
         self
     }
 
-    /// Whether the editor shows this param for the node's resolved `params` (defaults included).
+    /// Whether the editor shows this param for the node's resolved `params` (defaults included). A pin type condition
+    /// compares by type: the stored value may name it as a `Value::Type` or by its label (`Value::Str("Float")`).
     pub fn visible(&self, params: &BTreeMap<String, Value>) -> bool {
-        self.shown_if.as_ref().is_none_or(|(key, value)| params.get(key) == Some(value))
+        self.shown_if.as_ref().is_none_or(|(key, value)| {
+            let Some(stored) = params.get(key) else { return false };
+            match value.as_type() {
+                Some(ty) => stored.as_type().or_else(|| PinType::from_label(stored.as_str())) == Some(ty),
+                None => stored == value,
+            }
+        })
     }
 }
 
@@ -939,5 +946,24 @@ impl Registry {
             out.insert(k.clone(), v.clone());
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shown_if_type_compares_by_type() {
+        let p = ParamDef::new("min", "Min", ParamKind::Float { min: None, max: None }, Value::Float(0.0))
+            .shown_if("type", Value::Type(PinType::Float));
+        let with = |v: Value| BTreeMap::from([("type".to_string(), v)]);
+        assert!(p.visible(&with(Value::Type(PinType::Float))));
+        assert!(p.visible(&with(Value::Str("Float".into()))), "the type by its label");
+        assert!(!p.visible(&with(Value::Type(PinType::Float2))));
+        assert!(!p.visible(&with(Value::Str("Float2".into()))));
+        assert!(!p.visible(&BTreeMap::new()), "no value");
+        let always = ParamDef::new("x", "X", ParamKind::Str, Value::Str(String::new()));
+        assert!(always.visible(&BTreeMap::new()));
     }
 }

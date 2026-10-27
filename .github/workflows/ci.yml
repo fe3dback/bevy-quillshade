@@ -30,7 +30,7 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       # Unit, pipeline, snapshot (+ WESL compile against Bevy 0.20 sources) and UI smoke tests.
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --workspace --no-fail-fast
       - name: CLI check of the sample project (headless, compile-checks WESL)
         run: cargo run -- check examples/sample_game --compile
       - name: Generated crate is up to date

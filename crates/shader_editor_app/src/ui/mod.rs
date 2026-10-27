@@ -3,19 +3,20 @@
 //! covers the panels while no project is open. The editor topbar / statusbar and the right sidebar belong to the
 //! active editor kind ([`areas`], [`crate::editors::EditorAreas`]).
 
-use bevy::feathers::constants::size;
-use bevy::feathers::controls::{ButtonVariant, FeathersButton, FeathersToolButton};
+use std::path::Path;
+
+use bevy::feathers::controls::{
+    ButtonVariant, FeathersButton, FeathersMenu, FeathersMenuToolButton, FeathersToolButton,
+};
 use bevy::feathers::display::caption;
 use bevy::feathers::theme::ThemeBackgroundColor;
 use bevy::feathers::tokens;
 use bevy::input_focus::tab_navigation::TabGroup;
 use bevy::prelude::*;
-use std::path::Path;
-
-use bevy::ui::ui_transform::UiGlobalTransform;
-use bevy::ui_widgets::{Activate, Button, ScrollArea};
+use bevy::ui_widgets::{Activate, ScrollArea};
 use bevy_noodle::style::kit;
 
+use crate::config::UserConfig;
 use crate::state::{Action, Actions, Editor, Unsaved};
 use crate::tab::ViewKind;
 
@@ -27,6 +28,7 @@ pub mod curve_preview;
 pub mod curve_view;
 pub mod dialog;
 pub mod icons;
+pub mod image_preview;
 pub mod image_view;
 pub mod input;
 pub mod log;
@@ -41,10 +43,12 @@ pub mod texture_view;
 pub mod tooltip;
 pub mod tree;
 pub mod welcome;
+pub mod widgets;
 
-use dialog::{menu_separator, open_icon_menu};
+use dialog::menu_separator;
 use icons::{IconId, icon};
 use tooltip::Tooltip;
+use widgets::{pane_box, pane_title};
 
 /// Pushes its action when the widget is activated (buttons, menu items).
 #[derive(Component, Default, Clone)]
@@ -71,7 +75,7 @@ pub struct EditorCanvasMarker;
 #[derive(Component, Default, Clone)]
 pub struct EmptyHint;
 
-/// The menu_bar's project text (`name  |  N error(s)`, the full path as its tooltip).
+/// The menu_bar's project text (`name  |  N errors`, the full path as its tooltip).
 #[derive(Component, Default, Clone)]
 pub struct ProjectText;
 
@@ -96,6 +100,9 @@ pub const BORDER: Color = Color::srgb_u8(20, 21, 24);
 /// Background of document views (the window clear color the graph canvas shows through).
 pub const VIEW_BG: Color = Color::srgb_u8(24, 25, 29);
 
+/// Narrowest the center column (editor content and its bars) gets: in a smaller window the sidebars shrink.
+const CENTER_MIN_W: f32 = 400.0;
+
 pub struct UiPlugin;
 
 impl Plugin for UiPlugin {
@@ -119,21 +126,25 @@ impl Plugin for UiPlugin {
         .add_plugins((
             logo::LogoPlugin,
             welcome::WelcomePlugin,
+            image_preview::ImagePreviewPlugin,
             image_view::ImageViewPlugin,
             texture_view::TextureViewPlugin,
             crate::game_image::GameImagePlugin,
             crate::editors::main_input::InputContextsPlugin,
         ))
         .add_systems(Startup, spawn_layout)
-        .add_systems(Update, (show_active_view, show_empty_hint, show_doc_kind, show_project))
+        .add_systems(
+            Update,
+            (show_active_view, show_empty_hint, show_doc_kind, show_project, fill_main_menus, main_menu_barrier),
+        )
         .add_observer(activate_action)
-        .add_observer(open_main_menu)
         .add_observer(row_hover_on)
         .add_observer(row_hover_off);
     }
 }
 
-fn activate_action(ev: On<Activate>, q: Query<&OnActivate>, mut actions: ResMut<Actions>) {
+/// Pushes the [`OnActivate`] action of an activated widget (not sent for an `InteractionDisabled` one).
+pub fn activate_action(ev: On<Activate>, q: Query<&OnActivate>, mut actions: ResMut<Actions>) {
     if let Ok(a) = q.get(ev.event_target()) {
         actions.push(a.0.clone());
     }
@@ -159,12 +170,14 @@ fn row_hover_off(ev: On<PointerOut>, mut q: Query<(&HoverRow, &mut BackgroundCol
     }
 }
 
-/// Small text button that pushes `action`.
+/// Small text button that pushes `action`. Buttons never shrink (`flex_shrink: 0`): a caption is not broken inside
+/// its button, a row that runs out of room wraps or clips whole buttons instead.
 pub fn tool_button(label: impl Into<String>, action: Action) -> impl Scene {
     let label = label.into();
     let act = OnActivate(action);
     bsn! {
         @FeathersToolButton { @variant: ButtonVariant::Plain, @caption: bsn! { @caption(label) } }
+        Node { flex_shrink: 0.0 }
         act
     }
 }
@@ -178,6 +191,7 @@ pub fn icon_tool_button(id: IconId, label: impl Into<String>, action: Action, ti
             @variant: ButtonVariant::Plain,
             @caption: bsn_list! { @icon(id, 16.0, TEXT) Node { margin: UiRect::right(px(4)) } -- @caption(label) },
         }
+        Node { flex_shrink: 0.0 }
         act
         tip
     }
@@ -188,6 +202,7 @@ pub fn icon_button(id: IconId, action: Action, tip: impl Into<String>) -> impl S
     let (act, tip) = (OnActivate(action), Tooltip(tip.into()));
     bsn! {
         @FeathersToolButton { @variant: ButtonVariant::Plain, @caption: bsn! { @icon(id, 16.0, TEXT) } }
+        Node { flex_shrink: 0.0 }
         act
         tip
     }
@@ -199,38 +214,8 @@ pub fn button(label: impl Into<String>, action: Action, primary: bool) -> impl S
     let variant = if primary { ButtonVariant::Primary } else { ButtonVariant::Normal };
     bsn! {
         @FeathersButton { @variant: variant, @caption: bsn! { @caption(label) } }
+        Node { flex_shrink: 0.0 }
         act
-    }
-}
-
-/// A toggle chip (a step tab, one button of a button group): accent background while `selected`, an optional dim
-/// `tag` after the label.
-pub fn chip(
-    label: impl Into<String>,
-    action: Action,
-    selected: bool,
-    tip: impl Into<String>,
-    tag: Option<&str>,
-) -> impl Scene {
-    let label = label.into();
-    let base = if selected { ACCENT.with_alpha(0.45) } else { Color::NONE };
-    let (act, hover, tip) = (OnActivate(action), HoverRow { base }, Tooltip(tip.into()));
-    let tag_color = if selected { TEXT } else { TEXT_DIM };
-    let tags: Vec<Box<dyn Scene>> =
-        tag.map(|t| -> Box<dyn Scene> { Box::new(text(t, tag_color, 11.0)) }).into_iter().collect();
-    bsn! {
-        Node {
-            align_items: AlignItems::Center,
-            column_gap: px(6),
-            padding: UiRect::axes(px(8), px(4)),
-            border_radius: BorderRadius::all(px(4)),
-        }
-        BackgroundColor(base)
-        Button
-        act
-        hover
-        tip
-        Children [ @text(label, TEXT, 13.0) -- {tags} ]
     }
 }
 
@@ -245,6 +230,11 @@ pub fn text(s: impl Into<String>, color: Color, font_size: f32) -> impl Scene {
     }
 }
 
+/// `n` and the noun in the right number: `1 node`, `2 nodes`, `0 nodes`.
+pub fn plural(n: usize, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
+}
+
 /// One line of text that is clipped instead of wrapped when the row is too narrow (a path in an editor topbar).
 pub fn clipped_text(s: impl Into<String>, color: Color, font_size: f32) -> impl Scene {
     let (s, layout) = (s.into(), TextLayout::no_wrap());
@@ -254,36 +244,34 @@ pub fn clipped_text(s: impl Into<String>, color: Color, font_size: f32) -> impl 
     }
 }
 
-fn header(title: &'static str) -> impl Scene {
-    header_row(text(title, TEXT, 14.0))
-}
-
-/// A panel header row holding `title` (a text scene, possibly with a marker).
-fn header_row(title: impl Scene) -> impl Scene {
-    bsn! {
-        Node {
-            flex_direction: FlexDirection::Row,
-            align_items: AlignItems::Center,
-            column_gap: px(4),
-            padding: UiRect::axes(px(8), px(4)),
-            min_height: size::HEADER_HEIGHT,
-        }
-        BackgroundColor(HEADER_BG)
-        Children [ @{title} ]
-    }
-}
-
-/// A main menu button; activating it opens the menu below it.
+/// A main menu of the menu_bar (on its `FeathersMenu`, see [`main_menu`]).
 #[derive(Component, Default, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum MainMenu {
     #[default]
     File,
+    Edit,
+    View,
     Assets,
     Help,
 }
 
 impl MainMenu {
-    pub fn items(self) -> Vec<(Option<IconId>, String, Action)> {
+    /// The menus in the menu_bar, left to right.
+    pub const ORDER: [MainMenu; 5] = [MainMenu::File, MainMenu::Edit, MainMenu::View, MainMenu::Assets, MainMenu::Help];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            MainMenu::File => "File",
+            MainMenu::Edit => "Edit",
+            MainMenu::View => "View",
+            MainMenu::Assets => "Assets",
+            MainMenu::Help => "Help",
+        }
+    }
+
+    /// The menu's items; `config` checks the View toggles that are on.
+    pub fn items(self, config: &UserConfig) -> Vec<(Option<IconId>, String, Action)> {
+        let check = |on: bool| on.then_some(IconId::Check);
         match self {
             MainMenu::File => vec![
                 (Some(IconId::FolderOpen), "Open Project...\tCtrl+O".into(), Action::OpenProjectDialog),
@@ -294,6 +282,14 @@ impl MainMenu {
                 (Some(IconId::SaveAll), "Save All\tCtrl+Shift+S".into(), Action::SaveAll),
                 menu_separator(),
                 (None, "Quit\tCtrl+Q".into(), Action::Quit),
+            ],
+            MainMenu::Edit => vec![
+                (Some(IconId::Undo), "Undo\tCtrl+Z".into(), Action::Undo),
+                (Some(IconId::Redo), "Redo\tCtrl+Shift+Z".into(), Action::Redo),
+            ],
+            MainMenu::View => vec![
+                (check(config.show_log), "Show log\t`".into(), Action::ToggleLog),
+                (check(config.show_properties), "Show properties\tTab".into(), Action::ToggleProperties),
             ],
             MainMenu::Assets => {
                 let mut items = browser::create_items();
@@ -311,27 +307,76 @@ impl MainMenu {
     }
 }
 
-fn menu_button(label: &'static str, menu: MainMenu) -> impl Scene {
+/// The popup of a main menu, filled with its items by [`fill_main_menus`].
+#[derive(Component, Default, Clone, Copy)]
+pub struct MainMenuPopup(pub MainMenu);
+
+/// A main menu: a `FeathersMenu` holding a plain menu tool button (no chevron) and its popup, which opens under the
+/// button. Feathers opens and closes it; [`fill_main_menus`] fills it.
+pub fn main_menu(menu: MainMenu) -> impl Scene {
+    let (label, popup) = (menu.label(), MainMenuPopup(menu));
     bsn! {
-        @FeathersToolButton { @variant: ButtonVariant::Plain, @caption: bsn! { @caption(label) } }
+        @FeathersMenu
         menu
+        Children [
+            @FeathersMenuToolButton { @caption: bsn! { @caption(label) }, @arrow: false }
+            ButtonVariant::Plain
+            --
+            @dialog::menu_popup(Vec::new())
+            popup
+        ]
     }
 }
 
-fn open_main_menu(
-    ev: On<Activate>,
-    buttons: Query<(&MainMenu, &ComputedNode, &UiGlobalTransform)>,
+/// The [`dialog::menu_barrier`] of an open main menu: a click outside the popup (the menu_bar's buttons included) only
+/// closes the menu, as with a context menu.
+#[derive(Component, Default, Clone)]
+pub struct MainMenuBarrier;
+
+/// Spawns the [`MainMenuBarrier`] while a main menu's popup is shown and removes it once none is.
+pub fn main_menu_barrier(
+    popups: Query<&Visibility, With<MainMenuPopup>>,
+    barriers: Query<Entity, With<MainMenuBarrier>>,
     mut commands: Commands,
 ) {
-    let Ok((menu, node, t)) = buttons.get(ev.event_target()) else { return };
-    let (center, size) = (t.translation * node.inverse_scale_factor(), node.size() * node.inverse_scale_factor());
-    open_icon_menu(&mut commands, center + Vec2::new(-size.x, size.y) / 2.0 + Vec2::Y * 2.0, menu.items());
+    let open = popups.iter().any(|v| *v == Visibility::Visible);
+    if open && barriers.is_empty() {
+        commands.spawn_scene(bsn! { @dialog::menu_barrier() MainMenuBarrier });
+    } else if !open {
+        for b in &barriers {
+            commands.entity(b).despawn();
+        }
+    }
+}
+
+/// (Re)fills the main menus' popups: when spawned and when a View toggle changed (its check mark).
+pub fn fill_main_menus(
+    editor: Res<Editor>,
+    popups: Query<(Entity, &MainMenuPopup)>,
+    added: Query<(), Added<MainMenuPopup>>,
+    mut last: Local<Option<(bool, bool)>>,
+    mut commands: Commands,
+) {
+    let key = (editor.config.show_log, editor.config.show_properties);
+    if *last == Some(key) && added.is_empty() {
+        return;
+    }
+    *last = Some(key);
+    for (popup, MainMenuPopup(menu)) in &popups {
+        commands.entity(popup).despawn_children();
+        let entries = menu.items(&editor.config).into_iter().map(dialog::MenuEntry::from).collect();
+        for row in dialog::menu_rows(entries) {
+            commands.spawn_scene(bsn! { @{row} ChildOf(popup) });
+        }
+    }
 }
 
 /// Logo, main menu, undo/redo, then the project name and error count. Nothing of one editor kind (that is the editor
 /// topbar's).
 fn menu_bar() -> impl Scene {
     let tip = Tooltip::default();
+    let menus: Vec<Box<dyn Scene>> =
+        MainMenu::ORDER.into_iter().map(|m| Box::new(main_menu(m)) as Box<dyn Scene>).collect();
     bsn! {
         Node {
             flex_direction: FlexDirection::Row,
@@ -345,11 +390,7 @@ fn menu_bar() -> impl Scene {
         Children [
             @logo::logo(20.0) Node { margin: UiRect::axes(px(4), px(0)) }
             --
-            @menu_button("File", MainMenu::File)
-            --
-            @menu_button("Assets", MainMenu::Assets)
-            --
-            @menu_button("Help", MainMenu::Help)
+            {menus}
             --
             @icon_button(IconId::Undo, Action::Undo, "Undo (Ctrl+Z)")
             --
@@ -372,14 +413,15 @@ pub(crate) fn project_name(root: &Path) -> String {
     root.file_name().map_or_else(|| root.display().to_string(), |n| n.to_string_lossy().into_owned())
 }
 
-/// Scrollable column used by the panels; `marker` tags the entity the panel fills.
+/// Scrollable column used by the panels; `marker` tags the entity the panel fills. Rows wider than the column (a
+/// sidebar narrowed by a small window) are clipped, not drawn over the neighbouring area.
 pub fn scroll_column() -> impl Scene {
     bsn! {
         Node {
             flex_direction: FlexDirection::Column,
             flex_grow: 1.0,
             min_height: px(0),
-            overflow: Overflow::scroll_y(),
+            overflow: Overflow { x: OverflowAxis::Clip, y: OverflowAxis::Scroll },
             padding: UiRect::all(px(4)),
             row_gap: px(1),
         }
@@ -390,9 +432,16 @@ pub fn scroll_column() -> impl Scene {
 fn spawn_layout(mut commands: Commands) {
     commands.spawn(Camera2d);
     commands.spawn_scene(bsn! {
-        // `min_width: 0`: Bevy lays a UI root out in an implicit grid cell, which would otherwise grow to the root's
-        // min-content width (the editor topbar's buttons do not wrap) and push the right sidebar out of the window.
-        Node { width: percent(100), height: percent(100), min_width: px(0), flex_direction: FlexDirection::Column }
+        // `min_width` / `min_height: 0`: Bevy lays a UI root out in an implicit grid cell, which would otherwise grow
+        // to the root's min-content size (the editor topbar's buttons do not wrap; the sidebars' panes) and push the
+        // right sidebar and the console/logs out of the window.
+        Node {
+            width: percent(100),
+            height: percent(100),
+            min_width: px(0),
+            min_height: px(0),
+            flex_direction: FlexDirection::Column,
+        }
         ThemeBackgroundColor(tokens::WINDOW_BG)
         TabGroup
         Children [
@@ -400,22 +449,36 @@ fn spawn_layout(mut commands: Commands) {
             --
             Node { flex_grow: 1.0, flex_direction: FlexDirection::Row, min_height: px(0) }
             Children [
-                // Asset browser.
-                Node { width: px(270), flex_direction: FlexDirection::Column, border: UiRect::right(px(1)) }
+                // Left sidebar: the project tree and the assets tree, a pane each. `min_width: 0`: below
+                // `CENTER_MIN_W` it shrinks past its content (the rows clip) instead of pushing the window wider.
+                Node {
+                    width: px(270),
+                    min_width: px(0),
+                    flex_direction: FlexDirection::Column,
+                    row_gap: px(4),
+                    padding: UiRect::all(px(4)),
+                    border: UiRect::right(px(1)),
+                }
                 BackgroundColor(PANEL_BG)
                 BorderColor::all(BORDER)
                 Children [
-                    @header("Project")
+                    @pane_box(pane_title("Project"), Vec::new(), bsn! { @scroll_column() browser::BrowserBody })
+                    Node { flex_grow: 3.0, flex_basis: px(0), min_height: px(0) }
                     --
-                    @scroll_column() browser::BrowserBody Node { flex_grow: 3.0, flex_basis: px(0) }
-                    --
-                    @header("Game Assets")
-                    --
-                    @scroll_column() browser::GameAssetsBody Node { flex_grow: 2.0, flex_basis: px(0) }
+                    @pane_box(pane_title("Game Assets"), Vec::new(), bsn! { @scroll_column() browser::GameAssetsBody })
+                    Node { flex_grow: 2.0, flex_basis: px(0), min_height: px(0) }
                 ]
                 --
-                // Center: tabs bar, editor topbar, editor content, editor statusbar, console/logs.
-                Node { flex_grow: 1.0, flex_direction: FlexDirection::Column, min_width: px(0) }
+                // Center: tabs bar, editor topbar, editor content, editor statusbar, console/logs. `flex_basis: 0`
+                // here and on the editor content: they take what is left, so the sidebars keep their width and the
+                // log its height (with a content-sized basis every sibling shrinks with them). Below `CENTER_MIN_W`
+                // the sidebars give way instead.
+                Node {
+                    flex_grow: 1.0,
+                    flex_basis: px(0),
+                    flex_direction: FlexDirection::Column,
+                    min_width: px(CENTER_MIN_W),
+                }
                 Children [
                     tabs::TabsBar
                     Node {
@@ -432,7 +495,7 @@ fn spawn_layout(mut commands: Commands) {
                     @areas::editor_topbar()
                     --
                     DocArea
-                    Node { flex_grow: 1.0, min_height: px(0) }
+                    Node { flex_grow: 1.0, flex_basis: px(0), min_height: px(0) }
                     Children [
                         @kit::canvas() EditorCanvasMarker ViewOf(ViewKind::Graph)
                         // Dimmer than bevy_noodle's default (design §4.9).
@@ -470,22 +533,7 @@ fn spawn_layout(mut commands: Commands) {
                     --
                     @areas::editor_statusbar()
                     --
-                    Node { height: px(190), flex_direction: FlexDirection::Column, border: UiRect::top(px(1)) }
-                    BackgroundColor(PANEL_BG)
-                    BorderColor::all(BORDER)
-                    Children [
-                        Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, padding: UiRect::axes(px(8), px(2)), column_gap: px(8) }
-                        BackgroundColor(HEADER_BG)
-                        Children [
-                            log::LogHeader Text("Log") TextFont { font_size: FontSize::Px(13.0) } TextColor(TEXT)
-                            --
-                            Node { flex_grow: 1.0 }
-                            --
-                            @tool_button("Clear messages", Action::ClearMessages)
-                        ]
-                        --
-                        @scroll_column() log::LogBody
-                    ]
+                    @log::console()
                 ]
                 --
                 @areas::right_sidebar()
@@ -520,19 +568,29 @@ fn show_doc_kind(editor: Res<Editor>, mut q: Query<&mut Text, With<DocKindText>>
     }
 }
 
-/// The menu_bar's project text and tooltip, and the window title.
+/// The menu_bar's project text and tooltip, and the window title. Keyed like the editor statusbar (`areas`): the log
+/// revision (diagnostics; opening or closing a project logs), the tabs revision (tab titles, saves), the active tab
+/// and its document's revision (the dirty mark). Not on every change of `Editor`: the error count clones all
+/// diagnostics and the dirty mark serialises a graph.
 fn show_project(
     editor: Res<Editor>,
     mut q: Query<(&mut Text, &mut Tooltip), With<ProjectText>>,
+    spawned: Query<(), Added<ProjectText>>,
     mut windows: Query<&mut Window>,
+    mut last: Local<Option<(u64, u64, Option<usize>, u64)>>,
 ) {
-    if !editor.is_changed() {
+    let key = (editor.ui.log, editor.ui.tabs, editor.active, editor.tab().map_or(0, |t| t.doc().revision()));
+    if *last == Some(key) && spawned.is_empty() {
         return;
     }
+    *last = Some(key);
     let (status, path) = match &editor.project {
         Some(p) => {
             let errors = editor.all_diagnostics().iter().filter(|d| d.is_error()).count();
-            (format!("{}  |  {} error(s)", project_name(&p.root), errors), p.root.display().to_string())
+            (
+                format!("{}  |  {}", project_name(&p.root), plural(errors, "error", "errors")),
+                p.root.display().to_string(),
+            )
         }
         None => ("No project".into(), "No project open".into()),
     };
@@ -556,7 +614,46 @@ fn show_project(
 mod tests {
     use std::path::Path;
 
-    use super::project_name;
+    use super::icons::IconId;
+    use super::{MainMenu, plural, project_name};
+    use crate::config::UserConfig;
+    use crate::state::Action;
+
+    #[test]
+    fn plural_words() {
+        assert_eq!(plural(1, "node", "nodes"), "1 node");
+        assert_eq!(plural(2, "node", "nodes"), "2 nodes");
+        assert_eq!(plural(0, "node", "nodes"), "0 nodes");
+    }
+
+    /// Review Focus 5: the View menu's check marks show the config's flags; Edit sits between File and View.
+    #[test]
+    fn view_menu_check_marks_follow_config() {
+        let marks = |show_log, show_properties| {
+            let config = UserConfig { show_log, show_properties, ..UserConfig::default() };
+            MainMenu::View.items(&config)
+        };
+        let check = Some(IconId::Check);
+        assert_eq!(
+            marks(true, true),
+            [
+                (check, "Show log\t`".to_string(), Action::ToggleLog),
+                (check, "Show properties\tTab".to_string(), Action::ToggleProperties),
+            ]
+        );
+        let icons = |m: Vec<(Option<IconId>, String, Action)>| m.into_iter().map(|i| i.0).collect::<Vec<_>>();
+        assert_eq!(icons(marks(false, true)), [None, check]);
+        assert_eq!(icons(marks(true, false)), [check, None]);
+        assert_eq!(icons(marks(false, false)), [None, None]);
+
+        let edit = MainMenu::Edit.items(&UserConfig::default());
+        let edit: Vec<_> = edit.into_iter().map(|(_, label, action)| (label, action)).collect();
+        assert_eq!(
+            edit,
+            [("Undo\tCtrl+Z".to_string(), Action::Undo), ("Redo\tCtrl+Shift+Z".to_string(), Action::Redo)]
+        );
+        assert_eq!(&MainMenu::ORDER[..3], [MainMenu::File, MainMenu::Edit, MainMenu::View]);
+    }
 
     #[test]
     fn project_name_is_last_component() {

@@ -34,7 +34,7 @@ pub struct Doc {
     pub selected_frame: Option<String>,
     /// Comment frames a box selection fully enclosed together with `selection` (design §4.5): Delete removes them
     /// with the nodes. Only frames whose `Frame::nodes` are all selected ([`Doc::enclosed`]); cleared by a new node
-    /// selection.
+    /// selection ([`Doc::set_selection`]).
     pub enclosed_frames: BTreeSet<String>,
     /// Bumped on every model change; the canvas rebuilds when it differs.
     pub revision: u64,
@@ -61,6 +61,13 @@ impl Doc {
 
     pub fn is_dirty(&self) -> bool {
         self.asset.to_ron() != self.saved
+    }
+
+    /// Replaces the node selection; the frames a box enclosed with the old one are forgotten. Every direct write of
+    /// `selection` goes through here (pruning deleted nodes aside).
+    pub fn set_selection(&mut self, sel: impl IntoIterator<Item = NodeId>) {
+        self.selection = sel.into_iter().collect();
+        self.enclosed_frames.clear();
     }
 
     pub fn mark_saved(&mut self) {
@@ -224,8 +231,7 @@ impl Doc {
                 });
             }
         });
-        self.selection = new_ids.clone();
-        self.enclosed_frames.clear();
+        self.set_selection(new_ids.iter().cloned());
         new_ids
     }
 
@@ -260,7 +266,7 @@ impl Doc {
 
 /// Node positions snap to multiples of this many graph units when touched (design §4.1); positions loaded from a
 /// file are kept as they are.
-pub const GRID_SNAP: f32 = 5.0;
+pub const GRID_SNAP: f32 = 10.0;
 
 /// `p` rounded to the nearest grid point; ties round away from zero (`f32::round`), `-0.0` becomes `0.0`.
 pub fn snap(p: (f32, f32)) -> (f32, f32) {
@@ -451,6 +457,17 @@ mod tests {
     }
 
     #[test]
+    fn set_selection_clears_enclosed_frames() {
+        let mut d = doc();
+        let out = d.asset.nodes.keys().next().unwrap().clone();
+        d.selection = [out.clone()].into();
+        d.enclosed_frames = ["f1".to_string()].into();
+        d.set_selection([out.clone()]);
+        assert_eq!(d.selection, [out].into());
+        assert!(d.enclosed_frames.is_empty(), "a new node selection forgets the enclosed frames");
+    }
+
+    #[test]
     fn create_connect_undo_redo() {
         let reg = shader_stdlib::registry();
         let mut d = doc();
@@ -630,13 +647,14 @@ mod tests {
     }
 
     #[test]
-    fn snap_rounds_to_five() {
-        assert_eq!(snap((12.4, -7.6)), (10.0, -10.0));
-        // Ties round away from zero (`f32::round`).
-        assert_eq!(snap((12.5, 2.5)), (15.0, 5.0));
-        assert_eq!(snap((-12.5, -2.5)), (-15.0, -5.0));
-        assert_eq!(snap((40.0, -5.0)), (40.0, -5.0));
-        assert_eq!(tidy((34.999996, -1.4e-6)), (35.0, 0.0));
-        assert_eq!(tidy((12.3, 4.99)), (12.3, 4.99), "off-grid positions are kept");
+    fn snap_rounds_to_ten() {
+        assert_eq!(snap((14.0, 15.0)), (10.0, 20.0));
+        assert_eq!(snap((-4.0, -15.0)), (0.0, -20.0));
+        // Ties round away from zero (`f32::round`); `-0.0` becomes `0.0`.
+        assert_eq!(snap((25.0, -25.0)), (30.0, -30.0));
+        assert!(snap((-4.0, 0.0)).0.is_sign_positive());
+        assert_eq!(snap((40.0, -10.0)), (40.0, -10.0));
+        assert_eq!(tidy((39.999996, -1.4e-6)), (40.0, 0.0));
+        assert_eq!(tidy((12.3, 9.99)), (12.3, 9.99), "off-grid positions are kept");
     }
 }

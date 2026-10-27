@@ -111,9 +111,8 @@ impl Editor {
             }
         }
         let d = self.doc_mut().expect("active graph");
-        d.selection = [id].into();
+        d.set_selection([id]);
         d.selected_frame = None;
-        d.enclosed_frames.clear();
         self.ui.props += 1;
     }
 
@@ -155,9 +154,8 @@ impl Editor {
             Some((node, key)) => {
                 self.set_value(PropTarget::Param { node: node.clone(), key }, Value::Str(value), false);
                 if let Some(d) = self.doc_mut() {
-                    d.selection = [node].into();
+                    d.set_selection([node]);
                     d.selected_frame = None;
-                    d.enclosed_frames.clear();
                 }
                 self.ui.props += 1;
             }
@@ -179,60 +177,71 @@ impl Editor {
     }
 
     /// Moves the wires of the pin `from` (an output when `output`) to the pin `to` of the same direction (Ctrl+LMB
-    /// drag, decision 0032): an input's single wire becomes `src → to` (replacing a wire already into `to`); every
-    /// wire of an output becomes `to → dst`. All or nothing: `to` of the other direction, or any rewired wire the
-    /// connection check refuses, changes nothing and logs the first failing wire. Otherwise one undo step.
+    /// drag, decision 0032) as one undo step, or logs why not ([`Self::plan_move_wires`]).
     pub(super) fn move_wires(&mut self, from: (NodeId, String), output: bool, to: (NodeId, String)) {
-        let Some(d) = self.doc() else { return };
-        if from == to {
+        if self.doc().is_none() {
             return;
         }
-        let path = d.id.path.clone();
-        let mut tmp = d.asset.clone();
+        match self.plan_move_wires(&from, output, &to) {
+            Ok(moved) => {
+                if let Some(d) = self.doc_mut()
+                    && d.asset != moved
+                {
+                    d.edit(|a| *a = moved);
+                }
+            }
+            Err(why) => self.push_msg(Level::Warning, why),
+        }
+    }
+
+    /// The active graph after moving the wires of `from` onto `to`, or why the move is refused; changes nothing (a
+    /// Ctrl+drag checks every pin it hovers with it). An input's single wire becomes `src → to`, replacing a wire
+    /// already into `to`; every wire of an output becomes `to → dst`. All or nothing: `to` of the other direction, or
+    /// any rewired wire the connection check refuses, is an error naming the first failing wire. Nothing to move
+    /// (`from == to`, no wire at `from`, no graph tab) gives the asset unchanged.
+    pub fn plan_move_wires(
+        &self,
+        from: &(NodeId, String),
+        output: bool,
+        to: &(NodeId, String),
+    ) -> Result<Asset, String> {
+        let Some(d) = self.doc() else { return Err("no graph is open".into()) };
+        let mut moved = d.asset.clone();
+        if from == to {
+            return Ok(moved);
+        }
+        let path = &d.id.path;
         let label = |asset: &Asset, (node, pin): &(NodeId, String)| {
             format!("{}.{pin}", crate::canvas::node_title(self, asset, node))
         };
-        let sig = node_signature(&tmp, &to.0, &self.registry, &self.functions, &path);
+        let sig = node_signature(&moved, &to.0, &self.registry, &self.functions, path);
         let fits = sig.is_some_and(|s| if output { s.output(&to.1).is_some() } else { s.input(&to.1).is_some() });
         if !fits {
             let dir = if output { "an output" } else { "an input" };
-            let msg = format!("Wires not moved: {} is not {dir}", label(&tmp, &to));
-            return self.push_msg(Level::Warning, msg);
+            return Err(format!("Wires not moved: {} is not {dir}", label(&moved, to)));
         }
-        let at_pin = |e: &Edge| if output { e.from == from } else { e.to == from };
-        let rewired: Vec<Edge> = tmp
+        let at_pin = |e: &Edge| if output { e.from == *from } else { e.to == *from };
+        let rewired: Vec<Edge> = moved
             .edges
             .iter()
             .filter(|e| at_pin(e))
             .map(|e| if output { Edge { from: to.clone(), ..e.clone() } } else { Edge { to: to.clone(), ..e.clone() } })
             .collect();
         if rewired.is_empty() {
-            return;
+            return Ok(moved);
         }
-        // Checked one by one against the graph without the old wires, each accepted one added before the next.
-        tmp.edges.retain(|e| !at_pin(e));
+        // Checked one by one against the graph without the old wires — nor, for an input, the wire into `to` it
+        // replaces — each accepted one added before the next.
+        moved.edges.retain(|e| !at_pin(e) && (output || e.to != *to));
         for e in &rewired {
             let (f, t) = ((e.from.0.as_str(), e.from.1.as_str()), (e.to.0.as_str(), e.to.1.as_str()));
-            if let Some(why) = connection_error(&tmp, f, t, &self.registry, &self.functions, &path) {
-                let msg = format!("Wires not moved: {} → {}: {why}", label(&tmp, &e.from), label(&tmp, &e.to));
-                return self.push_msg(Level::Warning, msg);
+            if let Some(why) = connection_error(&moved, f, t, &self.registry, &self.functions, path) {
+                return Err(format!("Wires not moved: {} → {}: {why}", label(&moved, &e.from), label(&moved, &e.to)));
             }
-            tmp.connect(f, t);
+            moved.connect(f, t);
         }
-        let Some(d) = self.doc_mut() else { return };
-        d.edit(|a| {
-            if !output {
-                // The wire already into `to` is replaced, as by a plain connect.
-                a.edges.retain(|e| e.to != to);
-            }
-            for e in a.edges.iter_mut() {
-                match output {
-                    true if e.from == from => e.from = to.clone(),
-                    false if e.to == from => e.to = to.clone(),
-                    _ => {}
-                }
-            }
-        });
+        moved.normalize();
+        Ok(moved)
     }
 
     /// Value a property widget shows: the stored one, or the pin's default.
@@ -250,7 +259,7 @@ impl Editor {
             PropTarget::ConstDraftName => return Some(Value::Str(self.consts_doc()?.draft_name.clone())),
             PropTarget::ConstDraftType => return Some(Value::Str(self.consts_doc()?.draft_ty.label().into())),
             PropTarget::Texture(f) => return Some(f.get(&self.texture_doc()?.asset.settings)),
-            PropTarget::TextureTiled => return Some(Value::Bool(self.texture_doc()?.tiled)),
+            PropTarget::PreviewTiled => return Some(Value::Bool(self.tab()?.preview()?.tiled())),
             _ => {}
         }
         let d = self.doc()?;
@@ -324,7 +333,7 @@ impl Editor {
                 }
                 Value::Color(v)
             }
-            // A frame without a hue gets one from its slider.
+            // A frame without a hue gets one from its Hue field.
             Value::Str(_) if matches!(target, PropTarget::FrameHue(_)) => Value::Float(value),
             other => other,
         };
@@ -529,6 +538,30 @@ impl Editor {
         self.ui.props += 1;
     }
 
+    /// What renaming `node` of the active graph edits (design §5.5): the `name` param of a parameter, a function's
+    /// input / output and a Named Route declaration, the label of a Constant node (set or not); `None` for the rest.
+    pub fn rename_target(&self, node: &str) -> Option<PropTarget> {
+        let n = self.doc()?.asset.nodes.get(node)?;
+        if crate::canvas::has_label(&n.kind) {
+            return Some(PropTarget::NodeLabel(node.to_string()));
+        }
+        match self.registry.get(&n.kind)?.role() {
+            NodeRole::Parameter | NodeRole::FunctionInput | NodeRole::FunctionOutput | NodeRole::RouteDeclaration => {
+                Some(PropTarget::Param { node: node.to_string(), key: "name".into() })
+            }
+            _ => None,
+        }
+    }
+
+    /// What a double click on the header of `node` does (design §5.5): renames it ([`Self::rename_target`]), else
+    /// opens the file it refers to ([`Self::referenced_asset`]), else nothing.
+    pub fn header_action(&self, node: &str) -> Option<Action> {
+        match self.rename_target(node) {
+            Some(target) => Some(Action::TextDialog(target)),
+            None => self.referenced_asset(node).map(Action::OpenAsset),
+        }
+    }
+
     /// The editor asset node `node` of the active graph refers to (decision 0023): a function call's function, a
     /// Sample Curve's curve, a `Global*` node's constant table, a texture node's Texture asset. `None` for user nodes,
     /// unset params and dangling targets. Drives node double-click and the props panel's "Open …" button.
@@ -693,9 +726,9 @@ impl Editor {
                 }
                 return;
             }
-            PropTarget::TextureTiled => {
-                if let Some(t) = self.texture_doc_mut() {
-                    t.tiled = value.as_bool();
+            PropTarget::PreviewTiled => {
+                if let Some(p) = self.preview_doc_mut() {
+                    p.set_tiled(value.as_bool());
                 }
                 return;
             }
@@ -783,7 +816,7 @@ impl Editor {
                         f.hue = hue;
                     }
                 });
-                // A slider drag must not rebuild its own sidebar; "Default colour" moves the slider back.
+                // A Hue drag must not rebuild its own sidebar; "Default colour" moves the field back.
                 refresh = hue.is_none();
             }
             PropTarget::CurvePoint(_)
@@ -794,7 +827,7 @@ impl Editor {
             | PropTarget::ConstDraftName
             | PropTarget::ConstDraftType
             | PropTarget::Texture(_)
-            | PropTarget::TextureTiled => {}
+            | PropTarget::PreviewTiled => {}
         }
         if refresh {
             self.ui.props += 1;

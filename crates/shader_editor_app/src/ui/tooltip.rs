@@ -38,11 +38,15 @@ fn show_tooltips(
     time: Res<Time>,
     mouse: Res<ButtonInput<MouseButton>>,
     q: Query<(Entity, &Tooltip, &Hovered, &ComputedNode, &UiGlobalTransform)>,
+    parents: Query<&ChildOf>,
     mut state: Local<TooltipState>,
     mut commands: Commands,
 ) {
     let now = time.elapsed_secs();
-    let hovered = q.iter().find(|(_, _, h, ..)| h.get()).map(|(e, ..)| e);
+    // `Hovered` holds for a widget and every ancestor of it: the innermost one is under the pointer (a tab's close
+    // button inside the tab).
+    let hovered =
+        q.iter().filter(|(_, _, h, ..)| h.get()).map(|(e, ..)| e).max_by_key(|e| parents.iter_ancestors(*e).count());
     let hide = |state: &mut TooltipState, commands: &mut Commands| {
         if let Some(p) = state.popup.take() {
             commands.entity(p).try_despawn();

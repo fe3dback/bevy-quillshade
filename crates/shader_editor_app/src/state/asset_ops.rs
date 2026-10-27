@@ -8,6 +8,13 @@ impl Editor {
         match submit {
             Submit::OpenProject => return self.apply(Action::OpenProject(PathBuf::from(text))),
             Submit::NewProject => return self.apply(Action::NewProject(PathBuf::from(text))),
+            // The sidebar's edit, as one undo step (an empty label clears it); no inline validation, diagnostics
+            // report a bad name (design §5.5). The sidebar's field shows the new text.
+            Submit::SetText(target) => {
+                self.set_value(target, Value::Str(text.to_string()), false);
+                self.ui.props += 1;
+                return;
+            }
             _ => {}
         }
         let Some(project) = self.project.clone() else { return };
@@ -41,7 +48,7 @@ impl Editor {
             Submit::MoveTo(id) => {
                 self.apply(Action::MoveTo(id, text.to_string()));
             }
-            Submit::OpenProject | Submit::NewProject => {}
+            Submit::OpenProject | Submit::NewProject | Submit::SetText(_) => {}
         }
     }
 
@@ -89,6 +96,10 @@ impl Editor {
             return;
         }
         self.rescan();
+        // The statusbar's WESL line count follows until regeneration below recounts.
+        if let Some(n) = self.wesl_lines.remove(id) {
+            self.wesl_lines.insert(new_id.clone(), n);
+        }
         // The asset's document and its generated files follow (regeneration below fills the files).
         for t in &mut self.tabs {
             t.doc_mut().rename(&project, id, &new_id);
@@ -138,6 +149,7 @@ impl Editor {
             return self.io_error("Cannot delete", e);
         }
         self.info(format!("Deleted {}", id.source_rel()));
+        self.wesl_lines.remove(id);
         self.rescan();
         if id.ty == AssetType::Texture {
             self.follow_ref_rewrite(texture_refs, &id.path, |a, r| {
@@ -203,9 +215,8 @@ impl Editor {
             && d.id == id
             && d.asset.nodes.contains_key(node)
         {
-            d.selection = [node.clone()].into();
+            d.set_selection([node.clone()]);
             d.selected_frame = None;
-            d.enclosed_frames.clear();
             d.revision += 1;
             self.view_requests.retain(|v| *v != ViewRequest::FitAll);
             self.view_requests.push(ViewRequest::FitSelection);

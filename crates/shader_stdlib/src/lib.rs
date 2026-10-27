@@ -32,3 +32,17 @@ pub fn registry() -> Registry {
     nodes::register_all(&mut r);
     r
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn modules_have_lf_line_endings() {
+        // Modules are written into the game as is: a CRLF checkout would change the generated files (see
+        // `.gitattributes`).
+        for (name, text) in MODULES {
+            assert!(!text.contains('\r'), "wesl/{name}.wesl checked out with CRLF: see .gitattributes");
+        }
+    }
+}

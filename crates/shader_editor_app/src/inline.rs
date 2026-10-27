@@ -4,19 +4,20 @@
 
 use std::collections::BTreeMap;
 
-use bevy::feathers::controls::{ColorInputValue, FeathersColorInput, FeathersSlider, color_input_self_update};
+use bevy::feathers::controls::{ColorInputValue, FeathersColorInput, color_input_self_update};
 use bevy::prelude::*;
-use bevy::ui_widgets::{SliderPrecision, SliderValue, slider_self_update};
 use shader_graph_core::{PinType, Value};
 
 use crate::state::PropTarget;
-use crate::ui::props::{PropField, checkbox_w, integer, linear_color, number, vector_fields};
+use crate::ui::props::{
+    PropField, checkbox_w, integer, linear_color, number, number_ranged, soft_range, vector_fields,
+};
 
 /// Kind of inline editor.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Inline {
-    /// Scalar with a known range.
-    Slider {
+    /// Scalar with a known range: a number input with that soft limit (design §3; a typed value may leave it).
+    Ranged {
         min: f32,
         max: f32,
     },
@@ -29,13 +30,15 @@ pub enum Inline {
     Check,
 }
 
+/// A number editor, [`Inline::Ranged`] when `min < max`.
+fn scalar(min: Option<f32>, max: Option<f32>) -> Inline {
+    soft_range(min, max).map_or(Inline::Number, |(min, max)| Inline::Ranged { min, max })
+}
+
 /// Editor for an unconnected input of type `ty`; `range` comes from the pin definition.
 pub fn inline_for_pin(ty: PinType, range: Option<(f32, f32)>) -> Option<Inline> {
     Some(match ty {
-        PinType::Float => match range {
-            Some((min, max)) => Inline::Slider { min, max },
-            None => Inline::Number,
-        },
+        PinType::Float => scalar(range.map(|r| r.0), range.map(|r| r.1)),
         PinType::Int => Inline::Integer,
         PinType::Float2 => Inline::Vector(2),
         PinType::Float3 => Inline::Color(3),
@@ -49,13 +52,7 @@ pub fn inline_for_pin(ty: PinType, range: Option<(f32, f32)>) -> Option<Inline> 
 pub fn inline_for_param(kind: &str, params: &BTreeMap<String, Value>) -> Option<(String, Inline)> {
     let f = |k: &str| params.get(k).map(Value::as_f32).filter(|x| x.is_finite());
     let (key, ty) = match kind {
-        "param::Scalar" => {
-            let inline = match (f("min"), f("max")) {
-                (Some(min), Some(max)) if min < max => Inline::Slider { min, max },
-                _ => Inline::Number,
-            };
-            return Some(("default".into(), inline));
-        }
+        "param::Scalar" => return Some(("default".into(), scalar(f("min"), f("max")))),
         "param::Vector" => ("default", params.get("type").and_then(Value::as_type).unwrap_or(PinType::Float3)),
         _ if kind.starts_with("param::") => ("default", params.get("default")?.pin_type()?),
         _ if kind.starts_with("stdlib::Constant") => ("value", params.get("value")?.pin_type()?),
@@ -74,17 +71,7 @@ pub fn inline_scene(target: PropTarget, inline: Inline, v: &Value) -> Box<dyn Sc
         })
     };
     match inline {
-        Inline::Slider { min, max } => {
-            let (field, value) = (PropField { target, ..default() }, v.as_f32());
-            Box::new(bsn! {
-                @FeathersSlider { @min: min, @max: max }
-                SliderValue({value})
-                SliderPrecision(2)
-                on(slider_self_update)
-                Node { flex_grow: 1.0, min_width: px(100) }
-                field
-            })
-        }
+        Inline::Ranged { min, max } => number_ranged(target, 0, v.as_f32(), Some((min, max)), None),
         Inline::Number => number(target, 0, v.as_f32(), None),
         Inline::Integer => integer(target, v.as_i32()),
         Inline::Check => checkbox_w(target, v.as_bool()),
@@ -115,7 +102,6 @@ mod tests {
 
     #[test]
     fn pin_editor_follows_type_and_range() {
-        assert_eq!(inline_for_pin(PinType::Float, Some((0.0, 1.0))), Some(Inline::Slider { min: 0.0, max: 1.0 }));
         assert_eq!(inline_for_pin(PinType::Float, None), Some(Inline::Number));
         assert_eq!(inline_for_pin(PinType::Int, None), Some(Inline::Integer));
         assert_eq!(inline_for_pin(PinType::Float2, None), Some(Inline::Vector(2)));
@@ -127,12 +113,15 @@ mod tests {
         assert_eq!(inline_for_pin(PinType::Any, None), None);
     }
 
+    /// Design §3: a pin `range` or a `param::Scalar` min/max (with `min < max`) is the soft limit of the number input.
     #[test]
-    fn scalar_parameter_slider_uses_its_range() {
+    fn ranged_from_pin_and_scalar() {
+        assert_eq!(inline_for_pin(PinType::Float, Some((0.0, 1.0))), Some(Inline::Ranged { min: 0.0, max: 1.0 }));
+        assert_eq!(inline_for_pin(PinType::Float, Some((1.0, 1.0))), Some(Inline::Number), "an empty range");
         let mut p = BTreeMap::from([("min".to_string(), Value::Float(0.2)), ("max".to_string(), Value::Float(5.0))]);
         assert_eq!(
             inline_for_param("param::Scalar", &p),
-            Some(("default".to_string(), Inline::Slider { min: 0.2, max: 5.0 }))
+            Some(("default".to_string(), Inline::Ranged { min: 0.2, max: 5.0 }))
         );
         p.insert("max".into(), Value::Float(0.2));
         assert_eq!(inline_for_param("param::Scalar", &p), Some(("default".to_string(), Inline::Number)));

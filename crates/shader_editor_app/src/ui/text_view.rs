@@ -13,9 +13,9 @@ use bevy::text::FontSource;
 use bevy_enhanced_input::prelude::ModKeys;
 
 use super::icons::IconId;
-use super::{TEXT, TEXT_DIM, VIEW_BG, ViewOf, clipped_text, icon_tool_button, text};
-use crate::editors::main_input::mods;
+use super::{TEXT, TEXT_DIM, VIEW_BG, ViewOf, clipped_text, icon_tool_button};
 use crate::highlight::{Style, highlight};
+use crate::keys::mods;
 use crate::state::{Action, Editor, GenFile};
 use crate::tab::{Lang, Tab, ViewKind};
 
@@ -23,7 +23,7 @@ const FONT_SIZE: f32 = 13.0;
 
 /// The editor topbar row of a text tab (path, buttons), rebuilt with the file.
 #[derive(Component, Default, Clone)]
-pub struct TextViewBar;
+pub(crate) struct TextViewBar;
 
 /// Scroll area holding the code.
 #[derive(Component, Default, Clone)]
@@ -126,9 +126,9 @@ fn redraw(
     let (path, open) = (t.rel.clone(), Action::ShowFile(t.source.clone(), which));
     let (source_icon, source) = (IconId::for_id(&t.source, None), Action::OpenAsset(t.source.clone()));
     commands.spawn_scene(bsn! { @clipped_text(path, TEXT, 13.0) ChildOf(bar) });
-    let layout = TextLayout::no_wrap();
+    // The path keeps its width first: the label yields (clipped) before the path is clipped.
     commands.spawn_scene(
-        bsn! { @text("read-only, generated", TEXT_DIM, 12.0) layout Node { flex_shrink: 0.0 } ChildOf(bar) },
+        bsn! { @clipped_text("read-only, generated", TEXT_DIM, 12.0) Node { flex_shrink: 100.0 } ChildOf(bar) },
     );
     commands.spawn_scene(bsn! { Node { flex_grow: 1.0 } ChildOf(bar) });
     let buttons: [Box<dyn Scene>; 3] = [

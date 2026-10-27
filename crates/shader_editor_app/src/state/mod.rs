@@ -27,9 +27,12 @@ use crate::config::{ProjectTabs, UserConfig};
 use crate::consts_doc::ConstsDoc;
 use crate::curve_doc::CurveDoc;
 use crate::doc::{ClipboardData, Doc, bounds, connection_error, node_signature};
+use crate::doc_kind::PreviewDoc;
+use crate::game_image::Channel;
 use crate::search::{self, WireEnd};
 use crate::tab::{ImageDoc, Lang, Tab, TabKey, TextDoc, parse_config_key};
-use crate::texture_doc::{FilterPreset, TextureDoc, TextureField};
+use crate::texture_doc::{FilterPreset, TextureDoc, TextureField, fits_easy};
+use crate::ui::plural;
 use crate::ui::tree::TreeId;
 
 mod apply;
@@ -147,6 +150,11 @@ impl Editor {
 
     pub fn texture_doc_mut(&mut self) -> Option<&mut TextureDoc> {
         self.active.and_then(|i| self.tabs.get_mut(i)).and_then(Tab::texture_mut)
+    }
+
+    /// The active tab's preview view state, on a tab with the shared image preview (image, Texture; design §6.2).
+    pub fn preview_doc_mut(&mut self) -> Option<&mut dyn PreviewDoc> {
+        self.active.and_then(|i| self.tabs.get_mut(i)).and_then(Tab::preview_mut)
     }
 
     /// Tab index of a Texture asset or built-in texture (`Texture` + `@internal/…`).

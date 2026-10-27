@@ -57,7 +57,7 @@ impl Project {
     /// Opens `root`, which must contain `Cargo.toml` and `assets/`.
     pub fn open(root: impl AsRef<Path>) -> Result<Project, OpenError> {
         let root = root.as_ref();
-        let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        let root = root.canonicalize().map_or_else(|_| root.to_path_buf(), without_verbatim_prefix);
         if !root.is_dir() {
             return Err(OpenError::NotADirectory(root));
         }
@@ -189,6 +189,23 @@ fn glob_match(pattern: &str, path: &str) -> bool {
         })
 }
 
+/// Drops the `\\?\` prefix Windows `canonicalize` adds (`\\?\C:\…`, `\\?\UNC\server\…`): a verbatim path takes `/`
+/// literally, while layout constants and asset paths joined onto the root use `/` separators. Unlike `dunce`, it strips
+/// the prefix even where the plain form means another path (reserved device names, components ending in `.` or a
+/// space): acceptable for a project directory.
+fn without_verbatim_prefix(p: PathBuf) -> PathBuf {
+    let Some(s) = p.to_str() else { return p };
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{rest}"));
+    }
+    match s.strip_prefix(r"\\?\") {
+        Some(rest) if rest.as_bytes().get(1) == Some(&b':') && rest.as_bytes()[0].is_ascii_alphabetic() => {
+            PathBuf::from(rest)
+        }
+        _ => p,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -216,6 +233,16 @@ mod tests {
             BevyDep::Workspace
         );
         assert_eq!(dep("not toml ["), BevyDep::Version);
+    }
+
+    #[test]
+    fn verbatim_prefix_is_dropped() {
+        let strip = |p: &str| without_verbatim_prefix(PathBuf::from(p));
+        assert_eq!(strip(r"\\?\C:\games\rock"), PathBuf::from(r"C:\games\rock"));
+        assert_eq!(strip(r"\\?\UNC\server\share\rock"), PathBuf::from(r"\\server\share\rock"));
+        // No drive letter to fall back to: kept as is.
+        assert_eq!(strip(r"\\?\Volume{0a1b}\rock"), PathBuf::from(r"\\?\Volume{0a1b}\rock"));
+        assert_eq!(strip("/home/u/rock"), PathBuf::from("/home/u/rock"));
     }
 
     #[test]

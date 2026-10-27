@@ -42,6 +42,9 @@ impl FileStamp {
 /// [`FileStamp`] changed (checked on every [`GameImageCache::get`]), and dropped by
 /// [`GameImageCache::free_unused`] once nobody but the cache holds its handle (run every frame by
 /// [`GameImagePlugin`]): callers keep the handle for as long as they show the image.
+/// A preview's channel: 0 / 1 / 2 (R / G / B) shown alone in grey, `None` the whole image.
+pub type Channel = Option<usize>;
+
 #[derive(Resource, Default)]
 pub struct GameImageCache {
     /// Compressed texture formats the GPU can sample, from the render device (`NONE` without one, e.g. in tests):
@@ -89,7 +92,7 @@ impl GameImageCache {
         project: &Project,
         path: &str,
         settings: &TextureSettings,
-        channel: Option<usize>,
+        channel: Channel,
         images: &mut Assets<Image>,
     ) -> Result<(Handle<Image>, bool), String> {
         if let Some(Err(e)) = settings.sampler.map(|s| s.check()) {

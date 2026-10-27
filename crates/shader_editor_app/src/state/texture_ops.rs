@@ -12,6 +12,11 @@ impl Editor {
                 }
             }
             TextureAction::SetEasy(easy) => {
+                // Easy shows only the presets: refused while the sampler is none of them (the button is disabled,
+                // design §6.3). Switching never rewrites the settings.
+                if easy && !fits_easy(&t.asset.settings) {
+                    return;
+                }
                 if let Some(t) = self.texture_doc_mut() {
                     t.easy = easy;
                     t.relayout();

@@ -3,13 +3,13 @@
 //! One-way sync (spec §14): the model is the source of truth and the canvas is rebuilt from it;
 //! user gestures arrive as `EditApplied` (origin `Interaction`) and become [`Action`]s.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use bevy::feathers::controls::NumberInputValue;
 use bevy::input_focus::InputFocus;
-use bevy::picking::events::{PointerDragStart, PointerOut, PointerOver};
+use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
-use bevy::text::EditableText;
+use bevy::text::{EditableText, TextReadWriteMode};
 use bevy::ui::Selected;
 use bevy::ui::ui_transform::UiGlobalTransform;
 use bevy::ui_widgets::popover::Popover;
@@ -20,15 +20,13 @@ use shader_graph_core::registry::{FUNCTION_PREFIX, NodeRole, ParamKind, ROUTE_PA
 use shader_graph_core::{Code, PinType, Value};
 use shader_project::AssetId;
 
-use crate::doc::{connection_error, node_signature, route_declarations, snap, tidy};
+use crate::doc::{connection_error, node_signature, route_declarations, tidy};
+use crate::editors::main_input::typing_into;
 use crate::inline::{Inline, inline_for_param, inline_for_pin, inline_scene};
 use crate::state::{Action, Actions, Editor, Link, PropTarget, ViewRequest, display_value};
 use crate::ui::icons::{IconId, icon};
 use crate::ui::props::PropField;
 use crate::ui::{ACCENT, node_preview};
-
-/// Moves a frame makes to carry the nodes inside it.
-pub const CARRIED: EditOrigin = EditOrigin::Custom(1);
 
 /// Model id on a node entity.
 #[derive(Component, Default, Clone, Debug)]
@@ -38,6 +36,14 @@ pub struct NodeKey(pub String);
 #[derive(Component, Default, Clone, Debug)]
 pub struct FrameKey(pub String);
 
+/// On a node's title bar: a double click there renames the node (design §5.5).
+#[derive(Component, Default, Clone, Debug)]
+pub struct NodeHeader;
+
+/// On a comment frame's title (a strip across the frame's top): a double click there edits the title (design §5.5).
+#[derive(Component, Default, Clone, Debug)]
+pub struct FrameTitleStrip;
+
 /// Model pin on a port entity.
 #[derive(Component, Default, Clone, Debug, PartialEq)]
 pub struct PinKey {
@@ -45,14 +51,6 @@ pub struct PinKey {
     pub pin: String,
     pub output: bool,
 }
-
-/// On a pin's port while a pointer is over it, wire drags included (design §4.8; [`pin_hover`] / [`pin_unhover`]).
-#[derive(Component, Default, Clone, Debug)]
-pub struct PinHovered;
-
-/// Child of a pin's port drawn over its dot while the pin is [`PinHovered`] ([`pin_halos`]); never picked.
-#[derive(Component, Default, Clone, Debug)]
-pub struct PinHalo;
 
 /// On the previewed node (decision 0022): its outline pulses (`node_outlines`).
 #[derive(Component, Default, Clone, Debug)]
@@ -95,7 +93,7 @@ pub struct CanvasPlugin;
 impl Plugin for CanvasPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<PendingMoves>()
-            .init_resource::<SnapDrag>()
+            .init_resource::<MoveVerdicts>()
             .add_systems(
                 Update,
                 (
@@ -113,13 +111,10 @@ impl Plugin for CanvasPlugin {
                     .chain()
                     .in_set(CanvasSystems),
             )
-            .add_systems(PostUpdate, pin_halos.after(NoodleSystems::Render).before(bevy::ui::UiSystems::Prepare))
-            .add_observer(pin_hover)
-            .add_observer(pin_unhover)
             .add_observer(check_connection)
-            .add_observer(snap_drag)
-            .add_observer(restart_snap_drag)
-            .add_observer(carry_frame_contents);
+            .add_observer(start_move_verdicts)
+            .add_observer(check_move)
+            .add_observer(request_move_wires);
     }
 }
 
@@ -160,18 +155,22 @@ pub(crate) fn name_header_color(name: &str) -> Color {
     Color::hsl(name_hue(name), 0.45, 0.32)
 }
 
-/// Name a node's header colour comes from (design §4.2): a named route's name (usages: their declaration's),
-/// a constant's user title, a `Global*` node's constant. `None`: the category colour.
-fn header_name(registry: &Registry, asset: &Asset, id: &str) -> Option<String> {
+/// The declared name of the route a Named Route Usage reads (its resolved `params`), looked up in `routes`
+/// ([`route_declarations`] of its asset); `None` when the declaration is missing.
+fn usage_route<'a>(routes: &'a [(NodeId, String)], params: &BTreeMap<String, Value>) -> Option<&'a str> {
+    let route = params.get(ROUTE_PARAM).map_or("", Value::as_str);
+    routes.iter().find(|r| r.0 == route).map(|r| r.1.as_str())
+}
+
+/// Name a node's header colour comes from (design §4.2): a named route's name (usages: their declaration's, from
+/// `routes`), a constant's user title, a `Global*` node's constant. `None`: the category colour.
+fn header_name(registry: &Registry, asset: &Asset, id: &str, routes: &[(NodeId, String)]) -> Option<String> {
     let n = asset.nodes.get(id)?;
     let def = registry.get(&n.kind)?;
     let params = registry.resolved_params(&n.kind, &n.params);
     let name = match def.role() {
         NodeRole::RouteDeclaration => params.get("name").map(|v| v.as_str().to_string()),
-        NodeRole::RouteUsage => {
-            let route = params.get(ROUTE_PARAM).map(|v| v.as_str().to_string()).unwrap_or_default();
-            route_declarations(asset, registry).into_iter().find(|r| r.0 == route).map(|r| r.1)
-        }
+        NodeRole::RouteUsage => usage_route(routes, &params).map(str::to_string),
         _ if has_label(&n.kind) => Some(n.label.clone()),
         _ => def
             .params()
@@ -183,16 +182,16 @@ fn header_name(registry: &Registry, asset: &Asset, id: &str) -> Option<String> {
 }
 
 /// Header colour of a node: by name (see [`header_name`]) or by category.
-pub(crate) fn header_color(registry: &Registry, asset: &Asset, id: &str) -> Color {
-    if let Some(name) = header_name(registry, asset, id) {
+pub(crate) fn header_color(registry: &Registry, asset: &Asset, id: &str, routes: &[(NodeId, String)]) -> Color {
+    if let Some(name) = header_name(registry, asset, id, routes) {
         return name_header_color(&name);
     }
     let cat = asset.nodes.get(id).and_then(|n| registry.get(&n.kind)).map(|d| d.info().category.clone());
     category_color(cat.as_deref().unwrap_or("Unknown"))
 }
 
-/// Selected node outline: bevy_noodle's selected border yellow.
-const SELECTED: Color = Color::srgb_u8(250, 204, 92);
+/// Selected node outline: white like a selected comment frame's border (design §2), so it never reads as [`WARNING`].
+const SELECTED: Color = Color::WHITE;
 /// Period of the previewed node's outline pulse, seconds (design §4.4).
 const PULSE_PERIOD: f32 = 1.2;
 
@@ -217,22 +216,10 @@ pub(crate) fn node_outline(previewed: bool, selected: bool, diag: Option<bool>, 
     }
 }
 
-/// bevy_noodle's `kit::port` dot: size and border, px (the hover halo covers it exactly).
-const PORT_SIZE: f32 = 12.0;
-const PORT_BORDER: f32 = 1.5;
 /// A hovered pin's dot is shown at least this many times its size (design §4.8) …
-const PIN_HOVER_SCALE: f32 = 1.3;
-/// … and this much lighter.
-const PIN_HOVER_LIGHTEN: f32 = 0.15;
-
-/// Look of the hover halo of a pin whose dot bevy_noodle's `highlight_ports` currently draws with `fill` / `border`
-/// at `scale` (design §4.8): the same colours lighter (so a wire drag's dimmed / candidate / target states still
-/// read), and the halo's own scale, which makes the dot at least [`PIN_HOVER_SCALE`] times its size (a drag target,
-/// already larger, stays as it is).
-pub(crate) fn pin_hover_look(fill: Color, border: Color, scale: f32) -> (Color, Color, f32) {
-    let own = if scale > 0.0 { (PIN_HOVER_SCALE / scale).max(1.0) } else { 1.0 };
-    (fill.lighter(PIN_HOVER_LIGHTEN), border.lighter(PIN_HOVER_LIGHTEN), own)
-}
+pub const PIN_HOVER_SCALE: f32 = 1.3;
+/// … and this much lighter (bevy_noodle's `PortHoverStyle`, set on the canvas in `attach_canvas`).
+pub const PIN_HOVER_LIGHTEN: f32 = 0.15;
 
 const ERROR: Color = Color::srgb(0.95, 0.30, 0.30);
 const WARNING: Color = Color::srgb(0.95, 0.75, 0.25);
@@ -265,6 +252,11 @@ pub fn has_label(kind: &str) -> bool {
 }
 
 pub fn node_title(editor: &Editor, asset: &Asset, id: &str) -> String {
+    node_title_in(editor, asset, id, &route_declarations(asset, &editor.registry))
+}
+
+/// [`node_title`] with the asset's [`route_declarations`] already at hand (a canvas rebuild computes them once).
+fn node_title_in(editor: &Editor, asset: &Asset, id: &str, routes: &[(NodeId, String)]) -> String {
     let Some(n) = asset.nodes.get(id) else { return String::new() };
     let Some(def) = editor.registry.get(&n.kind) else { return format!("? {}", n.kind) };
     let params = editor.registry.resolved_params(&n.kind, &n.params);
@@ -272,11 +264,7 @@ pub fn node_title(editor: &Editor, asset: &Asset, id: &str) -> String {
     let p = |k: &str| params.get(k).map(short).unwrap_or_default();
     match def.role() {
         NodeRole::Parameter | NodeRole::RouteDeclaration => format!("{} ({name})", p("name")),
-        NodeRole::RouteUsage => {
-            let route = params.get(ROUTE_PARAM).map(|v| v.as_str().to_string()).unwrap_or_default();
-            let decl = route_declarations(asset, &editor.registry).into_iter().find(|r| r.0 == route);
-            format!("{} ({name})", decl.map_or("?".into(), |r| r.1))
-        }
+        NodeRole::RouteUsage => format!("{} ({name})", usage_route(routes, &params).unwrap_or("?")),
         NodeRole::FunctionInput => format!("Input: {}", p("name")),
         NodeRole::FunctionOutput => format!("Output: {}", p("name")),
         _ if n.kind.starts_with(FUNCTION_PREFIX) => {
@@ -345,69 +333,11 @@ fn pin_row(
     }
 }
 
-/// A pin's port: bevy_noodle's `kit::port` dot with the model key and the hover halo (design §4.8). The halo is not
-/// pickable, so hit testing, wire drags and drop targets stay bevy_noodle's own (no enlarged hit area: a pickable
-/// area over the dot loses it to wires near it and is no drop target, decision 0033).
+/// A pin's port: bevy_noodle's `kit::port` dot with the model key. Its hover look (design §4.8) is bevy_noodle's
+/// `PortHoverStyle`; hit testing, wire drags and drop targets stay bevy_noodle's own (no enlarged hit area: a
+/// pickable area over the dot loses it to wires near it and is no drop target, decision 0033).
 fn pin_port(port: Port, color: Color, key: PinKey) -> impl Scene {
-    bsn! {
-        @kit::port(port, color) key
-        Children [
-            PinHalo
-            Node {
-                position_type: PositionType::Absolute,
-                // Absolute offsets start inside the port's border: back out over it.
-                left: px(-PORT_BORDER),
-                top: px(-PORT_BORDER),
-                width: px(PORT_SIZE),
-                height: px(PORT_SIZE),
-                border: UiRect::all(px(PORT_BORDER)),
-                border_radius: BorderRadius::MAX,
-            }
-            BackgroundColor(Color::NONE)
-            BorderColor::all(Color::NONE)
-            Pickable::IGNORE
-            Visibility::Hidden
-        ]
-    }
-}
-
-/// A pointer entered a pin's port (bevy_picking keeps hovering while a wire is dragged).
-fn pin_hover(over: On<PointerOver>, pins: Query<(), With<PinKey>>, mut commands: Commands) {
-    if pins.contains(over.event_target()) {
-        commands.entity(over.event_target()).try_insert(PinHovered);
-    }
-}
-
-fn pin_unhover(out: On<PointerOut>, pins: Query<(), With<PinKey>>, mut commands: Commands) {
-    if pins.contains(out.event_target()) {
-        commands.entity(out.event_target()).try_remove::<PinHovered>();
-    }
-}
-
-type HaloLook =
-    (&'static mut Visibility, &'static mut BackgroundColor, &'static mut BorderColor, &'static mut UiTransform);
-
-/// Shows the halo of each hovered pin over its dot ([`pin_hover_look`] of what bevy_noodle just drew) and hides
-/// the others. Runs after bevy_noodle's render set and writes only the halos: the port's own look stays
-/// bevy_noodle's.
-fn pin_halos(
-    ports: Query<(Has<PinHovered>, &BackgroundColor, &BorderColor, &UiTransform), With<PinKey>>,
-    mut halos: Query<(&ChildOf, HaloLook), (With<PinHalo>, Without<PinKey>)>,
-) {
-    for (parent, (mut shown, mut fill, mut border, mut transform)) in &mut halos {
-        let Ok((hovered, port_fill, port_border, port_transform)) = ports.get(parent.parent()) else { continue };
-        if !hovered {
-            shown.set_if_neq(Visibility::Hidden);
-            continue;
-        }
-        let (f, b, scale) = pin_hover_look(port_fill.0, port_border.top, port_transform.scale.x);
-        shown.set_if_neq(Visibility::Inherited);
-        fill.set_if_neq(BackgroundColor(f));
-        border.set_if_neq(BorderColor::all(b));
-        if transform.scale != Vec2::splat(scale) {
-            transform.scale = Vec2::splat(scale);
-        }
-    }
+    bsn! { @kit::port(port, color) key }
 }
 
 /// The node a material previews (decision 0022).
@@ -415,8 +345,15 @@ fn previewed_node(asset: &Asset) -> Option<&str> {
     asset.preview.node.as_deref().filter(|_| matches!(asset.kind, AssetKind::Material(_)))
 }
 
-/// Scene of one model node.
-fn node_scene(editor: &Editor, asset: &Asset, path: &str, id: &str, canvas: Entity) -> Option<Box<dyn Scene>> {
+/// Scene of one model node; `routes`: the asset's [`route_declarations`].
+fn node_scene(
+    editor: &Editor,
+    asset: &Asset,
+    path: &str,
+    id: &str,
+    routes: &[(NodeId, String)],
+    canvas: Entity,
+) -> Option<Box<dyn Scene>> {
     let n = asset.nodes.get(id)?;
     let pos = Vec2::new(n.pos.0, n.pos.1);
     let key = NodeKey(id.to_string());
@@ -435,7 +372,7 @@ fn node_scene(editor: &Editor, asset: &Asset, path: &str, id: &str, canvas: Enti
             key
             Node { width: px(20), height: px(20), border: UiRect::all(px(1.5)), border_radius: BorderRadius::MAX }
             BackgroundColor(Color::srgb_u8(44, 46, 52))
-            SelectedBorderColor
+            SelectedBorderColor { selected: SELECTED }
             ChildOf(canvas)
             Children [
                 @pin_port(Port::input(PortType::ANY), c, kin)
@@ -444,8 +381,8 @@ fn node_scene(editor: &Editor, asset: &Asset, path: &str, id: &str, canvas: Enti
             ]
         }));
     }
-    let title = node_title(editor, asset, id);
-    let head = header_color(&editor.registry, asset, id);
+    let title = node_title_in(editor, asset, id, routes);
+    let head = header_color(&editor.registry, asset, id, routes);
     let mut rows: Vec<Box<dyn Scene>> = Vec::new();
     // Vector editors (a number field per component) need a wider node.
     let mut wide = false;
@@ -520,6 +457,7 @@ fn node_scene(editor: &Editor, asset: &Asset, path: &str, id: &str, canvas: Enti
                 border_radius: BorderRadius::top(px(6.5)),
             }
             BackgroundColor(head)
+            NodeHeader
             Children [
                 @icon(IconId::Warning, 16.0, ACCENT)
                 --
@@ -528,11 +466,13 @@ fn node_scene(editor: &Editor, asset: &Asset, path: &str, id: &str, canvas: Enti
             ]
         })
     } else {
-        Box::new(bsn! { @kit::title(title) BackgroundColor(head) })
+        Box::new(bsn! { @kit::title(title) BackgroundColor(head) NodeHeader })
     };
     Some(Box::new(bsn! {
         @kit::node(pos)
         Node { min_width: min_width }
+        // The 1.5 px border under the selection outline, white too.
+        SelectedBorderColor { selected: SELECTED }
         key
         ChildOf(canvas)
         Children [ @{title} -- {rows} ]
@@ -556,6 +496,9 @@ fn frame_look(c: Color) -> (SelectedBorderColor, BackgroundColor) {
     (SelectedBorderColor { normal: c.with_alpha(0.5), selected: Color::WHITE }, BackgroundColor(c.with_alpha(0.08)))
 }
 
+/// Height (graph px) of a comment frame's title strip, one 16 px line.
+const FRAME_TITLE_HEIGHT: f32 = 20.0;
+
 fn frame_scene(f: &Frame, canvas: Entity) -> impl Scene {
     let c = frame_color(f);
     let (x, y, w, h) = f.rect;
@@ -563,6 +506,8 @@ fn frame_scene(f: &Frame, canvas: Entity) -> impl Scene {
     let (border, bg) = frame_look(c);
     bsn! {
         GraphNode
+        // Dragging it carries the nodes inside (bevy_noodle).
+        NodeFrame
         NodePosition(pos)
         key
         ZIndex(-1)
@@ -578,10 +523,13 @@ fn frame_scene(f: &Frame, canvas: Entity) -> impl Scene {
         border
         ChildOf(canvas)
         Children [
+            // The title strip spans the frame's width (a click target even with an empty title): a double click
+            // there edits the title (design §5.5); a drag from it moves the frame, as from the frame itself.
             Text(title)
             TextFont { font_size: FontSize::Px(16.0) }
             TextColor(c)
-            Pickable { should_block_lower: false, is_hoverable: false }
+            Node { width: percent(100), min_height: px(FRAME_TITLE_HEIGHT) }
+            FrameTitleStrip
         ]
     }
 }
@@ -594,7 +542,8 @@ fn idle(world: &mut World) -> bool {
     if world.get_resource::<PendingMoves>().is_some_and(|m| !m.entities.is_empty()) {
         return false;
     }
-    let wires = world.query::<&PendingWire>().iter(world).next().is_some();
+    // A dragged wire, or wires lifted by a Ctrl+drag (design §5.3).
+    let wires = world.query_filtered::<(), Or<(With<PendingWire>, With<MovingEdges>)>>().iter(world).next().is_some();
     let pressed = world
         .get_resource::<ButtonInput<MouseButton>>()
         .is_some_and(|b| b.any_pressed([MouseButton::Left, MouseButton::Right, MouseButton::Middle]));
@@ -631,8 +580,9 @@ fn sync_inline_fields(
 }
 
 /// Text is being typed into a field inside a node, or an editor's popup (color picker) is open: a rebuild
-/// would despawn it. Focused sliders/buttons don't count: they keep focus after a click, and their drags are
-/// covered by the pressed-button check.
+/// would despawn it. Focused buttons and number inputs that are not being typed into (read-only after a scrub or
+/// Enter, [`typing_into`]) don't count: they keep focus after a click, and their drags are covered by the
+/// pressed-button check.
 fn inline_editing(world: &mut World) -> bool {
     let in_node = |world: &World, mut e: Entity| loop {
         if world.get::<NodeKey>(e).is_some() {
@@ -644,7 +594,11 @@ fn inline_editing(world: &mut World) -> bool {
         }
     };
     let focus = world.get_resource::<InputFocus>().and_then(InputFocus::get);
-    if focus.is_some_and(|e| world.get::<EditableText>(e).is_some() && in_node(world, e)) {
+    if focus.is_some_and(|e| {
+        world.get::<EditableText>(e).is_some()
+            && typing_into(world.get::<TextReadWriteMode>(e), false)
+            && in_node(world, e)
+    }) {
         return true;
     }
     let popovers: Vec<Entity> = world.query_filtered::<Entity, With<Popover>>().iter(world).collect();
@@ -674,8 +628,9 @@ pub fn rebuild_canvas(world: &mut World) {
         for f in &d.asset.comments {
             scenes.push(Box::new(frame_scene(f, canvas)));
         }
+        let routes = route_declarations(&d.asset, &editor.registry);
         for id in d.asset.nodes.keys() {
-            if let Some(s) = node_scene(editor, &d.asset, &d.id.path, id, canvas) {
+            if let Some(s) = node_scene(editor, &d.asset, &d.id.path, id, &routes, canvas) {
                 scenes.push(s);
             }
         }
@@ -702,6 +657,10 @@ pub fn rebuild_canvas(world: &mut World) {
         }
     }
 
+    // The pin under the pointer keeps its hover look: picking sees its new port only a frame later (after layout),
+    // and corrects `Hovered` then if the rebuild moved the pin away.
+    let hovered: Vec<PinKey> =
+        world.query::<(&PinKey, &Hovered)>().iter(world).filter(|(_, h)| h.0).map(|(k, _)| k.clone()).collect();
     let old: Vec<Entity> = world.query_filtered::<Entity, Or<(With<NodeKey>, With<FrameKey>)>>().iter(world).collect();
     for e in old {
         world.entity_mut(e).despawn();
@@ -716,6 +675,11 @@ pub fn rebuild_canvas(world: &mut World) {
     let mut ports: HashMap<(String, String, bool), Entity> = HashMap::new();
     for (e, k) in world.query::<(Entity, &PinKey)>().iter(world) {
         ports.insert((k.node.clone(), k.pin.clone(), k.output), e);
+    }
+    for k in hovered {
+        if let Some(&port) = ports.get(&(k.node, k.pin, k.output)) {
+            world.entity_mut(port).insert(Hovered(true));
+        }
     }
     let pulse: Vec<Entity> = world
         .query::<(Entity, &NodeKey)>()
@@ -823,6 +787,64 @@ fn check_connection(
     }
 }
 
+/// Verdicts of [`Editor::plan_move_wires`] for the Ctrl+drag running now, by (pin it started from, pin hovered):
+/// bevy_noodle asks [`MoveCheck`] for every pin of the direction when the wires are lifted, and again for the pin
+/// they are dropped on. The model does not change during a gesture (a drop is planned again when applied).
+#[derive(Resource, Default)]
+pub struct MoveVerdicts {
+    verdicts: HashMap<((String, String), (String, String)), bool>,
+}
+
+/// Each Ctrl+drag starts with no verdicts: between two the graph, or a function it calls, may have changed.
+fn start_move_verdicts(_: On<Add<MovingEdges>>, mut verdicts: ResMut<MoveVerdicts>) {
+    verdicts.verdicts.clear();
+}
+
+/// Lifted wires may move to a pin of the same direction exactly where the whole move would succeed (design §5.3): the
+/// dry run of `Action::MoveWires` decides alone, over bevy_noodle's built-in verdict (its edits never apply here,
+/// `request_move_wires`). A refused pin gets no snap and takes no drop.
+fn check_move(
+    mut check: On<MoveCheck>,
+    keys: Query<&PinKey>,
+    editor: Option<Res<Editor>>,
+    ec: Option<Res<EditorCanvas>>,
+    mut verdicts: ResMut<MoveVerdicts>,
+) {
+    if ec.as_ref().is_none_or(|c| c.syncing || c.canvas != check.canvas) {
+        return;
+    }
+    let (Ok(from), Ok(to), Some(editor)) = (keys.get(check.from), keys.get(check.to), editor) else { return };
+    let (from_pin, to_pin) = ((from.node.clone(), from.pin.clone()), (to.node.clone(), to.pin.clone()));
+    let ok = *verdicts
+        .verdicts
+        .entry((from_pin.clone(), to_pin.clone()))
+        .or_insert_with(|| editor.plan_move_wires(&from_pin, from.output, &to_pin).is_ok());
+    if ok { check.allow() } else { check.reject() }
+}
+
+/// A Ctrl+drag dropped on a pin becomes one `Action::MoveWires` (one undo step, decision 0032). bevy_noodle does not
+/// move the edges itself: the model is the source of truth, and the canvas is rebuilt from it (decision 0008).
+fn request_move_wires(
+    mut request: On<EditRequested>,
+    keys: Query<&PinKey>,
+    ec: Option<Res<EditorCanvas>>,
+    mut actions: ResMut<Actions>,
+) {
+    let GraphEdit::MoveEdges { from, to, .. } = &request.edit else { return };
+    if ec.is_none_or(|c| c.canvas != request.canvas) {
+        return;
+    }
+    if let (Ok(from), Ok(to)) = (keys.get(*from), keys.get(*to)) {
+        actions.push(Action::MoveWires {
+            node: from.node.clone(),
+            pin: from.pin.clone(),
+            output: from.output,
+            to: (to.node.clone(), to.pin.clone()),
+        });
+    }
+    request.reject();
+}
+
 fn sync_from_canvas(
     mut applied: MessageReader<EditApplied>,
     keys: Query<&PinKey>,
@@ -834,7 +856,7 @@ fn sync_from_canvas(
     let mut connected_inputs = Vec::new();
     let mut out = Vec::new();
     for msg in applied.read() {
-        if msg.canvas != ec.canvas || !(msg.origin == EditOrigin::Interaction || msg.origin == CARRIED) {
+        if msg.canvas != ec.canvas || msg.origin != EditOrigin::Interaction {
             continue;
         }
         match &msg.change {
@@ -858,7 +880,8 @@ fn sync_from_canvas(
                     moves.quiet_frames = 0;
                 }
             }
-            GraphChange::Deleted { .. } => {}
+            // Moves of wires never apply on the canvas: `request_move_wires` turns them into `Action::MoveWires`.
+            GraphChange::Deleted { .. } | GraphChange::EdgesMoved { .. } => {}
         }
     }
     // A connect into a used input reports the replaced edge first; the model connect replaces it anyway.
@@ -866,7 +889,7 @@ fn sync_from_canvas(
     actions.0.extend(out);
 }
 
-/// Commits finished moves (including nodes carried by frames) as one action, a frame later.
+/// Commits finished moves (a frame's drag lists the nodes it carries) as one action, a frame later.
 fn commit_moves(
     mut moves: ResMut<PendingMoves>,
     nodes: Query<(&NodeKey, &NodePosition)>,
@@ -892,75 +915,6 @@ fn commit_moves(
     }
     n.sort_by(|a, b| a.0.cmp(&b.0));
     actions.push(Action::Moved { nodes: n, frames: f });
-}
-
-/// The pointer drag being snapped (design §4.1): its lead node and where that node was when the drag began.
-#[derive(Resource, Default)]
-pub struct SnapDrag(Option<(Entity, Vec2)>);
-
-/// The delta that takes the lead node from `current` to the grid point nearest to `start + total`.
-pub(crate) fn snapped_delta(start: Vec2, total: Vec2, current: Vec2) -> Vec2 {
-    let (x, y) = snap((start + total).into());
-    Vec2::new(x, y) - current
-}
-
-/// A pointer drag start begins a new gesture: a drag that never got its final step (a cancelled touch) must not
-/// leave its start behind for the next drag of the same node.
-fn restart_snap_drag(_: On<PointerDragStart>, mut state: ResMut<SnapDrag>) {
-    state.0 = None;
-}
-
-/// Rewrites each step of a pointer drag so its lead node (the first moved one) sits on the grid while dragging; the
-/// other nodes move by the same delta. Frames moved as lead snap their origin. Moves made by code and the
-/// [`CARRIED`] re-emits (which repeat the already snapped delta) are left alone.
-fn snap_drag(mut request: On<EditRequested>, positions: Query<&NodePosition>, mut state: ResMut<SnapDrag>) {
-    if request.origin != EditOrigin::Interaction {
-        return;
-    }
-    let GraphEdit::MoveNodes { nodes, delta, drag: Some(drag) } = &mut request.edit else {
-        // Any other gesture's edit ends a drag that never got its final step.
-        state.0 = None;
-        return;
-    };
-    // The stored lead is not moved by this step: it belongs to an abandoned drag of another node.
-    let lead = match state.0 {
-        Some((e, start)) if nodes.contains(&e) => Some((e, start)),
-        _ => nodes.first().and_then(|e| Some((*e, positions.get(*e).ok()?.0))),
-    };
-    if let Some((e, start)) = lead
-        && let Ok(at) = positions.get(e)
-    {
-        *delta = snapped_delta(start, drag.total, at.0);
-    }
-    state.0 = if drag.is_final { None } else { lead };
-}
-
-/// When a frame is dragged, the nodes inside it move along (same drag, so one gesture).
-fn carry_frame_contents(
-    applied: On<EditApplied>,
-    frames: Query<(&NodePosition, &ComputedNode), With<FrameKey>>,
-    nodes: Query<(Entity, &NodePosition, &ComputedNode), With<NodeKey>>,
-    mut commands: Commands,
-) {
-    let GraphChange::Moved { nodes: moved, delta, drag } = &applied.change else { return };
-    if applied.origin == CARRIED {
-        return;
-    }
-    let rect = |p: Vec2, c: &ComputedNode| Rect::from_corners(p, p + c.size() * c.inverse_scale_factor());
-    let mut carried = Vec::new();
-    for (frame, computed) in moved.iter().filter_map(|f| frames.get(*f).ok()) {
-        let before = rect(frame.0 - *delta, computed);
-        for (node, p, c) in &nodes {
-            let r = rect(p.0, c);
-            if before.contains(r.min) && before.contains(r.max) && !moved.contains(&node) && !carried.contains(&node) {
-                carried.push(node);
-            }
-        }
-    }
-    if !carried.is_empty() {
-        let edit = GraphEdit::MoveNodes { nodes: carried, delta: *delta, drag: *drag };
-        commands.graph_edit_with_origin(applied.canvas, edit, CARRIED);
-    }
 }
 
 fn sync_selection(
@@ -1013,7 +967,7 @@ fn sync_selection(
     }
 }
 
-/// Comment frame colours follow the model without a rebuild (a hue slider drag recolours live; the canvas is rebuilt
+/// Comment frame colours follow the model without a rebuild (a hue drag recolours live; the canvas is rebuilt
 /// only after the gesture).
 fn frame_colors(
     editor: Res<Editor>,
@@ -1151,26 +1105,6 @@ mod tests {
     }
 
     #[test]
-    fn pin_hover_look_is_lighter_and_at_least_hover_scale() {
-        let lum = |c: Color| c.luminance();
-        let (fill, border) = (Color::srgb(0.2, 0.4, 0.8), Color::srgba(0.2, 0.4, 0.8, 0.3));
-        let (f, b, own) = pin_hover_look(fill, border, 1.0);
-        assert!(lum(f) > lum(fill), "fill lighter");
-        assert!(lum(b) > lum(border), "border lighter");
-        // A drag's dimming (alpha) is kept.
-        assert_eq!(b.alpha(), 0.3);
-        assert_eq!(f.alpha(), 1.0);
-        // Idle dot: the halo makes it 1.3x; a dimmed one (0.85) as well; a drag target (1.4) keeps its size.
-        assert!((own - PIN_HOVER_SCALE).abs() < 1e-6);
-        let (.., own) = pin_hover_look(fill, border, 0.85);
-        assert!((own * 0.85 - PIN_HOVER_SCALE).abs() < 1e-6);
-        let (.., own) = pin_hover_look(fill, border, 1.4);
-        assert_eq!(own, 1.0);
-        let (.., own) = pin_hover_look(fill, border, 0.0);
-        assert_eq!(own, 1.0);
-    }
-
-    #[test]
     fn name_hue_is_stable() {
         let h = name_hue("albedo");
         assert_eq!(h, name_hue("albedo"));
@@ -1187,6 +1121,11 @@ mod tests {
         a
     }
 
+    /// [`header_color`] with the asset's routes.
+    fn color(reg: &Registry, a: &Asset, id: &str) -> Color {
+        header_color(reg, a, id, &route_declarations(a, reg))
+    }
+
     #[test]
     fn route_usage_shares_declaration_header() {
         use shader_graph_core::model::Node;
@@ -1196,12 +1135,12 @@ mod tests {
         let usage = a.add_node(
             Node::new("stdlib::NamedRouteUsage", (0.0, 0.0)).with_param(ROUTE_PARAM, Value::Str(decl.clone())),
         );
-        let c = header_color(&reg, &a, &decl);
+        let c = color(&reg, &a, &decl);
         assert_eq!(c, name_header_color("wet"));
-        assert_eq!(header_color(&reg, &a, &usage), c);
+        assert_eq!(color(&reg, &a, &usage), c);
         // A usage of no declaration keeps the category colour.
         let lost = a.add_node(Node::new("stdlib::NamedRouteUsage", (0.0, 0.0)));
-        assert_eq!(header_color(&reg, &a, &lost), category_color("Utility"));
+        assert_eq!(color(&reg, &a, &lost), category_color("Utility"));
     }
 
     #[test]
@@ -1210,18 +1149,18 @@ mod tests {
         let reg = shader_stdlib::registry();
         let mut a = material();
         let plain = a.add_node(Node::new("stdlib::Constant", (0.0, 0.0)));
-        assert_eq!(header_color(&reg, &a, &plain), category_color("Constants"));
+        assert_eq!(color(&reg, &a, &plain), category_color("Constants"));
         let mut labelled = Node::new("stdlib::Constant3Vector", (0.0, 0.0));
         labelled.label = "tint".into();
         let labelled = a.add_node(labelled);
-        assert_eq!(header_color(&reg, &a, &labelled), name_header_color("tint"));
+        assert_eq!(color(&reg, &a, &labelled), name_header_color("tint"));
         // Global*: by the constant's name, set or not.
         let global = a.add_node(
             Node::new("stdlib::GlobalConstF32", (0.0, 0.0)).with_param("const", Value::Str("roughness_base".into())),
         );
-        assert_eq!(header_color(&reg, &a, &global), name_header_color("roughness_base"));
+        assert_eq!(color(&reg, &a, &global), name_header_color("roughness_base"));
         let unset = a.add_node(Node::new("stdlib::GlobalConstF32", (0.0, 0.0)));
-        assert_eq!(header_color(&reg, &a, &unset), category_color("Constants"));
+        assert_eq!(color(&reg, &a, &unset), category_color("Constants"));
     }
 
     #[test]
@@ -1239,6 +1178,28 @@ mod tests {
         assert!(node_outline(false, false, None, 0.0).is_none());
     }
 
+    /// The system itself, not only [`node_outline`]: a selected node gets the 3 px selection outline, the previewed
+    /// one the 6 px pulse, a plain node none (a stale outline is removed).
+    #[test]
+    fn node_outlines_selected_and_previewed() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut world = World::new();
+        world.insert_resource(Editor::default());
+        world.insert_resource(Time::<()>::default());
+        let selected = world.spawn((NodeKey("a".into()), Selected)).id();
+        let previewed = world.spawn((NodeKey("b".into()), PreviewPulse)).id();
+        let plain = world.spawn(NodeKey("c".into())).id();
+        let stale = world.spawn((NodeKey("d".into()), Outline::new(px(3), px(0), SELECTED))).id();
+        world.run_system_once(node_outlines).unwrap();
+        let outline = |e: Entity| world.get::<Outline>(e).copied();
+        let o = outline(selected).expect("a selected node is outlined");
+        assert_eq!((o.width, o.offset, o.color), (px(3), px(0), SELECTED));
+        let o = outline(previewed).expect("the previewed node is outlined");
+        assert_eq!((o.width, o.offset, o.color), (px(6), px(0), pulse_color(0.0)));
+        assert!(outline(plain).is_none());
+        assert!(outline(stale).is_none(), "an outline nothing asks for is removed");
+    }
+
     #[test]
     fn preview_pulse_swings_between_orange_and_dark_red() {
         let orange = Color::srgb_u8(255, 140, 0).to_srgba();
@@ -1249,18 +1210,5 @@ mod tests {
         assert!(close(pulse_color(PULSE_PERIOD), orange));
         let mid = pulse_color(PULSE_PERIOD / 4.0).to_srgba();
         assert!(mid.red < orange.red && mid.red > red.red, "{mid:?}");
-    }
-
-    #[test]
-    fn drag_delta_snaps_lead_node() {
-        let start = Vec2::new(12.3, 7.6);
-        // First step: the lead is still at its start and lands on the nearest grid point of start + total.
-        let d = snapped_delta(start, Vec2::new(1.0, 0.5), start);
-        assert_eq!(start + d, Vec2::new(15.0, 10.0));
-        // Later steps measure from where the previous step left it; a small move stays on the same grid point.
-        let at = start + d;
-        assert_eq!(snapped_delta(start, Vec2::new(2.0, 1.0), at), Vec2::ZERO);
-        let d = snapped_delta(start, Vec2::new(-20.4, 13.0), at);
-        assert_eq!(at + d, Vec2::new(-10.0, 20.0));
     }
 }

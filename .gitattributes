@@ -1,0 +1,6 @@
+# LF on every OS: templates and stdlib WESL are embedded with `include_str!` and emitted / matched as is, and the
+# CI regen check compares generated files byte for byte.
+* text=auto eol=lf
+
+*.png binary
+*.ktx2 binary

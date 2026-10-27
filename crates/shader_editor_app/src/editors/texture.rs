@@ -2,17 +2,20 @@
 //! [`TextureDoc`]).
 
 use bevy::prelude::*;
-use shader_graph_core::texture::TextureAsset;
+use shader_graph_core::texture::{TextureAsset, TextureSettings};
 use shader_project::{AssetId, AssetSet, Project, assets, ops};
 
-use super::{EditorAreas, SidebarKey, fill_sidebar};
-use crate::doc_kind::{TabDoc, asset_title, io_error};
+use super::{EditorAreas, SidebarKey, fill_sidebar_with};
+use crate::doc_kind::{PreviewDoc, TabDoc, asset_title, io_error};
+use crate::game_image::Channel;
 use crate::state::Editor;
 use crate::tab::ViewKind;
 use crate::texture_doc::TextureDoc;
 use crate::ui::icons::IconId;
-use crate::ui::props::{hotkey_row, section};
-use crate::ui::texture_view::{TextureInfoText, TextureViewBar};
+use crate::ui::image_preview::{PREVIEW_HOTKEYS, PreviewInfoText};
+use crate::ui::props::hotkey_row;
+use crate::ui::texture_view::TextureViewBar;
+use crate::ui::widgets::subpane_box;
 use crate::ui::{TEXT, TEXT_DIM, text};
 
 /// The texture editor's window areas.
@@ -22,13 +25,13 @@ impl EditorAreas for TextureEditor {
     const VIEW: ViewKind = ViewKind::Texture;
     const SIDEBAR_TITLE: &'static str = "Texture";
 
-    /// The bar row, filled by `ui::texture_view::redraw_form`.
+    /// The bar row, filled by `ui::texture_view::redraw_bar`.
     fn topbar() -> Option<impl Scene> {
-        Some(bsn! { @super::bar_row() TextureViewBar Node { flex_wrap: FlexWrap::Wrap } })
+        Some(bsn! { @super::bar_row() TextureViewBar })
     }
 
-    /// What the texture is, its image (`TextureInfoText`, filled by `ui::texture_view::redraw_preview`), its
-    /// problems, the hotkeys.
+    /// What the texture is, its image (`PreviewInfoText`, filled by `ui::image_preview::redraw`), its problems, the
+    /// hotkeys.
     fn sidebar() -> Option<impl Scene> {
         Some(bsn! { @super::sidebar_body() TextureSidebarBody })
     }
@@ -40,7 +43,7 @@ impl EditorAreas for TextureEditor {
 
 /// The texture editor's right sidebar body.
 #[derive(Component, Default, Clone)]
-pub struct TextureSidebarBody;
+struct TextureSidebarBody;
 
 fn redraw_sidebar(
     editor: Res<Editor>,
@@ -49,47 +52,65 @@ fn redraw_sidebar(
     mut commands: Commands,
 ) {
     let Some(t) = editor.texture_doc() else { return key.forget() };
-    let Some(body) = key.changed(&editor, &body) else { return };
-    let mut rows: Vec<Box<dyn Scene>> = Vec::new();
-    texture_rows(&editor, t, &mut rows);
-    fill_sidebar(&mut commands, body, rows);
+    fill_sidebar_with(&mut commands, &body, &mut key, SidebarKey::now(&editor), || texture_rows(&editor, t));
 }
 
-/// Hotkeys of the Texture tab's preview.
-const TEXTURE_HOTKEYS: [(&str, &str); 5] = [
-    ("Wheel", "Zoom the preview"),
-    ("Drag", "Pan the preview"),
-    ("Double-click", "Fit the preview"),
-    ("Ctrl+Z / Y", "Undo / redo"),
-    ("Ctrl+S", "Save and regenerate"),
-];
+/// Hotkeys of the Texture tab besides the preview's.
+const TEXTURE_HOTKEYS: [(&str, &str); 2] = [("Ctrl+Z / Y", "Undo / redo"), ("Ctrl+S", "Save and regenerate")];
 
-/// A Texture tab (design §4.4): what it is, its image, its problems (the form and preview are the view).
-fn texture_rows(editor: &Editor, t: &TextureDoc, out: &mut Vec<Box<dyn Scene>>) {
-    out.push(Box::new(text(t.base_title(), TEXT, 15.0)));
+/// A Texture tab (design §4.4): what it is, its image, its problems, the hotkeys (the form and preview are the view).
+fn texture_rows(editor: &Editor, t: &TextureDoc) -> Vec<Box<dyn Scene>> {
+    let mut texture: Vec<Box<dyn Scene>> = Vec::new();
+    texture.push(Box::new(text(t.base_title(), TEXT, 15.0)));
     let kind = if t.is_internal() { "Built-in texture, read-only" } else { "Type: Texture asset" };
-    out.push(Box::new(text(kind, TEXT_DIM, 12.0)));
-    out.push(Box::new(text(format!("Image: assets/{}", t.asset.path), TEXT_DIM, 12.0)));
-    out.push(Box::new(bsn! { @text("", TEXT_DIM, 12.0) TextureInfoText }));
+    texture.push(Box::new(text(kind, TEXT_DIM, 12.0)));
+    texture.push(Box::new(text(format!("Image: assets/{}", t.asset.path), TEXT_DIM, 12.0)));
+    texture.push(Box::new(bsn! { @text("", TEXT_DIM, 12.0) PreviewInfoText }));
     if !t.is_internal() {
-        out.push(Box::new(text(
+        texture.push(Box::new(text(
             "Settings reach the game through the baked manifest (hot-reloaded); sRGB and grayscale expansion need a \
              rebuild.",
             TEXT_DIM,
             12.0,
         )));
     }
+    let mut out = vec![subpane_box("Texture", texture)];
     if let Some(diags) = editor.diags.get(&t.id).filter(|d| !d.is_empty() && !t.is_internal()) {
-        out.push(Box::new(section("Problems")));
-        for diag in diags {
+        let rows = diags.iter().map(|diag| -> Box<dyn Scene> {
             let c = if diag.is_error() { Color::srgb(0.95, 0.42, 0.42) } else { Color::srgb(0.95, 0.78, 0.35) };
-            out.push(Box::new(text(format!("{}: {}", diag.code, diag.message), c, 12.0)));
-        }
+            Box::new(text(format!("{}: {}", diag.code, diag.message), c, 12.0))
+        });
+        out.push(subpane_box("Problems", rows.collect()));
     }
-    out.push(Box::new(section("Hotkeys")));
-    let hotkeys = if t.is_internal() { &TEXTURE_HOTKEYS[..3] } else { &TEXTURE_HOTKEYS[..] };
-    for (keys, what) in hotkeys {
-        out.push(Box::new(hotkey_row(keys, what)));
+    let edits = if t.is_internal() { &[][..] } else { &TEXTURE_HOTKEYS[..] };
+    let rows =
+        PREVIEW_HOTKEYS.iter().chain(edits).map(|&(keys, what)| -> Box<dyn Scene> { Box::new(hotkey_row(keys, what)) });
+    out.push(subpane_box("Hotkeys", rows.collect()));
+    out
+}
+
+impl PreviewDoc for TextureDoc {
+    /// The image with the document's current (unsaved) settings.
+    fn preview_image(&self) -> (&str, TextureSettings) {
+        (self.image_key(), self.asset.settings.clone())
+    }
+
+    fn channel(&self) -> Channel {
+        self.channel
+    }
+
+    fn set_channel(&mut self, channel: Channel) {
+        self.channel = channel;
+        // The editor topbar's channel buttons show the choice.
+        self.relayout();
+    }
+
+    fn tiled(&self) -> bool {
+        self.tiled
+    }
+
+    fn set_tiled(&mut self, tiled: bool) {
+        self.tiled = tiled;
     }
 }
 
@@ -107,7 +128,7 @@ impl TabDoc for TextureDoc {
     }
 
     fn icon(&self) -> IconId {
-        IconId::Image
+        IconId::Texture
     }
 
     fn watermark(&self) -> Option<&'static str> {

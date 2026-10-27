@@ -1,27 +1,32 @@
 //! Graph editor kind: node graph of a material or function on the bevy_noodle canvas ([`Doc`]).
 
+use bevy::feathers::containers::flex_spacer;
 use bevy::prelude::*;
 use bevy_enhanced_input::prelude::{Actions as InputActions, Complete, InputAction, Start};
+use bevy_noodle::prelude::GraphQuery;
 use shader_graph_core::model::{Asset, AssetKind, BlendMode, MaterialKind, PbrOutputMode, PreviewMode, Shading};
 use shader_graph_core::registry::{NodeRole, ParamKind};
 use shader_graph_core::{Hotkey, HotkeyKey, Value};
 use shader_project::{AssetId, AssetSet, AssetType, Project, assets, ops};
 
 use super::main_input::{
-    EditCopy, EditCut, EditDelete, EditDuplicate, EditSelectAll, add_kind, ctrl, hotkey, no_command_mods, on_combo,
-    on_plain, plain, shift,
+    EditCopy, EditCut, EditDelete, EditDuplicate, EditSelectAll, add_kind, ctrl, hotkey, on_combo, on_plain, plain,
+    shift,
 };
-use super::{EditorAreas, EditorInput, SidebarKey, StatusCtx, StatusInfo, fill_sidebar};
-use crate::canvas::frame_color;
+use super::{EditorAreas, EditorInput, SidebarKey, StatusCtx, StatusInfo, fill_sidebar_with};
+use crate::canvas::{EditorCanvas, frame_color};
 use crate::doc::{Doc, node_signature, route_declarations};
 use crate::doc_kind::{TabDoc, asset_title, io_error};
+use crate::inline::{Inline, inline_for_param, inline_for_pin};
+use crate::keys::no_command_mods;
 use crate::state::{Action, Actions, Editor, PropTarget, ViewRequest, preview_mode_label};
-use crate::tab::ViewKind;
+use crate::tab::{Lang, ViewKind};
 use crate::ui::icons::IconId;
-use crate::ui::input::{CanvasCursor, PreviewKey};
+use crate::ui::input::CanvasCursor;
 use crate::ui::palette::Palette;
-use crate::ui::props::{Choices, checkbox_w, hue_slider, labeled, pin_kind, section, select_w, text_w, value_widget};
-use crate::ui::{TEXT, TEXT_DIM, button, icon_tool_button, text};
+use crate::ui::props::{Choices, checkbox_row, hue_input, labeled, pin_kind, select_w, text_w, value_row};
+use crate::ui::widgets::{Caption, GroupButton, button_group, subpane_box};
+use crate::ui::{TEXT, TEXT_DIM, button, icon_button, icon_tool_button, plural, text};
 
 /// The graph editor's window areas.
 pub struct GraphEditor;
@@ -30,6 +35,7 @@ impl EditorAreas for GraphEditor {
     const VIEW: ViewKind = ViewKind::Graph;
     const SIDEBAR_TITLE: &'static str = "Properties";
 
+    /// The canvas tools, then [`GraphTopbarDynamic`]: the parts that depend on the tab (design §5.2, §5.4).
     fn topbar() -> Option<impl Scene> {
         Some(bsn! {
             @super::bar_row()
@@ -40,6 +46,9 @@ impl EditorAreas for GraphEditor {
                 @icon_tool_button(IconId::Comment, "Comment", Action::AddComment(None), "Add a comment frame (C)")
                 --
                 @icon_tool_button(IconId::Fit, "Fit", Action::View(ViewRequest::FitAll), "Fit the graph (Home)")
+                --
+                GraphTopbarDynamic
+                Node { flex_grow: 1.0, flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(2) }
             ]
         })
     }
@@ -50,7 +59,7 @@ impl EditorAreas for GraphEditor {
     }
 
     fn build(app: &mut App) {
-        app.add_systems(Update, redraw_sidebar);
+        app.add_systems(Update, (redraw_graph_topbar.after(crate::apply_actions), redraw_sidebar));
     }
 
     fn input(app: &mut App) {
@@ -67,7 +76,8 @@ impl EditorAreas for GraphEditor {
             .add_observer(node_hotkey::<ConvertStar>)
             .add_observer(node_hotkey::<ConvertSlash>)
             .add_observer(preview_press)
-            .add_observer(preview_release);
+            .add_observer(preview_release)
+            .add_observer(cancel_wire);
     }
 }
 
@@ -81,8 +91,8 @@ impl EditorInput for GraphEditor {
 
     fn bindings() -> impl Scene {
         use KeyCode::{
-            Backspace, Delete, Digit8, Equal, Home, KeyA, KeyC, KeyD, KeyF, KeyL, KeyV, KeyX, Minus, NumpadAdd,
-            NumpadDivide, NumpadMultiply, NumpadSubtract, Slash, Tab,
+            Backspace, Delete, Digit8, Equal, Escape, Home, KeyA, KeyC, KeyD, KeyF, KeyL, KeyV, KeyX, Minus, NumpadAdd,
+            NumpadDivide, NumpadMultiply, NumpadSubtract, Slash, Space,
         };
         bsn! {
             InputActions<GraphCtx> [
@@ -106,7 +116,7 @@ impl EditorInput for GraphEditor {
                 --
                 @{hotkey::<AddComment>(plain([KeyC]))}
                 --
-                @{hotkey::<OpenPalette>(plain([Tab]))}
+                @{hotkey::<OpenPalette>(plain([Space]))}
                 --
                 // Node action hotkeys (decision 0021): Shift + the main-row key, or the numpad key alone.
                 @{hotkey::<ConvertPlus>([shift(Equal), NumpadAdd.into()])}
@@ -118,6 +128,8 @@ impl EditorInput for GraphEditor {
                 @{hotkey::<ConvertSlash>([shift(Slash), NumpadDivide.into()])}
                 --
                 @{hotkey::<PreviewNode>(plain([KeyV]))}
+                --
+                @{hotkey::<CancelWire>(plain([Escape]))}
             ]
         }
     }
@@ -140,12 +152,17 @@ pub struct FitSelection;
 #[action_output(bool)]
 pub struct FitAll;
 
+/// Esc: drops the wire being dragged, or puts the wires a Ctrl+drag lifted back (design §5.3); nothing is edited.
+#[derive(InputAction)]
+#[action_output(bool)]
+pub struct CancelWire;
+
 /// C: a comment frame at the cursor (around the selection).
 #[derive(InputAction)]
 #[action_output(bool)]
 pub struct AddComment;
 
-/// Tab: the node palette at the cursor.
+/// Space: the node palette at the cursor (Tab is View → Show properties, design §4).
 #[derive(InputAction)]
 #[action_output(bool)]
 pub struct OpenPalette;
@@ -186,6 +203,15 @@ fn comment_at_cursor(
 ) {
     if no_command_mods(&keys) {
         actions.push(Action::AddComment(cursor.graph_pos()));
+    }
+}
+
+/// Esc ends the canvas's wire gesture the way bevy_noodle's own cancel does: by despawning its dragged wire or
+/// lifted edges (`MovingEdges`). Any modifier may be held (a Ctrl+drag holds Ctrl). While typing, the keyboard gate
+/// hides Esc from this context, so a text field, the palette or a dialog keeps it.
+fn cancel_wire(_: On<Start<CancelWire>>, ec: Option<Res<EditorCanvas>>, graph: GraphQuery, mut commands: Commands) {
+    if let Some(wire) = ec.and_then(|ec| graph.wire_of(ec.canvas)) {
+        commands.entity(wire).try_despawn();
     }
 }
 
@@ -234,9 +260,116 @@ fn preview_release(
     }
 }
 
+/// `V` toggles the node preview on release, unless `V` + click dropped a `param::Vector` meanwhile
+/// (decision 0021). Initialised by [`GraphEditor::input`]; the canvas click (`ui::input`) marks a placement.
+#[derive(Resource, Default)]
+pub(crate) struct PreviewKey {
+    held: bool,
+    placed: bool,
+}
+
+impl PreviewKey {
+    fn press(&mut self) {
+        *self = Self { held: true, placed: false };
+    }
+
+    /// A node was placed with `V` held: this release does not toggle.
+    pub(crate) fn placed(&mut self) {
+        self.placed = self.held;
+    }
+
+    /// True when the release toggles the preview.
+    fn release(&mut self) -> bool {
+        let toggle = self.held && !self.placed;
+        *self = Self::default();
+        toggle
+    }
+}
+
+/// The graph editor topbar's part that depends on the tab, refilled by [`redraw_graph_topbar`]: the Preview mode
+/// group (materials, design §5.4) and, right-aligned, the "Show generated" buttons (design §5.2).
+#[derive(Component, Default, Clone)]
+pub struct GraphTopbarDynamic;
+
+/// What [`GraphTopbarDynamic`] shows: the active tab, its asset (the buttons' target), whether that is a material,
+/// the stored preview mode and whether a node is previewed.
+type TopbarKey = (Option<usize>, AssetId, bool, PreviewMode, bool);
+
+fn redraw_graph_topbar(
+    editor: Res<Editor>,
+    bar: Query<Entity, With<GraphTopbarDynamic>>,
+    mut last: Local<Option<TopbarKey>>,
+    mut commands: Commands,
+) {
+    let Some(d) = editor.doc() else { return *last = None };
+    let preview = &d.asset.preview;
+    // A dangling id (read from a file) previews nothing (W107).
+    let previewing = preview.node.as_ref().is_some_and(|n| d.asset.nodes.contains_key(n));
+    let material = matches!(d.asset.kind, AssetKind::Material(_));
+    let key = (editor.active, d.id.clone(), material, preview.mode, previewing);
+    if last.as_ref() == Some(&key) {
+        return;
+    }
+    let Ok(bar) = bar.single() else { return };
+    commands.entity(bar).despawn_children();
+    for item in topbar_items(&d.id, material, preview.mode, previewing) {
+        commands.spawn_scene(bsn! { @{item} ChildOf(bar) });
+    }
+    *last = Some(key);
+}
+
+/// The action of the topbar's Preview `mode` button: a `PropTarget::PreviewMode` edit (one undo step).
+pub fn preview_mode_action(mode: PreviewMode) -> Action {
+    Action::SetValue {
+        target: PropTarget::PreviewMode,
+        value: Value::Str(preview_mode_label(mode).into()),
+        merge: false,
+    }
+}
+
+fn preview_mode_icon(mode: PreviewMode) -> IconId {
+    match mode {
+        PreviewMode::Unlit => IconId::Unlit,
+        PreviewMode::Lit => IconId::Pbr,
+        PreviewMode::Full => IconId::Layers,
+    }
+}
+
+/// The hover hint of a Preview mode button: it names the mode even while the group is disabled (design §5.4; the UI
+/// font has no em dash).
+fn preview_mode_tip(mode: PreviewMode, previewing: bool) -> String {
+    let label = preview_mode_label(mode);
+    if previewing { format!("Preview: {label}") } else { format!("Preview: {label} - preview a node first (V)") }
+}
+
+/// [`GraphTopbarDynamic`]'s items. The Preview mode group stays disabled, showing the stored mode, while no node is
+/// previewed.
+fn topbar_items(id: &AssetId, material: bool, mode: PreviewMode, previewing: bool) -> Vec<Box<dyn Scene>> {
+    let mut out: Vec<Box<dyn Scene>> = Vec::new();
+    if material {
+        let buttons = PreviewMode::ALL.map(|m| GroupButton {
+            caption: Caption::Icon(preview_mode_icon(m)),
+            action: preview_mode_action(m),
+            selected: m == mode,
+            disabled: !previewing,
+            tip: preview_mode_tip(m, previewing),
+        });
+        let buttons: Vec<GroupButton> = buttons.into();
+        out.push(Box::new(bsn! { @button_group(buttons) Node { margin: UiRect::left(px(8)) } }));
+    }
+    out.push(Box::new(flex_spacer()));
+    let wesl = Action::ShowGenerated(id.clone(), Lang::Wesl);
+    out.push(Box::new(icon_button(IconId::Code, wesl, "Show generated WESL")));
+    if material {
+        let rust = Action::ShowGenerated(id.clone(), Lang::Rust);
+        out.push(Box::new(icon_button(IconId::Crate, rust, "Show generated Rust")));
+    }
+    out
+}
+
 /// The graph editor's right sidebar body ("Properties").
 #[derive(Component, Default, Clone)]
-pub struct GraphSidebarBody;
+struct GraphSidebarBody;
 
 fn redraw_sidebar(
     editor: Res<Editor>,
@@ -245,127 +378,163 @@ fn redraw_sidebar(
     mut commands: Commands,
 ) {
     let Some(d) = editor.doc() else { return key.forget() };
-    let Some(body) = key.changed(&editor, &body) else { return };
-    let mut rows: Vec<Box<dyn Scene>> = Vec::new();
+    fill_sidebar_with(&mut commands, &body, &mut key, SidebarKey::now(&editor), || sidebar_rows(&editor, d));
+}
+
+/// A Float edited in the sidebar gets the soft limit of its inline field on the node (design §3).
+fn ranged(kind: &ParamKind, on_node: Option<Inline>) -> ParamKind {
+    match (kind, on_node) {
+        (ParamKind::Float { .. }, Some(Inline::Ranged { min, max })) => {
+            ParamKind::Float { min: Some(min), max: Some(max) }
+        }
+        _ => kind.clone(),
+    }
+}
+
+/// The selected comment frame, the one selected node, several nodes, or (no selection) the asset: one subpane per
+/// kind of content.
+fn sidebar_rows(editor: &Editor, d: &Doc) -> Vec<Box<dyn Scene>> {
     if let Some(f) = d.selected_frame.as_ref().and_then(|f| d.asset.comments.iter().find(|c| c.id == *f)) {
-        rows.push(Box::new(text("Comment", TEXT, 15.0)));
+        let mut rows: Vec<Box<dyn Scene>> = Vec::new();
         rows.push(Box::new(labeled(
             "Title".into(),
             text_w(PropTarget::FrameTitle(f.id.clone()), f.title.clone(), false),
         )));
-        // Unset: the slider starts at the default colour's hue (design §4.6).
+        // Unset: the field starts at the default colour's hue (design §4.6).
         let hue = f.hue.unwrap_or_else(|| Hsla::from(frame_color(f)).hue);
-        rows.push(Box::new(labeled("Hue".into(), hue_slider(PropTarget::FrameHue(f.id.clone()), hue))));
+        rows.push(Box::new(labeled("Hue".into(), hue_input(PropTarget::FrameHue(f.id.clone()), hue))));
         let reset = Action::SetValue {
             target: PropTarget::FrameHue(f.id.clone()),
             value: Value::Str(String::new()),
             merge: false,
         };
         rows.push(Box::new(labeled(String::new(), Box::new(button("Default colour", reset, false)))));
+        vec![subpane_box("Comment", rows)]
     } else if d.selection.len() == 1 {
         let id = d.selection.iter().next().cloned().unwrap_or_default();
-        node_rows(&editor, &id, &mut rows);
+        node_subpanes(editor, &id)
     } else if d.selection.len() > 1 {
-        rows.push(Box::new(text(format!("{} nodes selected", d.selection.len()), TEXT, 14.0)));
-        rows.push(Box::new(text("C: comment around them | Auto-layout arranges them.", TEXT_DIM, 12.0)));
+        let selected = format!("{} selected", plural(d.selection.len(), "node", "nodes"));
+        let rows: Vec<Box<dyn Scene>> = vec![
+            Box::new(text(selected, TEXT, 14.0)),
+            Box::new(text("C: comment around them | Auto-layout arranges them.", TEXT_DIM, 12.0)),
+        ];
+        vec![subpane_box("Selection", rows)]
     } else {
-        asset_rows(&editor, &mut rows);
-    }
-    fill_sidebar(&mut commands, body, rows);
-}
-
-/// No selection: the asset's settings (material, preview, description) and size.
-fn asset_rows(editor: &Editor, out: &mut Vec<Box<dyn Scene>>) {
-    let Some(d) = editor.doc() else { return };
-    out.push(Box::new(text(d.id.source_rel(), TEXT, 15.0)));
-    out.push(Box::new(text(
-        format!(
-            "Type: {}",
-            match d.asset.kind {
-                AssetKind::Function => "Function",
-                AssetKind::Material(m) => m.label(),
-            }
-        ),
-        TEXT_DIM,
-        12.0,
-    )));
-    if let AssetKind::Material(m) = d.asset.kind {
-        out.push(Box::new(section("Material")));
-        let blends = [BlendMode::Opaque, BlendMode::Mask, BlendMode::Blend, BlendMode::Add, BlendMode::Multiply];
-        let labels: Vec<String> = blends.iter().map(|b| b.label().to_string()).collect();
-        let cur = blends.iter().position(|b| *b == m.blend()).unwrap_or(0);
-        out.push(Box::new(labeled("Blend mode".into(), select_w(PropTarget::Blend, labels, Vec::new(), cur))));
-        let two_sided = match m {
-            MaterialKind::Pbr3d(s) => Some(s.two_sided),
-            MaterialKind::Unlit3d(s) => Some(s.two_sided),
-            MaterialKind::Sprite2d(_) => None,
-        };
-        if let Some(t) = two_sided {
-            out.push(Box::new(labeled("Two sided".into(), checkbox_w(PropTarget::TwoSided, t))));
-        }
-        if let MaterialKind::Pbr3d(s) = m {
-            let cur = usize::from(s.shading == Shading::Unlit);
-            out.push(Box::new(labeled(
-                "Shading".into(),
-                select_w(PropTarget::Shading, vec!["Lit".into(), "Unlit".into()], Vec::new(), cur),
-            )));
-            // Decision 0023: one `Material Attributes` input (+ WPO) instead of one pin per attribute.
-            let modes: Vec<String> = PbrOutputMode::ALL.iter().map(|m| m.label().to_string()).collect();
-            let cur = PbrOutputMode::ALL.iter().position(|m| *m == s.output).unwrap_or(0);
-            out.push(Box::new(labeled("Output".into(), select_w(PropTarget::OutputMode, modes, Vec::new(), cur))));
-        }
-        // Exclusive node preview (decision 0022): the mode is kept even while no node is previewed.
-        out.push(Box::new(section("Preview")));
-        let modes: Vec<String> = PreviewMode::ALL.iter().map(|m| preview_mode_label(*m).to_string()).collect();
-        let cur = PreviewMode::ALL.iter().position(|m| *m == d.asset.preview.mode).unwrap_or(0);
-        out.push(Box::new(labeled("Mode".into(), select_w(PropTarget::PreviewMode, modes, Vec::new(), cur))));
-        let status = match &d.asset.preview.node {
-            Some(n) if d.asset.nodes.contains_key(n) => {
-                format!("Previewing: {}", crate::canvas::node_title(editor, &d.asset, n))
-            }
-            Some(n) => format!("Previewed node `{n}` does not exist (ignored)"),
-            // ASCII dash: the UI font has no em dash glyph.
-            None => "No node previewed - select a node and press V".to_string(),
-        };
-        out.push(Box::new(text(status, TEXT_DIM, 12.0)));
-    }
-    out.push(Box::new(section("Description")));
-    out.push(Box::new(text_w(PropTarget::Description, d.asset.meta.description.clone(), false)));
-    out.push(Box::new(section("Graph")));
-    out.push(Box::new(text(
-        format!(
-            "{} node(s), {} wire(s), {} comment(s)",
-            d.asset.nodes.len(),
-            d.asset.edges.len(),
-            d.asset.comments.len()
-        ),
-        TEXT_DIM,
-        12.0,
-    )));
-    // Hotkey hints (decision 0032).
-    for tip in [
-        "Tip: Tab or right-click on the canvas opens the node palette.",
-        "Alt+click a pin or a wire: break its wires. Ctrl+drag from a pin onto another pin of the same side: move its wires.",
-        "Hold 1-4, S, V, T, M, A, L, U, R, D, O, E, N, P or I and click the canvas: drop that node.",
-    ] {
-        out.push(Box::new(text(tip, TEXT_DIM, 12.0)));
+        asset_subpanes(editor, d)
     }
 }
 
-/// One selected node: title, parameters, the asset it refers to, input defaults and problems.
-fn node_rows(editor: &Editor, id: &str, out: &mut Vec<Box<dyn Scene>>) {
-    let Some(d) = editor.doc() else { return };
-    let Some(n) = d.asset.nodes.get(id) else { return };
+/// Hotkey hints of the graph canvas (decision 0032), shown with no selection.
+const GRAPH_HOTKEYS: [&str; 3] = [
+    "Space or right-click on the canvas opens the node palette.",
+    "Alt+click a pin or a wire: break its wires. Ctrl+drag from a pin onto another pin of the same side: move its wires.",
+    "Hold 1-4, S, V, T, M, A, L, U, R, D, O, E, N, P or I and click the canvas: drop that node.",
+];
+
+/// No selection: the asset's settings (material, preview, description), its size and the canvas hotkeys.
+fn asset_subpanes(editor: &Editor, d: &Doc) -> Vec<Box<dyn Scene>> {
+    let mut out = Vec::new();
+    let mut asset: Vec<Box<dyn Scene>> = Vec::new();
+    asset.push(Box::new(text(d.id.source_rel(), TEXT, 15.0)));
+    let kind = match d.asset.kind {
+        AssetKind::Function => "Function",
+        AssetKind::Material(m) => m.label(),
+    };
+    asset.push(Box::new(text(format!("Type: {kind}"), TEXT_DIM, 12.0)));
+    let AssetKind::Material(m) = d.asset.kind else {
+        out.push(subpane_box("Function", asset));
+        return common_subpanes(d, out);
+    };
+    let blends = [BlendMode::Opaque, BlendMode::Mask, BlendMode::Blend, BlendMode::Add, BlendMode::Multiply];
+    let labels: Vec<String> = blends.iter().map(|b| b.label().to_string()).collect();
+    let cur = blends.iter().position(|b| *b == m.blend()).unwrap_or(0);
+    asset.push(Box::new(labeled("Blend mode".into(), select_w(PropTarget::Blend, labels, Vec::new(), cur))));
+    let two_sided = match m {
+        MaterialKind::Pbr3d(s) => Some(s.two_sided),
+        MaterialKind::Unlit3d(s) => Some(s.two_sided),
+        MaterialKind::Sprite2d(_) => None,
+    };
+    if let Some(t) = two_sided {
+        asset.push(checkbox_row("Two sided", PropTarget::TwoSided, t));
+    }
+    if let MaterialKind::Pbr3d(s) = m {
+        let cur = usize::from(s.shading == Shading::Unlit);
+        asset.push(Box::new(labeled(
+            "Shading".into(),
+            select_w(PropTarget::Shading, vec!["Lit".into(), "Unlit".into()], Vec::new(), cur),
+        )));
+        // Decision 0023: one `Material Attributes` input (+ WPO) instead of one pin per attribute.
+        let modes: Vec<String> = PbrOutputMode::ALL.iter().map(|m| m.label().to_string()).collect();
+        let cur = PbrOutputMode::ALL.iter().position(|m| *m == s.output).unwrap_or(0);
+        asset.push(Box::new(labeled("Output".into(), select_w(PropTarget::OutputMode, modes, Vec::new(), cur))));
+    }
+    out.push(subpane_box("Material", asset));
+    // Exclusive node preview (decision 0022); its mode is the editor topbar's group (design §5.4).
+    let status = match &d.asset.preview.node {
+        Some(n) if d.asset.nodes.contains_key(n) => {
+            format!("Previewing: {}", crate::canvas::node_title(editor, &d.asset, n))
+        }
+        Some(n) => format!("Previewed node `{n}` does not exist (ignored)"),
+        // ASCII dash: the UI font has no em dash glyph.
+        None => "No node previewed - select a node and press V".to_string(),
+    };
+    out.push(subpane_box("Preview", vec![Box::new(text(status, TEXT_DIM, 12.0))]));
+    common_subpanes(d, out)
+}
+
+/// The subpanes every graph asset shows after its own: description, size, canvas hotkeys.
+fn common_subpanes(d: &Doc, mut out: Vec<Box<dyn Scene>>) -> Vec<Box<dyn Scene>> {
+    out.push(subpane_box(
+        "Description",
+        vec![text_w(PropTarget::Description, d.asset.meta.description.clone(), false)],
+    ));
+    let size = format!(
+        "{}, {}, {}",
+        plural(d.asset.nodes.len(), "node", "nodes"),
+        plural(d.asset.edges.len(), "wire", "wires"),
+        plural(d.asset.comments.len(), "comment", "comments")
+    );
+    out.push(subpane_box("Info", vec![Box::new(text(size, TEXT_DIM, 12.0))]));
+    let hotkeys = GRAPH_HOTKEYS.map(|tip| -> Box<dyn Scene> { Box::new(text(tip, TEXT_DIM, 12.0)) });
+    out.push(subpane_box("Hotkeys", hotkeys.into()));
+    out
+}
+
+/// One selected node: what it is (title, kind, label, the asset it refers to), its parameters, input defaults and
+/// problems.
+fn node_subpanes(editor: &Editor, id: &str) -> Vec<Box<dyn Scene>> {
+    let mut out = Vec::new();
+    let Some(d) = editor.doc() else { return out };
+    let Some(n) = d.asset.nodes.get(id) else { return out };
     let Some(def) = editor.registry.get(&n.kind) else {
-        out.push(Box::new(text(format!("Unknown node kind {}", n.kind), TEXT, 13.0)));
-        return;
+        let unknown: Box<dyn Scene> = Box::new(text(format!("Unknown node kind {}", n.kind), TEXT, 13.0));
+        out.push(subpane_box("Node", vec![unknown]));
+        return out;
     };
     let info = def.info();
-    out.push(Box::new(text(crate::canvas::node_title(editor, &d.asset, id), TEXT, 15.0)));
-    out.push(Box::new(text(format!("{} | {}", info.category, n.kind), TEXT_DIM, 11.0)));
+    let mut node: Vec<Box<dyn Scene>> = Vec::new();
+    node.push(Box::new(text(crate::canvas::node_title(editor, &d.asset, id), TEXT, 15.0)));
+    node.push(Box::new(text(format!("{} | {}", info.category, n.kind), TEXT_DIM, 11.0)));
     if !info.description.is_empty() {
-        out.push(Box::new(text(info.description.clone(), TEXT_DIM, 12.0)));
+        node.push(Box::new(text(info.description.clone(), TEXT_DIM, 12.0)));
     }
+    if crate::canvas::has_label(&n.kind) {
+        let target = PropTarget::NodeLabel(id.to_string());
+        node.push(Box::new(labeled("Label".to_string(), text_w(target, n.label.clone(), false))));
+    }
+    // The file the node refers to; double-clicking the node opens it too (decision 0023).
+    if let Some(target) = editor.referenced_asset(id) {
+        let label = match target.ty {
+            AssetType::Function => "Open function",
+            AssetType::Curve => "Open curve",
+            AssetType::Consts => "Open constant table",
+            AssetType::Material => "Open material",
+            AssetType::Texture => "Open texture",
+        };
+        node.push(Box::new(button(label, Action::OpenAsset(target), false)));
+    }
+    out.push(subpane_box("Node", node));
     let params = editor.registry.resolved_params(&n.kind, &n.params);
     let choices = Choices {
         routes: route_declarations(&d.asset, &editor.registry),
@@ -374,16 +543,10 @@ fn node_rows(editor: &Editor, id: &str, out: &mut Vec<Box<dyn Scene>>) {
         textures: editor.texture_choices(),
     };
     let global_consts = editor.global_consts();
-    let defs = def.params();
-    if crate::canvas::has_label(&n.kind) {
-        let target = PropTarget::NodeLabel(id.to_string());
-        out.push(Box::new(labeled("Label".to_string(), text_w(target, n.label.clone(), false))));
-    }
-    if !defs.is_empty() {
-        out.push(Box::new(section("Parameters")));
-    }
+    let inline = inline_for_param(&n.kind, &params);
+    let mut rows: Vec<Box<dyn Scene>> = Vec::new();
     // Params that only apply to other settings (FunctionInput `min` / `max` of a non-Float input) are hidden.
-    for p in defs.iter().filter(|p| p.visible(&params)) {
+    for p in def.params().iter().filter(|p| p.visible(&params)) {
         let v = params.get(&p.id).cloned().unwrap_or_else(|| p.default.clone());
         let target = PropTarget::Param { node: id.to_string(), key: p.id.clone() };
         // A deleted or broken curve stays visible as the current choice (the node reports E006).
@@ -411,45 +574,40 @@ fn node_rows(editor: &Editor, id: &str, out: &mut Vec<Box<dyn Scene>>) {
             choices_here = Some(c);
         }
         let choices = choices_here.as_ref().unwrap_or(&choices);
-        out.push(Box::new(labeled(p.label.clone(), value_widget(target, &p.kind, &v, choices))));
+        let on_node = inline.as_ref().filter(|i| i.0 == p.id).map(|i| i.1);
+        rows.push(value_row(p.label.clone(), target, &ranged(&p.kind, on_node), &v, choices));
     }
-    // The file the node refers to; double-clicking the node opens it too (decision 0023).
-    if let Some(target) = editor.referenced_asset(id) {
-        let label = match target.ty {
-            AssetType::Function => "Open function",
-            AssetType::Curve => "Open curve",
-            AssetType::Consts => "Open constant table",
-            AssetType::Material => "Open material",
-            AssetType::Texture => "Open texture",
-        };
-        out.push(Box::new(button(label, Action::OpenAsset(target), false)));
+    if !rows.is_empty() {
+        out.push(subpane_box("Parameters", rows));
     }
-    let Some(sig) = node_signature(&d.asset, id, &editor.registry, &editor.functions, &d.id.path) else { return };
-    let mut header = false;
-    // A usage's input is the declaration's, never a value of its own.
-    let inputs = if def.role() == NodeRole::RouteUsage { &[][..] } else { &sig.inputs[..] };
-    for pin in inputs {
-        if d.asset.edge_into(id, &pin.id).is_some() || pin.implicit.is_some() {
-            continue;
+    if let Some(sig) = node_signature(&d.asset, id, &editor.registry, &editor.functions, &d.id.path) {
+        let mut rows: Vec<Box<dyn Scene>> = Vec::new();
+        // A usage's input is the declaration's, never a value of its own.
+        let inputs = if def.role() == NodeRole::RouteUsage { &[][..] } else { &sig.inputs[..] };
+        for pin in inputs {
+            if d.asset.edge_into(id, &pin.id).is_some() || pin.implicit.is_some() {
+                continue;
+            }
+            let Some(kind) = pin_kind(pin.ty) else { continue };
+            let kind = ranged(&kind, inline_for_pin(pin.ty, pin.range));
+            let v = n.inputs.get(&pin.id).cloned().unwrap_or_else(|| pin.default.coerce(pin.ty));
+            let target = PropTarget::Input { node: id.to_string(), pin: pin.id.clone() };
+            let label = if pin.label.is_empty() { pin.id.clone() } else { pin.label.clone() };
+            rows.push(value_row(label, target, &kind, &v, &Choices::default()));
         }
-        let Some(kind) = pin_kind(pin.ty) else { continue };
-        if !header {
-            out.push(Box::new(section("Input defaults (used when not connected)")));
-            header = true;
+        if !rows.is_empty() {
+            rows.insert(0, Box::new(text("Used when not connected.", TEXT_DIM, 12.0)));
+            out.push(subpane_box("Input defaults", rows));
         }
-        let v = n.inputs.get(&pin.id).cloned().unwrap_or_else(|| pin.default.coerce(pin.ty));
-        let target = PropTarget::Input { node: id.to_string(), pin: pin.id.clone() };
-        let label = if pin.label.is_empty() { pin.id.clone() } else { pin.label.clone() };
-        out.push(Box::new(labeled(label, value_widget(target, &kind, &v, &Choices::default()))));
     }
-    let diags = editor.node_diags();
-    if let Some(list) = diags.get(id) {
-        out.push(Box::new(section("Problems")));
-        for diag in list {
+    if let Some(list) = editor.node_diags().get(id) {
+        let rows = list.iter().map(|diag| -> Box<dyn Scene> {
             let c = if diag.is_error() { Color::srgb(0.95, 0.42, 0.42) } else { Color::srgb(0.95, 0.78, 0.35) };
-            out.push(Box::new(text(format!("{}: {}", diag.code, diag.message), c, 12.0)));
-        }
+            Box::new(text(format!("{}: {}", diag.code, diag.message), c, 12.0))
+        });
+        out.push(subpane_box("Problems", rows.collect()));
     }
+    out
 }
 
 impl TabDoc for Doc {
@@ -530,8 +688,31 @@ impl TabDoc for Doc {
     }
 
     fn status(&self, ctx: &StatusCtx) -> Option<StatusInfo> {
-        let mut counts = vec![format!("{} nodes", self.asset.nodes.len())];
-        counts.extend(ctx.wesl_lines.map(|n| format!("{n} WESL lines")));
+        let mut counts = vec![plural(self.asset.nodes.len(), "node", "nodes")];
+        counts.extend(ctx.wesl_lines.map(|n| plural(n, "WESL line", "WESL lines")));
         Some(StatusInfo::new(Doc::is_dirty(self), ctx, counts))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preview_key_toggles_on_release_unless_a_node_was_placed() {
+        let mut k = PreviewKey::default();
+        k.press();
+        assert!(k.release());
+        k.press();
+        k.placed();
+        assert!(!k.release());
+        assert!(!k.release(), "release without press");
+    }
+
+    #[test]
+    fn disabled_preview_mode_tips_still_name_their_mode() {
+        assert_eq!(preview_mode_tip(PreviewMode::Lit, true), "Preview: Lit");
+        assert_eq!(preview_mode_tip(PreviewMode::Lit, false), "Preview: Lit - preview a node first (V)");
+        assert_eq!(preview_mode_tip(PreviewMode::Full, false), "Preview: Full - preview a node first (V)");
     }
 }

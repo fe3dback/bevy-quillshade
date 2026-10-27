@@ -4,9 +4,11 @@
 //! operations does not match on the tab kind; kind-specific work (graph editing, curve edits) still does. The impls
 //! live with the rest of their kind in [`crate::editors`].
 
+use shader_graph_core::texture::TextureSettings;
 use shader_project::{AssetId, AssetSet, Project};
 
 use crate::editors::{StatusCtx, StatusInfo};
+use crate::game_image::Channel;
 use crate::tab::ViewKind;
 use crate::ui::icons::IconId;
 
@@ -47,6 +49,21 @@ pub trait TabDoc {
     fn status(&self, _ctx: &StatusCtx) -> Option<StatusInfo> {
         None
     }
+}
+
+/// A tab kind with the shared image preview (`ui::image_preview`, design §6.2: image and Texture tabs): the image it
+/// shows and the preview's view state (channel, tiling), which is editor-only: not saved, not undoable.
+/// [`crate::tab::Tab::preview`] gives it for any tab that has one.
+pub trait PreviewDoc {
+    /// What [`crate::game_image::GameImageCache::get_channel`] decodes (a path under `assets/` or an `@internal/…`
+    /// id) and the settings to decode it with.
+    fn preview_image(&self) -> (&str, TextureSettings);
+    fn channel(&self) -> Channel;
+    /// Shows `channel` only (`None`: the whole image).
+    fn set_channel(&mut self, channel: Channel);
+    /// The preview repeats the image 3x3, so the address modes show.
+    fn tiled(&self) -> bool;
+    fn set_tiled(&mut self, tiled: bool);
 }
 
 /// Title of an asset's document: its source path without `.ron`.

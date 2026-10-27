@@ -18,9 +18,10 @@ use shader_graph_core::curve::{Curve, Interp};
 use super::dialog::open_icon_menu;
 use super::icons::IconId;
 use super::node_preview::{opaque_image, skia_color};
-use super::{TEXT, TEXT_DIM, VIEW_BG, ViewOf, button, clipped_text, icon_button, icon_tool_button, text, tool_button};
+use super::widgets::{Caption, GroupButton, button_group};
+use super::{TEXT, TEXT_DIM, VIEW_BG, ViewOf, clipped_text, icon_button, icon_tool_button, text, tool_button};
 use crate::curve_doc::CurveDoc;
-use crate::editors::main_input::mods;
+use crate::keys::mods;
 use crate::state::{Action, Actions, CurveAction, Editor, PropTarget};
 use crate::tab::{Lang, ViewKind};
 
@@ -36,7 +37,7 @@ const GRID: f32 = 10.0;
 /// The editor topbar row of a curve tab (path, select all / delete, preview switch), rebuilt with the tab or the
 /// preview mode.
 #[derive(Component, Default, Clone)]
-pub struct CurveViewBar;
+pub(crate) struct CurveViewBar;
 
 /// The plot area: the unit square plus margins. Receives clicks on empty space.
 #[derive(Component, Default, Clone)]
@@ -182,15 +183,21 @@ fn redraw_bar(
     }
     commands.spawn_scene(bsn! { Node { flex_grow: 1.0 } ChildOf(bar) });
     commands.spawn_scene(bsn! { @text("Preview:", TEXT_DIM, 12.0) ChildOf(bar) });
-    for interp in Interp::ALL {
-        let action = Action::SetValue {
-            target: PropTarget::CurvePreview,
-            value: Value::Str(interp.label().into()),
-            merge: false,
-        };
-        let active = interp == c.preview;
-        commands.spawn_scene(bsn! { @button(interp.label(), action, active) ChildOf(bar) });
-    }
+    let modes = Interp::ALL
+        .into_iter()
+        .map(|interp| GroupButton {
+            caption: Caption::Text(interp.label().into()),
+            action: Action::SetValue {
+                target: PropTarget::CurvePreview,
+                value: Value::Str(interp.label().into()),
+                merge: false,
+            },
+            selected: interp == c.preview,
+            disabled: false,
+            tip: format!("Preview the {} interpolation", interp.label()),
+        })
+        .collect();
+    commands.spawn_scene(bsn! { @button_group(modes) ChildOf(bar) });
     let wesl = Action::ShowGenerated(c.id.clone(), Lang::Wesl);
     commands.spawn_scene(bsn! { @icon_button(IconId::Code, wesl, "Show generated WESL") ChildOf(bar) });
 }

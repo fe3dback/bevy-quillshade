@@ -6,17 +6,17 @@
 //! the widgets, and [`sync_fields`] keeps a constant's number fields and colour picker in step.
 
 use bevy::feathers::controls::{
-    ColorInputValue, FeathersColorInput, FeathersSlider, NumberInputValue, color_input_self_update,
+    ColorInputValue, FeathersColorInput, NumberInputRange, NumberInputValue, SoftLimit, color_input_self_update,
 };
 use bevy::input::keyboard::KeyboardInput;
 use bevy::input_focus::{FocusedInput, InputFocus};
 use bevy::prelude::*;
-use bevy::ui_widgets::{SliderPrecision, SliderRange, SliderValue, ValueChange, slider_self_update};
+use bevy::ui_widgets::ValueChange;
 use shader_graph_core::Value;
 use shader_graph_core::consts::{ConstType, GlobalConst};
 
 use super::icons::IconId;
-use super::props::{PropField, checkbox_w, linear_color, number, select_w, text_w, vector_fields};
+use super::props::{PropField, checkbox_w, linear_color, number_input, select_w, text_w, vector_fields};
 use super::{TEXT, TEXT_DIM, VIEW_BG, ViewOf, icon_button, icon_tool_button, scroll_column, text};
 use crate::consts_doc::ConstsDoc;
 use crate::state::{Action, Actions, ConstsAction, Editor, PropTarget, display_value};
@@ -31,7 +31,7 @@ const ROW_LINE: Color = Color::srgb_u8(40, 42, 48);
 
 /// The editor topbar row of a consts tab (path, count), rebuilt with the tab.
 #[derive(Component, Default, Clone)]
-pub struct ConstsViewBar;
+pub(crate) struct ConstsViewBar;
 
 /// Form and table, rebuilt on [`ConstsDoc::layout`].
 #[derive(Component, Default, Clone)]
@@ -105,34 +105,25 @@ fn type_select(target: PropTarget, ty: ConstType) -> Box<dyn Scene> {
     select_w(target, type_labels(), Vec::new(), cur)
 }
 
-/// Range of an `f32` constant's slider: `0..1` for values in it, otherwise the power of ten around the value
-/// (`5` → `0..10`, `-0.5` → `-1..1`, `-250` → `-1000..1000`). Any value can be typed into the number field.
+/// Soft limit of an `f32` constant's number input: `0..1` for values in it, otherwise the power of ten around the
+/// value (`5` → `0..10`, `-0.5` → `-1..1`, `-250` → `-1000..1000`). Any value can be typed in; the range then widens
+/// ([`sync_fields`]).
 fn slider_range(v: f32) -> (f32, f32) {
     let m = if v.abs() <= 1.0 || !v.is_finite() { 1.0 } else { 10f32.powf(v.abs().log10().ceil()) };
     (if v < 0.0 { -m } else { 0.0 }, m)
 }
 
-/// Editor of a constant's value: `f32` number field + slider, `vecN` colour picker + component fields, flags a
-/// checkbox.
+/// Editor of a constant's value: `f32` a number input with a soft limit, `vecN` colour picker + component fields,
+/// flags a checkbox.
 fn value_editor(c: &GlobalConst) -> Box<dyn Scene> {
     let target = PropTarget::Const(c.name.clone());
     match c.ty {
         ConstType::F32 => {
             let value = c.value.as_f32();
-            let (min, max) = slider_range(value);
-            let (field, input) = (PropField { target: target.clone(), ..default() }, number(target, 0, value, None));
+            let input = number_input(target, 0, value, Some(slider_range(value)), None, 3);
             Box::new(bsn! {
-                Node { flex_direction: FlexDirection::Row, column_gap: px(6), align_items: AlignItems::Center, max_width: px(460), flex_grow: 1.0 }
-                Children [
-                    Node { width: px(110), flex_shrink: 0.0 } Children [ @{input} ]
-                    --
-                    @FeathersSlider { @min: min, @max: max }
-                    SliderValue({value})
-                    SliderPrecision(3)
-                    on(slider_self_update)
-                    Node { flex_grow: 1.0 }
-                    field
-                ]
+                Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, max_width: px(460), flex_grow: 1.0 }
+                Children [ @{input} ]
             })
         }
         ConstType::Vec2 | ConstType::Vec3 | ConstType::Vec4 => {
@@ -223,24 +214,22 @@ fn redraw(
     let (Ok(bar), Ok(body)) = (bar.single(), body.single()) else { return };
     *last = Some(c.layout);
     commands.entity(bar).despawn_children();
+    // Only the path: the constant count is in the editor statusbar, how values are used in the sidebar's Usage
+    // subpane (design §6.4).
     commands.spawn_scene(bsn! { @text(c.id.source_rel(), TEXT, 13.0) ChildOf(bar) });
-    commands.spawn_scene(bsn! { Node { flex_grow: 1.0 } ChildOf(bar) });
-    let count = format!("{} constant(s), values are inlined into the shaders reading them", c.table.consts.len());
-    commands.spawn_scene(bsn! { @text(count, TEXT_DIM, 12.0) ChildOf(bar) });
     commands.entity(body).despawn_children();
     for r in form(c).into_iter().chain(table(c)) {
         commands.spawn_scene(bsn! { @{r} ChildOf(body) });
     }
 }
 
-/// Keeps the number fields, the slider and the colour picker of a constant in step with the model (an edit in one
-/// of them changes the others; a typed value outside the slider's range widens it); the field being typed into is
-/// left alone.
+/// Keeps the number fields and the colour picker of a constant in step with the model (an edit in one of them
+/// changes the others); the field being typed into is left alone. A typed value outside an `f32` field's soft limit
+/// widens the limit.
 fn sync_fields(
     editor: Res<Editor>,
     focus: Option<Res<InputFocus>>,
-    numbers: Query<(Entity, &PropField, &NumberInputValue)>,
-    sliders: Query<(Entity, &PropField, &SliderValue, &SliderRange)>,
+    numbers: Query<(Entity, &PropField, &NumberInputValue, Option<&SoftLimit>)>,
     pickers: Query<(Entity, &PropField, &ColorInputValue)>,
     parents: Query<&ChildOf>,
     mut commands: Commands,
@@ -249,28 +238,24 @@ fn sync_fields(
         return;
     }
     let typing = focus.and_then(|f| f.get()).and_then(|f| parents.get(f).ok()).map(ChildOf::parent);
-    for (e, field, shown) in &numbers {
-        if Some(e) == typing || !matches!(field.target, PropTarget::Const(_)) {
-            continue;
-        }
-        let Some(v) = editor.current_value(&field.target) else { continue };
-        let want = NumberInputValue::F32(display_value(v.floats().get(field.comp).copied().unwrap_or(0.0)));
-        if *shown != want {
-            commands.entity(e).insert(want);
-        }
-    }
-    for (e, field, shown, range) in &sliders {
+    for (e, field, shown, soft) in &numbers {
         if !matches!(field.target, PropTarget::Const(_)) {
             continue;
         }
         let Some(v) = editor.current_value(&field.target) else { continue };
-        let v = v.as_f32();
-        if v < range.start() || v > range.end() {
-            let (min, max) = slider_range(v);
-            commands.entity(e).insert(SliderRange::new(min, max));
+        let want = NumberInputValue::F32(display_value(v.floats().get(field.comp).copied().unwrap_or(0.0)));
+        if let Some(SoftLimit(NumberInputRange::F32(range))) = soft
+            && let NumberInputValue::F32(x) = want
+            && !range.contains(&x)
+        {
+            let (min, max) = slider_range(x);
+            // Re-inserting the value redraws the fill bar for the new range; the edit that left the range has
+            // finished (typed values arrive on Enter or focus loss), so the field is not being typed into.
+            commands.entity(e).insert((SoftLimit(NumberInputRange::F32(min..=max)), want));
+            continue;
         }
-        if shown.0 != v {
-            commands.entity(e).insert(SliderValue(v));
+        if Some(e) != typing && *shown != want {
+            commands.entity(e).insert(want);
         }
     }
     for (e, field, shown) in &pickers {
@@ -291,7 +276,7 @@ fn sync_fields(
     }
 }
 
-/// A finished picker drag on a constant is one undo step (number fields and sliders end theirs with `is_final`).
+/// A finished picker drag on a constant is one undo step (number fields end theirs with `is_final`).
 fn commit_color(ev: On<ValueChange<Color>>, fields: Query<&PropField>, mut actions: ResMut<Actions>) {
     if ev.is_final && fields.get(ev.source).is_ok_and(|f| matches!(f.target, PropTarget::Const(_))) {
         actions.push(Action::CommitInline);

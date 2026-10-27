@@ -5,13 +5,14 @@ use bevy_enhanced_input::prelude::Actions;
 use shader_project::{AssetId, Project};
 
 use super::main_input::{EditCopy, add_kind, ctrl, hotkey};
-use super::{EditorAreas, EditorInput, SidebarKey, fill_sidebar};
+use super::{EditorAreas, EditorInput, SidebarKey, fill_sidebar_with};
 use crate::doc_kind::TabDoc;
 use crate::state::Editor;
 use crate::tab::{Lang, Tab, TextDoc, ViewKind};
 use crate::ui::icons::IconId;
 use crate::ui::text_view::TextViewBar;
-use crate::ui::{TEXT, TEXT_DIM, text};
+use crate::ui::widgets::subpane_box;
+use crate::ui::{TEXT, TEXT_DIM, plural, text};
 
 /// The text editor's window areas.
 pub struct TextEditor;
@@ -57,7 +58,7 @@ impl EditorInput for TextEditor {
 
 /// The text editor's right sidebar body.
 #[derive(Component, Default, Clone)]
-pub struct TextSidebarBody;
+struct TextSidebarBody;
 
 fn redraw_sidebar(
     editor: Res<Editor>,
@@ -66,14 +67,12 @@ fn redraw_sidebar(
     mut commands: Commands,
 ) {
     let Some(Tab::Text(t)) = editor.tab() else { return key.forget() };
-    let Some(body) = key.changed(&editor, &body) else { return };
-    let mut rows: Vec<Box<dyn Scene>> = Vec::new();
-    text_rows(t, &mut rows);
-    fill_sidebar(&mut commands, body, rows);
+    fill_sidebar_with(&mut commands, &body, &mut key, SidebarKey::now(&editor), || text_rows(t));
 }
 
 /// A generated file: where it comes from (Source / Open externally are buttons of the editor topbar).
-fn text_rows(t: &TextDoc, out: &mut Vec<Box<dyn Scene>>) {
+fn text_rows(t: &TextDoc) -> Vec<Box<dyn Scene>> {
+    let mut out: Vec<Box<dyn Scene>> = Vec::new();
     let lang = match t.lang {
         Lang::Wesl => "WESL",
         Lang::Rust => "Rust",
@@ -82,8 +81,9 @@ fn text_rows(t: &TextDoc, out: &mut Vec<Box<dyn Scene>>) {
     out.push(Box::new(text(format!("Generated {lang}, read-only"), TEXT_DIM, 12.0)));
     out.push(Box::new(text(format!("Source: {}", t.source.source_rel()), TEXT_DIM, 12.0)));
     if let Some(src) = &t.text {
-        out.push(Box::new(text(format!("{} lines", src.lines().count()), TEXT_DIM, 12.0)));
+        out.push(Box::new(text(plural(src.lines().count(), "line", "lines"), TEXT_DIM, 12.0)));
     }
+    vec![subpane_box("File", out)]
 }
 
 impl TabDoc for TextDoc {

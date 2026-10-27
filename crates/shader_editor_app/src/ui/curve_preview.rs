@@ -2,7 +2,7 @@
 //! plot, a vertical line at `T` while that input is unconnected, "n/a" when no loadable curve is selected.
 //!
 //! Redrawn from the model every time its data changes (curve points — of the open curve tab if there is one —,
-//! interpolation type, `T`), so it follows a curve edited in another tab and the inline `T` slider live.
+//! interpolation type, `T`), so it follows a curve edited in another tab and the inline `T` field live.
 
 use bevy::ecs::system::SystemParamItem;
 use bevy::prelude::*;

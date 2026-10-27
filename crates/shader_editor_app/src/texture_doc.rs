@@ -154,7 +154,12 @@ impl TextureDoc {
         done
     }
 
+    /// After undo / redo / reload: a sampler that matches no preset cannot be shown in Easy (no preset selected, the
+    /// form hidden), so the tab goes to Advanced (design §6.3); settings that fit keep the mode.
     fn after_history(&mut self) {
+        if !fits_easy(&self.asset.settings) {
+            self.easy = false;
+        }
         self.revision += 1;
         self.relayout();
     }
@@ -287,9 +292,12 @@ pub fn effective_sampler(settings: &TextureSettings) -> SamplerSettings {
 }
 
 /// Easy mode's presets: what the texture is for, each the whole sampler that suits it best (after the filtering guide
-/// the user referred to, decision 0028).
+/// the user referred to, decision 0028). Easy mode always has one selected: the file stores it through the sampler it
+/// writes, and [`FilterPreset::of`] reads it back (design §6.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FilterPreset {
+    /// No sampler stored: the game's default (with Bevy's `ImagePlugin::default()`: Linear, Clamp to edge).
+    Default,
     /// Nearest everywhere, Clamp to edge: crisp texels.
     PixelArt,
     /// Bilinear (Linear mag / min, Nearest mipmap), Clamp to edge.
@@ -301,11 +309,12 @@ pub enum FilterPreset {
 }
 
 impl FilterPreset {
-    pub const ALL: [FilterPreset; 4] =
-        [FilterPreset::PixelArt, FilterPreset::Ui, FilterPreset::ThreeD, FilterPreset::Ground];
+    pub const ALL: [FilterPreset; 5] =
+        [FilterPreset::Default, FilterPreset::PixelArt, FilterPreset::Ui, FilterPreset::ThreeD, FilterPreset::Ground];
 
     pub fn label(self) -> &'static str {
         match self {
+            FilterPreset::Default => "Default",
             FilterPreset::PixelArt => "Pixel art",
             FilterPreset::Ui => "UI",
             FilterPreset::ThreeD => "3D",
@@ -315,6 +324,9 @@ impl FilterPreset {
 
     pub fn tip(self) -> &'static str {
         match self {
+            FilterPreset::Default => {
+                "Bevy's default sampler (ImagePlugin::default(): Linear, Clamp to edge); no sampler stored"
+            }
             FilterPreset::PixelArt => "Pixel art: Nearest filters (crisp texels), Clamp to edge",
             FilterPreset::Ui => "UI, sprites: bilinear filtering, Clamp to edge",
             FilterPreset::ThreeD => "3D surfaces: trilinear filtering, Repeat (tiles when UVs leave 0..1)",
@@ -322,16 +334,17 @@ impl FilterPreset {
         }
     }
 
-    /// The preset's sampler (LOD clamps at their defaults).
-    pub fn sampler(self) -> SamplerSettings {
+    /// The preset's sampler (LOD clamps at their defaults); `None` for [`FilterPreset::Default`].
+    pub fn sampler(self) -> Option<SamplerSettings> {
         use FilterMode::{Linear, Nearest};
         let (mag, min, mip, wrap, aniso) = match self {
+            FilterPreset::Default => return None,
             FilterPreset::PixelArt => (Nearest, Nearest, Nearest, AddressMode::ClampToEdge, 1),
             FilterPreset::Ui => (Linear, Linear, Nearest, AddressMode::ClampToEdge, 1),
             FilterPreset::ThreeD => (Linear, Linear, Linear, AddressMode::Repeat, 1),
             FilterPreset::Ground => (Linear, Linear, Linear, AddressMode::Repeat, MAX_ANISOTROPY),
         };
-        SamplerSettings {
+        Some(SamplerSettings {
             address_mode_u: wrap,
             address_mode_v: wrap,
             address_mode_w: wrap,
@@ -340,23 +353,24 @@ impl FilterPreset {
             mipmap_filter: mip,
             anisotropy_clamp: aniso,
             ..SamplerSettings::default()
-        }
+        })
     }
 
-    /// The preset whose sampler the settings have (none for the default sampler).
+    /// The preset whose sampler the settings have: [`FilterPreset::Default`] for no sampler, `None` for a custom
+    /// one (also one equal to the game's default: it is stored, so it is not "Default").
     pub fn of(settings: &TextureSettings) -> Option<Self> {
-        FilterPreset::ALL.into_iter().find(|p| settings.sampler == Some(p.sampler()))
+        FilterPreset::ALL.into_iter().find(|p| settings.sampler == p.sampler())
     }
 
     /// `settings` with this preset's sampler (sRGB and grayscale expansion stay).
     pub fn apply(self, settings: &TextureSettings) -> TextureSettings {
-        TextureSettings { sampler: Some(self.sampler()), ..settings.clone() }
+        TextureSettings { sampler: self.sampler(), ..settings.clone() }
     }
 }
 
-/// Easy mode loses nothing on these settings: the default sampler (nothing chosen yet) or a preset's.
+/// Easy mode loses nothing on these settings: their sampler is a preset's ([`FilterPreset::Default`]: none).
 pub fn fits_easy(settings: &TextureSettings) -> bool {
-    settings.sampler.is_none() || FilterPreset::of(settings).is_some()
+    FilterPreset::of(settings).is_some()
 }
 
 pub fn address_label(m: AddressMode) -> &'static str {
@@ -441,20 +455,35 @@ mod tests {
         assert_eq!(d.asset.path, "textures/a.png");
     }
 
+    /// Design §6.3: "Default" is no sampler in the file (Bevy's `ImagePlugin::default()`), not "3D" (Repeat).
+    #[test]
+    fn default_preset_is_no_sampler() {
+        assert_eq!(FilterPreset::of(&TextureSettings::default()), Some(FilterPreset::Default));
+        assert_eq!(FilterPreset::ALL[0], FilterPreset::Default, "the first preset");
+        assert_eq!(FilterPreset::Default.sampler(), None);
+        let s3d = FilterPreset::ThreeD.apply(&TextureSettings { is_srgb: false, ..TextureSettings::default() });
+        let back = FilterPreset::Default.apply(&s3d);
+        assert!(back.sampler.is_none());
+        assert!(!back.is_srgb, "loader settings stay");
+        // A custom sampler equal to the game's default is still a custom one: no preset.
+        let custom = TextureSettings { sampler: Some(SamplerSettings::image_plugin_default()), ..Default::default() };
+        assert_eq!(FilterPreset::of(&custom), None);
+        assert!(!fits_easy(&custom));
+    }
+
     #[test]
     fn presets() {
         let d = TextureSettings::default();
-        assert_eq!(FilterPreset::of(&d), None, "the default sampler is no preset");
         assert!(fits_easy(&d));
         for p in FilterPreset::ALL {
             let s = p.apply(&TextureSettings { is_srgb: false, ..d.clone() });
             assert_eq!(FilterPreset::of(&s), Some(p));
             assert!(!s.is_srgb, "loader settings stay");
-            assert!(s.sampler.unwrap().check().is_ok(), "{p:?}");
+            assert!(s.sampler.is_none_or(|s| s.check().is_ok()), "{p:?}");
         }
-        let ground = FilterPreset::Ground.sampler();
+        let ground = FilterPreset::Ground.sampler().unwrap();
         assert_eq!((ground.anisotropy_clamp, ground.address_mode_v), (MAX_ANISOTROPY, AddressMode::Repeat));
-        let ui = FilterPreset::Ui.sampler();
+        let ui = FilterPreset::Ui.sampler().unwrap();
         assert_eq!((ui.min_filter, ui.mipmap_filter), (FilterMode::Linear, FilterMode::Nearest));
         assert!(!fits_easy(&TextureField::LodMaxClamp.set(&FilterPreset::ThreeD.apply(&d), &Value::Float(4.0))));
     }

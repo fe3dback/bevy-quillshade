@@ -76,13 +76,15 @@ pub fn for_each_kind(v: &mut impl KindVisitor) {
     v.visit::<TextureEditor>();
 }
 
-/// The row a kind's editor topbar is built on: a marker plus this, filled by the kind's redraw system.
+/// The row a kind's editor topbar is built on: a marker plus this, filled by the kind's redraw system. Items that
+/// do not fit wrap onto another line (buttons never shrink, `ui::button`).
 pub fn bar_row() -> impl Scene {
     bsn! {
         Node {
             flex_grow: 1.0,
             min_width: px(0),
             flex_direction: FlexDirection::Row,
+            flex_wrap: FlexWrap::Wrap,
             align_items: AlignItems::Center,
             column_gap: px(8),
             padding: UiRect::axes(px(10), px(2)),
@@ -91,7 +93,7 @@ pub fn bar_row() -> impl Scene {
 }
 
 /// The column a kind's right sidebar body is built on: a marker plus this, filled by the kind's redraw system through
-/// [`SidebarKey`] and [`fill_sidebar`].
+/// [`fill_sidebar_with`].
 pub fn sidebar_body() -> impl Scene {
     bsn! {
         Node { flex_direction: FlexDirection::Column, row_gap: px(6) }
@@ -105,27 +107,40 @@ pub fn sidebar_body() -> impl Scene {
 pub struct SidebarKey(Option<(u64, Option<usize>)>);
 
 impl SidebarKey {
-    /// The body to refill when the key changed since the last rebuild, `None` when nothing is to be done.
-    pub fn changed<M: Component>(&mut self, editor: &Editor, body: &Query<Entity, With<M>>) -> Option<Entity> {
-        let key = (editor.ui.props, editor.active);
-        if self.0 == Some(key) {
-            return None;
-        }
-        let body = body.single().ok()?;
-        self.0 = Some(key);
-        Some(body)
+    /// The key's current value: `(Editor::ui.props, Editor::active)`.
+    pub fn now(editor: &Editor) -> (u64, Option<usize>) {
+        (editor.ui.props, editor.active)
     }
 
     /// The kind is not active.
     pub fn forget(&mut self) {
         self.0 = None;
     }
+
+    /// Whether the body must be rebuilt for `now` ([`SidebarKey::now`]): true when it differs from the stored key,
+    /// which then becomes `now`.
+    pub fn refresh(&mut self, now: (u64, Option<usize>)) -> bool {
+        let changed = self.0 != Some(now);
+        self.0 = Some(now);
+        changed
+    }
 }
 
-/// Replaces the rows of a right sidebar body.
-pub fn fill_sidebar(commands: &mut Commands, body: Entity, rows: Vec<Box<dyn Scene>>) {
+/// A kind's right sidebar redraw, called by its system once its guard found a tab of the kind active: when `now`
+/// ([`SidebarKey::now`]) differs from `key`, replaces the rows of the body tagged `B` with `rows()` (built only then).
+pub fn fill_sidebar_with<B: Component>(
+    commands: &mut Commands,
+    body: &Query<Entity, With<B>>,
+    key: &mut SidebarKey,
+    now: (u64, Option<usize>),
+    rows: impl FnOnce() -> Vec<Box<dyn Scene>>,
+) {
+    let Ok(body) = body.single() else { return };
+    if !key.refresh(now) {
+        return;
+    }
     commands.entity(body).despawn_children();
-    for r in rows {
+    for r in rows() {
         commands.spawn_scene(bsn! { @{r} ChildOf(body) });
     }
 }
@@ -187,5 +202,29 @@ mod tests {
         let status = StatusInfo::new(true, &ctx, vec!["3 points".into()]);
         assert_eq!(status, StatusInfo { dirty: true, errors: 1, warnings: 2, counts: vec!["3 points".into()] });
         assert_eq!(StatusInfo::new(false, &StatusCtx::default(), Vec::new()), StatusInfo::default());
+    }
+
+    #[test]
+    fn sidebar_key_rebuilds_on_props_or_tab_change() {
+        let mut editor = Editor::default();
+        editor.active = Some(0);
+        let mut key = SidebarKey::default();
+        let rebuilds = |editor: &Editor, key: &mut SidebarKey| key.refresh(SidebarKey::now(editor));
+        assert!(rebuilds(&editor, &mut key), "the first fill");
+        assert!(!rebuilds(&editor, &mut key), "nothing changed");
+        editor.ui.props += 1;
+        assert!(rebuilds(&editor, &mut key), "properties revision");
+        assert!(!rebuilds(&editor, &mut key));
+        editor.active = Some(1);
+        assert!(rebuilds(&editor, &mut key), "another tab");
+        assert!(!rebuilds(&editor, &mut key));
+        // Other revisions are not the sidebar's business.
+        editor.ui.tabs += 1;
+        editor.ui.log += 1;
+        editor.ui.browser += 1;
+        assert!(!rebuilds(&editor, &mut key));
+        // Another kind was active meanwhile: the body is rebuilt when the kind comes back.
+        key.forget();
+        assert!(rebuilds(&editor, &mut key), "after forget");
     }
 }

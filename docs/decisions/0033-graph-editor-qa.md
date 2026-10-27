@@ -1,5 +1,9 @@
 # 0033. Graph editor QA: snapping, header colours, node emphasis, comment frames, pin hover, drops
 
+*Superseded in part by [0034](0034-qa-round-2.md): the grid is 10 units, snapping and the frame carry are bevy_noodle
+fork features (lead = the grabbed node), the selection is white, and the pin hover enlarges the port itself (marked
+below).*
+
 **Context.** A QA round on the node graph editor (design `docs/superpowers/specs/2026-10-26-editor-kinds-qa-design.md`
 §4) asked for grid snapping, header colours by name, thicker selection / preview borders, a pulsing preview node,
 deleting comment frames together with their nodes, a comment colour, a fix for "Show WESL" in preview mode, a larger
@@ -9,8 +13,9 @@ stays rebuilt from the model (decision 0008). This records what was built and wh
 
 **Decision.**
 
-- **Snap to grid** (design §4.1). `doc::GRID_SNAP` = 5 graph units. `doc::snap` rounds a position to the nearest grid
-  point; ties round away from zero (`f32::round`: 12.5 → 15, -12.5 → -15), and `-0.0` becomes `0.0`.
+- **Snap to grid** (design §4.1). `doc::GRID_SNAP` = 5 graph units (*superseded by 0034:* 10). `doc::snap` rounds a
+  position to the nearest grid point; ties round away from zero (`f32::round`: 12.5 → 15, -12.5 → -15), and `-0.0`
+  becomes `0.0`.
   - **Drag.** bevy_noodle has no snapping, so the `snap_drag` observer on `EditRequested` rewrites every step of a
     pointer drag (`GraphEdit::MoveNodes` with `drag: Some(..)` and origin `Interaction`). The *lead* node is the first
     entity of the step, which is bevy_noodle's first selected node and **not necessarily the one under the pointer**.
@@ -19,7 +24,9 @@ stays rebuilt from the model (decision 0008). This records what was built and wh
     grid once they lead a drag. The node visibly jumps from grid point to grid point while dragging, not on release.
     `SnapDrag` holds the lead and its start position. It is cleared on the final step, on every `PointerDragStart`
     (`restart_snap_drag`, so a cancelled touch drag leaves nothing behind) and on any other `Interaction` edit. Moves
-    made by code (`drag: None`) and the frame-carry re-emits (`CARRIED`) are left alone.
+    made by code (`drag: None`) and the frame-carry re-emits (`CARRIED`) are left alone. *Superseded by 0034:* the
+    bevy_noodle fork snaps the drag itself (`CanvasInteraction::snap`); the lead is the grabbed node, its drag state
+    lives for one gesture, and `snap_drag`, `SnapDrag` and `restart_snap_drag` are gone.
   - **New positions.** Placing a node (`Editor::add_node`: palette, add-from-wire, drops) snaps its position. Paste and
     Duplicate move the first clipboard node (in id order) onto the grid and the others with it. A reroute point and a
     comment frame created at the cursor snap too.
@@ -30,7 +37,8 @@ stays rebuilt from the model (decision 0008). This records what was built and wh
   - **Frames.** A dragged frame is a canvas node: dragged alone it is the lead, so its origin snaps, and the nodes it
     carries move by the same delta. Dragged with nodes, it follows the lead's delta. Frame **size is not snapped**:
     the editor has no frame resize gesture, and `w` / `h` are set only on creation (400×300, or the selection's bounds
-    plus a margin).
+    plus a margin). *Superseded by 0034:* the carry is the fork's `NodeFrame`, not a `CARRIED` re-emit: the nodes
+    inside the frame when the drag starts move in the same edits, nested frames included.
 - **Header colour by name** (design §4.2). `canvas::header_color` takes the hue from `name_hue` (FNV-1a 32-bit of the
   name's UTF-8 bytes, `hash % 360`) at fixed saturation 0.45 and lightness 0.32 (`name_header_color`); the header
   text stays readable on the dark theme. Name sources:
@@ -45,16 +53,16 @@ stays rebuilt from the model (decision 0008). This records what was built and wh
   layout, so ports and wires do not move when a node is selected. Every node keeps a 1.5 px border.
   `canvas::node_outline` decides it, in this priority:
   - the previewed node (decision 0022): 6 px, offset 0, pulsing;
-  - a selected node: 3 px, offset 0, bevy_noodle's selected yellow, or the error / warning colour if it has a
-    diagnostic;
+  - a selected node: 3 px, offset 0, white, with the node's own border white too, or the error / warning colour if
+    it has a diagnostic (*changed by 0034:* it was bevy_noodle's selected yellow, which read like the warning colour);
   - a node with a diagnostic only: 2 px, offset 2, error / warning colour (as before).
 
   The pulse (`pulse_color`) is `k = 0.5 - 0.5·cos(2πt / 1.2 s)` mixing orange `(255, 140, 0)` into dark red
   `(140, 20, 20)` in sRGB. `rebuild_canvas` tags the previewed node with `PreviewPulse`; the `node_outlines` system
   runs every frame but only writes the `Outline` component (`set_if_neq`), so nothing rebuilds the canvas. It uses
   `Time::elapsed_secs_wrapped`, which wraps after 3600 s, a multiple of the period, so there is no phase jump. Known
-  limits: the selected yellow and the warning colour are close (they differ in width and offset); a previewed node
-  that is also selected shows only the pulse.
+  limit: a previewed node that is also selected shows only the pulse. (The first version's selected yellow was close
+  to the warning colour; 0034 made the selection white.)
 - **Dimmer grid** (design §4.9). The editor canvas's `CanvasGrid` uses white at alpha 0.006 (minor lines) and 0.014
   (major lines), tuned by screenshot (`ui/mod.rs`).
 - **Deleting comment frames with their nodes** (design §4.5). `Doc::enclosed_frames` marks the frames that Delete
@@ -102,12 +110,20 @@ stays rebuilt from the model (decision 0008). This records what was built and wh
     whole port) and stop wires short (`draw_edges` trims by the port size). Per the design's no-hacks rule the hit area
     is skipped. A clean path would be upstream: a component letting a non-port entity stand for a port in `pick_edges`
     and `WireTarget`.
+  - *Superseded by 0034* (the next two points): the fork's `PortHoverStyle` lightens and enlarges the port dot
+    itself (wires end at its rim), from Bevy's `Hovered`; `rebuild_canvas` only puts `Hovered(true)` on a rebuilt
+    pin's new port. `PinHalo`, `pin_halos`, `PinHovered`, `CarriedHover` and `confirm_carried_hover` are gone.
   - The highlight: `pin_hover` / `pin_unhover` (`PointerOver` / `PointerOut` observers) put `PinHovered` on the port.
     Each port has a `PinHalo` child exactly over its dot, `Pickable::IGNORE` and hidden unless hovered. `pin_halos`
     (PostUpdate, after bevy_noodle's render systems) shows it in the port's current colours lightened by 0.15, at
     least 1.3× the dot size (`pin_hover_look`). It writes only halo components, so bevy_noodle's own port look, wire
     trimming and picking are untouched. bevy_picking keeps hovering during a drag, so the highlight also shows on the
     pin under a dragged wire.
+  - A rebuild replaces every port entity, and picking sends `PointerOver` for the new port only a frame later (after
+    layout), so the halo blinked. `rebuild_canvas` carries `PinHovered` over to the new port of the same pin, marked
+    `CarriedHover`; `confirm_carried_hover` (PreUpdate, after picking's hover systems) keeps it only if the new port
+    is in the rewritten `HoverMap`, so a pin the rebuild moved away from the pointer does not keep a stale halo (added
+    in QA round 2, `ui_smoke::pin_halo_survives_rebuild`).
 - **FunctionInput slider range** (design §4.10). `output::FunctionInput` has optional `min` / `max` params ("Slider
   Min" / "Slider Max", appended after `order`). `ParamDef::shown_if("type", Float)` + `ParamDef::visible` hide them in
   the right sidebar unless the input's `type` is Float. `ir::declared_function_sig` sets `FnPort.range` only for a
@@ -127,10 +143,12 @@ stays rebuilt from the model (decision 0008). This records what was built and wh
     into B) is not detected in the editor, as in the palette; regeneration reports it as E006.
 
 **Consequences.**
-- Graphs converge to the 5-unit grid as they are edited, without a migration; old files keep their positions.
+- Graphs converge to the 5-unit grid (10 since 0034) as they are edited, without a migration; old files keep their
+  positions.
 - Frame membership remains creation-time data. Deriving it from geometry (or updating it on moves) would change the
   frame-delete rule and the frame-carry behaviour and is left for later.
-- The pin hit area waits for bevy_noodle support; the halo is independent of it.
+- The pin hit area waits for bevy_noodle support (now possible in the fork, not built yet); the hover look is
+  independent of it.
 - Debug hooks for the scripted checks (`demo.rs`, `lib.rs`): `SHADER_EDITOR_INPUT=box_delete|box_delete_partial`
   (`SHADER_EDITOR_INPUT_FRAME`), `hover` with `SHADER_EDITOR_INPUT_PIN`, `wire_hold`, `drop_game_file` with a
   `shaders/<path>.<kind>.ron` Project asset, and `SHADER_EDITOR_SELECT=<comment frame id>`.

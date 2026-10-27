@@ -1,23 +1,25 @@
 //! Property widgets of the right sidebar (spec §9.4) and of inline editors on nodes: number / vector / color / select
-//! / text fields editing a [`PropTarget`], section headers, labelled and hotkey rows, and the observers turning their
-//! changes into [`Action`]s. The rows each editor kind shows are built in `editors/<kind>.rs` (decision 0031).
+//! / text fields editing a [`PropTarget`], labelled and hotkey rows, and the observers turning their changes into
+//! [`Action`]s. The rows each editor kind shows are built in `editors/<kind>.rs` (decision 0031), grouped into
+//! subpanes ([`super::widgets::subpane_box`]).
 
 use bevy::feathers::controls::{
-    ColorSwatchValue, FeathersCheckbox, FeathersColorSwatch, FeathersNumberInput, FeathersSelect, FeathersSlider,
-    FeathersTextInput, FeathersTextInputContainer, NumberInputPrecision, NumberInputValue, OptionIndex,
-    list_rows_from_strings,
+    ColorSwatchValue, FeathersCheckbox, FeathersColorSwatch, FeathersNumberInput, FeathersSelect, FeathersTextInput,
+    FeathersTextInputContainer, HardLimit, NumberInputPrecision, NumberInputRange, NumberInputValue, OptionIndex,
+    SoftLimit, list_rows_from_strings,
 };
 use bevy::feathers::display::caption;
 use bevy::feathers::tokens;
 use bevy::prelude::*;
 use bevy::text::{EditableText, TextEditChange};
 use bevy::ui::Checked;
-use bevy::ui_widgets::{SliderPrecision, SliderValue, ValueChange, slider_self_update};
+use bevy::ui_widgets::ValueChange;
 use bevy_noodle::prelude::GraphQuery;
 use shader_graph_core::registry::ParamKind;
 use shader_graph_core::{PinType, Value};
 
 use super::dialog::InitText;
+use super::widgets::checkbox;
 use super::{TEXT, TEXT_DIM, text};
 use crate::state::{Action, Actions, Editor, PropTarget, display_value};
 
@@ -55,18 +57,9 @@ impl Plugin for PropsPlugin {
             .add_observer(number_f32)
             .add_observer(number_i32)
             .add_observer(color)
-            .add_observer(checkbox)
+            .add_observer(checkbox_changed)
             .add_observer(select)
             .add_observer(text_changed);
-    }
-}
-
-pub(crate) fn section(title: impl Into<String>) -> impl Scene {
-    let title = title.into();
-    bsn! {
-        Node { margin: UiRect::top(px(6)), padding: UiRect::bottom(px(2)), border: UiRect::bottom(px(1)) }
-        BorderColor::all(Color::srgb_u8(60, 62, 70))
-        Children [ @text(title, TEXT_DIM, 12.0) ]
     }
 }
 
@@ -81,7 +74,34 @@ pub(crate) fn labeled(label: String, widget: Box<dyn Scene>) -> impl Scene {
     }
 }
 
+/// A bool as a captioned checkbox ([`checkbox`]) filling a row as tall as a [`labeled`] one: the box starts where the
+/// other rows' labels do and its caption is the clickable label (no empty label column in front of it).
+pub(crate) fn checkbox_row(label: &str, target: PropTarget, checked: bool) -> Box<dyn Scene> {
+    let checkbox = checkbox(label, target, checked);
+    Box::new(bsn! {
+        Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, min_height: px(26) }
+        Children [ @{checkbox} ]
+    })
+}
+
+/// A row editing a value of `kind`: [`labeled`] [`value_widget`], or a [`checkbox_row`] for a bool.
+pub(crate) fn value_row(
+    label: String,
+    target: PropTarget,
+    kind: &ParamKind,
+    v: &Value,
+    choices: &Choices,
+) -> Box<dyn Scene> {
+    match kind {
+        ParamKind::Bool => checkbox_row(&label, target, v.as_bool()),
+        _ => Box::new(labeled(label, value_widget(target, kind, v, choices))),
+    }
+}
+
+/// A number input editing component `comp` of `target`; a component's field (`sigil` X/Y/Z/W or R/G/B/A) is
+/// marked with its axis colour.
 pub(crate) fn number(target: PropTarget, comp: usize, v: f32, sigil: Option<&'static str>) -> Box<dyn Scene> {
+    let Some(s) = sigil else { return number_ranged(target, comp, v, None, None) };
     let field = PropField { target, comp, ..Default::default() };
     let v = display_value(v);
     let token = match comp {
@@ -90,22 +110,58 @@ pub(crate) fn number(target: PropTarget, comp: usize, v: f32, sigil: Option<&'st
         2 => tokens::TEXT_INPUT_Z_AXIS,
         _ => tokens::TEXT_INPUT_W_AXIS,
     };
-    match sigil {
-        Some(s) => Box::new(bsn! {
-            @FeathersNumberInput { @sigil_color: token, @label_text: s }
-            NumberInputValue::F32(v)
-            NumberInputPrecision(3)
-            Node { flex_grow: 1.0, min_width: px(40) }
-            field
-        }),
-        None => Box::new(bsn! {
-            @FeathersNumberInput
-            NumberInputValue::F32(v)
-            NumberInputPrecision(3)
-            Node { flex_grow: 1.0 }
-            field
-        }),
-    }
+    Box::new(bsn! {
+        @FeathersNumberInput { @sigil_color: token, @label_text: s }
+        NumberInputValue::F32(v)
+        NumberInputPrecision(3)
+        Node { flex_grow: 1.0, min_width: px(40) }
+        field
+    })
+}
+
+/// A number input with optional limits (design §3): dragging stays inside the `soft` range (its fill bar shows
+/// where the value is), a click enters text editing and a typed value may leave it; a `hard` limit clamps both.
+/// Drags round to 2 decimals with a soft limit (as the sliders it replaces did), else to 3 — without a soft limit
+/// Feathers also derives the drag speed from the precision (`10^-precision` per pixel).
+pub(crate) fn number_ranged(
+    target: PropTarget,
+    comp: usize,
+    v: f32,
+    soft: Option<(f32, f32)>,
+    hard: Option<(f32, f32)>,
+) -> Box<dyn Scene> {
+    let precision = if soft.is_some() { 2 } else { 3 };
+    number_input(target, comp, v, soft, hard, precision)
+}
+
+/// [`number_ranged`] rounding drags to `precision` decimals.
+pub(crate) fn number_input(
+    target: PropTarget,
+    comp: usize,
+    v: f32,
+    soft: Option<(f32, f32)>,
+    hard: Option<(f32, f32)>,
+    precision: i32,
+) -> Box<dyn Scene> {
+    let field = PropField { target, comp, ..Default::default() };
+    let v = display_value(v);
+    let soft: Box<dyn Scene> = match soft {
+        Some((min, max)) => Box::new(bsn! { SoftLimit(NumberInputRange::F32({min..=max})) }),
+        None => Box::new(bsn! {}),
+    };
+    let hard: Box<dyn Scene> = match hard {
+        Some((min, max)) => Box::new(bsn! { HardLimit(NumberInputRange::F32({min..=max})) }),
+        None => Box::new(bsn! {}),
+    };
+    Box::new(bsn! {
+        @FeathersNumberInput
+        NumberInputValue::F32(v)
+        NumberInputPrecision(precision)
+        @{soft}
+        @{hard}
+        Node { flex_grow: 1.0 }
+        field
+    })
 }
 
 pub(crate) fn integer(target: PropTarget, v: i32) -> Box<dyn Scene> {
@@ -138,19 +194,14 @@ fn vector(target: PropTarget, v: &[f32], color: bool) -> Box<dyn Scene> {
     )
 }
 
-/// Hue slider `0..360` degrees (whole degrees); a drag is one undo step (`SetComponent`, `is_final` at the end).
-pub(crate) fn hue_slider(target: PropTarget, hue: f32) -> Box<dyn Scene> {
-    let field = PropField { target, ..Default::default() };
-    Box::new(bsn! {
-        @FeathersSlider { @min: 0.0, @max: 360.0 }
-        SliderValue({hue})
-        SliderPrecision(0)
-        on(slider_self_update)
-        Node { flex_grow: 1.0 }
-        field
-    })
+/// Hue in whole degrees, `0..=360` both soft and hard; a drag is one undo step (`SetComponent`, `is_final` at the
+/// end).
+pub(crate) fn hue_input(target: PropTarget, hue: f32) -> Box<dyn Scene> {
+    number_input(target, 0, hue, Some((0.0, 360.0)), Some((0.0, 360.0)), 0)
 }
 
+/// An uncaptioned checkbox, where the label is elsewhere (an inline editor on a node, a consts table cell); a
+/// labelled row uses [`checkbox_row`].
 pub(crate) fn checkbox_w(target: PropTarget, v: bool) -> Box<dyn Scene> {
     let field = PropField { target, ..Default::default() };
     if v {
@@ -216,7 +267,7 @@ pub(crate) struct Choices {
     pub textures: Vec<(String, String)>,
 }
 
-/// Widget editing a value of `kind`.
+/// Widget editing a value of `kind` (a bool: an uncaptioned checkbox, for rows that show the label themselves).
 pub(crate) fn value_widget(target: PropTarget, kind: &ParamKind, v: &Value, choices: &Choices) -> Box<dyn Scene> {
     match kind {
         ParamKind::Route => keyed_select(target, &choices.routes, v.as_str()),
@@ -224,7 +275,7 @@ pub(crate) fn value_widget(target: PropTarget, kind: &ParamKind, v: &Value, choi
         ParamKind::GlobalConst(_) => keyed_select(target, &choices.consts, v.as_str()),
         // `(none)`: the node uses the default texture (W110).
         ParamKind::Texture => keyed_select(target, &choices.textures, v.as_str()),
-        ParamKind::Float { .. } => number(target, 0, v.as_f32(), None),
+        ParamKind::Float { min, max } => number_ranged(target, 0, v.as_f32(), soft_range(*min, *max), None),
         ParamKind::Float2 => vector(target, &v.coerce(PinType::Float2).floats(), false),
         ParamKind::Float3 => vector(target, &v.coerce(PinType::Float3).floats(), false),
         ParamKind::Float4 => vector(target, &v.coerce(PinType::Float4).floats(), false),
@@ -241,6 +292,14 @@ pub(crate) fn value_widget(target: PropTarget, kind: &ParamKind, v: &Value, choi
             let cur = types.iter().position(|t| Some(*t) == v.as_type()).unwrap_or(0);
             select_w(target, types.iter().map(|t| t.label().to_string()).collect(), types.clone(), cur)
         }
+    }
+}
+
+/// The soft limit of a Float with `min` and `max` (`min < max`).
+pub(crate) fn soft_range(min: Option<f32>, max: Option<f32>) -> Option<(f32, f32)> {
+    match (min, max) {
+        (Some(min), Some(max)) if min < max => Some((min, max)),
+        _ => None,
     }
 }
 
@@ -337,7 +396,7 @@ fn color(ev: On<ValueChange<Color>>, fields: Query<&PropField>, graph: GraphQuer
     commit_inline(ev.source, ev.is_final, &graph, &mut actions);
 }
 
-fn checkbox(
+fn checkbox_changed(
     ev: On<ValueChange<bool>>,
     fields: Query<&PropField>,
     graph: GraphQuery,

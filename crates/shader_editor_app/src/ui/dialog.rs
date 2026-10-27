@@ -1,19 +1,22 @@
-//! Modal dialogs (confirmations, name input, errors) and simple context menus.
+//! Modal dialogs (confirmations, name input, errors) and the menus: context menus at the cursor and the popups of
+//! the main menu, both Feathers menus ([`menu_popup`]).
 
 use bevy::feathers::controls::{
-    FeathersDialog, FeathersDialogBody, FeathersDialogFooter, FeathersDialogHeader, FeathersTextInput,
-    FeathersTextInputContainer,
+    ButtonVariant, FeathersButton, FeathersDialog, FeathersDialogBody, FeathersDialogFooter, FeathersDialogHeader,
+    FeathersMenuDivider, FeathersMenuItem, FeathersMenuPopup, FeathersTextInput, FeathersTextInputContainer,
 };
 use bevy::feathers::display::caption;
 use bevy::input::keyboard::KeyboardInput;
-use bevy::input_focus::{AutoFocus, FocusedInput};
+use bevy::input_focus::tab_navigation::NavAction;
+use bevy::input_focus::{AcquireFocus, AutoFocus, FocusedInput, InputFocus};
 use bevy::prelude::*;
 use bevy::text::{EditableText, TextEdit};
-use bevy::ui_widgets::{Activate, Button, RequestClose};
+use bevy::ui::InteractionDisabled;
+use bevy::ui_widgets::{Activate, MenuAction, MenuEvent, MenuFocusState, RequestClose};
 
 use super::icons::{IconId, icon};
 use super::tooltip::Tooltip;
-use super::{HoverRow, OnActivate, TEXT, TEXT_DIM, button, text};
+use super::{OnActivate, TEXT, TEXT_DIM, button, text};
 use crate::state::{Action, Actions, Dialog, Editor, Submit};
 
 #[derive(Component, Default, Clone)]
@@ -31,11 +34,10 @@ pub struct InitText(pub String);
 #[derive(Component, Default, Clone)]
 pub struct SubmitButton;
 
+/// An open context menu: its [`menu_barrier`], which holds the anchor at the cursor and the popup
+/// ([`open_menu_entries`]).
 #[derive(Component, Default, Clone)]
 pub struct MenuRoot;
-
-#[derive(Component, Default, Clone)]
-pub struct MenuItem;
 
 pub struct DialogPlugin;
 
@@ -44,9 +46,7 @@ impl Plugin for DialogPlugin {
         app.add_systems(Update, (redraw, init_text))
             .add_observer(close_requested)
             .add_observer(submit_clicked)
-            .add_observer(submit_on_enter)
-            .add_observer(menu_item_activated)
-            .add_observer(menu_barrier_clicked);
+            .add_observer(submit_on_enter);
     }
 }
 
@@ -145,13 +145,11 @@ fn redraw(
     });
 }
 
-use bevy::feathers::controls::{ButtonVariant, FeathersButton};
-
 /// Help → About: the logo, then name, version, link, author and license.
 fn about() -> impl Scene {
     let version = format!("Version {}", crate::EDITOR_VERSION);
     let (author, license) = (format!("Author: {}", crate::AUTHORS), format!("License: {}", crate::LICENSE));
-    let (act, hover) = (OnActivate(Action::OpenUrl(crate::PROJECT_URL.into())), HoverRow { base: Color::NONE });
+    let act = OnActivate(Action::OpenUrl(crate::PROJECT_URL.into()));
     let tip = super::tooltip::Tooltip("Open in the browser".into());
     let link = crate::PROJECT_URL.trim_start_matches("https://");
     bsn! {
@@ -165,23 +163,19 @@ fn about() -> impl Scene {
                 --
                 @text(version, TEXT_DIM, 13.0)
                 --
+                @FeathersButton {
+                    @variant: ButtonVariant::Plain,
+                    @caption: bsn_list! { @icon(IconId::Link, 14.0, super::ACCENT) -- @text(link, super::ACCENT, 13.0) },
+                }
                 Node {
-                    align_items: AlignItems::Center,
+                    align_self: AlignSelf::Start,
                     column_gap: px(6),
                     padding: UiRect::axes(px(4), px(2)),
                     margin: UiRect::left(px(-4)),
-                    border_radius: BorderRadius::all(px(3)),
+                    height: Val::Auto,
                 }
-                BackgroundColor(Color::NONE)
-                Button
                 act
-                hover
                 tip
-                Children [
-                    @icon(IconId::Link, 14.0, super::ACCENT)
-                    --
-                    @text(link, super::ACCENT, 13.0)
-                ]
                 --
                 @text(author, TEXT, 13.0)
                 --
@@ -278,104 +272,127 @@ pub fn open_icon_menu(commands: &mut Commands, pos: Vec2, items: Vec<(Option<Ico
 }
 
 /// [`open_icon_menu`] whose items may be disabled ([`MenuEntry::disabled`]).
+///
+/// A Feathers menu popup ([`menu_popup`]) on a [`menu_barrier`] ([`MenuRoot`]), hung from a zero-size anchor at
+/// `pos`: it opens below the point (above it when there is no room), focuses its first item and closes when the focus
+/// leaves it, on Esc or when an item is activated; the barrier goes with it ([`context_menu_event`]). A click outside
+/// lands on the barrier: it only closes the menu. One context menu at a time: opening one removes any other.
 pub fn open_menu_entries(commands: &mut Commands, pos: Vec2, items: Vec<MenuEntry>) {
+    commands.queue(|world: &mut World| {
+        let open: Vec<Entity> = world.query_filtered::<Entity, With<MenuRoot>>().iter(world).collect();
+        for e in open {
+            world.entity_mut(e).despawn();
+        }
+    });
+    let popup = menu_popup(items);
+    let (x, y) = (px(pos.x), px(pos.y));
+    commands.spawn_scene(bsn! {
+        @menu_barrier()
+        MenuRoot
+        on(context_menu_event)
+        Children [
+            Node { position_type: PositionType::Absolute, left: x, top: y, width: px(0), height: px(0) }
+            Children [ @{popup} Visibility::Visible MenuFocusState::Opening(NavAction::First) ]
+        ]
+    });
+}
+
+/// A transparent node over the whole window, under an open menu's popup and over everything else: a press outside
+/// the popup lands here and nowhere else. It takes no focus, so its `AcquireFocus` reaches the window, which clears
+/// the focus; the menu then closes on its focus loss (Feathers).
+pub fn menu_barrier() -> impl Scene {
+    bsn! {
+        Node { position_type: PositionType::Absolute, left: px(0), top: px(0), width: percent(100), height: percent(100) }
+        GlobalZIndex(MENU_BARRIER_Z)
+    }
+}
+
+/// Z of a [`menu_barrier`]; menu popups are one above it, tooltips above both.
+pub const MENU_BARRIER_Z: i32 = 94;
+
+/// The popup of a main or context menu: a `FeathersMenuPopup` of [`menu_rows`], at least 200 px wide, above its
+/// [`menu_barrier`] and under the tooltips (which name why an item is disabled). A press inside it that hits no item
+/// (the padding, a divider) keeps the focus where it is, so it does not close the menu.
+pub fn menu_popup(items: Vec<MenuEntry>) -> impl Scene {
+    let rows = menu_rows(items);
+    bsn! {
+        @FeathersMenuPopup
+        Node { min_width: px(200) }
+        GlobalZIndex({ MENU_BARRIER_Z + 1 })
+        on(|mut ev: On<AcquireFocus>| ev.propagate(false))
+        Children [ {rows} ]
+    }
+}
+
+/// The rows of a menu popup: a `FeathersMenuDivider` per separator, a `FeathersMenuItem` per item — icon (or its
+/// space when any item has one), label (a Feathers caption), the hotkey dimmed on the right. An activated item pushes its action
+/// ([`OnActivate`]); a disabled one is `InteractionDisabled` (dimmed, no `Activate`) with its reason as tooltip.
+pub fn menu_rows(items: Vec<MenuEntry>) -> Vec<Box<dyn Scene>> {
     let with_icons = items.iter().any(|m| m.icon.is_some());
-    let rows: Vec<Box<dyn Scene>> = items
+    items
         .into_iter()
         .map(|MenuEntry { icon: id, label, action, disabled }| -> Box<dyn Scene> {
             if label.is_empty() {
-                return Box::new(bsn! {
-                    Node { height: px(1), margin: UiRect::axes(px(6), px(4)) }
-                    BackgroundColor(Color::srgb_u8(70, 72, 80))
-                });
+                return Box::new(bsn! { @FeathersMenuDivider });
             }
             let (label, hotkey) = match label.split_once('\t') {
                 Some((l, h)) => (l.to_string(), h.to_string()),
                 None => (label, String::new()),
             };
-            let color = if disabled.is_some() { TEXT_DIM } else { TEXT };
+            let tint = if disabled.is_some() { TEXT_DIM } else { TEXT };
             let lead: Vec<Box<dyn Scene>> = match id {
-                Some(id) => vec![Box::new(icon(id, 16.0, color))],
+                Some(id) => vec![Box::new(icon(id, 16.0, tint))],
                 None if with_icons => vec![Box::new(bsn! { Node { width: px(16), flex_shrink: 0.0 } })],
                 None => Vec::new(),
+            };
+            // The label is a Feathers caption: the item's theme colour (dimmed when disabled) and font reach it.
+            let caption = bsn_list! {
+                {lead}
+                --
+                @caption(label)
+                --
+                Node { flex_grow: 1.0, min_width: px(24) }
+                --
+                @text(hotkey, TEXT_DIM, 12.0)
             };
             match disabled {
                 Some(why) => {
                     let tip = Tooltip(why);
-                    Box::new(bsn! { @menu_row(lead, label, color, hotkey) tip })
+                    Box::new(bsn! {
+                        @FeathersMenuItem { @caption: caption } Node { column_gap: px(8) } InteractionDisabled tip
+                    })
                 }
                 None => {
-                    let (act, hover) = (OnActivate(action), HoverRow { base: Color::NONE });
-                    Box::new(bsn! { @menu_row(lead, label, color, hotkey) Button MenuItem act hover })
+                    let act = OnActivate(action);
+                    Box::new(bsn! { @FeathersMenuItem { @caption: caption } Node { column_gap: px(8) } act })
                 }
             }
         })
-        .collect();
-    let (x, y) = (px(pos.x), px(pos.y));
-    commands.spawn_scene(bsn! {
-        MenuRoot
-        Node { position_type: PositionType::Absolute, left: px(0), top: px(0), width: percent(100), height: percent(100) }
-        GlobalZIndex(95)
-        Children [
-            Node {
-                position_type: PositionType::Absolute,
-                left: x,
-                top: y,
-                flex_direction: FlexDirection::Column,
-                padding: UiRect::all(px(4)),
-                min_width: px(200),
-                border: UiRect::all(px(1)),
-                border_radius: BorderRadius::all(px(4)),
-            }
-            BackgroundColor(Color::srgb_u8(36, 38, 44))
-            BorderColor::all(Color::srgb_u8(70, 72, 80))
-            BoxShadow::new(Color::srgba(0.0, 0.0, 0.0, 0.6), px(0), px(3), px(0), px(10))
-            Children [ {rows} ]
-        ]
-    });
+        .collect()
 }
 
-/// A context menu row: icon (or its space), label, hotkey.
-fn menu_row(lead: Vec<Box<dyn Scene>>, label: String, color: Color, hotkey: String) -> impl Scene {
-    bsn! {
-        Node {
-            align_items: AlignItems::Center,
-            column_gap: px(8),
-            padding: UiRect::axes(px(10), px(4)),
-            border_radius: BorderRadius::all(px(3)),
-        }
-        BackgroundColor(Color::NONE)
-        Children [
-            {lead}
-            --
-            @text(label, color, 13.0)
-            --
-            Node { flex_grow: 1.0, min_width: px(24) }
-            --
-            @text(hotkey, TEXT_DIM, 12.0)
-        ]
-    }
-}
-
-fn close_menus(commands: &mut Commands, menus: &Query<Entity, With<MenuRoot>>) {
-    for m in menus {
-        commands.entity(m).despawn();
-    }
-}
-
-fn menu_item_activated(
-    ev: On<Activate>,
-    items: Query<(), With<MenuItem>>,
-    menus: Query<Entity, With<MenuRoot>>,
+/// Closes a context menu: on `CloseAll` (focus lost, Esc, an item activated) its [`MenuRoot`] goes; `FocusRoot` (Esc,
+/// an item activated) drops the keyboard focus, as a context menu has no button to return it to.
+fn context_menu_event(
+    mut ev: On<MenuEvent>,
+    focus: Option<ResMut<InputFocus>>,
+    parents: Query<&ChildOf>,
     mut commands: Commands,
 ) {
-    if items.contains(ev.event_target()) {
-        close_menus(&mut commands, &menus);
-    }
-}
-
-fn menu_barrier_clicked(ev: On<PointerPress>, menus: Query<Entity, With<MenuRoot>>, mut commands: Commands) {
-    if menus.contains(ev.event_target()) && ev.original_event_target() == ev.event_target() {
-        close_menus(&mut commands, &menus);
+    let root = ev.event_target();
+    match ev.action {
+        MenuAction::CloseAll => {
+            ev.propagate(false);
+            commands.entity(root).try_despawn();
+        }
+        MenuAction::FocusRoot => {
+            ev.propagate(false);
+            if let Some(mut focus) = focus
+                && focus.get().is_some_and(|f| f == root || parents.iter_ancestors(f).any(|a| a == root))
+            {
+                focus.clear();
+            }
+        }
+        MenuAction::Open(_) | MenuAction::Toggle => {}
     }
 }

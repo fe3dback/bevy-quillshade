@@ -145,7 +145,9 @@ fn draw_tree(source: &dyn TreeSource, editor: &Editor, body: Entity, commands: &
                 };
                 (row_icons(None, IconId::for_id(id, editor.asset_kind(id))), state)
             }
-            TreeItem::GameFile(_) | TreeItem::Internal(_) => (row_icons(None, IconId::Image), RowState::default()),
+            TreeItem::GameFile(_) => (row_icons(None, IconId::Image), RowState::default()),
+            // A built-in texture opens as a (read-only) Texture tab.
+            TreeItem::Internal(_) => (row_icons(None, IconId::Texture), RowState::default()),
         };
         let r = TreeRow { tree, item };
         commands.spawn_scene(bsn! { @row(label, icons, depth, r, state) ChildOf(body) });

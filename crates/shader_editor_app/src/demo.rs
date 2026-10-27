@@ -1,45 +1,56 @@
 //! Debug aid: scripted mouse gestures,
-//! `SHADER_EDITOR_INPUT=drag|rmb_click|rmb_pan|mmb_pan|slider|color|pin_rmb|node_rmb|node_dblclick|hover|curve_drag|curve_add`
-//! `|ctrl_drag_wire|wire_drag|wire_hold|alt_click|box_delete|box_delete_partial`
+//! `SHADER_EDITOR_INPUT=drag|rmb_click|rmb_pan|mmb_pan|slider|color|pin_rmb|node_rmb|node_dblclick|frame_dblclick`
+//! `|hover|curve_drag|curve_add|texture_zoom|drop_game_file`
+//! `|ctrl_drag_wire|ctrl_wire_hold|wire_drag|wire_hold|alt_click|box_delete|box_delete_partial|type_field`
 //! (with `SHADER_EDITOR_SCREENSHOT` and `SHADER_EDITOR_OPEN`; `SHADER_EDITOR_ZOOM=<f32>` sets the canvas zoom
-//! first). `slider`/`color` act on the first inline slider / color button on a node, `pin_rmb` right-clicks the
-//! first input pin of `SHADER_EDITOR_INPUT_NODE`, `node_rmb` right-clicks the middle of an unselected node (or of
-//! `SHADER_EDITOR_INPUT_NODE`) to open its menu, `node_dblclick` double-clicks the middle of that node (opens the
-//! file it refers to; the active tab is logged), `hover` rests on the menu_bar's Undo button (its tooltip) or, with
-//! `SHADER_EDITOR_INPUT_PIN=<node>.<pin>`, on that pin (its hover halo, design §4.8; hovered pins are logged),
-//! `curve_drag` drags the second point of an open curve, `curve_add` double-clicks below it, `texture_zoom` turns the
-//! wheel 10 notches over the preview of an open Texture tab (left of its centre), `drop_game_file` drags the Game
-//! Assets row of `SHADER_EDITOR_INPUT_FILE` (a path under `assets/`, or a Project tree asset as
-//! `shaders/<path>.<kind>.ron`, design §4.11; default: the first game file) onto the middle of
+//! first). `slider` drags the topmost number input with a soft limit (an inline ranged field on a node wholly inside
+//! the visible canvas, or the Hue of a selected comment in the right sidebar) across most of its on-screen width and
+//! logs the field's value and its node's position, `color` clicks the first inline color button on
+//! a node, `pin_rmb` right-clicks the first input pin of `SHADER_EDITOR_INPUT_NODE`, `node_rmb` right-clicks the
+//! middle of an unselected node (or of `SHADER_EDITOR_INPUT_NODE`) to open its menu, `node_dblclick` double-clicks
+//! the middle of that node (opens the file it refers to) or, with `SHADER_EDITOR_INPUT_AT=header`, its header (the
+//! rename dialog, design §5.5; the active tab and the dialog are logged), `frame_dblclick` double-clicks the title
+//! strip of the first comment frame (or `SHADER_EDITOR_INPUT_FRAME`; the dialog is logged), `hover` rests on the
+//! menu_bar's Undo button (its tooltip), on the widget whose tooltip starts with `SHADER_EDITOR_INPUT_TIP` or, with
+//! `SHADER_EDITOR_INPUT_PIN=<node>.<pin>`, on that pin (its hover look, design §4.8; hovered pins are logged),
+//! `curve_drag` drags the second point of an open curve, `curve_add` double-clicks below it, `texture_zoom` turns
+//! the wheel 10 notches over the preview of an open image or Texture tab (left of its centre),
+//! `drop_game_file` drags the Game Assets row of `SHADER_EDITOR_INPUT_FILE` (a path under `assets/`, or a Project
+//! tree asset as `shaders/<path>.<kind>.ron`, design §4.11; default: the first game file) onto the middle of
 //! `SHADER_EDITOR_INPUT_NODE` (default: the canvas centre) and logs the texture / curve references and function
 //! calls of the graph.
 //! `ctrl_drag_wire` holds Ctrl and drags from the pin `SHADER_EDITOR_INPUT_PIN=<node>.<pin>` (default: the topmost
 //! connected input) onto the pin `SHADER_EDITOR_INPUT_TO=<node>.<pin>` (default: the nearest pin of the same
 //! direction on another node), `wire_drag` does the same without Ctrl, `wire_hold` too but keeps the button down
-//! (the screenshot shows the dragged wire over the target pin), `alt_click` Alt+clicks the
-//! `SHADER_EDITOR_INPUT_PIN` pin; all of them log the wires at both pins before and after (decision 0032).
+//! (the screenshot shows the dragged wire over the target pin), `ctrl_wire_hold` is `ctrl_drag_wire` keeping Ctrl
+//! and the button down (the screenshot shows the lifted wires mid-gesture, design §5.3; the lifted wires and the pin
+//! they snap to are logged); with `SHADER_EDITOR_INPUT_AT=<dx>,<dy>` these drags end that many logical px from the
+//! pin dragged from instead of on the target pin. `alt_click` Alt+clicks the `SHADER_EDITOR_INPUT_PIN` pin; all of
+//! them log the wires at both pins before and after (decision 0032).
 //! `box_delete` drags a selection box from 20 px outside the first comment frame (or `SHADER_EDITOR_INPUT_FRAME`) to
 //! 20 px past its far corner and presses Delete, `box_delete_partial` the same with a box ending in the frame's
-//! middle; both log frames, node count and selection before and after (design §4.5). The input goes through
-//! the same window messages winit writes,
-//! so picking, bevy_noodle and the editor see a real gesture; the outcome is logged.
+//! middle; both log frames, node count and selection before and after (design §4.5). `type_field` clicks the
+//! right sidebar's Description field of an open graph, types `ab` and logs the focus and the field's text. The input
+//! goes through the same window messages winit writes, so picking, bevy_noodle and the editor see a real gesture; the
+//! outcome is logged.
 
-use bevy::feathers::controls::{FeathersColorInput, FeathersColorWheel, FeathersSlider};
+use bevy::feathers::controls::{FeathersColorInput, FeathersColorWheel, SoftLimit};
 use bevy::input::ButtonState;
 use bevy::input::keyboard::{Key, KeyboardInput, NativeKey};
 use bevy::input::mouse::{MouseButtonInput, MouseScrollUnit, MouseWheel};
 use bevy::input::touch::TouchPhase;
+use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
 use bevy::ui::ui_transform::UiGlobalTransform;
 use bevy::window::{CursorMoved, PrimaryWindow, WindowEvent};
 use bevy_noodle::prelude::*;
 
-use crate::canvas::{EditorCanvas, FrameKey, NodeKey, PinHovered, PinKey};
+use crate::canvas::{EditorCanvas, FrameKey, FrameTitleStrip, NodeHeader, NodeKey, PinKey};
 use crate::state::{Editor, PropTarget};
 use crate::ui::curve_view::CurveHandle;
+use crate::ui::image_preview::PreviewArea;
 use crate::ui::palette::Palette;
 use crate::ui::props::PropField;
-use crate::ui::texture_view::TextureViewArea;
 use crate::ui::tooltip::Tooltip;
 use crate::ui::tree::{TreeItem, TreeRow};
 
@@ -52,6 +63,8 @@ enum Step {
     Release(MouseButton),
     /// A key down (`true`) or up.
     Key(KeyCode, bool),
+    /// A key typing this character (down and up).
+    Type(KeyCode, char),
     /// Wheel notches (positive: up / zoom in).
     Wheel(f32),
     Wait,
@@ -100,7 +113,8 @@ fn frames_log(editor: &Editor) -> String {
     )
 }
 
-/// Inline editors on canvas nodes: what they edit, where they are, which widget.
+/// Property widgets (inline editors on canvas nodes and the right sidebar's): what they edit, where they are, which
+/// widget.
 type Widgets<'w, 's> = Query<
     'w,
     's,
@@ -108,10 +122,23 @@ type Widgets<'w, 's> = Query<
         &'static PropField,
         &'static UiGlobalTransform,
         &'static ComputedNode,
-        Has<FeathersSlider>,
+        Has<SoftLimit>,
         Has<FeathersColorInput>,
+        Entity,
     ),
 >;
+
+/// The logical on-screen size of a UI node: layout size times the scale of its transform (the canvas zoom for
+/// anything on the canvas).
+fn screen_size(t: &UiGlobalTransform, c: &ComputedNode) -> Vec2 {
+    c.size() * t.to_scale_angle_translation().0 * c.inverse_scale_factor()
+}
+
+/// Two left clicks at `at`.
+fn double_click(at: Vec2) -> Vec<Step> {
+    let click = || [Step::Press(MouseButton::Left), Step::Wait, Step::Release(MouseButton::Left)];
+    [Step::Move(at)].into_iter().chain(click()).chain([Step::Wait]).chain(click()).collect()
+}
 
 fn drag(from: Vec2, button: MouseButton, by: Vec2) -> Vec<Step> {
     let mut steps = vec![Step::Move(from), Step::Press(button)];
@@ -133,16 +160,25 @@ pub fn scripted_input(
     ports: Query<(&PinKey, &UiGlobalTransform, &ComputedNode)>,
     wheels: Query<(&UiGlobalTransform, &ComputedNode), With<FeathersColorWheel>>,
     tips: Query<(&Tooltip, &UiGlobalTransform, &ComputedNode)>,
-    (handles, previews, rows, frames, hovered): (
+    (handles, previews, rows, frames, hovered, headers, strips): (
         Query<(&CurveHandle, &UiGlobalTransform, &ComputedNode)>,
-        Query<(&UiGlobalTransform, &ComputedNode), With<TextureViewArea>>,
+        Query<(&PreviewArea, &UiGlobalTransform, &ComputedNode)>,
         Query<(&TreeRow, &UiGlobalTransform, &ComputedNode)>,
         Query<(&FrameKey, &UiGlobalTransform, &ComputedNode)>,
-        Query<&PinKey, With<PinHovered>>,
+        Query<(&PinKey, &Hovered)>,
+        Query<(&ChildOf, &UiGlobalTransform, &ComputedNode), With<NodeHeader>>,
+        Query<(&ChildOf, &UiGlobalTransform, &ComputedNode), With<FrameTitleStrip>>,
     ),
     mut events: MessageWriter<WindowEvent>,
     (mut moved, mut wheel): (MessageWriter<CursorMoved>, MessageWriter<MouseWheel>),
     (mut buttons, mut keyboard): (MessageWriter<MouseButtonInput>, MessageWriter<KeyboardInput>),
+    (focus, texts, lifts, wires, parents): (
+        Res<bevy::input_focus::InputFocus>,
+        Query<&bevy::text::EditableText>,
+        Query<(&MovingEdges, &WireTarget)>,
+        Query<(), With<PendingWire>>,
+        Query<&ChildOf>,
+    ),
 ) {
     let Ok(name) = std::env::var("SHADER_EDITOR_INPUT") else { return };
     let (Ok(window), Some(ec)) = (window.single(), ec) else { return };
@@ -168,7 +204,8 @@ pub fn scripted_input(
         };
         let focus_or_popup = palette.open;
         let rev = d.map(|d| d.revision);
-        let mut hovered: Vec<String> = hovered.iter().map(|k| format!("{}.{}", k.node, k.pin)).collect();
+        let mut hovered: Vec<String> =
+            hovered.iter().filter(|(_, h)| h.0).map(|(k, _)| format!("{}.{}", k.node, k.pin)).collect();
         hovered.sort();
         if let Some(c) = editor.curve_doc() {
             info!("demo {name} f{} curve {:?} selection {:?}", s.frame, c.curve.points, c.selection);
@@ -197,20 +234,55 @@ pub fn scripted_input(
                 s.node = Some(key.0.clone());
                 drag(logical(t, c), MouseButton::Left, Vec2::new(120.0, 60.0))
             }
-            "slider" | "color" => {
-                let slider = name == "slider";
-                let Some((f, t, c, ..)) = widgets.iter().filter(|w| if slider { w.3 } else { w.4 }).min_by(|a, b| {
-                    let (a, b) = (a.1.translation, b.1.translation);
-                    (a.y, a.x).partial_cmp(&(b.y, b.x)).unwrap()
-                }) else {
-                    error!("demo {name}: no inline widget on the canvas");
+            "type_field" => {
+                let Some((f, t, c, ..)) = widgets.iter().find(|w| w.0.target == PropTarget::Description) else {
+                    error!("demo {name}: no Description field (open a graph)");
                     return;
                 };
                 s.target = Some(f.target.clone());
                 let at = logical(t, c);
+                vec![
+                    Step::Move(at),
+                    Step::Press(MouseButton::Left),
+                    Step::Wait,
+                    Step::Release(MouseButton::Left),
+                    Step::Wait,
+                    Step::Wait,
+                    Step::Type(KeyCode::KeyA, 'a'),
+                    Step::Wait,
+                    Step::Type(KeyCode::KeyB, 'b'),
+                ]
+            }
+            "slider" | "color" => {
+                let slider = name == "slider";
+                // A widget on the canvas must lie wholly inside the canvas' rect, or the press misses it.
+                let canvas_rect = Rect::from_center_size(logical(ct, cc), cc.size() * cc.inverse_scale_factor());
+                let reachable = |(_, t, c, _, _, e): &(&PropField, &UiGlobalTransform, &ComputedNode, _, _, _)| {
+                    let rect = Rect::from_center_size(logical(t, c), screen_size(t, c));
+                    !parents.iter_ancestors(*e).any(|a| a == ec.canvas)
+                        || canvas_rect.contains(rect.min) && canvas_rect.contains(rect.max)
+                };
+                let Some((f, t, c, ..)) =
+                    widgets.iter().filter(|w| if slider { w.3 } else { w.4 }).filter(reachable).min_by(|a, b| {
+                        let (a, b) = (a.1.translation, b.1.translation);
+                        (a.y, a.x).partial_cmp(&(b.y, b.x)).unwrap()
+                    })
+                else {
+                    error!("demo {name}: no widget on screen (pan or zoom with SHADER_EDITOR_ZOOM)");
+                    return;
+                };
+                s.target = Some(f.target.clone());
+                // The node owning an inline field: the report logs its position (a scrub must not move it).
+                s.node = match &f.target {
+                    PropTarget::Input { node, .. } | PropTarget::Param { node, .. } => Some(node.clone()),
+                    _ => None,
+                };
+                let at = logical(t, c);
                 if slider {
-                    // From the left quarter to the right edge of the track.
-                    let w = c.size().x * c.inverse_scale_factor();
+                    // From the left quarter of the field to its right edge (a press without a move would type);
+                    // on screen, so scaled by the canvas zoom for an inline field.
+                    let w = screen_size(t, c).x;
+                    info!("demo {name}: field at {at} {w} px wide");
                     drag(at - Vec2::new(w / 4.0, 0.0), MouseButton::Left, Vec2::new(w * 0.7, 0.0))
                 } else {
                     vec![Step::Move(at), Step::Press(MouseButton::Left), Step::Wait, Step::Release(MouseButton::Left)]
@@ -238,8 +310,32 @@ pub fn scripted_input(
             "node_dblclick" => {
                 let Some((key, _, t, c)) = unselected else { return };
                 s.node = Some(key.0.clone());
-                let click = || [Step::Press(MouseButton::Left), Step::Wait, Step::Release(MouseButton::Left)];
-                [Step::Move(logical(t, c))].into_iter().chain(click()).chain([Step::Wait]).chain(click()).collect()
+                let at = match std::env::var("SHADER_EDITOR_INPUT_AT").as_deref() {
+                    Ok("header") => {
+                        let of_node = |p: &ChildOf| nodes.get(p.parent()).is_ok_and(|n| n.0.0 == key.0);
+                        let Some((_, t, c)) = headers.iter().find(|h| of_node(h.0)) else {
+                            error!("demo {name}: node {} has no header", key.0);
+                            return;
+                        };
+                        logical(t, c)
+                    }
+                    _ => logical(t, c),
+                };
+                double_click(at)
+            }
+            "frame_dblclick" => {
+                let wanted = std::env::var("SHADER_EDITOR_INPUT_FRAME").ok();
+                let of_frame =
+                    |p: &ChildOf| frames.get(p.parent()).is_ok_and(|f| wanted.as_ref().is_none_or(|w| *w == f.0.0));
+                let strip = strips
+                    .iter()
+                    .filter(|s| of_frame(s.0))
+                    .min_by_key(|s| frames.get(s.0.parent()).map(|f| f.0.0.clone()).unwrap_or_default());
+                let Some((_, t, c)) = strip else {
+                    error!("demo {name}: no comment frame {wanted:?}");
+                    return;
+                };
+                double_click(logical(t, c))
             }
             "rmb_click" => vec![Step::Move(canvas_min + 20.0), Step::Press(MouseButton::Right), Step::Wait, Step::Wait]
                 .into_iter()
@@ -253,8 +349,9 @@ pub fn scripted_input(
                 vec![Step::Move(logical(t, c))]
             }
             "hover" => {
-                let Some((_, t, c)) = tips.iter().find(|t| t.0.0.starts_with("Undo (")) else {
-                    error!("demo {name}: no Undo button");
+                let tip = std::env::var("SHADER_EDITOR_INPUT_TIP").unwrap_or_else(|_| "Undo (".into());
+                let Some((_, t, c)) = tips.iter().find(|t| t.0.0.starts_with(&tip)) else {
+                    error!("demo {name}: no widget with the tooltip {tip:?}");
                     return;
                 };
                 vec![Step::Move(logical(t, c))]
@@ -268,14 +365,13 @@ pub fn scripted_input(
                 if name == "curve_drag" {
                     drag(at, MouseButton::Left, Vec2::new(80.0, 60.0))
                 } else {
-                    let at = at + Vec2::new(0.0, 120.0);
-                    let click = || [Step::Press(MouseButton::Left), Step::Wait, Step::Release(MouseButton::Left)];
-                    [Step::Move(at)].into_iter().chain(click()).chain([Step::Wait]).chain(click()).collect()
+                    double_click(at + Vec2::new(0.0, 120.0))
                 }
             }
             "texture_zoom" => {
-                let Some((t, c)) = previews.iter().next() else {
-                    error!("demo {name}: no Texture tab");
+                let kind = editor.tab().map(|t| t.doc().view());
+                let Some((_, t, c)) = previews.iter().find(|(a, ..)| Some(a.0) == kind) else {
+                    error!("demo {name}: no image or Texture tab");
                     return;
                 };
                 let at = logical(t, c) - Vec2::new(60.0, 0.0);
@@ -299,7 +395,7 @@ pub fn scripted_input(
                 info!("demo {name}: dragging {:?} from {from} to {to}", row.item);
                 drag(from, MouseButton::Left, to - from)
             }
-            "ctrl_drag_wire" | "wire_drag" | "wire_hold" | "alt_click" => {
+            "ctrl_drag_wire" | "ctrl_wire_hold" | "wire_drag" | "wire_hold" | "alt_click" => {
                 let d = editor.doc();
                 let connected = |k: &PinKey| {
                     d.is_some_and(|d| d.asset.edges.iter().any(|e| e.to == (k.node.clone(), k.pin.clone())))
@@ -338,11 +434,17 @@ pub fn scripted_input(
                         return;
                     };
                     s.pins = vec![from.clone(), to.clone()];
-                    let hold = (name == "ctrl_drag_wire").then_some(KeyCode::ControlLeft);
+                    let hold = name.starts_with("ctrl_").then_some(KeyCode::ControlLeft);
+                    // `SHADER_EDITOR_INPUT_AT=<dx>,<dy>`: end that far from the pin dragged from (empty canvas).
+                    let offset = std::env::var("SHADER_EDITOR_INPUT_AT").ok().and_then(|v| {
+                        let (x, y) = v.split_once(',')?;
+                        Some(Vec2::new(x.trim().parse().ok()?, y.trim().parse().ok()?))
+                    });
+                    let end = offset.map_or(logical(tt, tc), |o| at + o);
                     // A last move onto the pin itself: picking hovers it before the release.
-                    let mut steps = drag(at, MouseButton::Left, logical(tt, tc) - at);
+                    let mut steps = drag(at, MouseButton::Left, end - at);
                     steps.insert(steps.len() - 1, Step::Wait);
-                    if name == "wire_hold" {
+                    if name.ends_with("_hold") {
                         steps.pop();
                     }
                     (hold, steps)
@@ -350,7 +452,8 @@ pub fn scripted_input(
                 info!("demo {name}: pins {:?} wires {:?}", s.pins, wires_at(&editor, &s.pins));
                 let mut all: Vec<Step> = hold.map(|k| Step::Key(k, true)).into_iter().collect();
                 all.extend(steps);
-                all.extend(hold.map(|k| Step::Key(k, false)));
+                // `ctrl_wire_hold` keeps Ctrl down with the button, for the mid-gesture screenshot.
+                all.extend(hold.filter(|_| !name.ends_with("_hold")).map(|k| Step::Key(k, false)));
                 all
             }
             "box_delete" | "box_delete_partial" => {
@@ -421,6 +524,13 @@ pub fn scripted_input(
                     window,
                 });
             }
+            Some(Step::Type(key_code, c)) => {
+                for state in [ButtonState::Pressed, ButtonState::Released] {
+                    let text = (state == ButtonState::Pressed).then(|| c.to_string().into());
+                    let logical_key = Key::Character(c.to_string().into());
+                    keyboard.write(KeyboardInput { key_code, logical_key, state, text, repeat: false, window });
+                }
+            }
             Some(Step::Wheel(y)) => {
                 let e = MouseWheel { unit: MouseScrollUnit::Line, x: 0.0, y, window, phase: TouchPhase::Moved };
                 wheel.write(e);
@@ -430,9 +540,15 @@ pub fn scripted_input(
             None if s.frame == START + 40 && name.starts_with("box_delete") => {
                 info!("demo {name}: {}", frames_log(&editor));
             }
-            None if s.frame == START + 40 && name == "node_dblclick" => {
+            None if s.frame == START + 40 && name == "type_field" => {
+                let focused = focus.get();
+                let text = focused.and_then(|f| texts.get(f).ok()).map(|t| t.value().to_string());
+                let field = widgets.iter().find(|w| w.0.target == PropTarget::Description).is_some();
+                info!("demo type_field: focus {focused:?} field shown {field} focused text {text:?}");
+            }
+            None if s.frame == START + 40 && (name == "node_dblclick" || name == "frame_dblclick") => {
                 let tab = editor.active.and_then(|i| editor.tabs[i].owner()).map(shader_project::AssetId::source_rel);
-                info!("demo node_dblclick: active tab {}", tab.unwrap_or_default());
+                info!("demo {name}: active tab {} dialog {:?}", tab.unwrap_or_default(), editor.dialog);
             }
             None if s.frame == START + 40 && !s.pins.is_empty() => {
                 let rev = editor.doc().map(|d| d.revision);
@@ -442,6 +558,13 @@ pub fn scripted_input(
                     wires_at(&editor, &s.pins),
                     palette.open
                 );
+                // Mid-gesture (`*_hold`): what is dragged, lifted wires or a new one.
+                let pin = |e: Entity| ports.get(e).ok().map(|p| format!("{}.{}", p.0.node, p.0.pin));
+                for (lifted, target) in &lifts {
+                    let (from, to) = (pin(lifted.from), target.0.and_then(pin));
+                    info!("demo {name}: lifted {} wires from {from:?}, snapped to {to:?}", lifted.edges.len());
+                }
+                info!("demo {name}: dragged new wires {}", wires.iter().count());
             }
             None if s.frame == START + 40 && name == "drop_game_file" => {
                 let Some(d) = editor.doc() else { return };

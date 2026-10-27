@@ -5,13 +5,14 @@
 //! stays, titled "Properties", saying so.
 
 use bevy::feathers::constants::fonts;
+use bevy::feathers::controls::{ButtonVariant, FeathersToolButton};
 use bevy::prelude::*;
 use bevy::text::FontSource;
-use bevy::ui_widgets::Button;
 use shader_graph_core::Diagnostic;
 
 use super::tooltip::Tooltip;
-use super::{BORDER, HoverRow, OnActivate, PANEL_BG, TEXT, TEXT_DIM, TOPBAR_BG, header_row, scroll_column, text};
+use super::widgets::{pane_box, pane_title};
+use super::{BORDER, OnActivate, PANEL_BG, TEXT_DIM, TOPBAR_BG, plural, scroll_column, text};
 use crate::editors::{AreaOf, EditorAreas, KindVisitor, StatusInfo, for_each_kind};
 use crate::state::{Action, Editor};
 use crate::tab::ViewKind;
@@ -20,11 +21,12 @@ use crate::tab::ViewKind;
 #[derive(Component, Default, Clone)]
 pub struct EditorTopbar;
 
-/// The right sidebar strip: a header with the active kind's [`EditorAreas::SIDEBAR_TITLE`], then its body.
+/// The right sidebar strip: one pane, the active kind's [`EditorAreas::SIDEBAR_TITLE`] in its header, the kind's
+/// subpanes in its body.
 #[derive(Component, Default, Clone)]
 pub struct RightSidebar;
 
-/// The right sidebar's header text.
+/// The right sidebar's pane title.
 #[derive(Component, Default, Clone)]
 pub struct SidebarTitle;
 
@@ -124,7 +126,7 @@ impl KindVisitor for Sidebars {
         self.0.push(Box::new(bsn! {
             @scroll_column()
             area
-            Node { display: Display::None, padding: UiRect::all(px(8)) }
+            Node { display: Display::None, padding: UiRect::all(px(0)) }
             Children [ @{body} ]
         }));
     }
@@ -137,17 +139,33 @@ pub fn right_sidebar() -> impl Scene {
     let title = sidebar_title(None);
     bsn! {
         RightSidebar
-        Node { width: px(330), flex_direction: FlexDirection::Column, border: UiRect::left(px(1)) }
+        // `min_width: 0`: in a narrow window (the center at its minimum width) the sidebar gives way instead of being
+        // pushed out of the window by its content's width.
+        Node {
+            width: px(330),
+            min_width: px(0),
+            flex_direction: FlexDirection::Column,
+            padding: UiRect::all(px(4)),
+            border: UiRect::left(px(1)),
+        }
         BackgroundColor(PANEL_BG)
         BorderColor::all(BORDER)
         Children [
-            @header_row(bsn! { @text(title, TEXT, 14.0) SidebarTitle })
-            --
-            SidebarPlaceholder
-            Node { padding: UiRect::all(px(8)) }
-            Children [ @text("Nothing open.", TEXT_DIM, 13.0) ]
-            --
-            {areas}
+            @pane_box(
+                bsn! { @pane_title(title) SidebarTitle },
+                Vec::new(),
+                bsn! {
+                    Node { flex_grow: 1.0, min_height: px(0), flex_direction: FlexDirection::Column }
+                    Children [
+                        SidebarPlaceholder
+                        Node { padding: UiRect::all(px(2)) }
+                        Children [ @text("Nothing open.", TEXT_DIM, 13.0) ]
+                        --
+                        {areas}
+                    ]
+                },
+            )
+            Node { flex_grow: 1.0, min_height: px(0) }
         ]
     }
 }
@@ -178,10 +196,14 @@ fn display(node: &mut Node, shown: bool) {
 }
 
 /// Shows the active kind's areas only; a strip only when that kind has something in it (the right sidebar also
-/// while no tab is open, with its placeholder). The right sidebar header follows the active kind.
+/// while no tab is open, with its placeholder, and never while View → Show properties is off: the editor content
+/// takes its width). The right sidebar header follows the active kind. Runs when the active tab or its kind or
+/// [`UserConfig::show_properties`](crate::config::UserConfig::show_properties) changed, or areas were spawned.
 pub fn show_active_areas(
     editor: Res<Editor>,
-    mut areas: Query<(&AreaOf, &ChildOf, &mut Node)>,
+    mut last: Local<Option<(Option<usize>, Option<ViewKind>, bool)>>,
+    spawned: Query<(), Added<AreaOf>>,
+    (mut areas, parents): (Query<(Entity, &AreaOf, &mut Node)>, Query<&ChildOf>),
     mut strips: Query<
         (Entity, &mut Node, Has<RightSidebar>),
         (Or<(With<EditorTopbar>, With<RightSidebar>)>, Without<AreaOf>),
@@ -193,16 +215,24 @@ pub fn show_active_areas(
     mut title: Query<&mut Text, With<SidebarTitle>>,
 ) {
     let active: Option<ViewKind> = editor.tab().map(|t| t.doc().view());
+    let properties = editor.config.show_properties;
+    let key = (editor.active, active, properties);
+    if *last == Some(key) && spawned.is_empty() {
+        return;
+    }
+    *last = Some(key);
     let mut used = Vec::new();
-    for (area, parent, mut node) in &mut areas {
+    for (entity, area, mut node) in &mut areas {
         let shown = Some(area.0) == active;
         if shown {
-            used.push(parent.parent());
+            // The strip may hold the area deeper down (the right sidebar's pane body).
+            used.extend(parents.iter_ancestors(entity));
         }
         display(&mut node, shown);
     }
     for (strip, mut node, sidebar) in &mut strips {
-        display(&mut node, used.contains(&strip) || (sidebar && active.is_none()));
+        let content = used.contains(&strip) || (sidebar && active.is_none());
+        display(&mut node, content && (properties || !sidebar));
     }
     for mut node in &mut placeholder {
         display(&mut node, active.is_none());
@@ -216,8 +246,11 @@ pub fn show_active_areas(
 }
 
 /// What the statusbar shows depends on: the log revision (diagnostics, WESL line counts after a regeneration), the
-/// active tab, its document revision and dirty state.
-type StatusKey = (u64, Option<usize>, Option<String>, u64, bool);
+/// active tab, the tabs revision (bumped whenever a tab is opened, closed, activated, renamed or saved, so another tab
+/// at the same index is noticed) and the document's revision. The dirty state is not part of the key (a graph
+/// document serialises its asset to tell): it changes only with an edit, an undo / redo or a reload (the revision) or
+/// with a save, a rename or "keep mine" (the tabs revision).
+type StatusKey = (u64, Option<usize>, u64, u64);
 
 /// Rebuilds the editor statusbar from [`Editor::status_info`] when its key changed (not every frame: the status
 /// clones the asset's diagnostics).
@@ -229,13 +262,7 @@ fn redraw_statusbar(
     mut commands: Commands,
 ) {
     let doc = editor.tab().map(|t| t.doc());
-    let key = (
-        editor.ui.log,
-        editor.active,
-        doc.and_then(|d| d.config_key()),
-        doc.map_or(0, |d| d.revision()),
-        doc.is_some_and(|d| d.is_dirty()),
-    );
+    let key = (editor.ui.log, editor.active, editor.ui.tabs, doc.map_or(0, |d| d.revision()));
     if last.as_ref() == Some(&key) {
         return;
     }
@@ -265,19 +292,23 @@ fn spawn_status(
     if status.dirty {
         commands.spawn((text("● unsaved".into()), ChildOf(strip)));
     }
-    let problems = text(format!("{} errors · {} warnings", status.errors, status.warnings));
+    let problems = text(format!(
+        "{} · {}",
+        plural(status.errors, "error", "errors"),
+        plural(status.warnings, "warning", "warnings")
+    ));
     match first {
         Some(d) => {
+            // A plain Feathers tool button as tall as the strip's text.
+            let (act, tip) = (OnActivate(Action::FocusDiagnostic(d)), Tooltip("Show the first problem".into()));
             let row = commands
-                .spawn((
-                    Node { padding: UiRect::axes(px(4), px(1)), border_radius: BorderRadius::all(px(3)), ..default() },
-                    BackgroundColor(Color::NONE),
-                    Button,
-                    OnActivate(Action::FocusDiagnostic(d)),
-                    HoverRow { base: Color::NONE },
-                    Tooltip("Show the first problem".into()),
-                    ChildOf(strip),
-                ))
+                .spawn_scene(bsn! {
+                    @FeathersToolButton { @variant: ButtonVariant::Plain }
+                    Node { height: Val::Auto, min_width: px(0), padding: UiRect::axes(px(4), px(1)) }
+                    act
+                    tip
+                    ChildOf(strip)
+                })
                 .id();
             commands.spawn((problems, ChildOf(row)));
         }

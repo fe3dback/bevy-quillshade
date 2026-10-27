@@ -1,5 +1,7 @@
 # 0032. Input contexts and UE5-style graph gestures
 
+*The Ctrl+drag mechanism and the palette on Tab are superseded by [0034](0034-qa-round-2.md) (marked below).*
+
 **Context.** All hotkeys used to live in one hand-written `ui::input::shortcuts` system. It had a `not_typing` run
 condition, `ctrl_held` / `pressed_hotkey` helpers and `editor.doc().is_some()` / cursor-over-canvas guards for the
 graph-only keys. The curve view had its own `nudge_keys` system. Most keys were pushed on every tab, and whatever
@@ -39,7 +41,8 @@ Ctrl modifiers, unlike UE5's Material Editor, which the editor models (design
   `ActionSources.keyboard = false` while the user types, for **every** context, `MainCtx` included. "Typing" means a
   dialog is open, the palette is open, or `InputFocus` is on an `EditableText`, which is the old `not_typing`. The
   widgets' own keys stay local to the widget: the palette list, Enter in a dialog, the consts add form and the
-  texture path field.
+  texture path field. *Extended by 0034:* an open menu or popup also counts as typing, a scrubbed number field only
+  while LMB is held, and the gate runs before `InputFocusSystems::Dispatch`.
 - **Held keys after a context switch.** bevy_enhanced_input's `require_reset` only acts on *deactivation*: the
   bindings of a context that turns inactive stay ignored while held. On *activation* it does nothing, so a context
   that was active before would fire a key held during a tab switch at once.
@@ -51,7 +54,8 @@ Ctrl modifiers, unlike UE5's Material Editor, which the editor models (design
   - The guarding test is `held_key_not_fired_after_tab_switch` in `tests/input_contexts.rs`. **Re-check it on every
     bevy_enhanced_input upgrade.**
 - **Mouse gestures** stay picking observers on bevy_noodle entities (`ui/input.rs`, `ui/curve_view.rs`). They read
-  modifiers through `main_input::mods()` (`ModKeys::pressed`) instead of hand-written key lists.
+  modifiers through `main_input::mods()` (`ModKeys::pressed`; since moved to `keys::mods()`) instead of hand-written
+  key lists.
 - **Graph gestures follow UE5:**
   - **Alt+LMB click on a pin** removes all its wires (`DisconnectPin`). **Alt+LMB click on a wire** removes the wire.
     RMB click on a wire still removes it. Ctrl+LMB no longer removes anything; on a wire it only toggles the wire's
@@ -62,7 +66,10 @@ Ctrl modifiers, unlike UE5's Material Editor, which the editor models (design
   - **A Ctrl+LMB drag from a pin moves its wires** (`Action::MoveWires`, `Editor::move_wires`).
     - bevy_noodle draws the wire as usual. A pin of the same direction is never a wire candidate, so a drop there
       arrives as `WireDropped` with no target. While Ctrl (or Super) is held, `wire_dropped` turns a drop on another
-      pin of the same direction into `MoveWires`.
+      pin of the same direction into `MoveWires`. *Superseded by 0034:* the drag is the bevy_noodle fork's move-wires
+      gesture: Ctrl is latched at drag start, the pin's wires are lifted and follow the cursor (no new wire), they
+      snap only to pins `plan_move_wires` accepts, and the drop's `GraphEdit::MoveEdges` becomes the same
+      `MoveWires`; `wire_dropped` no longer reads Ctrl or `HoverMap`. The rules below are unchanged.
     - From an input, its single wire `src → pin` becomes `src → to`; a wire already into `to` is replaced.
     - From an output, every wire `pin → dst` becomes `to → dst`.
     - All or nothing:
@@ -72,7 +79,9 @@ Ctrl modifiers, unlike UE5's Material Editor, which the editor models (design
         warning names the first failing wire. The wires are checked one by one against the graph without the old
         wires, each accepted wire added before the next is checked.
       - Otherwise the move is one edit, so one undo step.
-    - Dropping on empty canvas with Ctrl held does nothing, and no palette opens.
+    - Dropping on empty canvas with Ctrl held does nothing, and no palette opens. *Superseded by 0034* for an
+      unconnected pin: a Ctrl+drag from it is a normal new wire, and its drop on empty canvas opens the palette.
+      Lifted wires dropped on empty canvas go back, with no palette.
     - Dropping on a pin of the other direction is not part of this gesture. bevy_noodle connects a compatible pin as
       in a plain drag, and an incompatible one reports why.
   - **Hold a key + LMB on empty canvas** drops a node, now with UE's D, O, E, N, P and I as well. `NODE_HOTKEYS`
@@ -104,7 +113,7 @@ Graph (`GraphCtx`, graph tabs only):
 | Delete, Backspace | delete selection, every tab | graph and curve only |
 | F / Home | fit selection / all, every tab | graph only |
 | C | comment frame, every tab | graph only |
-| Tab | palette at the cursor, if over the canvas | same, graph only |
+| Tab | palette at the cursor, if over the canvas | same, graph only (*superseded by 0034:* the palette is on Space; Tab toggles the right sidebar on every tab) |
 | Shift + `=` `-` `8` `/`, numpad `+ - * /` | convert the selected nodes | same |
 | V | exclusive preview on release | same |
 | Alt + a plain key (Alt+F) | fired the plain key | nothing |
@@ -117,8 +126,8 @@ Graph (`GraphCtx`, graph tabs only):
 | RMB click on a wire | remove it | same |
 | Double click on a wire | reroute point | same |
 | LMB drag from a connected input | picks up and moves its wire (bevy_noodle `detach_wires`) | starts a new wire; connecting replaces the old one |
-| Ctrl+LMB drag from a pin onto a pin of the same direction | as a plain drag | moves the wire (input) / all wires (output) there, all or nothing, one undo step |
-| Wire dropped on empty canvas | palette filtered by type | same; with Ctrl held: nothing |
+| Ctrl+LMB drag from a pin onto a pin of the same direction | as a plain drag | moves the wire (input) / all wires (output) there, all or nothing, one undo step (*0034:* the wires follow the cursor; Esc cancels) |
+| Wire dropped on empty canvas | palette filtered by type | same; with Ctrl held: nothing (*superseded by 0034:* lifted wires go back; a new wire from an unconnected pin opens the palette) |
 | RMB click on a pin / a node / the canvas | pin menu / node menu / palette | same |
 
 Curve (`CurveCtx`, curve tabs only):

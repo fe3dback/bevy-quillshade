@@ -563,6 +563,12 @@ mod tests {
     use crate::manifest::ManifestTexture;
 
     #[test]
+    fn template_has_lf_line_endings() {
+        // The template is matched and emitted as is: a CRLF checkout breaks both (see `.gitattributes`).
+        assert!(!MOD_TEMPLATE.contains('\r'), "templates/baked_mod.rs checked out with CRLF: see .gitattributes");
+    }
+
+    #[test]
     fn field_names_keyword_and_clash() {
         let ids = ["kw/loop/type", "env/water", "env/water/x", "env/rock_wet", "top", "fx/hologram"];
         let f = material_field_paths(ids.iter().copied());

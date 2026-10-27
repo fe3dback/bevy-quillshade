@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*"]
+members = ["crates/*", "vendor/bevy_noodle"]
 exclude = ["examples/sample_game"]
 
 [workspace.package]
@@ -13,7 +13,8 @@ license = "MIT"
 # todo: move dynamic_linking to crate feature (before wide use)
 # system_clipboard: paste from / copy to other applications (without it the clipboard is in-app only)
 bevy = { version = "0.20.0", features = ["bevy_feathers", "system_clipboard", "dynamic_linking"] }
-bevy_noodle = { version = "0.5.0", features = ["default_style", "scene"] }
+# Local fork of bevy_noodle 0.5.0 (vendor/bevy_noodle/FORK.md).
+bevy_noodle = { path = "vendor/bevy_noodle", features = ["default_style", "scene"] }
 # Input contexts of the editor (decision 0032).
 bevy_enhanced_input = { version = "0.27", default-features = false }
 wesl = { version = "0.6", features = ["naga-ext"] }
@@ -63,5 +64,11 @@ shader_editor_app = { workspace = true }
 debug = "line-tables-only"
 
 [profile.dev.package."*"]
+opt-level = 3
+debug = false
+
+# The bevy_noodle fork is a workspace member, so `package."*"` above no longer covers it; keep it optimized as when
+# it came from crates.io.
+[profile.dev.package.bevy_noodle]
 opt-level = 3
 debug = false

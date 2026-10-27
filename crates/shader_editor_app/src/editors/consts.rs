@@ -4,15 +4,16 @@ use bevy::prelude::*;
 use shader_graph_core::consts::GlobalConsts;
 use shader_project::{AssetId, AssetSet, Project, assets, ops};
 
-use super::{EditorAreas, SidebarKey, StatusCtx, StatusInfo, fill_sidebar};
+use super::{EditorAreas, SidebarKey, StatusCtx, StatusInfo, fill_sidebar_with};
 use crate::consts_doc::ConstsDoc;
 use crate::doc_kind::{TabDoc, asset_title, io_error};
 use crate::state::Editor;
 use crate::tab::ViewKind;
 use crate::ui::consts_view::ConstsViewBar;
 use crate::ui::icons::IconId;
-use crate::ui::props::{hotkey_row, section};
-use crate::ui::{TEXT, TEXT_DIM, text};
+use crate::ui::props::hotkey_row;
+use crate::ui::widgets::subpane_box;
+use crate::ui::{TEXT, TEXT_DIM, plural, text};
 
 /// The consts editor's window areas.
 pub struct ConstsEditor;
@@ -38,7 +39,7 @@ impl EditorAreas for ConstsEditor {
 
 /// The consts editor's right sidebar body.
 #[derive(Component, Default, Clone)]
-pub struct ConstsSidebarBody;
+struct ConstsSidebarBody;
 
 fn redraw_sidebar(
     editor: Res<Editor>,
@@ -47,29 +48,24 @@ fn redraw_sidebar(
     mut commands: Commands,
 ) {
     let Some(c) = editor.consts_doc() else { return key.forget() };
-    let Some(body) = key.changed(&editor, &body) else { return };
-    let mut rows: Vec<Box<dyn Scene>> = Vec::new();
-    consts_rows(c, &mut rows);
-    fill_sidebar(&mut commands, body, rows);
+    fill_sidebar_with(&mut commands, &body, &mut key, SidebarKey::now(&editor), || consts_rows(c));
 }
 
-/// A constant table tab: what it is and how it is used (the table itself is the view).
-fn consts_rows(c: &ConstsDoc, out: &mut Vec<Box<dyn Scene>>) {
-    out.push(Box::new(text(c.id.source_rel(), TEXT, 15.0)));
-    out.push(Box::new(text(format!("Type: Global Consts, {} constant(s)", c.table.consts.len()), TEXT_DIM, 12.0)));
-    out.push(Box::new(section("Usage")));
-    for line in [
+/// A constant table tab: what it is and how it is used (the table itself is the view; the constant count is only in
+/// the editor statusbar, design §6.4).
+fn consts_rows(c: &ConstsDoc) -> Vec<Box<dyn Scene>> {
+    let table: Vec<Box<dyn Scene>> =
+        vec![Box::new(text(c.id.source_rel(), TEXT, 15.0)), Box::new(text("Type: Global Consts", TEXT_DIM, 12.0))];
+    let usage = [
         "Read a constant with the Global* nodes (Constants category); names are unique project-wide.",
         "Values are copied into the generated WESL as literals: saving the table regenerates the shaders reading it.",
         "bool reads as 1.0 / 0.0; compileFlag is a real bool for logic nodes (If (Bool), And, Or, Not).",
         "Changing a type or deleting a constant clears the references of the nodes reading it (after a confirmation).",
-    ] {
-        out.push(Box::new(text(line, TEXT_DIM, 12.0)));
-    }
-    out.push(Box::new(section("Hotkeys")));
-    for (keys, what) in [("Ctrl+Z / Y", "Undo / redo"), ("Ctrl+S", "Save and regenerate")] {
-        out.push(Box::new(hotkey_row(keys, what)));
-    }
+    ]
+    .map(|line| -> Box<dyn Scene> { Box::new(text(line, TEXT_DIM, 12.0)) });
+    let hotkeys = [("Ctrl+Z / Y", "Undo / redo"), ("Ctrl+S", "Save and regenerate")]
+        .map(|(keys, what)| -> Box<dyn Scene> { Box::new(hotkey_row(keys, what)) });
+    vec![subpane_box("Table", table), subpane_box("Usage", usage.into()), subpane_box("Hotkeys", hotkeys.into())]
 }
 
 impl TabDoc for ConstsDoc {
@@ -146,7 +142,7 @@ impl TabDoc for ConstsDoc {
     }
 
     fn status(&self, ctx: &StatusCtx) -> Option<StatusInfo> {
-        let counts = vec![format!("{} constants", self.table.consts.len())];
+        let counts = vec![plural(self.table.consts.len(), "constant", "constants")];
         Some(StatusInfo::new(ConstsDoc::is_dirty(self), ctx, counts))
     }
 }
