@@ -155,67 +155,6 @@ pub fn register(r: &mut Registry) {
     );
 
     r.register(
-        def("stdlib::Desaturation", "Desaturation", CAT)
-            .kw(&["grayscale", "greyscale", "saturation", "luminance"])
-            .param(ParamDef::new("luminance", "Luminance Factors", ParamKind::Float3, Value::Float3([0.3, 0.59, 0.11])))
-            .build(
-                |_| {
-                    sig(
-                        vec![
-                            pin_in("color", "Color", PinType::Float3, 0.0),
-                            pin_in("fraction", "Fraction", PinType::Float, 1.0).range(0.0, 1.0),
-                        ],
-                        vec![pin_out("out", "", PinType::Float3)],
-                    )
-                },
-                |c| {
-                    let lum = c.param("luminance").wesl_literal(PinType::Float3);
-                    let col = c.input("color");
-                    let e = format!("mix({col}, vec3<f32>(dot({col}, {lum})), {})", c.input("fraction"));
-                    c.define("out", e);
-                },
-            ),
-    );
-
-    let modes: Vec<String> = ["Overlay", "Screen", "Multiply", "SoftLight"].iter().map(|s| s.to_string()).collect();
-    r.register(
-        def("stdlib::Blend", "Blend", CAT)
-            .kw(&["blend", "overlay", "screen", "soft light", "photoshop"])
-            .param(ParamDef::new("mode", "Mode", ParamKind::Enum(modes), Value::Str("Overlay".into())))
-            .build(
-                |_| {
-                    sig(
-                        vec![
-                            pin_in("base", "Base", PinType::Float3, 0.5),
-                            pin_in("blend", "Blend", PinType::Float3, 0.5),
-                        ],
-                        vec![pin_out("out", "", PinType::Float3)],
-                    )
-                },
-                |c| {
-                    let func = match c.param("mode").as_str() {
-                        "Screen" => "sg_blend_screen",
-                        "Multiply" => "sg_blend_multiply",
-                        "SoftLight" => "sg_blend_soft_light",
-                        _ => "sg_blend_overlay",
-                    };
-                    let f = c.stdlib("color", func);
-                    let e = format!("{f}({}, {})", c.input("base"), c.input("blend"));
-                    c.define("out", e);
-                },
-            ),
-    );
-
-    r.register(def("stdlib::BlackBody", "BlackBody", CAT).kw(&["temperature", "kelvin", "fire"]).build(
-        |_| sig(vec![pin_in("temp", "Temp", PinType::Float, 6500.0)], vec![pin_out("out", "", PinType::Float3)]),
-        |c| {
-            let f = c.stdlib("color", "sg_blackbody");
-            let e = format!("{f}({})", c.input("temp"));
-            c.define("out", e);
-        },
-    ));
-
-    r.register(
         def("stdlib::Noise", "Noise", CAT)
             .kw(&["noise", "perlin", "value noise", "random"])
             .param(ParamDef::new(

@@ -370,6 +370,15 @@ beyond about 53° is 0 — and `Angle` is the slope in degrees (0 = flat, 90 = w
 normal; wire a perturbed normal in for "pixel normals". `examples/sample_game` has a two-layer terrain
 (`env/terrain_layers`, rock from the `common/rock_layer` function on the slopes, grass on top).
 
+**Color** nodes (decision 0036) take and return linear RGB (`Float3`, as a texture gives it) and work in a
+perceptual space inside, so a shift looks the same in darks and lights: `HueShift`, `Saturation`, `Lightness`,
+`HueSaturationLightness`, `Colorize` and `Grayscale` in OKLCh / OKLab (a hue shift keeps the perceived lightness);
+`Contrast`, `Gamma`, `Levels`, `Desaturation`, `Sepia`, `Invert`, `Posterize` and `Blend` (Burn, Darken, Difference,
+Dodge, HardLight, Lighten, Multiply, Overlay, Screen, SoftLight, with an `Opacity` input) on sRGB-encoded values like
+Photoshop; `Exposure` in stops. `MakeHSV` / `BreakHSV` and the same for HSL, OKLab and OKLCh convert from / to three
+floats (hues in turns, `0..1`); `LinearToSRGB` / `SRGBToLinear` convert raw data. Every amount is an ordinary input,
+so a noise or slope mask can drive the variation per pixel.
+
 **Textures**: a Texture asset is picked in the Texture property of `TextureSample` and `TextureObject` (Texture), or
 as the Default Texture of `TextureSampleParameter2D` / `TextureObjectParameter` (Parameters). `TextureSample`'s `Tex`
 input is optional and overrides its property when connected (like UE); `TextureObject` outputs its texture as a

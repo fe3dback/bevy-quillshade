@@ -1,6 +1,7 @@
 //! Node definitions grouped by palette category.
 
 pub mod attributes;
+pub mod color;
 pub mod constants;
 pub mod coords;
 pub mod math;
@@ -18,6 +19,7 @@ pub fn register_all(r: &mut Registry) {
     coords::register(r);
     texture::register(r);
     utility::register(r);
+    color::register(r);
     output::register(r);
     attributes::register(r);
 }

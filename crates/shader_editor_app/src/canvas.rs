@@ -138,6 +138,7 @@ fn category_color(cat: &str) -> Color {
         "Coordinates" => Color::srgb_u8(110, 58, 58),
         "Texture" => Color::srgb_u8(50, 74, 120),
         "Utility" => Color::srgb_u8(74, 74, 80),
+        "Color" => Color::srgb_u8(104, 62, 96),
         "Output" => Color::srgb_u8(90, 64, 34),
         "Function" | "Functions" => Color::srgb_u8(86, 60, 110),
         _ => Color::srgb_u8(60, 63, 71),

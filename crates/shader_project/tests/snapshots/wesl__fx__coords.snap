@@ -6,7 +6,7 @@ source: crates/shader_project/tests/snapshots.rs
 import bevy_pbr::render::forward_io::VertexOutput;
 import bevy_pbr::render::mesh_functions::get_world_from_local;
 import bevy_pbr::render::mesh_view_bindings::{globals, view};
-import super::super::stdlib::color::sg_blend_overlay;
+import super::super::stdlib::color::{sg_blend_overlay, sg_desaturation, sg_linear_to_srgb, sg_srgb_to_linear};
 import super::super::stdlib::math::sg_remap;
 import super::super::stdlib::transform::sg_mat3;
 import super::super::stdlib::uv::{sg_flipbook_uv, sg_rotate_uv};
@@ -46,8 +46,9 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let n_n15_out: f32 = sg_remap(n_n09_out, 0.0f, 50.0f, 0.0f, 1.0f);
     let n_n16_out: f32 = select(select(0.25f, 0.5f, abs(n_n12_out - n_n14_out) <= 1e-5f), n_n15_out, (n_n12_out - n_n14_out) > 1e-5f);
     let n_n17_out: vec3<f32> = (n_n03_rgba.rgb * b_vertex_color.rgb);
-    let n_n18_out: vec3<f32> = sg_blend_overlay(n_n17_out, vec3<f32>(n_n16_out));
-    let n_n19_out: vec3<f32> = mix(n_n18_out, vec3<f32>(dot(n_n18_out, vec3<f32>(0.3, 0.59, 0.11))), 0.25f);
+    let n_n18_base_: vec3<f32> = sg_linear_to_srgb(n_n17_out);
+    let n_n18_out: vec3<f32> = sg_srgb_to_linear(mix(n_n18_base_, sg_blend_overlay(n_n18_base_, sg_linear_to_srgb(vec3<f32>(n_n16_out))), 1.0f));
+    let n_n19_out: vec3<f32> = sg_desaturation(n_n18_out, 0.25f, vec3<f32>(0.3, 0.59, 0.11));
     // --- outputs ---
     let color: vec3<f32> = n_n19_out;
     let alpha: f32 = 1.0;
