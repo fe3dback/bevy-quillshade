@@ -1,32 +1,25 @@
-//! Properties panel (spec §9.4): node parameters and input defaults, asset settings, frame titles.
+//! Property widgets of the right sidebar (spec §9.4) and of inline editors on nodes: number / vector / color / select
+//! / text fields editing a [`PropTarget`], section headers, labelled and hotkey rows, and the observers turning their
+//! changes into [`Action`]s. The rows each editor kind shows are built in `editors/<kind>.rs` (decision 0031).
 
 use bevy::feathers::controls::{
-    ColorSwatchValue, FeathersCheckbox, FeathersColorSwatch, FeathersNumberInput, FeathersSelect, FeathersTextInput,
-    FeathersTextInputContainer, NumberInputPrecision, NumberInputValue, OptionIndex, list_rows_from_strings,
+    ColorSwatchValue, FeathersCheckbox, FeathersColorSwatch, FeathersNumberInput, FeathersSelect, FeathersSlider,
+    FeathersTextInput, FeathersTextInputContainer, NumberInputPrecision, NumberInputValue, OptionIndex,
+    list_rows_from_strings,
 };
 use bevy::feathers::display::caption;
 use bevy::feathers::tokens;
 use bevy::prelude::*;
 use bevy::text::{EditableText, TextEditChange};
 use bevy::ui::Checked;
-use bevy::ui_widgets::ValueChange;
+use bevy::ui_widgets::{SliderPrecision, SliderValue, ValueChange, slider_self_update};
 use bevy_noodle::prelude::GraphQuery;
-use shader_graph_core::model::{AssetKind, BlendMode, MaterialKind, PbrOutputMode, PreviewMode, Shading};
-use shader_graph_core::registry::{NodeRole, ParamKind};
+use shader_graph_core::registry::ParamKind;
 use shader_graph_core::{PinType, Value};
-use shader_project::AssetType;
 
 use super::dialog::InitText;
-use super::{TEXT, TEXT_DIM, button, text};
-use crate::consts_doc::ConstsDoc;
-use crate::curve_doc::CurveDoc;
-use crate::doc::{node_signature, route_declarations};
-use crate::state::{Action, Actions, Editor, GenFile, PropTarget, display_value, preview_mode_label};
-use crate::tab::{ImageDoc, Lang, Tab, TextDoc};
-use crate::texture_doc::TextureDoc;
-
-#[derive(Component, Default, Clone)]
-pub struct PropsBody;
+use super::{TEXT, TEXT_DIM, text};
+use crate::state::{Action, Actions, Editor, PropTarget, display_value};
 
 /// A property widget: what it edits and how to read its value.
 #[derive(Component, Default, Clone)]
@@ -58,7 +51,7 @@ pub struct PropsPlugin;
 
 impl Plugin for PropsPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, (redraw, update_swatches))
+        app.add_systems(Update, update_swatches)
             .add_observer(number_f32)
             .add_observer(number_i32)
             .add_observer(color)
@@ -145,6 +138,19 @@ fn vector(target: PropTarget, v: &[f32], color: bool) -> Box<dyn Scene> {
     )
 }
 
+/// Hue slider `0..360` degrees (whole degrees); a drag is one undo step (`SetComponent`, `is_final` at the end).
+pub(crate) fn hue_slider(target: PropTarget, hue: f32) -> Box<dyn Scene> {
+    let field = PropField { target, ..Default::default() };
+    Box::new(bsn! {
+        @FeathersSlider { @min: 0.0, @max: 360.0 }
+        SliderValue({hue})
+        SliderPrecision(0)
+        on(slider_self_update)
+        Node { flex_grow: 1.0 }
+        field
+    })
+}
+
 pub(crate) fn checkbox_w(target: PropTarget, v: bool) -> Box<dyn Scene> {
     let field = PropField { target, ..Default::default() };
     if v {
@@ -203,15 +209,15 @@ fn keyed_select(target: PropTarget, choices: &[(String, String)], current: &str)
 /// Choices of reference parameters: named route declarations of the asset, curve assets of the project, global
 /// constants (of the parameter's type), Texture assets and built-in textures.
 #[derive(Default, Clone)]
-struct Choices {
-    routes: Vec<(String, String)>,
-    curves: Vec<(String, String)>,
-    consts: Vec<(String, String)>,
-    textures: Vec<(String, String)>,
+pub(crate) struct Choices {
+    pub routes: Vec<(String, String)>,
+    pub curves: Vec<(String, String)>,
+    pub consts: Vec<(String, String)>,
+    pub textures: Vec<(String, String)>,
 }
 
 /// Widget editing a value of `kind`.
-fn value_widget(target: PropTarget, kind: &ParamKind, v: &Value, choices: &Choices) -> Box<dyn Scene> {
+pub(crate) fn value_widget(target: PropTarget, kind: &ParamKind, v: &Value, choices: &Choices) -> Box<dyn Scene> {
     match kind {
         ParamKind::Route => keyed_select(target, &choices.routes, v.as_str()),
         ParamKind::Curve => keyed_select(target, &choices.curves, v.as_str()),
@@ -238,7 +244,8 @@ fn value_widget(target: PropTarget, kind: &ParamKind, v: &Value, choices: &Choic
     }
 }
 
-fn pin_kind(t: PinType) -> Option<ParamKind> {
+/// The widget kind editing an input default of type `t` (`None`: the type has no value editor).
+pub(crate) fn pin_kind(t: PinType) -> Option<ParamKind> {
     Some(match t {
         PinType::Float => ParamKind::Float { min: None, max: None },
         PinType::Float2 => ParamKind::Float2,
@@ -250,38 +257,6 @@ fn pin_kind(t: PinType) -> Option<ParamKind> {
         PinType::Texture2D | PinType::MaterialAttributesPbr | PinType::Any => return None,
     })
 }
-
-/// A generated file: where it comes from and how to get to the source.
-fn text_rows(t: &TextDoc, out: &mut Vec<Box<dyn Scene>>) {
-    let (lang, which) = match t.lang {
-        Lang::Wesl => ("WESL", GenFile::Wesl),
-        Lang::Rust => ("Rust", GenFile::Rust),
-    };
-    out.push(Box::new(text(t.rel.clone(), TEXT, 15.0)));
-    out.push(Box::new(text(format!("Generated {lang}, read-only"), TEXT_DIM, 12.0)));
-    out.push(Box::new(text(format!("Source: {}", t.source.source_rel()), TEXT_DIM, 12.0)));
-    if let Some(src) = &t.text {
-        out.push(Box::new(text(format!("{} lines", src.lines().count()), TEXT_DIM, 12.0)));
-    }
-    out.push(Box::new(button("Open source graph", Action::OpenAsset(t.source.clone()), true)));
-    out.push(Box::new(button("Open in default application", Action::ShowFile(t.source.clone(), which), false)));
-}
-
-/// Hotkeys of the curve view, shown in its Properties.
-const CURVE_HOTKEYS: [(&str, &str); 12] = [
-    ("Double-click", "Add a point"),
-    ("Drag", "Move selection"),
-    ("X (held)", "Only along T"),
-    ("Y (held)", "Only along value"),
-    ("Shift (held)", "Snap to 0.1 grid"),
-    ("Shift+click", "Toggle selection"),
-    ("Arrows", "Nudge (Shift: x10)"),
-    ("Del", "Delete selection"),
-    ("Ctrl+A", "Select all"),
-    ("Ctrl+C / V", "Copy / paste"),
-    ("Ctrl+D", "Duplicate"),
-    ("Right-click", "Menu"),
-];
 
 /// One hotkey row: the keys as a key cap, then what they do.
 pub(crate) fn hotkey_row(keys: &'static str, what: &'static str) -> impl Scene {
@@ -298,315 +273,6 @@ pub(crate) fn hotkey_row(keys: &'static str, what: &'static str) -> impl Scene {
             --
             Node { flex_grow: 1.0 } Children [ @text(what, TEXT_DIM, 12.0) ]
         ]
-    }
-}
-
-/// A curve tab: the selected point and the hotkeys (preview mode and generated WESL are in the view's header, select
-/// all / delete in the toolbar).
-fn curve_rows(c: &CurveDoc, out: &mut Vec<Box<dyn Scene>>) {
-    out.push(Box::new(text(c.id.source_rel(), TEXT, 15.0)));
-    out.push(Box::new(text(format!("Type: Curve, {} point(s)", c.curve.points.len()), TEXT_DIM, 12.0)));
-    match c.selection.len() {
-        0 => {}
-        1 => {
-            let i = *c.selection.first().expect("one");
-            if let Some((t, v)) = c.curve.points.get(i) {
-                out.push(Box::new(section(format!("Point {}", i + 1))));
-                let target = PropTarget::CurvePoint(i);
-                out.push(Box::new(labeled("T".into(), number(target.clone(), 0, *t, None))));
-                out.push(Box::new(labeled("Value".into(), number(target, 1, *v, None))));
-            }
-        }
-        n => {
-            out.push(Box::new(section("Selection")));
-            out.push(Box::new(text(format!("{n} points selected"), TEXT, 13.0)));
-        }
-    }
-    out.push(Box::new(section("Hotkeys")));
-    for (keys, what) in CURVE_HOTKEYS {
-        out.push(Box::new(hotkey_row(keys, what)));
-    }
-}
-
-/// A game image tab (design §4.4): the file and the Texture asset pointing at it (size and format are in the view's
-/// header, they come from the decoded image).
-fn image_rows(editor: &Editor, i: &ImageDoc, out: &mut Vec<Box<dyn Scene>>) {
-    use crate::doc_kind::TabDoc;
-    out.push(Box::new(text(i.base_title(), TEXT, 15.0)));
-    out.push(Box::new(text("Game image, read-only", TEXT_DIM, 12.0)));
-    match editor.texture_for_file(&i.path) {
-        Some(id) => out.push(Box::new(text(format!("Texture asset: {}", id.source_rel()), TEXT_DIM, 12.0))),
-        None => out.push(Box::new(button("Create Texture Asset", Action::CreateTextureForFile(i.path.clone()), false))),
-    }
-}
-
-/// Hotkeys of the Texture tab's preview.
-const TEXTURE_HOTKEYS: [(&str, &str); 5] = [
-    ("Wheel", "Zoom the preview"),
-    ("Drag", "Pan the preview"),
-    ("Double-click", "Fit the preview"),
-    ("Ctrl+Z / Y", "Undo / redo"),
-    ("Ctrl+S", "Save and regenerate"),
-];
-
-/// A Texture tab (design §4.4): what it is, its image, its problems (the form and preview are the view).
-fn texture_rows(editor: &Editor, t: &TextureDoc, out: &mut Vec<Box<dyn Scene>>) {
-    use crate::doc_kind::TabDoc;
-    out.push(Box::new(text(t.base_title(), TEXT, 15.0)));
-    let kind = if t.is_internal() { "Built-in texture, read-only" } else { "Type: Texture asset" };
-    out.push(Box::new(text(kind, TEXT_DIM, 12.0)));
-    out.push(Box::new(text(format!("Image: assets/{}", t.asset.path), TEXT_DIM, 12.0)));
-    out.push(Box::new(bsn! { @text("", TEXT_DIM, 12.0) super::texture_view::TextureInfoText }));
-    if !t.is_internal() {
-        out.push(Box::new(text(
-            "Settings reach the game through the baked manifest (hot-reloaded); sRGB and grayscale expansion need a \
-             rebuild.",
-            TEXT_DIM,
-            12.0,
-        )));
-    }
-    if let Some(diags) = editor.diags.get(&t.id).filter(|d| !d.is_empty() && !t.is_internal()) {
-        out.push(Box::new(section("Problems")));
-        for diag in diags {
-            let c = if diag.is_error() { Color::srgb(0.95, 0.42, 0.42) } else { Color::srgb(0.95, 0.78, 0.35) };
-            out.push(Box::new(text(format!("{}: {}", diag.code, diag.message), c, 12.0)));
-        }
-    }
-    out.push(Box::new(section("Hotkeys")));
-    let hotkeys = if t.is_internal() { &TEXTURE_HOTKEYS[..3] } else { &TEXTURE_HOTKEYS[..] };
-    for (keys, what) in hotkeys {
-        out.push(Box::new(hotkey_row(keys, what)));
-    }
-}
-
-/// A constant table tab: what it is and how it is used (the table itself is the view).
-fn consts_rows(c: &ConstsDoc, out: &mut Vec<Box<dyn Scene>>) {
-    out.push(Box::new(text(c.id.source_rel(), TEXT, 15.0)));
-    out.push(Box::new(text(format!("Type: Global Consts, {} constant(s)", c.table.consts.len()), TEXT_DIM, 12.0)));
-    out.push(Box::new(section("Usage")));
-    for line in [
-        "Read a constant with the Global* nodes (Constants category); names are unique project-wide.",
-        "Values are copied into the generated WESL as literals: saving the table regenerates the shaders reading it.",
-        "bool reads as 1.0 / 0.0; compileFlag is a real bool for logic nodes (If (Bool), And, Or, Not).",
-        "Changing a type or deleting a constant clears the references of the nodes reading it (after a confirmation).",
-    ] {
-        out.push(Box::new(text(line, TEXT_DIM, 12.0)));
-    }
-    out.push(Box::new(section("Hotkeys")));
-    for (keys, what) in [("Ctrl+Z / Y", "Undo / redo"), ("Ctrl+S", "Save and regenerate")] {
-        out.push(Box::new(hotkey_row(keys, what)));
-    }
-}
-
-fn asset_rows(editor: &Editor, out: &mut Vec<Box<dyn Scene>>) {
-    let Some(d) = editor.doc() else { return };
-    out.push(Box::new(text(d.id.source_rel(), TEXT, 15.0)));
-    out.push(Box::new(text(
-        format!(
-            "Type: {}",
-            match d.asset.kind {
-                AssetKind::Function => "Function",
-                AssetKind::Material(m) => m.label(),
-            }
-        ),
-        TEXT_DIM,
-        12.0,
-    )));
-    if let AssetKind::Material(m) = d.asset.kind {
-        out.push(Box::new(section("Material")));
-        let blends = [BlendMode::Opaque, BlendMode::Mask, BlendMode::Blend, BlendMode::Add, BlendMode::Multiply];
-        let labels: Vec<String> = blends.iter().map(|b| b.label().to_string()).collect();
-        let cur = blends.iter().position(|b| *b == m.blend()).unwrap_or(0);
-        out.push(Box::new(labeled("Blend mode".into(), select_w(PropTarget::Blend, labels, Vec::new(), cur))));
-        let two_sided = match m {
-            MaterialKind::Pbr3d(s) => Some(s.two_sided),
-            MaterialKind::Unlit3d(s) => Some(s.two_sided),
-            MaterialKind::Sprite2d(_) => None,
-        };
-        if let Some(t) = two_sided {
-            out.push(Box::new(labeled("Two sided".into(), checkbox_w(PropTarget::TwoSided, t))));
-        }
-        if let MaterialKind::Pbr3d(s) = m {
-            let cur = usize::from(s.shading == Shading::Unlit);
-            out.push(Box::new(labeled(
-                "Shading".into(),
-                select_w(PropTarget::Shading, vec!["Lit".into(), "Unlit".into()], Vec::new(), cur),
-            )));
-            // Decision 0023: one `Material Attributes` input (+ WPO) instead of one pin per attribute.
-            let modes: Vec<String> = PbrOutputMode::ALL.iter().map(|m| m.label().to_string()).collect();
-            let cur = PbrOutputMode::ALL.iter().position(|m| *m == s.output).unwrap_or(0);
-            out.push(Box::new(labeled("Output".into(), select_w(PropTarget::OutputMode, modes, Vec::new(), cur))));
-        }
-        // Exclusive node preview (decision 0022): the mode is kept even while no node is previewed.
-        out.push(Box::new(section("Preview")));
-        let modes: Vec<String> = PreviewMode::ALL.iter().map(|m| preview_mode_label(*m).to_string()).collect();
-        let cur = PreviewMode::ALL.iter().position(|m| *m == d.asset.preview.mode).unwrap_or(0);
-        out.push(Box::new(labeled("Mode".into(), select_w(PropTarget::PreviewMode, modes, Vec::new(), cur))));
-        let status = match &d.asset.preview.node {
-            Some(n) if d.asset.nodes.contains_key(n) => {
-                format!("Previewing: {}", crate::canvas::node_title(editor, &d.asset, n))
-            }
-            Some(n) => format!("Previewed node `{n}` does not exist (ignored)"),
-            // ASCII dash: the UI font has no em dash glyph.
-            None => "No node previewed - select a node and press V".to_string(),
-        };
-        out.push(Box::new(text(status, TEXT_DIM, 12.0)));
-    }
-    out.push(Box::new(section("Description")));
-    out.push(Box::new(text_w(PropTarget::Description, d.asset.meta.description.clone(), false)));
-    out.push(Box::new(section("Graph")));
-    out.push(Box::new(text(
-        format!(
-            "{} node(s), {} wire(s), {} comment(s)",
-            d.asset.nodes.len(),
-            d.asset.edges.len(),
-            d.asset.comments.len()
-        ),
-        TEXT_DIM,
-        12.0,
-    )));
-    out.push(Box::new(text("Tip: Tab or right-click on the canvas opens the node palette.", TEXT_DIM, 12.0)));
-}
-
-fn node_rows(editor: &Editor, id: &str, out: &mut Vec<Box<dyn Scene>>) {
-    let Some(d) = editor.doc() else { return };
-    let Some(n) = d.asset.nodes.get(id) else { return };
-    let Some(def) = editor.registry.get(&n.kind) else {
-        out.push(Box::new(text(format!("Unknown node kind {}", n.kind), TEXT, 13.0)));
-        return;
-    };
-    let info = def.info();
-    out.push(Box::new(text(crate::canvas::node_title(editor, &d.asset, id), TEXT, 15.0)));
-    out.push(Box::new(text(format!("{} | {}", info.category, n.kind), TEXT_DIM, 11.0)));
-    if !info.description.is_empty() {
-        out.push(Box::new(text(info.description.clone(), TEXT_DIM, 12.0)));
-    }
-    let params = editor.registry.resolved_params(&n.kind, &n.params);
-    let choices = Choices {
-        routes: route_declarations(&d.asset, &editor.registry),
-        curves: editor.curve_paths().into_iter().map(|p| (p.clone(), p)).collect(),
-        consts: Vec::new(),
-        textures: editor.texture_choices(),
-    };
-    let global_consts = editor.global_consts();
-    let defs = def.params();
-    if crate::canvas::has_label(&n.kind) {
-        let target = PropTarget::NodeLabel(id.to_string());
-        out.push(Box::new(labeled("Label".to_string(), text_w(target, n.label.clone(), false))));
-    }
-    if !defs.is_empty() {
-        out.push(Box::new(section("Parameters")));
-    }
-    for p in &defs {
-        let v = params.get(&p.id).cloned().unwrap_or_else(|| p.default.clone());
-        let target = PropTarget::Param { node: id.to_string(), key: p.id.clone() };
-        // A deleted or broken curve stays visible as the current choice (the node reports E006).
-        let mut choices_here = None;
-        if p.kind == ParamKind::Curve && !v.as_str().is_empty() && !choices.curves.iter().any(|c| c.0 == v.as_str()) {
-            let mut c = choices.clone();
-            c.curves.push((v.as_str().to_string(), format!("{} (missing)", v.as_str())));
-            choices_here = Some(c);
-        }
-        // Constants of the node's type; a missing one or one of another type stays visible (E006 / E003).
-        if let ParamKind::GlobalConst(ty) = p.kind {
-            let mut c = choices.clone();
-            c.consts = global_consts.iter().filter(|k| k.1.1.ty == ty).map(|k| (k.0.clone(), k.0.clone())).collect();
-            if !v.as_str().is_empty() && !c.consts.iter().any(|k| k.0 == v.as_str()) {
-                let why = global_consts.get(v.as_str()).map_or("missing".into(), |k| format!("is {}", k.1.ty.label()));
-                c.consts.push((v.as_str().to_string(), format!("{} ({why})", v.as_str())));
-            }
-            choices_here = Some(c);
-        }
-        // A deleted Texture asset stays visible as the current choice (the node reports E006).
-        if p.kind == ParamKind::Texture && !v.as_str().is_empty() && !choices.textures.iter().any(|c| c.0 == v.as_str())
-        {
-            let mut c = choices.clone();
-            c.textures.push((v.as_str().to_string(), format!("{} (missing)", v.as_str())));
-            choices_here = Some(c);
-        }
-        let choices = choices_here.as_ref().unwrap_or(&choices);
-        out.push(Box::new(labeled(p.label.clone(), value_widget(target, &p.kind, &v, choices))));
-    }
-    // The file the node refers to; double-clicking the node opens it too (decision 0023).
-    if let Some(target) = editor.referenced_asset(id) {
-        let label = match target.ty {
-            AssetType::Function => "Open function",
-            AssetType::Curve => "Open curve",
-            AssetType::Consts => "Open constant table",
-            AssetType::Material => "Open material",
-            AssetType::Texture => "Open texture",
-        };
-        out.push(Box::new(button(label, Action::OpenAsset(target), false)));
-    }
-    let Some(sig) = node_signature(&d.asset, id, &editor.registry, &editor.functions, &d.id.path) else { return };
-    let mut header = false;
-    // A usage's input is the declaration's, never a value of its own.
-    let inputs = if def.role() == NodeRole::RouteUsage { &[][..] } else { &sig.inputs[..] };
-    for pin in inputs {
-        if d.asset.edge_into(id, &pin.id).is_some() || pin.implicit.is_some() {
-            continue;
-        }
-        let Some(kind) = pin_kind(pin.ty) else { continue };
-        if !header {
-            out.push(Box::new(section("Input defaults (used when not connected)")));
-            header = true;
-        }
-        let v = n.inputs.get(&pin.id).cloned().unwrap_or_else(|| pin.default.coerce(pin.ty));
-        let target = PropTarget::Input { node: id.to_string(), pin: pin.id.clone() };
-        let label = if pin.label.is_empty() { pin.id.clone() } else { pin.label.clone() };
-        out.push(Box::new(labeled(label, value_widget(target, &kind, &v, &Choices::default()))));
-    }
-    let diags = editor.node_diags();
-    if let Some(list) = diags.get(id) {
-        out.push(Box::new(section("Problems")));
-        for diag in list {
-            let c = if diag.is_error() { Color::srgb(0.95, 0.42, 0.42) } else { Color::srgb(0.95, 0.78, 0.35) };
-            out.push(Box::new(text(format!("{}: {}", diag.code, diag.message), c, 12.0)));
-        }
-    }
-}
-
-fn redraw(
-    editor: Res<Editor>,
-    body: Query<Entity, With<PropsBody>>,
-    mut last: Local<Option<(u64, Option<usize>)>>,
-    mut commands: Commands,
-) {
-    let key = (editor.ui.props, editor.active);
-    if last.as_ref() == Some(&key) {
-        return;
-    }
-    let Ok(body) = body.single() else { return };
-    *last = Some(key);
-    commands.entity(body).despawn_children();
-    let mut rows: Vec<Box<dyn Scene>> = Vec::new();
-    match editor.tab() {
-        None => rows.push(Box::new(text("Nothing open.", TEXT_DIM, 13.0))),
-        Some(Tab::Text(t)) => text_rows(t, &mut rows),
-        Some(Tab::Curve(c)) => curve_rows(c, &mut rows),
-        Some(Tab::Consts(c)) => consts_rows(c, &mut rows),
-        Some(Tab::Image(i)) => image_rows(&editor, i, &mut rows),
-        Some(Tab::Texture(t)) => texture_rows(&editor, t, &mut rows),
-        Some(Tab::Graph(d)) => {
-            if let Some(f) = d.selected_frame.as_ref().and_then(|f| d.asset.comments.iter().find(|c| c.id == *f)) {
-                rows.push(Box::new(text("Comment", TEXT, 15.0)));
-                rows.push(Box::new(labeled(
-                    "Title".into(),
-                    text_w(PropTarget::FrameTitle(f.id.clone()), f.title.clone(), false),
-                )));
-            } else if d.selection.len() == 1 {
-                let id = d.selection.iter().next().cloned().unwrap_or_default();
-                node_rows(&editor, &id, &mut rows);
-            } else if d.selection.len() > 1 {
-                rows.push(Box::new(text(format!("{} nodes selected", d.selection.len()), TEXT, 14.0)));
-                rows.push(Box::new(text("C: comment around them | Auto-layout arranges them.", TEXT_DIM, 12.0)));
-            } else {
-                asset_rows(&editor, &mut rows);
-            }
-        }
-    }
-    for r in rows {
-        commands.spawn_scene(bsn! { @{r} ChildOf(body) });
     }
 }
 

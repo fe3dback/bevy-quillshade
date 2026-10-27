@@ -9,13 +9,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use shader_graph_core::Value;
 use shader_graph_core::texture::{AddressMode, FilterMode, SamplerSettings, TextureAsset, TextureSettings};
 use shader_project::layout::INTERNAL_DIR;
-use shader_project::{AssetId, AssetSet, AssetType, Project, assets, ops};
+use shader_project::{AssetId, AssetType};
 use shader_stdlib::internal::InternalTexture;
 
-use crate::doc_kind::{TabDoc, asset_title, io_error};
 use crate::history::History;
-use crate::tab::ViewKind;
-use crate::ui::icons::IconId;
 
 /// A fresh value for [`TextureDoc::layout`], unique across documents.
 fn next_layout() -> u64 {
@@ -168,92 +165,6 @@ impl TextureDoc {
         self.mark_saved();
         self.history.clear();
         self.after_history();
-    }
-}
-
-impl TabDoc for TextureDoc {
-    fn asset(&self) -> Option<&AssetId> {
-        (!self.internal).then_some(&self.id)
-    }
-
-    fn view(&self) -> ViewKind {
-        ViewKind::Texture
-    }
-
-    fn base_title(&self) -> String {
-        if self.internal { self.id.path.clone() } else { asset_title(&self.id) }
-    }
-
-    fn icon(&self) -> IconId {
-        IconId::Image
-    }
-
-    fn kind_label(&self) -> &'static str {
-        "texture"
-    }
-
-    fn is_dirty(&self) -> bool {
-        TextureDoc::is_dirty(self)
-    }
-
-    fn is_read_only(&self) -> bool {
-        self.internal
-    }
-
-    fn revision(&self) -> u64 {
-        self.revision
-    }
-
-    fn save(&mut self, project: &Project) -> std::io::Result<()> {
-        if self.internal {
-            return Ok(());
-        }
-        ops::save_texture(project, &self.id, &self.asset).map_err(io_error)?;
-        self.mark_saved();
-        Ok(())
-    }
-
-    fn changed_on_disk(&self, project: &Project) -> bool {
-        !self.internal
-            && assets::load_texture(project, &self.id)
-                .is_ok_and(|t| TextureAsset::from_ron(&self.saved).ok() != Some(t))
-    }
-
-    /// A built-in texture never changes (read-only documents are "reloaded" on activation).
-    fn reload_from_disk(&mut self, project: &Project) -> Result<(), String> {
-        if !self.internal {
-            self.reload(assets::load_texture(project, &self.id)?);
-        }
-        Ok(())
-    }
-
-    fn keep_mine(&mut self, project: &Project) {
-        if self.internal {
-            return;
-        }
-        if let Ok(on_disk) = assets::load_texture(project, &self.id) {
-            self.saved = on_disk.to_ron();
-        }
-    }
-
-    fn rename(&mut self, _project: &Project, from: &AssetId, to: &AssetId) {
-        if self.internal || self.id != *from {
-            return;
-        }
-        self.id = to.clone();
-        self.revision += 1;
-        self.relayout();
-    }
-
-    /// `shaders/….texture.ron`, or the `@internal/…` id of a built-in texture.
-    fn config_key(&self) -> Option<String> {
-        Some(if self.internal { self.id.path.clone() } else { self.id.source_rel() })
-    }
-
-    fn override_into(&self, set: &mut AssetSet) {
-        if !self.internal {
-            set.textures.insert(self.id.clone(), Ok(self.asset.clone()));
-        }
     }
 }
 

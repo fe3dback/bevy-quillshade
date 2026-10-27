@@ -259,6 +259,10 @@ pub struct Frame {
     pub nodes: Vec<NodeId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<[f32; 4]>,
+    /// Hue in degrees `0..360` picked in the editor (saturation / lightness are the editor's); wins over `color`.
+    /// Unset: the frame keeps `color` or the default look, and the field is not written (design §4.6).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hue: Option<f32>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -461,6 +465,31 @@ mod tests {
         let mut b = a.clone();
         b.nodes.values_mut().for_each(|n| n.label.clear());
         assert!(!b.to_ron().contains("label:"));
+    }
+
+    #[test]
+    fn frame_without_hue_roundtrips_byte_identical() {
+        let mut a = Asset::new("rock", AssetKind::Material(MaterialKind::Pbr3d(PbrSettings::default())));
+        let n = a.add_node(Node::new("stdlib::Constant", (0.0, 0.0)));
+        a.comments.push(Frame {
+            id: "c1".into(),
+            title: "Rim".into(),
+            rect: (-30.0, -50.0, 400.0, 300.0),
+            nodes: vec![n],
+            color: None,
+            hue: None,
+        });
+        // A file written before frames had a hue (design §4.6) loads and saves unchanged.
+        let text = a.to_ron();
+        assert!(!text.contains("hue"), "{text}");
+        let b = Asset::from_ron(&text).unwrap();
+        assert_eq!(b.comments[0].hue, None);
+        assert_eq!(b.to_ron(), text);
+
+        a.comments[0].hue = Some(200.0);
+        let text = a.to_ron();
+        assert!(text.contains("hue: Some(200.0)"), "{text}");
+        assert_eq!(Asset::from_ron(&text).unwrap(), a);
     }
 
     #[test]

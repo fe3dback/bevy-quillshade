@@ -11,6 +11,11 @@ use crate::def::{def, pin_in, pin_out, poly_ins, poly_out, sig};
 
 const CAT: &str = "Utility";
 
+/// Node reading a Curve asset (decision 0015).
+pub const SAMPLE_CURVE_KIND: &str = "stdlib::SampleCurve";
+/// Property of [`SAMPLE_CURVE_KIND`]: the Curve asset path, `""` = none.
+pub const CURVE_PARAM: &str = "curve";
+
 pub fn register(r: &mut Registry) {
     r.register(
         def("stdlib::If", "If", CAT)
@@ -339,10 +344,10 @@ pub fn register(r: &mut Registry) {
     // Curve assets (decision 0015): the data is baked into the curve's own WESL module.
     let interps: Vec<String> = Interp::ALL.iter().map(|i| i.label().to_string()).collect();
     r.register(
-        def("stdlib::SampleCurve", "Sample Curve", CAT)
+        def(SAMPLE_CURVE_KIND, "Sample Curve", CAT)
             .kw(&["curve", "float curve", "ramp", "falloff", "easing", "spline", "catmull"])
             .desc("Value of a curve asset at T (0..1). Simple: linear between points; Catmull-Rom: smooth.")
-            .param(ParamDef::new("curve", "Curve", ParamKind::Curve, Value::Str(String::new())))
+            .param(ParamDef::new(CURVE_PARAM, "Curve", ParamKind::Curve, Value::Str(String::new())))
             .param(ParamDef::new(
                 "type",
                 "Type",
@@ -357,7 +362,7 @@ pub fn register(r: &mut Registry) {
                     )
                 },
                 |c| {
-                    let path = c.param("curve").as_str().to_string();
+                    let path = c.param(CURVE_PARAM).as_str().to_string();
                     let interp = Interp::from_label(c.param("type").as_str()).unwrap_or_default();
                     if path.is_empty() {
                         c.diag(Code::E004, "no curve selected");
@@ -431,6 +436,7 @@ fn function_call_sig(c: &SigCtx) -> shader_graph_core::Signature {
         .map(|p| {
             let mut pin = PinDef::new(&p.name, &p.name, p.ty).default(p.default.clone());
             pin.required = p.required;
+            pin.range = p.range;
             pin
         })
         .collect();

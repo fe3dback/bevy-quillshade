@@ -1,8 +1,9 @@
 //! Open tabs (spec §9 "State"). A tab holds one kind of content and is shown by the view of that kind;
 //! every view fills the document area (dark background, file type watermark in the bottom-right corner).
-//! See decision 0014.
+//! See decision 0014; the per-kind trait impls are in [`crate::editors`].
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use shader_graph_core::model::AssetKind;
 use shader_graph_core::texture::INTERNAL_PREFIX;
@@ -15,7 +16,6 @@ use crate::doc::Doc;
 use crate::doc_kind::TabDoc;
 use crate::game_image::FileStamp;
 use crate::texture_doc::TextureDoc;
-use crate::ui::icons::IconId;
 
 /// The view that shows a tab's content.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,11 +65,18 @@ pub struct TextDoc {
     pub rel: String,
     /// File contents; `None` while the file does not exist.
     pub text: Option<String>,
-    /// Bumped whenever `text` changes; the view rebuilds when it differs.
+    /// Set to a fresh [`TextDoc::next_revision`] whenever `text` changes; the view rebuilds when it differs.
     pub revision: u64,
 }
 
 impl TextDoc {
+    /// A process-wide unique revision: the view caches on `(rel, revision)`, so a tab closed and reopened on a
+    /// regenerated file (a preview toggle, decision 0022) must not reuse the closed tab's revision.
+    fn next_revision() -> u64 {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    }
+
     /// `None` when the asset has no such file (functions have no Rust module, constant tables nothing at all).
     pub fn open(project: &Project, source: AssetId, lang: Lang) -> Option<TextDoc> {
         let path = match lang {
@@ -88,75 +95,8 @@ impl TextDoc {
             return false;
         }
         self.text = text;
-        self.revision += 1;
+        self.revision = Self::next_revision();
         true
-    }
-}
-
-impl TabDoc for TextDoc {
-    fn asset(&self) -> Option<&AssetId> {
-        None
-    }
-
-    fn view(&self) -> ViewKind {
-        ViewKind::Text
-    }
-
-    fn base_title(&self) -> String {
-        self.rel.clone()
-    }
-
-    fn icon(&self) -> IconId {
-        IconId::Code
-    }
-
-    fn kind_label(&self) -> &'static str {
-        self.lang.label()
-    }
-
-    fn is_dirty(&self) -> bool {
-        false
-    }
-
-    fn is_read_only(&self) -> bool {
-        true
-    }
-
-    fn revision(&self) -> u64 {
-        self.revision
-    }
-
-    fn save(&mut self, _project: &Project) -> std::io::Result<()> {
-        Ok(())
-    }
-
-    fn changed_on_disk(&self, _project: &Project) -> bool {
-        false
-    }
-
-    fn reload_from_disk(&mut self, _project: &Project) -> Result<(), String> {
-        self.reload();
-        match self.text {
-            Some(_) => Ok(()),
-            None => Err(format!("{} does not exist", self.rel)),
-        }
-    }
-
-    fn keep_mine(&mut self, _project: &Project) {}
-
-    /// The generated file moves with its source (regeneration fills it).
-    fn rename(&mut self, project: &Project, from: &AssetId, to: &AssetId) {
-        if self.source != *from {
-            return;
-        }
-        if let Some(moved) = TextDoc::open(project, to.clone(), self.lang) {
-            *self = TextDoc { revision: self.revision + 1, ..moved };
-        }
-    }
-
-    /// `AssetId::source_rel` of the source plus `#wesl` / `#rust`.
-    fn config_key(&self) -> Option<String> {
-        Some(format!("{}#{}", self.source.source_rel(), self.lang.label()))
     }
 }
 
@@ -193,64 +133,10 @@ impl ImageDoc {
         self.revision += 1;
         true
     }
-}
 
-impl TabDoc for ImageDoc {
-    fn asset(&self) -> Option<&AssetId> {
-        None
-    }
-
-    fn view(&self) -> ViewKind {
-        ViewKind::Image
-    }
-
-    fn base_title(&self) -> String {
-        format!("assets/{}", self.path)
-    }
-
-    fn icon(&self) -> IconId {
-        IconId::Image
-    }
-
-    fn kind_label(&self) -> &'static str {
-        "image"
-    }
-
-    fn is_dirty(&self) -> bool {
-        false
-    }
-
-    fn is_read_only(&self) -> bool {
-        true
-    }
-
-    fn revision(&self) -> u64 {
-        self.revision
-    }
-
-    fn save(&mut self, _project: &Project) -> std::io::Result<()> {
-        Ok(())
-    }
-
-    fn changed_on_disk(&self, _project: &Project) -> bool {
-        false
-    }
-
-    fn reload_from_disk(&mut self, project: &Project) -> Result<(), String> {
-        self.reload(project);
-        match self.stamp {
-            Some(_) => Ok(()),
-            None => Err(format!("assets/{} does not exist", self.path)),
-        }
-    }
-
-    fn keep_mine(&mut self, _project: &Project) {}
-
-    /// Game files are not assets: nothing to follow.
-    fn rename(&mut self, _project: &Project, _from: &AssetId, _to: &AssetId) {}
-
-    fn config_key(&self) -> Option<String> {
-        Some(format!("{GAME_KEY_PREFIX}{}", self.path))
+    /// Whether the file existed when last checked.
+    pub fn exists(&self) -> bool {
+        self.stamp.is_some()
     }
 }
 
@@ -428,4 +314,34 @@ pub fn labels(tabs: &[Tab]) -> Vec<String> {
         .zip(&short)
         .map(|(t, s)| if short.iter().filter(|o| *o == s).count() > 1 { t.title() } else { t.short_title() })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use shader_project::{AssetType, fixtures};
+
+    fn project() -> (tempfile::TempDir, Project) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname = \"g\"\n").unwrap();
+        std::fs::create_dir_all(dir.path().join("assets")).unwrap();
+        let p = Project::open(dir.path()).unwrap();
+        fixtures::save_all(&p).unwrap();
+        (dir, p)
+    }
+
+    /// The text view caches on `(rel, revision)`: a tab closed and reopened after its file changed (a preview
+    /// toggle regenerates the WESL, decision 0022) must not reuse the revision of the closed one.
+    #[test]
+    fn reopened_text_doc_gets_new_revision() {
+        let (_dir, p) = project();
+        let id = AssetId::new(AssetType::Material, "env/rock_wet");
+        let first = TextDoc::open(&p, id.clone(), Lang::Wesl).unwrap();
+        std::fs::create_dir_all(first.path.parent().unwrap()).unwrap();
+        std::fs::write(&first.path, "// preview variant\n").unwrap();
+        let second = TextDoc::open(&p, id, Lang::Wesl).unwrap();
+        assert_eq!(second.rel, first.rel);
+        assert_eq!(second.text.as_deref(), Some("// preview variant\n"));
+        assert_ne!(second.revision, first.revision);
+    }
 }

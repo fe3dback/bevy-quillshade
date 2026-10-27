@@ -257,7 +257,13 @@ fn layer_sig(path: &str, node: &str) -> FunctionSig {
         path: path.into(),
         name: path.rsplit('/').next().unwrap().into(),
         inputs: vec![],
-        outputs: vec![FnPort { name: "rgb".into(), ty: PinType::Float3, default: Value::Float(0.0), required: false }],
+        outputs: vec![FnPort {
+            name: "rgb".into(),
+            ty: PinType::Float3,
+            default: Value::Float(0.0),
+            required: false,
+            range: None,
+        }],
         builtins: vec![],
         textures: vec![HiddenTexture { origin: path.into(), node: node.into(), texture: "textures/rock".into() }],
     }

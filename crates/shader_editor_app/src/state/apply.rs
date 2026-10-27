@@ -125,6 +125,10 @@ impl Editor {
             Action::Copy => self.copy(),
             Action::Cut => {
                 self.copy();
+                // The clipboard holds no frames: a cut keeps the enclosed ones (only Delete removes them, design §4.5).
+                if let Some(d) = self.doc_mut() {
+                    d.enclosed_frames.clear();
+                }
                 self.delete_selection();
             }
             Action::Paste(at) => self.paste(at),
@@ -159,10 +163,11 @@ impl Editor {
             }
             Action::Select(sel) => {
                 if let Some(d) = self.doc_mut()
-                    && (d.selection != sel || d.selected_frame.is_some())
+                    && (d.selection != sel || d.selected_frame.is_some() || !d.enclosed_frames.is_empty())
                 {
                     d.selection = sel;
                     d.selected_frame = None;
+                    d.enclosed_frames.clear();
                     self.ui.props += 1;
                 }
             }
@@ -171,7 +176,14 @@ impl Editor {
                     && d.selected_frame != f
                 {
                     d.selected_frame = f;
+                    d.enclosed_frames.clear();
                     self.ui.props += 1;
+                }
+            }
+            // The sidebar keeps showing the node selection (design §4.5): no props refresh.
+            Action::SelectFrames(frames) => {
+                if let Some(d) = self.doc_mut() {
+                    d.enclosed_frames = d.enclosed(&frames, &d.selection);
                 }
             }
             Action::AddNode { kind, pos, link, params } => self.add_node(&kind, pos, link, &params),
@@ -191,6 +203,7 @@ impl Editor {
                     d.edit(|a| a.edges.retain(|e| !at_pin(e)));
                 }
             }
+            Action::MoveWires { node, pin, output, to } => self.move_wires((node, pin), output, to),
             Action::Moved { nodes, frames } => {
                 if let Some(d) = self.doc_mut() {
                     d.edit(|a| {
@@ -242,7 +255,7 @@ impl Editor {
                 if let Some(d) = self.doc_mut() {
                     let sel = d.selection.clone();
                     if sel.is_empty() {
-                        let (x, y) = at.unwrap_or((0.0, 0.0));
+                        let (x, y) = crate::doc::snap(at.unwrap_or((0.0, 0.0)));
                         let id = d.add_frame("Comment", &sel);
                         d.edit(|a| {
                             if let Some(f) = a.comments.iter_mut().find(|f| f.id == id) {
@@ -259,7 +272,8 @@ impl Editor {
                 if let Some(d) = self.doc_mut() {
                     let r = shader_graph_core::model::new_node_id();
                     d.edit(|a| {
-                        a.nodes.insert(r.clone(), shader_graph_core::Node::new("stdlib::Reroute", pos));
+                        a.nodes
+                            .insert(r.clone(), shader_graph_core::Node::new("stdlib::Reroute", crate::doc::snap(pos)));
                         a.connect((&from.0, &from.1), (&r, "in"));
                         a.connect((&r, "out"), (&to.0, &to.1));
                     });

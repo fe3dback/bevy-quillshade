@@ -24,7 +24,9 @@
   longer postpone loading past the first frame.
 - **Quick Start** is a set of seven tabs (`Dialog::QuickStart(step)`, `Action::QuickStart(step)` opens or switches;
   Back / Next / Close in the footer): Project, Material, Cargo.toml, Plugin, Spawn, Loading (marked optional),
-  Hot reload, each with a longer code example. `SHADER_EDITOR_DEMO=quick_start:N` opens step N.
+  Hot reload, each with a longer code example. `SHADER_EDITOR_DEMO=quick_start:N` opens step N. *Superseded in
+  part by the editor-kinds QA round (design 2026-10-26 §3.3): the Material step (texture drag tip, `regen` / `check`
+  / `diff`) is gone — six tabs — and the Rust snippets are highlighted with `highlight.rs`.*
 - **Thumbnails beside the outputs.** `NodePreview::BESIDE_OUTPUTS` puts a preview kind in a fixed-width column left
   of the node's output pins (`node_preview::previews` splits the rows); the texture thumbnail uses it at 128×128. A
   node without outputs falls back to a row. No bevy_noodle change was needed: a port finds its node through its

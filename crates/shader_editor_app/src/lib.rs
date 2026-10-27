@@ -23,6 +23,7 @@ mod demo;
 pub mod doc;
 pub mod doc_kind;
 pub mod droppable;
+pub mod editors;
 mod external;
 mod fixes;
 pub mod game_image;
@@ -80,6 +81,8 @@ fn attach_canvas(world: &mut World) {
     if let Some(canvas) = found {
         if let Some(mut interaction) = world.get_mut::<CanvasInteraction>(canvas) {
             interaction.pan_button = Some(PointerButton::Secondary);
+            // UE: dragging from a connected input starts a new wire; Ctrl+drag moves wires (decision 0032).
+            interaction.detach_wires = false;
         }
         world.insert_resource(EditorCanvas::new(canvas));
     }
@@ -229,7 +232,8 @@ fn open_startup_project(mut editor: ResMut<Editor>, startup: Res<StartupProject>
 /// Debug aid: `SHADER_EDITOR_SCREENSHOT=out.png` saves a screenshot after a few seconds and quits;
 /// `SHADER_EDITOR_OPEN=env/rock_wet.material.ron` opens an asset at startup (`…ron#wesl` / `#rust`: its generated
 /// file in a text tab, after the asset's graph; `@game/textures/rock_albedo.ktx2`: a game image's tab;
-/// `@internal/default`: a built-in texture's read-only Texture tab).
+/// `@internal/default`: a built-in texture's read-only Texture tab); `SHADER_EDITOR_SELECT=stdlib::Lerp` selects the
+/// first node of that kind, or the comment frame of that id (`c01`).
 /// `SHADER_EDITOR_DEMO=palette|wire|dialog|about|quick_start[:N]|texture_channel:N|open_project|welcome|menu|tab_menu` additionally opens that popup before the
 /// shot (`menu`: the main menu's File; `welcome`: closes the project).
 fn debug_screenshot(
@@ -263,9 +267,13 @@ fn debug_screenshot(
         }
         if let Ok(sel) = std::env::var("SHADER_EDITOR_SELECT")
             && let Some(d) = editor.doc_mut()
-            && let Some(n) = d.asset.nodes.iter().find(|(_, n)| n.kind == sel).map(|(k, _)| k.clone())
         {
-            d.selection = [n].into();
+            // A node kind, or the id of a comment frame.
+            if let Some(n) = d.asset.nodes.iter().find(|(_, n)| n.kind == sel).map(|(k, _)| k.clone()) {
+                d.selection = [n].into();
+            } else if d.asset.comments.iter().any(|f| f.id == sel) {
+                d.selected_frame = Some(sel);
+            }
             d.revision += 1;
             editor.ui.props += 1;
         }

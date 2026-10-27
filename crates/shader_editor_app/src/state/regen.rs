@@ -1,4 +1,7 @@
 use super::*;
+use crate::editors::{StatusCtx, StatusInfo};
+use shader_project::RegenReport;
+use shader_project::writer::Change;
 
 impl Editor {
     // ---- validation / generation ----
@@ -88,6 +91,7 @@ impl Editor {
                 } else {
                     self.info(msg);
                 }
+                self.note_wesl_lines(&report, false);
                 self.validate();
                 self.reload_read_only_tabs();
                 true
@@ -132,6 +136,7 @@ impl Editor {
                 let errors = diags.iter().filter(|d| d.is_error()).count();
                 let regen_only = diags.iter().filter(|d| matches!(d.code, Code::E008 | Code::E010)).cloned().collect();
                 self.regen_only.insert(id.clone(), regen_only);
+                self.note_wesl_lines(&report, true);
                 if errors > 0 {
                     let msg =
                         format!("Preview: {errors} error(s) in {} - its generated files were kept", id.source_rel());
@@ -149,6 +154,43 @@ impl Editor {
         self.validate();
         self.reload_read_only_tabs();
         ok
+    }
+
+    /// Remembers the line count of each `.wesl` the report generated without errors (the editor statusbar); an asset
+    /// with errors keeps its previous file and count. `written_only`: count only files the run created or modified
+    /// (a scoped run also generates assets it does not write).
+    fn note_wesl_lines(&mut self, report: &RegenReport, written_only: bool) {
+        let Some(project) = &self.project else { return };
+        let written: BTreeSet<&Path> =
+            report.changes.iter().filter(|c| !matches!(c, Change::Delete(_))).map(Change::path).collect();
+        for (id, r) in &report.assets {
+            let (true, Some(g), Some(file)) = (r.ok, &r.wesl, wesl_file(project, id)) else { continue };
+            if !written_only || written.contains(file.as_path()) {
+                self.wesl_lines.insert(id.clone(), g.text.lines().count());
+            }
+        }
+    }
+
+    /// The editor statusbar's content for the active tab (design §2.3); `None` without a tab or for a kind that has
+    /// no statusbar.
+    pub fn status_info(&self) -> Option<StatusInfo> {
+        let doc = self.tab()?.doc();
+        let id = doc.asset();
+        let diagnostics: Vec<Diagnostic> = id
+            .into_iter()
+            .flat_map(|id| self.diags.get(id).into_iter().chain(self.regen_only.get(id)).flatten())
+            .cloned()
+            .collect();
+        let wesl_lines = id.and_then(|id| self.wesl_lines.get(id).copied());
+        let ctx = StatusCtx { diagnostics: &diagnostics, wesl_lines };
+        doc.status(&ctx)
+    }
+
+    /// The first diagnostic of the active tab's asset, in console/logs order (live ones, then regeneration-only
+    /// codes): what a click on the editor statusbar's problem count focuses.
+    pub fn active_first_diagnostic(&self) -> Option<&Diagnostic> {
+        let id = self.tab()?.doc().asset()?;
+        self.diags.get(id).into_iter().chain(self.regen_only.get(id)).flatten().next()
     }
 
     /// All diagnostics for display: live ones plus regeneration-only codes.

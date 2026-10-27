@@ -28,7 +28,8 @@ What Bevy 0.20 / Feathers 0.20 offer for text (researched in the registry source
   them; the watermark names the asset type for graphs and the language (`wesl`/`rust`) for text. The graph canvas
   is not despawned: with a text tab active `doc()` is `None`, the canvas rebuilds empty and stores the graph's
   camera, which is restored when its tab comes back.
-- Adding a content kind = a `Tab` variant + `ViewKind` variant, a view scene spawned in `DocArea`, its redraw
+- *Superseded in part by 0031* (the recipe for a new kind and the per-kind toolbar / properties panel).
+  Adding a content kind = a `Tab` variant + `ViewKind` variant, a view scene spawned in `DocArea`, its redraw
   system keyed on (tab identity, revision), a branch in the properties panel and the watermark label, and a
   `Tab::config_key` form so it is restored on the next launch.
   *Update:* what every kind shares (asset, view, title, icon, watermark label, dirty/read-only state, revision,

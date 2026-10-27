@@ -274,11 +274,15 @@ pub fn declared_function_sig(asset: &Asset, path: &str, registry: &Registry) -> 
         let params = registry.resolved_params(&node.kind, &node.params);
         let get = |k: &str| params.get(k).cloned().unwrap_or(Value::Float(0.0));
         let ty = get("type").as_type().unwrap_or(PinType::Float);
+        // Same rule as `param::Scalar`: a slider only for a proper range (design §4.10).
+        let (min, max) = (get("min").as_f32(), get("max").as_f32());
+        let range = (ty == PinType::Float && min.is_finite() && max.is_finite() && min < max).then_some((min, max));
         let port = FnPort {
             name: get("name").as_str().to_string(),
             ty,
             default: get("default").coerce(ty),
             required: get("required").as_bool() || ty == PinType::Texture2D,
+            range,
         };
         let order = get("order").as_i32();
         match def.role() {

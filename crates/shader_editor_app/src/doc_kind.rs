@@ -1,10 +1,12 @@
 //! What every tab's content offers the editor, whatever its kind (decision 0014): identity, title, icon, dirty
 //! state, saving, reloading after external changes, following a rename and the key it is remembered by in the user
 //! config (decision 0018). [`crate::tab::Tab::doc`] gives it for any tab, so code that only needs one of these
-//! operations does not match on the tab kind; kind-specific work (graph editing, curve edits) still does.
+//! operations does not match on the tab kind; kind-specific work (graph editing, curve edits) still does. The impls
+//! live with the rest of their kind in [`crate::editors`].
 
 use shader_project::{AssetId, AssetSet, Project};
 
+use crate::editors::{StatusCtx, StatusInfo};
 use crate::tab::ViewKind;
 use crate::ui::icons::IconId;
 
@@ -17,8 +19,9 @@ pub trait TabDoc {
     fn base_title(&self) -> String;
     /// Tab bar icon.
     fn icon(&self) -> IconId;
-    /// Watermark in the document area's corner: the asset type or the language of a generated file.
-    fn kind_label(&self) -> &'static str;
+    /// Watermark in the editor content's corner: the asset type or the language of a generated file; `None` shows
+    /// none.
+    fn watermark(&self) -> Option<&'static str>;
     fn is_dirty(&self) -> bool;
     fn is_read_only(&self) -> bool;
     /// Bumped whenever the content the view shows changes.
@@ -40,6 +43,10 @@ pub trait TabDoc {
     /// Puts the unsaved content into `set` in place of the file's (what live validation and reference lookups
     /// see); nothing for read-only documents.
     fn override_into(&self, _set: &mut AssetSet) {}
+    /// Content of the editor statusbar (design §2.3); `None` (the default) hides it.
+    fn status(&self, _ctx: &StatusCtx) -> Option<StatusInfo> {
+        None
+    }
 }
 
 /// Title of an asset's document: its source path without `.ron`.

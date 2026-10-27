@@ -1,6 +1,6 @@
-//! Read-only view of a game image (design §4.4): the image fitted to the view (aspect kept), a header with the path
-//! and `WxH | format | mips` ([`describe`]); a load / decode error is shown as text instead of the image. Transparent parts show a
-//! checkerboard.
+//! Read-only view of a game image (design §4.4): the image fitted to the view (aspect kept), an editor topbar with the
+//! path and `WxH | format | mips` ([`describe`]); a load / decode error is shown as text instead of the image.
+//! Transparent parts show a checkerboard.
 
 use std::path::PathBuf;
 
@@ -10,7 +10,7 @@ use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use shader_graph_core::texture::TextureSettings;
 
-use super::{HEADER_BG, TEXT, TEXT_DIM, VIEW_BG, ViewOf, text};
+use super::{TEXT, TEXT_DIM, VIEW_BG, ViewOf, text};
 use crate::doc_kind::TabDoc;
 use crate::game_image::{GameImageCache, describe};
 use crate::state::Editor;
@@ -20,7 +20,7 @@ use crate::tab::{Tab, ViewKind};
 const PAD: f32 = 16.0;
 const ERROR: Color = Color::srgb(0.95, 0.42, 0.42);
 
-/// Header row (path, info), rebuilt with the image.
+/// The editor topbar row of an image tab (path, info), rebuilt with the image.
 #[derive(Component, Default, Clone)]
 pub struct ImageViewBar;
 
@@ -73,15 +73,6 @@ pub fn image_view() -> impl Scene {
         BackgroundColor(VIEW_BG)
         Visibility::Hidden
         Children [
-            ImageViewBar
-            Node {
-                flex_direction: FlexDirection::Row,
-                align_items: AlignItems::Center,
-                column_gap: px(8),
-                padding: UiRect::new(px(10), px(4), px(4), px(4)),
-            }
-            BackgroundColor(HEADER_BG)
-            --
             // The bottom margin keeps the image clear of the file type watermark.
             ImageViewArea
             Node {

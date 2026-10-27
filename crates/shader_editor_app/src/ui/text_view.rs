@@ -10,16 +10,18 @@ use bevy::feathers::constants::fonts;
 use bevy::input::mouse::MouseScrollPixelsPerLine;
 use bevy::prelude::*;
 use bevy::text::FontSource;
+use bevy_enhanced_input::prelude::ModKeys;
 
 use super::icons::IconId;
-use super::{HEADER_BG, TEXT, TEXT_DIM, VIEW_BG, ViewOf, icon_button, text};
+use super::{TEXT, TEXT_DIM, VIEW_BG, ViewOf, clipped_text, icon_tool_button, text};
+use crate::editors::main_input::mods;
 use crate::highlight::{Style, highlight};
 use crate::state::{Action, Editor, GenFile};
 use crate::tab::{Lang, Tab, ViewKind};
 
 const FONT_SIZE: f32 = 13.0;
 
-/// Header row (path, buttons), rebuilt with the file.
+/// The editor topbar row of a text tab (path, buttons), rebuilt with the file.
 #[derive(Component, Default, Clone)]
 pub struct TextViewBar;
 
@@ -49,15 +51,6 @@ pub fn text_view() -> impl Scene {
         BackgroundColor(VIEW_BG)
         Visibility::Hidden
         Children [
-            TextViewBar
-            Node {
-                flex_direction: FlexDirection::Row,
-                align_items: AlignItems::Center,
-                column_gap: px(8),
-                padding: UiRect::new(px(10), px(4), px(2), px(2)),
-            }
-            BackgroundColor(HEADER_BG)
-            --
             TextViewCode
             Node {
                 flex_grow: 1.0,
@@ -82,7 +75,7 @@ fn scroll_code(
     ev.propagate(false);
     let px = ev.to_pixels(&ratio);
     let mut delta = Vec2::new(px.x, px.y);
-    if keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]) {
+    if mods(&keys).contains(ModKeys::SHIFT) {
         delta = Vec2::new(delta.y, delta.x);
     }
     let max = ((node.content_size() - node.size()) * node.inverse_scale_factor).max(Vec2::ZERO);
@@ -131,13 +124,21 @@ fn redraw(
         Lang::Rust => GenFile::Rust,
     };
     let (path, open) = (t.rel.clone(), Action::ShowFile(t.source.clone(), which));
-    commands.spawn_scene(bsn! { @text(path, TEXT, 13.0) ChildOf(bar) });
-    commands.spawn_scene(bsn! { @text("read-only, generated", TEXT_DIM, 12.0) ChildOf(bar) });
+    let (source_icon, source) = (IconId::for_id(&t.source, None), Action::OpenAsset(t.source.clone()));
+    commands.spawn_scene(bsn! { @clipped_text(path, TEXT, 13.0) ChildOf(bar) });
+    let layout = TextLayout::no_wrap();
+    commands.spawn_scene(
+        bsn! { @text("read-only, generated", TEXT_DIM, 12.0) layout Node { flex_shrink: 0.0 } ChildOf(bar) },
+    );
     commands.spawn_scene(bsn! { Node { flex_grow: 1.0 } ChildOf(bar) });
-    commands
-        .spawn_scene(bsn! { @icon_button(IconId::Copy, Action::Copy, "Copy the whole file (Ctrl+C)") ChildOf(bar) });
-    commands
-        .spawn_scene(bsn! { @icon_button(IconId::OpenExternal, open, "Open in the default application") ChildOf(bar) });
+    let buttons: [Box<dyn Scene>; 3] = [
+        Box::new(icon_tool_button(IconId::Copy, "Copy", Action::Copy, "Copy the whole file (Ctrl+C)")),
+        Box::new(icon_tool_button(source_icon, "Source", source, "Open the source graph")),
+        Box::new(icon_tool_button(IconId::OpenExternal, "Open externally", open, "Open in the default application")),
+    ];
+    for b in buttons {
+        commands.spawn_scene(bsn! { @{b} Node { flex_shrink: 0.0 } ChildOf(bar) });
+    }
 
     commands.entity(code).despawn_children();
     let font = TextFont {

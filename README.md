@@ -195,20 +195,29 @@ Project (sets up an existing game crate — a directory with `Cargo.toml`: creat
 how to hook the generated crate into the game. Open / New Project show the system folder picker (on Linux through
 xdg-desktop-portal); cancel it to type or paste the path instead (Browse... reopens it).
 
-The toolbar holds the logo and the main menu — **File** (Open Project, New Project, Close Project, Save, Save All,
+The menu_bar holds the logo and the main menu — **File** (Open Project, New Project, Close Project, Save, Save All,
 Quit), **Assets** (create a Pbr3d/Unlit3d/Sprite2d material, a function, a curve, a global constant table, a folder;
-Regenerate) and **Help** (Quick Start: how to hook a game up, one tab per step; Project Page; About: version, link, author, license) — then Undo /
-Redo and the actions of the active tab (graph: Auto-layout, Comment, Fit; curve: Select all, Delete; constant table:
-Add; generated file: Copy, Source, Open externally).
+Regenerate) and **Help** (Quick Start: how to hook a game up, one tab per step; Project Page; About: version, link,
+author, license) — then Undo / Redo and, on the right, the project name and its error count (the full path is the
+tooltip).
+
+Under the tabs bar, the editor topbar holds the buttons of the active tab's kind (graph: Auto-layout, Comment, Fit;
+curve: path, Select all, Delete, preview mode, generated WESL; constant table: path and count; generated file: path,
+Copy, Source, Open externally; game image: path and size; Texture asset: Easy / Advanced, presets, channel, tiling,
+zoom). Under the editor content, the editor statusbar of a graph, curve or constant table shows `● unsaved`, the
+asset's error / warning count (click: show the first problem) and its size (nodes and generated WESL lines, points,
+constants).
 
 On the left is the asset browser — the **Project** panel (the `shaders/` tree: double click opens an asset; RMB on a
 folder or on the empty space below the tree creates a Pbr3d/Unlit3d/Sprite2d material, a function, a curve, a global
 constant table, a folder; RMB on an asset: rename, move (also by dragging onto a folder), delete, show the generated
-WESL/Rust in a read-only, syntax-highlighted tab), in the center the tabs and the canvas, on the right the properties
-(node parameters, input default values, asset blend mode / two-sided / shading / output), at the bottom the log (click —
-focus the node). The browser is an IDE-style file tree: folders with expand carets, an icon per asset kind (function,
-Pbr3d, Unlit3d, Sprite2d, curve, constant table, texture); the active tab's asset is highlighted, unsaved assets get an
-orange dot after the name.
+WESL/Rust in a read-only, syntax-highlighted tab), in the center the tabs and the canvas, on the right the right
+sidebar of the active tab's kind, titled after it (graph: **Properties** — node parameters, input default values, asset
+blend mode / two-sided / shading / output, or a selected comment frame's title and hue; **Curve**: the selected point
+and hotkeys; **Constants**: usage; **Generated File**: source and line count; **Image**: its Texture asset;
+**Texture**: image info, problems, hotkeys), at the bottom the log (click — focus the node). The browser is an
+IDE-style file tree: folders with expand carets, an icon per asset kind (function, Pbr3d, Unlit3d, Sprite2d, curve,
+constant table, texture); the active tab's asset is highlighted, unsaved assets get an orange dot after the name.
 
 The Project tree ends with the virtual read-only **Internal** folder of the editor's built-in textures
 (`@internal/default`; no rename / move / delete). Below it the read-only **Game Assets** panel lists the game's images
@@ -220,43 +229,58 @@ file. **Drag an image onto a graph** (design §4.3): on empty canvas (or onto a 
 a `TextureSample` at the drop point referencing the image's Texture asset; onto a `TextureSample`, `TextureObject` or
 texture parameter node it sets that node's texture. When no Texture asset points at the image yet, one is created with
 default settings (same name rule as Create Texture Asset); Ctrl+Z reverts only the graph edit, the created asset stays.
-A Texture asset or `Internal` → `default` dragged from the Project tree works the same way.
+A Texture asset or `Internal` → `default` dragged from the Project tree works the same way. A **Function** asset
+dragged onto a graph adds its call node at the drop point (a function dropped into its own graph is refused, as in the
+palette; indirect recursion is reported by regeneration as E006). A **Curve** asset dropped onto a `Sample Curve` node
+sets its curve, anywhere else it adds a `Sample Curve` reading it. Each drop is one undo step (decision 0033).
 
 Double-click an image to open it in a read-only **image tab**: the image fitted to the view (transparent parts over a
-checkerboard), `WxH | format | mips` in its header, a load / decode error as text (decoded by Bevy, like the game
+checkerboard), `WxH | format | mips` in its editor topbar, a load / decode error as text (decoded by Bevy, like the game
 would); it follows changes of the file and is restored on the next launch.
 
 Double-click a Texture asset to open its **Texture tab**: on the left a form with the image path (relative to `assets/`,
 applied on Enter; refused when another Texture asset already points at the file — on disk or in an open, unsaved tab, so
 a file a tab moved away from stays taken until that tab is saved — or when the path breaks the E012 rules; "Create
 Texture Asset" follows the same rule), sRGB and Expand grayscale (both need a rebuild in the game; grayscale expansion
-is not previewed — the editor always expands) and the sampler. **Easy** mode (the header's Easy | Advanced; the default
-unless the sampler is one no preset describes) has no form: "Use for" **Pixel art** (Nearest, Clamp to edge), **UI**
-(bilinear, Clamp to edge), **3D** (trilinear, Repeat) or **Ground** (trilinear + 16x anisotropy, Repeat) sets the whole
-sampler for that use (sRGB stays; one undo step). **Advanced** is the form: path, sRGB, Expand grayscale, "Default"
-(= the app's default sampler: with Bevy's `ImagePlugin::default()` Linear filters and Clamp to edge, *not* Repeat;
-turning it off starts from those values) and every sampler field. The image path, size, format and mip count are in
-Properties. The preview is decoded with the current, unsaved settings: the wheel zooms around the pointer (Nearest vs
-Linear shows up close), a drag pans, a double click fits again, "Tile 3x3" repeats the image so the address modes show,
-**R | G | B | All** shows one channel in grey (compressed formats: tinted) or the image (preview only). Invalid sampler settings (E013, e.g. anisotropy above 1 without Linear filters,
-inverted or negative LOD clamps) show the error instead of the image; Clamp to border on a GPU without the
-`ADDRESS_MODE_CLAMP_TO_BORDER` feature is previewed as Clamp to edge, with a note. Undo / Redo, Ctrl+S (saves,
-regenerates the baked manifest) work as for graphs. Built-in textures (double-click in **Internal**) open in a read-only
-Texture tab. In a node's Properties the Texture property is a picker of the project's Texture assets and the built-in
-ones, with an **Open texture** button. `TextureSample`, `TextureObject`, `TextureSampleParameter2D` and
-`TextureObjectParameter` show a 128×128 thumbnail of their texture left of the output pins (aspect kept; the built-in default
-without one; "n/a" for a missing Texture asset or an image that does not load); it follows unsaved edits of an open
-Texture tab, and a `TextureSample` wired straight to a TextureObject or texture parameter shows that node's texture.
+is not previewed — the editor always expands) and the sampler. **Easy** mode (the editor topbar's Easy | Advanced; the
+default unless the sampler is one no preset describes) has no form: "Use for" **Pixel art** (Nearest, Clamp to edge),
+**UI** (bilinear, Clamp to edge), **3D** (trilinear, Repeat) or **Ground** (trilinear + 16x anisotropy, Repeat) sets the
+whole sampler for that use (sRGB stays; one undo step). **Advanced** is the form: path, sRGB, Expand grayscale,
+"Default" (= the app's default sampler: with Bevy's `ImagePlugin::default()` Linear filters and Clamp to edge, *not*
+Repeat; turning it off starts from those values) and every sampler field. The image path, size, format and mip count are
+in the right sidebar. The preview is decoded with the current, unsaved settings: the wheel zooms around the pointer
+(Nearest vs Linear shows up close), a drag pans, a double click fits again, "Tile 3x3" repeats the image so the address
+modes show, **R | G | B | All** shows one channel in grey (compressed formats: tinted) or the image (preview only).
+Invalid sampler settings (E013, e.g. anisotropy above 1 without Linear filters, inverted or negative LOD clamps) show
+the error instead of the image; Clamp to border on a GPU without the `ADDRESS_MODE_CLAMP_TO_BORDER` feature is previewed
+as Clamp to edge, with a note. Undo / Redo, Ctrl+S (saves, regenerates the baked manifest) work as for graphs. Built-in
+textures (double-click in **Internal**) open in a read-only Texture tab. In a node's Properties the Texture property is
+a picker of the project's Texture assets and the built-in ones, with an **Open texture** button. `TextureSample`,
+`TextureObject`, `TextureSampleParameter2D` and `TextureObjectParameter` show a 128×128 thumbnail of their texture left
+of the output pins (aspect kept; the built-in default without one; "n/a" for a missing Texture asset or an image that
+does not load); it follows unsaved edits of an open Texture tab, and a `TextureSample` wired straight to a TextureObject
+or texture parameter shows that node's texture.
 
-Tabs and menus show icons too; Undo / Redo are icon-only buttons — hover a toolbar button for its name and hotkey.
+Tabs and menus show icons too; Undo / Redo are icon-only buttons — hover a menu_bar or editor topbar button for its
+name and hotkey.
 Tabs are compact and wrap onto more rows when there are many; a tab shows the file name only (`rock_wet`), the full
 path when several open tabs share that name, and the full path as its tooltip. RMB on a tab: Close / Close All / Close Others / Close to the Left / Close to the Right / Close Unmodified. The bottom-right corner of the main view shows the open document's type (`pbr3d`, `unlit3d`, `sprite2d`,
 `function`, `curve`, `consts`, `image`, `texture`, or `wesl`/`rust` for a generated file) as a faint watermark over
 the view.
-Generated-file tabs refresh after every regeneration; Ctrl+C there copies the whole file, and the header has
-"Open in the default application". Icons come from [icon-rs](https://crates.io/crates/icon-rs), plus a few
+Generated-file tabs refresh after every regeneration; Ctrl+C there copies the whole file, and the editor topbar
+has "Open in the default application". Icons come from [icon-rs](https://crates.io/crates/icon-rs), plus a few
 drawn by hand in `crates/shader_editor_app/icons/`.
 Validation runs live: nodes with errors are outlined in red, with warnings — in yellow.
+
+On the canvas (decision 0033) node positions snap to a 5-unit grid when touched: a dragged node jumps from grid point
+to grid point (in a multi-node drag the lead node snaps and the others keep their offsets to it), and new, pasted and
+duplicated nodes land on the grid; positions loaded from a file stay as they are until moved. A selected node has a
+3 px yellow outline. Named Route declarations and their usages, Constant nodes with a label and `Global*` nodes get a
+header colour from their name (route, label or constant), so a route's declaration and usages match. The pin under
+the pointer is highlighted (also while dragging a wire onto it). **Comment frames** (C) get a Hue slider and a
+"Default colour" button in the right sidebar when selected; a box selection that fully encloses a frame and covers
+all of its nodes marks it, and Delete then removes the frame with the nodes (one undo step; Cut keeps the frame, and so
+does a frame around the material output, which is never deleted).
 
 Values are also edited right on the nodes (UE-style): an unconnected input shows a slider (inputs with a known
 range, e.g. Lerp Alpha), a number field, X/Y fields, or a color button (Float3/Float4/Color) that opens a color picker (values are linear;
@@ -270,21 +294,22 @@ Texture Sample** / **Convert to Texture Object**, which drops name and group), t
 preview (materials only), Copy / Duplicate / Delete; an unselected node is selected first. A node action's hotkey works
 on the selected nodes without the menu (decision 0021).
 
-**Exclusive node preview** (decision 0022, like UE's "Start Previewing Node"): `V` on the one selected node (on
-release; `V` + LMB still drops a Vector parameter) or "Exclusive preview" in its menu shows that node's output on the
-material instead of the material output — the running game picks it up through hot reload. The node gets a thick
-orange border and a warning icon, the tab title says `(preview)`; `V` again or "Stop preview" turns it off. Toggling
-(and the mode select in Properties → Preview: `Unlit` / `Lit` / `Full`) is an undoable edit that marks the tab unsaved
-**and** regenerates that material's files from the in-memory graph at once, without saving — including the asset's
-other unsaved edits; closing the tab without saving regenerates them from disk again. Only nodes with an output that converts to a color can be previewed; the
-preview is stored in the `.ron` on save, so `regen` / `check` produce what the editor showed (W107).
+**Exclusive node preview** (decision 0022, like UE's "Start Previewing Node"): `V` on the one selected node (on release;
+`V` + LMB still drops a Vector parameter) or "Exclusive preview" in its menu shows that node's output on the material
+instead of the material output — the running game picks it up through hot reload. The node gets a 6 px outline pulsing
+between orange and dark red and a warning icon, the tab title says `(preview)`; `V` again or "Stop preview" turns it
+off. Toggling (and the mode select in Properties → Preview: `Unlit` / `Lit` / `Full`) is an undoable edit that marks the
+tab unsaved **and** regenerates that material's files from the in-memory graph at once, without saving — including the
+asset's other unsaved edits; closing the tab without saving regenerates them from disk again. Only nodes with an output
+that converts to a color can be previewed; the preview is stored in the `.ron` on save, so `regen` / `check` produce
+what the editor showed (W107).
 
-**Curves** (`+Curve`) are 1D functions on the unit square: points `(t, value)`, both in `0..1`. A curve tab shows
-the plot with draggable points; the `Catmull-Rom` / `Simple` switch in its header only changes the preview — the file stores just the points. The `Sample Curve` node (Utility) picks a curve of the project in
-Properties, has a `Type` (`Catmull-Rom` — smooth, may overshoot between points; `Simple` — linear) and returns the
-value at `T`; outside the first/last point the curve holds the end values. The node shows a small read-only plot of
-its curve (with a line at `T` while `T` is not connected; "n/a" when no curve is selected). Renaming a curve updates the nodes that
-use it.
+**Curves** (`+Curve`) are 1D functions on the unit square: points `(t, value)`, both in `0..1`. A curve tab shows the
+plot with draggable points; the `Catmull-Rom` / `Simple` switch in its editor topbar only changes the preview — the file
+stores just the points. The `Sample Curve` node (Utility) picks a curve of the project in Properties, has a `Type`
+(`Catmull-Rom` — smooth, may overshoot between points; `Simple` — linear) and returns the value at `T`; outside the
+first/last point the curve holds the end values. The node shows a small read-only plot of its curve (with a line at `T`
+while `T` is not connected; "n/a" when no curve is selected). Renaming a curve updates the nodes that use it.
 
 **Global constants** (`+Global Consts`, decision 0017) are tables of named values shared by every shader: the tab
 has an add form (name, type, Add or Enter) and the table (type select, value, delete). Types: `f32` (number field
@@ -349,14 +374,17 @@ nodes are not editor assets and do nothing.
 | Focus selection / whole graph | F / Home |
 | Node palette (search by name, category, synonyms: `*`, `+`, `lerp`) | Tab, RMB click on the canvas |
 | Palette filtered by wire type + auto-connect | release a wire on empty space |
-| Node under the cursor: Constant/2/3/4Vector, Scalar/Vector parameter, TextureSample, Multiply, Add, Lerp, TexCoord, Reroute | `1` `2` `3` `4` `S` `V` `T` `M` `A` `L` `U` `R` + LMB |
+| Node under the cursor: Constant/2/3/4Vector, Scalar/Vector parameter, TextureSample, Multiply, Add, Lerp, TexCoord, Reroute, Divide, OneMinus, Power, Normalize, Panner, If | `1` `2` `3` `4` `S` `V` `T` `M` `A` `L` `U` `R` `D` `O` `E` `N` `P` `I` + LMB |
 | Comment frame around the selection | C |
-| Reroute point on a wire / delete a wire | double click / RMB click on the wire |
+| Delete a comment frame together with its nodes | box-select around the whole frame, Delete |
+| Reroute point on a wire / delete a wire | double click / RMB click or Alt+LMB on the wire |
 | Pin menu: polymorphic type / reset value / disconnect | RMB click on an input pin |
 | Node menu: node actions / copy / duplicate / delete | RMB click on a node |
 | Convert the selected Add / Subtract / Multiply / Divide nodes to Add / Subtract / Multiply / Divide | Shift + `+` / `-` / `*` / `/` (main row or numpad, Shift optional on the numpad) |
 | Exclusive preview of the selected node on / off (materials) | `V` (on release) |
-| Disconnect every wire of a pin / a wire | Ctrl+LMB on the pin / on the wire |
+| Disconnect every wire of a pin / a wire | Alt+LMB on the pin / on the wire |
+| New wire from a pin (from a connected input too: connecting replaces its wire) | LMB drag from the pin |
+| Move a wire to another input / all wires of an output to another output (all or nothing, one undo step) | Ctrl+LMB drag from the pin onto the other pin |
 | Named route: a wire without a visible wire (Named Route + one usage per place) | palette: "Named Route", then "Named Route Usage: {name}" |
 | Auto-layout the selection (or the whole graph) | Ctrl+L |
 | Close tab / next tab | Ctrl+W (or MMB on the tab) / Ctrl+Tab |
@@ -364,6 +392,7 @@ nodes are not editor assets and do nothing.
 | Open an asset | double click in the browser |
 | Open a game image / a built-in texture | double click in Game Assets / in Project → Internal |
 | Add a `TextureSample` for an image, or set a texture node's texture | drag an image (Game Assets), a Texture asset or `Internal` → `default` (Project) onto the canvas / onto the node |
+| Add a function call / a `Sample Curve`, or set a `Sample Curve`'s curve | drag a Function / Curve asset (Project) onto the canvas / onto the node |
 | Texture tab preview: zoom / pan / fit | wheel (around the pointer) / drag / double click |
 | Open the function / curve / constant table a node refers to | double click on the node |
 | Scroll a generated file horizontally | Shift+wheel |
@@ -373,9 +402,12 @@ nodes are not editor assets and do nothing.
 | Curve: point menu / plot menu (add point, select all, preview mode) | RMB on a point / on empty space |
 | Open project / quit | Ctrl+O / Ctrl+Q |
 
-Pan — drag with the right (or middle) mouse button (an RMB press that does not move is a click), zoom — wheel, box select — LMB on empty space; the minimap
-in the bottom left is clickable. Unsaved tabs are marked with `*` (browser rows with an orange dot); on close and on an external change
-of the file (git checkout) the editor asks what to do. Window size, recent projects and open
+Hotkeys belong to the active tab's editor kind (graph, curve, generated file) or are global (save, undo, tabs, open,
+quit); none fires while a text field, the palette or a dialog has the keyboard, and Ctrl, Alt or Super held blocks
+the single-key ones (decision 0032). Pan — drag with the right (or middle) mouse button (an RMB press that does not
+move is a click), zoom — wheel, box select — LMB on empty space; the minimap in the bottom left is clickable. Unsaved
+tabs are marked with `*` (browser rows with an orange dot); on close and on an external change of the file (git
+checkout) the editor asks what to do. Window size, recent projects and open
 tabs are stored in `<config dir>/fe3dback/bevy-shader-editor/config.ron`, where the config dir is `%APPDATA%` on Windows,
 `~/Library/Application Support` on macOS and `$XDG_CONFIG_HOME` (else `~/.config`) elsewhere (decision 0018).
 
@@ -403,6 +435,10 @@ Asset(
   `user::<id>` (user node).
 - Constant nodes (`stdlib::Constant`, `Constant2Vector`/`3Vector`/`4Vector`) may have an optional `label: "…"` on the
   node (omitted when empty). It is editor-only: it replaces the value in the node title and never affects generated code.
+- A comment frame `Frame(id, title, rect: (x, y, w, h), nodes)` may end with an optional `color: Some((r, g, b, a))`
+  and an optional `hue: Some(200.0)` (degrees; set from the right sidebar, drawn at the editor's fixed saturation /
+  lightness, takes precedence over `color`). Both are omitted when unset; frames are editor-only. `nodes` lists the
+  member nodes at creation time (used when deleting a frame with its nodes).
 - Pbr3d settings may end with `output: Wrapped` (`PbrSettings(blend: Opaque, two_sided: false, shading: Lit, output:
   Wrapped)`): the output node takes one `MaterialAttributes (PBR)` input plus WPO. Omitted for the default `Default`.
 - A material may have an optional `preview: Preview(node: Some("n09"), mode: Unlit)` (omitted when no node is
@@ -410,6 +446,9 @@ Asset(
   that node replace the material output's in the generated WESL (W107); deleting the node clears it.
 - A function (`*.function.ron`, `kind: Function`) declares inputs with `output::FunctionInput` nodes and
   outputs with `output::FunctionOutput` nodes. Changing a function regenerates the dependent materials.
+  FunctionInput params: `name`, `type`, `default`, `required`, `order` (Sort Priority) and, for a `Float` input only,
+  `min` / `max` (Slider Min / Max): when `min < max`, that input of every call node gets an inline slider with this
+  range (editor only, no codegen effect; omitted from the file unless set).
 - A curve (`*.curve.ron`): `Curve(format_version: 1, name: "pulse", points: [(0.0, 0.0), (0.25, 1.0), (1.0, 0.0)])`
   — points sorted by `t`, clamped to `0..1`. It is generated into `autogen/curves/dir_<dir>/crv_<name>.wesl` (a
   const array of `(t, value, slope)` and `sample_curve_simple` / `sample_curve_catmullrom`); shaders import the one

@@ -52,11 +52,24 @@ pub struct ParamDef {
     pub label: String,
     pub kind: ParamKind,
     pub default: Value,
+    /// Shown in the editor only while another param has this value (`(key, value)`); the value is kept either way.
+    pub shown_if: Option<(String, Value)>,
 }
 
 impl ParamDef {
     pub fn new(id: &str, label: &str, kind: ParamKind, default: Value) -> Self {
-        ParamDef { id: id.into(), label: label.into(), kind, default }
+        ParamDef { id: id.into(), label: label.into(), kind, default, shown_if: None }
+    }
+
+    /// Show this param only while param `key` equals `value` (FunctionInput `min` / `max`, design §4.10).
+    pub fn shown_if(mut self, key: &'static str, value: Value) -> Self {
+        self.shown_if = Some((key.into(), value));
+        self
+    }
+
+    /// Whether the editor shows this param for the node's resolved `params` (defaults included).
+    pub fn visible(&self, params: &BTreeMap<String, Value>) -> bool {
+        self.shown_if.as_ref().is_none_or(|(key, value)| params.get(key) == Some(value))
     }
 }
 
@@ -345,6 +358,8 @@ pub struct FnPort {
     pub ty: PinType,
     pub default: Value,
     pub required: bool,
+    /// Slider range of a Float input (FunctionInput `min < max`, design §4.10); editor only, no codegen use.
+    pub range: Option<(f32, f32)>,
 }
 
 /// Callable signature of a project function.

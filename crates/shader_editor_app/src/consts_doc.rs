@@ -6,12 +6,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use shader_graph_core::Value;
 use shader_graph_core::consts::{ConstType, GlobalConst, GlobalConsts};
-use shader_project::{AssetId, AssetSet, Project, assets, ops};
+use shader_project::AssetId;
 
-use crate::doc_kind::{TabDoc, asset_title, io_error};
 use crate::history::History;
-use crate::tab::ViewKind;
-use crate::ui::icons::IconId;
 
 /// A fresh value for [`ConstsDoc::layout`]: unique across documents, so a closed and reopened table never looks
 /// like the view it had before.
@@ -164,80 +161,6 @@ impl ConstsDoc {
         self.mark_saved();
         self.history.clear();
         self.after_history();
-    }
-}
-
-impl TabDoc for ConstsDoc {
-    fn asset(&self) -> Option<&AssetId> {
-        Some(&self.id)
-    }
-
-    fn view(&self) -> ViewKind {
-        ViewKind::Consts
-    }
-
-    fn base_title(&self) -> String {
-        asset_title(&self.id)
-    }
-
-    fn icon(&self) -> IconId {
-        IconId::Consts
-    }
-
-    fn kind_label(&self) -> &'static str {
-        "consts"
-    }
-
-    fn is_dirty(&self) -> bool {
-        ConstsDoc::is_dirty(self)
-    }
-
-    fn is_read_only(&self) -> bool {
-        false
-    }
-
-    fn revision(&self) -> u64 {
-        self.revision
-    }
-
-    fn save(&mut self, project: &Project) -> std::io::Result<()> {
-        ops::save_consts(project, &self.id, &self.table).map_err(io_error)?;
-        self.mark_saved();
-        Ok(())
-    }
-
-    fn changed_on_disk(&self, project: &Project) -> bool {
-        assets::load_consts(project, &self.id).is_ok_and(|c| GlobalConsts::from_ron(&self.saved).ok() != Some(c))
-    }
-
-    fn reload_from_disk(&mut self, project: &Project) -> Result<(), String> {
-        self.reload(assets::load_consts(project, &self.id)?);
-        Ok(())
-    }
-
-    fn keep_mine(&mut self, project: &Project) {
-        if let Ok(on_disk) = assets::load_consts(project, &self.id) {
-            self.saved = on_disk.to_ron();
-        }
-    }
-
-    fn rename(&mut self, _project: &Project, from: &AssetId, to: &AssetId) {
-        if self.id != *from {
-            return;
-        }
-        self.id = to.clone();
-        self.table.name = to.name().to_string();
-        self.mark_saved();
-        self.revision += 1;
-        self.relayout();
-    }
-
-    fn config_key(&self) -> Option<String> {
-        Some(self.id.source_rel())
-    }
-
-    fn override_into(&self, set: &mut AssetSet) {
-        set.consts.insert(self.id.clone(), Ok(self.table.clone()));
     }
 }
 

@@ -205,6 +205,7 @@ impl Editor {
         {
             d.selection = [node.clone()].into();
             d.selected_frame = None;
+            d.enclosed_frames.clear();
             d.revision += 1;
             self.view_requests.retain(|v| *v != ViewRequest::FitAll);
             self.view_requests.push(ViewRequest::FitSelection);

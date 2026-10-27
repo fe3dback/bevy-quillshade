@@ -195,6 +195,7 @@ pub fn rock_wet() -> Asset {
         rect: (230.0 * SPREAD.0, 560.0 * SPREAD.1, 720.0 * SPREAD.0, 260.0 * SPREAD.1),
         nodes: vec![],
         color: None,
+        hue: None,
     });
     a
 }

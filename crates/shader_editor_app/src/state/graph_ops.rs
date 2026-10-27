@@ -1,5 +1,8 @@
 use super::*;
+use crate::doc::snap;
 use crate::droppable::{DroppableFile, Dropped, ImageFile, droppable_for};
+use shader_graph_core::model::Edge;
+use shader_stdlib::nodes::utility::{CURVE_PARAM, SAMPLE_CURVE_KIND};
 
 impl Editor {
     pub(super) fn copy(&mut self) {
@@ -50,6 +53,11 @@ impl Editor {
             (Some(p), Some(b)) => (p.0 - b.0, p.1 - b.1),
             _ => (step, step),
         };
+        // The first copied node lands on the grid (design §4.1); the others keep their places relative to it.
+        let offset = clip.nodes.values().next().map_or(offset, |n| {
+            let to = snap((n.pos.0 + offset.0, n.pos.1 + offset.1));
+            (to.0 - n.pos.0, to.1 - n.pos.1)
+        });
         d.paste(&clip, offset);
         self.ui.props += 1;
     }
@@ -65,8 +73,11 @@ impl Editor {
         if let Some(f) = d.selected_frame.take() {
             d.edit(|a| a.comments.retain(|c| c.id != f));
         } else {
+            // Frames enclosed by the selection go in the same step (design §4.5, one undo).
             let sel = d.selection.clone();
-            d.delete_nodes(&sel, registry);
+            let marked = std::mem::take(&mut d.enclosed_frames);
+            let frames = d.enclosed(&marked, &sel);
+            d.delete_nodes_and_frames(&sel, &frames, registry);
         }
         self.ui.props += 1;
     }
@@ -74,7 +85,7 @@ impl Editor {
     pub(super) fn add_node(&mut self, kind: &str, pos: (f32, f32), link: Option<Link>, params: &[(String, Value)]) {
         let Some(d) = self.doc_mut() else { return };
         let asset_kind = d.asset.kind;
-        let id = d.add_node_with(kind, pos, params);
+        let id = d.add_node_with(kind, snap(pos), params);
         if let Some(link) = link {
             let d = self.doc().expect("active graph");
             let path = d.id.path.clone();
@@ -102,34 +113,42 @@ impl Editor {
         let d = self.doc_mut().expect("active graph");
         d.selection = [id].into();
         d.selected_frame = None;
+        d.enclosed_frames.clear();
         self.ui.props += 1;
     }
 
-    /// A drop from a sidebar tree onto the active graph (design §4.3). A game file is resolved through its
+    /// A drop from a sidebar tree onto the active graph (design §4.3, §4.11). A game file is resolved through its
     /// [`DroppableFile`] (an image's Texture asset is created when there is none: on disk, outside the undo history);
-    /// a Texture asset / built-in texture is the reference itself. Over a node with a param of the droppable's kind
-    /// that param is set; otherwise (empty canvas or any other node) the droppable's node is added at `pos`. Either
-    /// way one undo step.
+    /// a Texture asset / built-in texture or a Curve asset is the reference itself. Over a node with a param of that
+    /// reference's kind the param is set; otherwise (empty canvas or any other node) the droppable's node is added at
+    /// `pos`. A Function asset always adds its call node, unless the call would be recursive (as in the palette).
+    /// Either way one undo step.
     pub(super) fn drop_item(&mut self, item: Dropped, pos: (f32, f32), node: Option<NodeId>) {
-        if self.doc().is_none() {
-            return;
-        }
-        let (kind, value): (&dyn DroppableFile, String) = match item {
+        let Some(d) = self.doc() else { return };
+        let (node_kind, param, param_kind, value) = match item {
             Dropped::GameFile(path) => {
                 let Some(kind) = droppable_for(&path) else {
                     return self.push_msg(Level::Warning, format!("`{path}` cannot be dropped onto a graph"));
                 };
                 match kind.resolve(self, &path) {
-                    Ok(value) => (kind, value),
+                    Ok(value) => (kind.node_kind(), kind.param(), kind.param_kind(), value),
                     Err(e) => return self.io_error(&format!("Cannot drop `assets/{path}`"), e),
                 }
             }
-            Dropped::Texture(value) => (&ImageFile, value),
+            Dropped::Texture(value) => (ImageFile.node_kind(), ImageFile.param(), ImageFile.param_kind(), value),
+            Dropped::Curve(value) => (SAMPLE_CURVE_KIND, CURVE_PARAM, ParamKind::Curve, value),
+            Dropped::Function(path) => {
+                if search::is_self_call(&path, &d.id.path) {
+                    let msg = format!("Function `{path}` cannot call itself (recursion)");
+                    return self.push_msg(Level::Warning, msg);
+                }
+                return self.add_node(&format!("{FUNCTION_PREFIX}{path}"), pos, None, &[]);
+            }
         };
         let target = node.and_then(|node| {
             let n = self.doc()?.asset.nodes.get(&node)?;
             let def = self.registry.get(&n.kind)?;
-            let param = def.params().into_iter().find(|p| p.kind == kind.param_kind())?;
+            let param = def.params().into_iter().find(|p| p.kind == param_kind)?;
             Some((node, param.id))
         });
         match target {
@@ -138,10 +157,11 @@ impl Editor {
                 if let Some(d) = self.doc_mut() {
                     d.selection = [node].into();
                     d.selected_frame = None;
+                    d.enclosed_frames.clear();
                 }
                 self.ui.props += 1;
             }
-            None => self.add_node(kind.node_kind(), pos, None, &[(kind.param().to_string(), Value::Str(value))]),
+            None => self.add_node(node_kind, pos, None, &[(param.to_string(), Value::Str(value))]),
         }
     }
 
@@ -156,6 +176,63 @@ impl Editor {
         if let Some(d) = self.doc_mut() {
             d.edit(|a| a.connect((&from.0, &from.1), (&to.0, &to.1)));
         }
+    }
+
+    /// Moves the wires of the pin `from` (an output when `output`) to the pin `to` of the same direction (Ctrl+LMB
+    /// drag, decision 0032): an input's single wire becomes `src → to` (replacing a wire already into `to`); every
+    /// wire of an output becomes `to → dst`. All or nothing: `to` of the other direction, or any rewired wire the
+    /// connection check refuses, changes nothing and logs the first failing wire. Otherwise one undo step.
+    pub(super) fn move_wires(&mut self, from: (NodeId, String), output: bool, to: (NodeId, String)) {
+        let Some(d) = self.doc() else { return };
+        if from == to {
+            return;
+        }
+        let path = d.id.path.clone();
+        let mut tmp = d.asset.clone();
+        let label = |asset: &Asset, (node, pin): &(NodeId, String)| {
+            format!("{}.{pin}", crate::canvas::node_title(self, asset, node))
+        };
+        let sig = node_signature(&tmp, &to.0, &self.registry, &self.functions, &path);
+        let fits = sig.is_some_and(|s| if output { s.output(&to.1).is_some() } else { s.input(&to.1).is_some() });
+        if !fits {
+            let dir = if output { "an output" } else { "an input" };
+            let msg = format!("Wires not moved: {} is not {dir}", label(&tmp, &to));
+            return self.push_msg(Level::Warning, msg);
+        }
+        let at_pin = |e: &Edge| if output { e.from == from } else { e.to == from };
+        let rewired: Vec<Edge> = tmp
+            .edges
+            .iter()
+            .filter(|e| at_pin(e))
+            .map(|e| if output { Edge { from: to.clone(), ..e.clone() } } else { Edge { to: to.clone(), ..e.clone() } })
+            .collect();
+        if rewired.is_empty() {
+            return;
+        }
+        // Checked one by one against the graph without the old wires, each accepted one added before the next.
+        tmp.edges.retain(|e| !at_pin(e));
+        for e in &rewired {
+            let (f, t) = ((e.from.0.as_str(), e.from.1.as_str()), (e.to.0.as_str(), e.to.1.as_str()));
+            if let Some(why) = connection_error(&tmp, f, t, &self.registry, &self.functions, &path) {
+                let msg = format!("Wires not moved: {} → {}: {why}", label(&tmp, &e.from), label(&tmp, &e.to));
+                return self.push_msg(Level::Warning, msg);
+            }
+            tmp.connect(f, t);
+        }
+        let Some(d) = self.doc_mut() else { return };
+        d.edit(|a| {
+            if !output {
+                // The wire already into `to` is replaced, as by a plain connect.
+                a.edges.retain(|e| e.to != to);
+            }
+            for e in a.edges.iter_mut() {
+                match output {
+                    true if e.from == from => e.from = to.clone(),
+                    false if e.to == from => e.to = to.clone(),
+                    _ => {}
+                }
+            }
+        });
     }
 
     /// Value a property widget shows: the stored one, or the pin's default.
@@ -203,6 +280,12 @@ impl Editor {
             PropTarget::FrameTitle(id) => {
                 d.asset.comments.iter().find(|f| f.id == *id).map(|f| Value::Str(f.title.clone()))
             }
+            PropTarget::FrameHue(id) => d
+                .asset
+                .comments
+                .iter()
+                .find(|f| f.id == *id)
+                .map(|f| f.hue.map_or(Value::Str(String::new()), Value::Float)),
             _ => None,
         }
     }
@@ -241,6 +324,8 @@ impl Editor {
                 }
                 Value::Color(v)
             }
+            // A frame without a hue gets one from its slider.
+            Value::Str(_) if matches!(target, PropTarget::FrameHue(_)) => Value::Float(value),
             other => other,
         };
         self.set_value(target, new, true);
@@ -687,6 +772,19 @@ impl Editor {
                     }
                 });
                 refresh = false;
+            }
+            PropTarget::FrameHue(id) => {
+                let hue = match &value {
+                    Value::Float(h) => Some(h.clamp(0.0, 360.0)),
+                    _ => None,
+                };
+                d.edit_merge(key, |a| {
+                    if let Some(f) = a.comments.iter_mut().find(|f| f.id == *id) {
+                        f.hue = hue;
+                    }
+                });
+                // A slider drag must not rebuild its own sidebar; "Default colour" moves the slider back.
+                refresh = hue.is_none();
             }
             PropTarget::CurvePoint(_)
             | PropTarget::OutputMode

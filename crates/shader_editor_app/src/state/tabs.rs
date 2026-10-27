@@ -20,6 +20,7 @@ impl Editor {
         self.active = None;
         self.diags.clear();
         self.regen_only.clear();
+        self.wesl_lines.clear();
         self.current_folder.clear();
         self.rescan();
         self.refresh_game_files();
@@ -144,6 +145,10 @@ impl Editor {
         }
         match assets::load(project, id) {
             Ok(a) => {
+                // The statusbar's WESL line count before this session regenerates the asset.
+                if let Some(text) = wesl_file(project, id).and_then(|f| std::fs::read_to_string(f).ok()) {
+                    self.wesl_lines.insert(id.clone(), text.lines().count());
+                }
                 self.tabs.push(Tab::Graph(Doc::new(id.clone(), a)));
                 self.activate(self.tabs.len() - 1);
                 self.view_requests.push(ViewRequest::FitAll);
@@ -195,15 +200,30 @@ impl Editor {
     /// Re-reads the files of read-only tabs (after regeneration; each one also on activation).
     pub(super) fn reload_read_only_tabs(&mut self) {
         let Some(project) = &self.project else { return };
-        let mut changed = false;
-        for t in self.tabs.iter_mut().map(Tab::doc_mut).filter(|t| t.is_read_only()) {
+        let (mut changed, mut active_changed) = (false, false);
+        for (i, t) in self.tabs.iter_mut().map(Tab::doc_mut).enumerate().filter(|(_, t)| t.is_read_only()) {
             let revision = t.revision();
             // A missing file is shown as such; nothing to report here.
             let _ = t.reload_from_disk(project);
             changed |= t.revision() != revision;
+            active_changed |= t.revision() != revision && self.active == Some(i);
         }
         if changed {
             self.ui.tabs += 1;
+        }
+        // The right sidebar of the active tab shows the file (a text tab's line count).
+        if active_changed {
+            self.ui.props += 1;
+        }
+        self.note_wesl_text();
+    }
+
+    /// Line counts of the generated WESL that text tabs show (the file as last read).
+    fn note_wesl_text(&mut self) {
+        for t in self.tabs.iter().filter_map(Tab::text).filter(|t| t.lang == Lang::Wesl) {
+            if let Some(text) = &t.text {
+                self.wesl_lines.insert(t.source.clone(), text.lines().count());
+            }
         }
     }
 
@@ -213,6 +233,7 @@ impl Editor {
                 && self.tabs[i].doc().is_read_only()
             {
                 let _ = self.tabs[i].doc_mut().reload_from_disk(project);
+                self.note_wesl_text();
             }
             self.active = Some(i);
             self.ui.tabs += 1;

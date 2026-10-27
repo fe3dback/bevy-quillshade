@@ -76,6 +76,9 @@ pub enum PropTarget {
     /// Editor-only label of a constant node (decision 0021).
     NodeLabel(NodeId),
     FrameTitle(String),
+    /// Hue of a comment frame (`Frame::hue`, design §4.6): a `Float` in degrees, a `Str` when unset (any non-float
+    /// value clears it: "Default colour").
+    FrameHue(String),
     /// `(t, value)` of a point of the active curve, as a `Float2`.
     CurvePoint(usize),
     /// Interpolation the active curve view draws (editor-only).
@@ -278,6 +281,9 @@ pub enum Action {
     SelectAll,
     Select(BTreeSet<NodeId>),
     SelectFrame(Option<String>),
+    /// Frames selected on the canvas together with the node selection (pushed after [`Action::Select`]); only
+    /// those whose nodes are all selected are kept in [`Doc::enclosed_frames`](crate::doc::Doc::enclosed_frames).
+    SelectFrames(BTreeSet<String>),
     AddNode {
         kind: String,
         pos: (f32, f32),
@@ -292,11 +298,19 @@ pub enum Action {
     Disconnect {
         to: (NodeId, String),
     },
-    /// Removes every wire at a pin (Ctrl+LMB on it).
+    /// Removes every wire at a pin (Alt+LMB on it).
     DisconnectPin {
         node: NodeId,
         pin: String,
         output: bool,
+    },
+    /// Moves the wires of a pin to another pin of the same direction (Ctrl+LMB drag, decision 0032): an input's
+    /// single wire to the input `to`, or every wire of an output to the output `to`. All or nothing, one undo step.
+    MoveWires {
+        node: NodeId,
+        pin: String,
+        output: bool,
+        to: (NodeId, String),
     },
     /// Final node/frame positions after a drag (one undo step).
     Moved {
@@ -430,6 +444,9 @@ pub struct Editor {
     pub project_diags: Vec<Diagnostic>,
     /// E008/E010 from the last real regeneration (not reproduced by dry runs).
     pub(super) regen_only: BTreeMap<AssetId, Vec<Diagnostic>>,
+    /// Line count of each asset's generated `.wesl` (the editor statusbar, design §2.3): taken from what
+    /// regeneration writes, read once when a graph tab opens and refreshed whenever a generated WESL tab is read.
+    pub wesl_lines: HashMap<AssetId, usize>,
     pub messages: Vec<Message>,
     pub bevy: Option<BevySources>,
     pub(super) validated: Option<Vec<(AssetId, u64)>>,
@@ -470,6 +487,7 @@ impl Default for Editor {
             diags: BTreeMap::new(),
             project_diags: Vec::new(),
             regen_only: BTreeMap::new(),
+            wesl_lines: HashMap::new(),
             messages: Vec::new(),
             bevy: None,
             validated: None,

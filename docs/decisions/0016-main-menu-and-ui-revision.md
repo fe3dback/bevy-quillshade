@@ -25,6 +25,7 @@ to the picker; the accent colour was blue and defined twice (the tint of line ic
   Discard / Save); the active tab stays active, or its nearest kept right neighbour takes over.
 - Ctrl+LMB on a pin removes every wire at it (`Action::DisconnectPin`, outputs included); on a wire, removes the
   wire. bevy_noodle starts wires only on drag start, so a click on a port with Ctrl does not begin a connection.
+  *Superseded by 0032:* Alt+LMB (UE) instead of Ctrl+LMB; Ctrl+drag from a pin now moves its wires.
 - Inline Float3/Float4/Color editors on nodes are the color picker alone; exact component values are edited in
   Properties (supersedes that part of decision 0012).
 - Curve view drags (supersedes the Shift/Ctrl toggle of decision 0015): X / Y held lock the movement to that axis

@@ -35,6 +35,9 @@ the node is defined, but `shader_graph_core` and `shader_stdlib` must stay free 
   map to the `Shift` hotkeys. Like the other shortcuts they are ignored while a text field has the focus or a
   dialog / the palette is open (`not_typing`). bevy_noodle's keyboard zoom (`Equal` / `Minus`) is not enabled in
   the editor, so there is no clash.
+  *Update (decision 0032):* the mapping is the graph editor's input context (`editors::graph`, actions
+  `ConvertPlus` … `ConvertSlash`, `PreviewNode`); the keys are hidden from it while typing by
+  `editors::main_input::gate_keyboard`, and Ctrl / Alt / Super held blocks them.
 - **`V` toggles on release.** Holding `V` + LMB on empty canvas already drops a Vector parameter (`hotkey_node`), so
   `V` cannot act on press: `ui::input::PreviewKey` remembers the press, `canvas_click` marks it when it drops a node
   while `V` is held, and the release toggles only when nothing was placed meanwhile.

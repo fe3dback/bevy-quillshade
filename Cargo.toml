@@ -14,6 +14,8 @@ license = "MIT"
 # system_clipboard: paste from / copy to other applications (without it the clipboard is in-app only)
 bevy = { version = "0.20.0", features = ["bevy_feathers", "system_clipboard", "dynamic_linking"] }
 bevy_noodle = { version = "0.5.0", features = ["default_style", "scene"] }
+# Input contexts of the editor (decision 0032).
+bevy_enhanced_input = { version = "0.27", default-features = false }
 wesl = { version = "0.6", features = ["naga-ext"] }
 naga = { version = "30", features = ["wgsl-in"] }
 serde = { version = "1", features = ["derive"] }

@@ -8,6 +8,7 @@ license = { workspace = true }
 [dependencies]
 bevy = { workspace = true }
 bevy_noodle = { workspace = true }
+bevy_enhanced_input = { workspace = true }
 shader_graph_core = { workspace = true }
 shader_stdlib = { workspace = true }
 shader_project = { workspace = true }

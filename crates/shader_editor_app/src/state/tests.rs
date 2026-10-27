@@ -842,6 +842,37 @@ fn generated_files_open_in_text_tabs() {
     assert_eq!(e.tabs[0].owner(), Some(&mask));
 }
 
+/// Regeneration rewriting the file of the active text tab rebuilds its right sidebar (the "N lines" row is keyed on
+/// `ui.props`).
+#[test]
+fn regenerated_active_text_tab_refreshes_sidebar() {
+    let (_dir, mut e) = project();
+    e.regenerate();
+    let rock = AssetId::new(AssetType::Material, "env/rock_wet");
+    e.apply(Action::OpenAsset(rock.clone()));
+    e.apply(Action::ShowGenerated(rock, Lang::Wesl));
+    let lines = |e: &Editor| e.tabs[1].text().unwrap().text.as_deref().unwrap().lines().count();
+    let before = lines(&e);
+    // The graph stripped down to its output node, saved without regenerating.
+    e.apply(Action::ActivateTab(0));
+    e.apply(Action::SelectAll);
+    e.apply(Action::DeleteSelection);
+    assert!(e.save(0));
+    e.apply(Action::ActivateTab(1));
+    let props = e.ui.props;
+    e.apply(Action::RegenAll);
+    assert_ne!(lines(&e), before, "the WESL line count changed");
+    assert_ne!(e.ui.props, props, "the active text tab's sidebar is rebuilt");
+    // A reload of an inactive text tab leaves the sidebar alone.
+    e.apply(Action::ActivateTab(0));
+    let (path, text) = (e.tabs[1].text().unwrap().path.clone(), e.tabs[1].text().unwrap().text.clone());
+    std::fs::write(&path, format!("{}// stale\n", text.as_deref().unwrap())).unwrap();
+    let props = e.ui.props;
+    e.apply(Action::RegenAll);
+    assert_eq!(e.tabs[1].text().unwrap().text, text, "reloaded");
+    assert_eq!(e.ui.props, props);
+}
+
 #[test]
 fn clicking_a_diagnostic_opens_its_asset() {
     let (_dir, mut e) = project();
@@ -1300,6 +1331,112 @@ fn tab_doc_dispatch_matches_kinds() {
     assert_eq!(e.asset_index(&tuning), Some(3));
 }
 
+/// The editor statusbar's data (design §2.3): unsaved marker, this asset's errors / warnings, a node count and the
+/// generated WESL's line count.
+#[test]
+fn status_of_graph_counts_nodes_and_diagnostics() {
+    let (dir, mut e) = project();
+    let rock = AssetId::new(AssetType::Material, "env/rock_wet");
+    e.apply(Action::OpenAsset(rock.clone()));
+    let status = e.status_info().expect("a graph tab has a statusbar");
+    assert!(!status.dirty);
+    assert!(!status.counts.iter().any(|c| c.ends_with("WESL lines")), "not generated yet: {:?}", status.counts);
+    // An unconnected node: a warning of this asset.
+    e.apply(Action::AddNode { kind: "stdlib::Time".into(), pos: (0.0, 0.0), link: None, params: Vec::new() });
+    e.validate();
+    let status = e.status_info().unwrap();
+    assert!(status.dirty);
+    assert_eq!(status.counts[0], format!("{} nodes", e.doc().unwrap().asset.nodes.len()));
+    let own: Vec<&Diagnostic> = e.diags.get(&rock).into_iter().flatten().collect();
+    assert_eq!(status.errors, own.iter().filter(|d| d.is_error()).count());
+    assert_eq!(status.warnings, own.iter().filter(|d| !d.is_error()).count());
+    assert!(status.warnings > 0, "{own:?}");
+
+    e.apply(Action::RegenAll);
+    let wesl = std::fs::read_to_string(dir.path().join("assets/shaders/autogen/dir_env/mat_rock_wet.wesl")).unwrap();
+    let status = e.status_info().unwrap();
+    assert!(status.counts.contains(&format!("{} WESL lines", wesl.lines().count())), "{:?}", status.counts);
+
+    // A preview writes the asset's WESL from memory (a scoped regeneration): the count follows the file.
+    let lerp = add_lerp(&mut e);
+    e.apply(Action::Select([lerp].into()));
+    press_v(&mut e);
+    let previewed = std::fs::read_to_string(rock_wet_wesl(&e)).unwrap();
+    assert_ne!(previewed.lines().count(), wesl.lines().count());
+    let lines = format!("{} WESL lines", previewed.lines().count());
+    assert!(e.status_info().unwrap().counts.contains(&lines), "{:?}", e.status_info().unwrap().counts);
+    e.apply(Action::DiscardTab(e.active.unwrap()));
+
+    // Known for a tab opened later (the file is read once) and refreshed with a generated text tab.
+    let mut next = Editor::default();
+    next.open_project(dir.path()).unwrap();
+    next.apply(Action::OpenAsset(rock.clone()));
+    assert!(next.status_info().unwrap().counts.contains(&format!("{} WESL lines", wesl.lines().count())));
+    let path = dir.path().join("assets/shaders/autogen/dir_env/mat_rock_wet.wesl");
+    std::fs::write(&path, format!("{wesl}// one more\n")).unwrap();
+    next.apply(Action::ShowGenerated(rock.clone(), Lang::Wesl));
+    next.apply(Action::ActivateTab(0));
+    let lines = format!("{} WESL lines", wesl.lines().count() + 1);
+    assert!(next.status_info().unwrap().counts.contains(&lines), "{:?}", next.status_info().unwrap().counts);
+}
+
+#[test]
+fn status_of_curve_and_consts() {
+    let (_dir, mut e) = project();
+    e.apply(Action::OpenAsset(pulse()));
+    let points = e.curve_doc().unwrap().curve.points.len();
+    let status = e.status_info().expect("a curve tab has a statusbar");
+    assert_eq!(status.counts, vec![format!("{points} points")]);
+    assert!(!status.dirty);
+    e.apply(Action::OpenAsset(tuning()));
+    let rows = e.consts_doc().unwrap().table.consts.len();
+    let status = e.status_info().expect("a consts tab has a statusbar");
+    assert_eq!(status.counts, vec![format!("{rows} constants")]);
+}
+
+#[test]
+fn no_status_for_read_only_kinds() {
+    let (dir, mut e) = project();
+    e.regenerate();
+    let rock = AssetId::new(AssetType::Material, "env/rock_wet");
+    e.apply(Action::ShowGenerated(rock.clone(), Lang::Wesl));
+    assert!(e.tab().and_then(Tab::text).is_some());
+    assert_eq!(e.status_info(), None, "generated WESL");
+    let path = "textures/env/rock.png";
+    let file = dir.path().join("assets").join(path);
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, b"not decoded by the editor state").unwrap();
+    e.refresh_game_files();
+    e.apply(Action::OpenGameImage(path.into()));
+    assert!(e.tab().and_then(Tab::image).is_some());
+    assert_eq!(e.status_info(), None, "game image");
+    e.apply(Action::OpenAsset(AssetId::new(AssetType::Texture, "textures/rock_albedo")));
+    assert!(e.texture_doc().is_some());
+    assert_eq!(e.status_info(), None, "texture");
+    e.close_tab(usize::MAX, true);
+    e.close_tab(usize::MAX, true);
+    e.close_tab(usize::MAX, true);
+    assert_eq!(e.status_info(), None, "no tab");
+}
+
+#[test]
+fn watermark_per_kind() {
+    let (_dir, mut e) = project();
+    e.regenerate();
+    let rock = AssetId::new(AssetType::Material, "env/rock_wet");
+    let mask = AssetId::new(AssetType::Function, "common/wet_mask");
+    e.apply(Action::OpenAsset(rock.clone()));
+    e.apply(Action::OpenAsset(mask.clone()));
+    e.apply(Action::ShowGenerated(rock.clone(), Lang::Wesl));
+    e.apply(Action::ShowGenerated(rock.clone(), Lang::Rust));
+    e.apply(Action::OpenAsset(pulse()));
+    e.apply(Action::OpenAsset(tuning()));
+    e.apply(Action::OpenAsset(AssetId::new(AssetType::Texture, "textures/rock_albedo")));
+    let marks: Vec<_> = e.tabs.iter().map(|t| t.doc().watermark()).collect();
+    let expected = ["pbr3d", "function", "wesl", "rust", "curve", "consts", "texture"];
+    assert_eq!(marks, expected.map(Some));
+}
+
 #[test]
 fn keep_mine_takes_the_file_as_saved_baseline() {
     let (_dir, mut e) = project();
@@ -1702,7 +1839,7 @@ fn texture_tab_edit_undo_redo() {
     let doc = e.tab().unwrap().doc();
     assert_eq!(doc.view(), ViewKind::Texture);
     assert_eq!(doc.asset(), Some(&id));
-    assert_eq!(doc.kind_label(), "texture");
+    assert_eq!(doc.watermark(), Some("texture"));
     assert_eq!(doc.base_title(), "shaders/textures/rock_albedo.texture");
     assert!(!doc.is_read_only() && !doc.is_dirty());
     assert_eq!(parse_config_key(&doc.config_key().unwrap()), Some(TabKey::Asset(id.clone())));
@@ -1951,7 +2088,7 @@ fn drop_image_creates_texture_asset_and_node() {
     let added = nodes_of(&e, "stdlib::TextureSample");
     assert_eq!(added.len(), 1);
     let d = e.doc().unwrap();
-    assert_eq!(d.asset.nodes[&added[0]].pos, (12.0, 34.0));
+    assert_eq!(d.asset.nodes[&added[0]].pos, (10.0, 35.0), "snapped to the 5-unit grid");
     assert_eq!(param_of(&e, &added[0], "texture"), Some(Value::Str("textures/env/rock_albedo".into())));
     assert_eq!(e.doc().unwrap().selection, [added[0].clone()].into());
     assert_eq!(e.referenced_asset(&added[0]), Some(id));
@@ -2038,6 +2175,151 @@ fn drop_on_other_node_adds_new_node() {
     assert_eq!(added.len(), 1);
     assert_eq!(e.doc().unwrap().asset.nodes[&added[0]].pos, (40.0, 50.0));
     assert_eq!(param_of(&e, &added[0], "texture"), Some(Value::Str("textures/env/rock_albedo".into())));
+}
+
+/// Design §4.11: a Function asset of the Project tree dropped onto a graph adds a call node at the drop point.
+#[test]
+fn drop_function_adds_call_node() {
+    use crate::droppable::Dropped;
+    use crate::ui::tree::{TreeItem, TreeRow};
+    let (_dir, mut e) = project();
+    let row = |id| TreeRow { tree: TreeId::Project, item: TreeItem::Asset(id) };
+    let mask = AssetId::new(AssetType::Function, "common/wet_mask");
+    assert_eq!(Dropped::from_row(&row(mask)), Some(Dropped::Function("common/wet_mask".into())));
+    let consts = AssetId::new(AssetType::Consts, "common/globals");
+    assert_eq!(Dropped::from_row(&row(consts)), None, "other asset kinds are not droppable");
+
+    open_rock_wet(&mut e);
+    let kind = "function::common/wet_mask";
+    let before = nodes_of(&e, kind).len();
+    let out = output_node(&e);
+    let item = Dropped::Function("common/wet_mask".into());
+    // Over another node: still a new node at the drop point.
+    e.apply(Action::Drop { item, pos: (12.0, 34.0), node: Some(out) });
+    let added: Vec<NodeId> =
+        nodes_of(&e, kind).into_iter().filter(|n| e.doc().unwrap().selection.contains(n)).collect();
+    assert_eq!(nodes_of(&e, kind).len(), before + 1);
+    assert_eq!(added.len(), 1, "the new call node is selected");
+    assert_eq!(e.doc().unwrap().asset.nodes[&added[0]].pos, (10.0, 35.0), "snapped to the 5-unit grid");
+    e.apply(Action::Undo);
+    assert_eq!(nodes_of(&e, kind).len(), before, "one undo step");
+}
+
+/// Design §4.11: a function graph cannot call itself, as in the palette.
+#[test]
+fn drop_function_into_itself_is_rejected() {
+    use crate::droppable::Dropped;
+    let (_dir, mut e) = project();
+    e.apply(Action::OpenAsset(AssetId::new(AssetType::Function, "common/wet_mask")));
+    let before = e.doc().unwrap().asset.clone();
+    let warnings = e.messages.iter().filter(|m| m.level == Level::Warning).count();
+    let item = Dropped::Function("common/wet_mask".into());
+    e.apply(Action::Drop { item, pos: (0.0, 0.0), node: None });
+    assert_eq!(e.doc().unwrap().asset, before, "nothing added");
+    assert!(!e.is_dirty());
+    let new: Vec<&Message> = e.messages.iter().filter(|m| m.level == Level::Warning).skip(warnings).collect();
+    assert!(new.len() == 1 && new[0].text.contains("common/wet_mask"), "{new:?}");
+
+    // Another function is fine.
+    let item = Dropped::Function("common/tex_layer".into());
+    e.apply(Action::Drop { item, pos: (0.0, 0.0), node: None });
+    assert_eq!(nodes_of(&e, "function::common/tex_layer").len(), 1);
+}
+
+/// Design §4.11: a Curve asset on empty canvas adds a Sample Curve node reading it.
+#[test]
+fn drop_curve_adds_sample_curve() {
+    use crate::droppable::Dropped;
+    use crate::ui::tree::{TreeItem, TreeRow};
+    let (_dir, mut e) = project();
+    let pulse = AssetId::new(AssetType::Curve, "common/pulse");
+    let row = TreeRow { tree: TreeId::Project, item: TreeItem::Asset(pulse.clone()) };
+    assert_eq!(Dropped::from_row(&row), Some(Dropped::Curve("common/pulse".into())));
+
+    open_rock_wet(&mut e);
+    let before = nodes_of(&e, "stdlib::SampleCurve");
+    e.apply(Action::Drop { item: Dropped::Curve("common/pulse".into()), pos: (21.0, 9.0), node: None });
+    let added: Vec<NodeId> = nodes_of(&e, "stdlib::SampleCurve").into_iter().filter(|n| !before.contains(n)).collect();
+    assert_eq!(added.len(), 1);
+    assert_eq!(e.doc().unwrap().asset.nodes[&added[0]].pos, (20.0, 10.0));
+    assert_eq!(param_of(&e, &added[0], "curve"), Some(Value::Str("common/pulse".into())));
+    assert_eq!(e.doc().unwrap().selection, [added[0].clone()].into());
+    assert_eq!(e.referenced_asset(&added[0]), Some(pulse));
+}
+
+/// Design §4.11 / Review Focus 4: a Curve dropped onto a node with a curve param sets it, in one undo step.
+#[test]
+fn drop_curve_on_sample_curve_sets_param() {
+    use crate::droppable::Dropped;
+    let (_dir, mut e) = project();
+    open_rock_wet(&mut e);
+    let sample = add(&mut e, "stdlib::SampleCurve");
+    e.apply(Action::Drop { item: Dropped::Curve("common/pulse".into()), pos: (0.0, 0.0), node: Some(sample.clone()) });
+    assert_eq!(param_of(&e, &sample, "curve"), Some(Value::Str("common/pulse".into())));
+    let count = e.doc().unwrap().asset.nodes.len();
+    e.apply(Action::Drop { item: Dropped::Curve("common/steps".into()), pos: (0.0, 0.0), node: Some(sample.clone()) });
+    assert_eq!(e.doc().unwrap().asset.nodes.len(), count, "no node added");
+    assert_eq!(param_of(&e, &sample, "curve"), Some(Value::Str("common/steps".into())));
+    assert_eq!(e.doc().unwrap().selection, [sample.clone()].into());
+    e.apply(Action::Undo);
+    assert_eq!(param_of(&e, &sample, "curve"), Some(Value::Str("common/pulse".into())), "one undo step");
+    assert_eq!(e.doc().unwrap().asset.nodes.len(), count);
+
+    // A node without a curve param: a new Sample Curve node instead.
+    let out = output_node(&e);
+    e.apply(Action::Drop { item: Dropped::Curve("common/steps".into()), pos: (0.0, 0.0), node: Some(out) });
+    assert_eq!(e.doc().unwrap().asset.nodes.len(), count + 1);
+}
+
+/// Design §4.1: new nodes land on the 5-unit grid; a paste moves its first node onto it and keeps the layout.
+#[test]
+fn added_and_pasted_nodes_are_snapped() {
+    let (_dir, mut e) = project();
+    open_rock_wet(&mut e);
+    let add = |e: &mut Editor, pos| {
+        let before: Vec<_> = e.doc().unwrap().asset.nodes.keys().cloned().collect();
+        e.apply(Action::AddNode { kind: "stdlib::Constant".into(), pos, link: None, params: Vec::new() });
+        e.doc().unwrap().asset.nodes.keys().find(|k| !before.contains(k)).unwrap().clone()
+    };
+    let a = add(&mut e, (12.3, 7.6));
+    assert_eq!(e.doc().unwrap().asset.nodes[&a].pos, (10.0, 10.0));
+    let b = add(&mut e, (0.0, 0.0));
+    // Off-grid like a node of an older file (positions are not rewritten on load).
+    let moved = vec![(a.clone(), (3.3, 4.4)), (b.clone(), (103.3, 54.4))];
+    e.apply(Action::Moved { nodes: moved, frames: Vec::new() });
+    let on_grid = |p: (f32, f32)| p.0 % 5.0 == 0.0 && p.1 % 5.0 == 0.0;
+    let check = |e: &Editor| {
+        let d = e.doc().unwrap();
+        let mut pasted: Vec<(f32, f32)> = d.selection.iter().map(|id| d.asset.nodes[id].pos).collect();
+        pasted.sort_by(|p, q| p.0.total_cmp(&q.0));
+        assert_eq!(pasted.len(), 2);
+        assert!(pasted.iter().all(|p| on_grid(*p)), "{pasted:?}");
+        let rel = (pasted[1].0 - pasted[0].0, pasted[1].1 - pasted[0].1);
+        assert!((rel.0 - 100.0).abs() < 1e-3 && (rel.1 - 50.0).abs() < 1e-3, "layout kept: {rel:?}");
+        pasted[0]
+    };
+    e.apply(Action::Select([a.clone(), b.clone()].into()));
+    e.apply(Action::Copy);
+    e.apply(Action::Paste(Some((33.0, 1.0))));
+    assert_eq!(check(&e), (35.0, 0.0));
+    e.apply(Action::Paste(None));
+    check(&e);
+    e.apply(Action::Select([a].into()));
+    e.apply(Action::Duplicate);
+    let d = e.doc().unwrap();
+    assert!(on_grid(d.asset.nodes[d.selection.first().unwrap()].pos));
+
+    // A reroute on a wire and a comment frame at the cursor are placed on the grid too.
+    let out = output_node(&e);
+    let before: Vec<_> = e.doc().unwrap().asset.nodes.keys().cloned().collect();
+    e.apply(Action::AddReroute { from: (b, "out".into()), to: (out, "metallic".into()), pos: (-41.0, 22.6) });
+    let d = e.doc().unwrap();
+    let r = d.asset.nodes.iter().find(|(k, _)| !before.contains(k)).unwrap().1;
+    assert_eq!((r.kind.as_str(), r.pos), ("stdlib::Reroute", (-40.0, 25.0)));
+    e.apply(Action::Select(BTreeSet::new()));
+    e.apply(Action::AddComment(Some((12.3, -7.6))));
+    let f = e.doc().unwrap().asset.comments.last().unwrap();
+    assert_eq!((f.rect.0, f.rect.1), (10.0, -10.0));
 }
 
 #[test]
@@ -2203,4 +2485,358 @@ fn texture_tab_presets_mode_and_channels() {
     e.apply(Action::TextureChannel(Some(7)));
     assert_eq!(texture_doc(&e).channel, None, "out of range: the whole image");
     assert!(!e.is_dirty());
+}
+
+/// A click on the editor statusbar's problem count focuses what the first console/logs row of this asset focuses.
+#[test]
+fn statusbar_problem_is_first_diagnostic_of_active_asset() {
+    let (_dir, mut e) = project();
+    assert!(e.active_first_diagnostic().is_none(), "no tab");
+    let rock = AssetId::new(AssetType::Material, "env/rock_wet");
+    e.apply(Action::OpenAsset(rock.clone()));
+    e.apply(Action::AddNode { kind: "stdlib::Time".into(), pos: (0.0, 0.0), link: None, params: Vec::new() });
+    e.validate();
+    let first = e.diags.get(&rock).and_then(|d| d.first()).expect("rock_wet has warnings");
+    assert_eq!(e.active_first_diagnostic(), Some(first));
+    e.apply(Action::OpenAsset(pulse()));
+    assert!(e.active_first_diagnostic().is_none(), "the curve has no problems");
+}
+
+// Ctrl+LMB drag moves wires (decision 0032).
+
+fn edges(e: &Editor) -> Vec<(NodeId, String, NodeId, String)> {
+    let d = e.doc().unwrap();
+    let mut v: Vec<_> =
+        d.asset.edges.iter().map(|x| (x.from.0.clone(), x.from.1.clone(), x.to.0.clone(), x.to.1.clone())).collect();
+    v.sort();
+    v
+}
+
+fn connect(e: &mut Editor, from: &NodeId, from_pin: &str, to: &NodeId, to_pin: &str) {
+    e.apply(Action::Connect { from: (from.clone(), from_pin.into()), to: (to.clone(), to_pin.into()) });
+    let source = e.doc().unwrap().asset.edge_into(to, to_pin).map(|x| x.from.clone());
+    assert_eq!(source, Some((from.clone(), from_pin.into())));
+}
+
+fn move_wires(node: &NodeId, pin: &str, output: bool, to: (&NodeId, &str)) -> Action {
+    Action::MoveWires { node: node.clone(), pin: pin.into(), output, to: (to.0.clone(), to.1.into()) }
+}
+
+#[test]
+fn move_input_wire_to_another_input() {
+    let (_dir, mut e) = project();
+    e.apply(Action::OpenAsset(AssetId::new(AssetType::Material, "env/rock_wet")));
+    let (a, b, c) = (add(&mut e, "stdlib::Constant"), add(&mut e, "stdlib::Lerp"), add(&mut e, "stdlib::Lerp"));
+    connect(&mut e, &a, "out", &b, "a");
+    let before = edges(&e);
+    e.apply(move_wires(&b, "a", false, (&c, "b")));
+    let d = e.doc().unwrap();
+    assert!(d.asset.edge_into(&b, "a").is_none());
+    let moved = d.asset.edge_into(&c, "b").expect("moved");
+    assert_eq!(moved.from, (a.clone(), "out".into()));
+    assert_eq!(edges(&e).len(), before.len());
+    e.apply(Action::Undo);
+    assert_eq!(edges(&e), before, "one undo step");
+}
+
+#[test]
+fn move_output_wires_to_another_output() {
+    let (_dir, mut e) = project();
+    e.apply(Action::OpenAsset(AssetId::new(AssetType::Material, "env/rock_wet")));
+    let (a, d) = (add(&mut e, "stdlib::Constant"), add(&mut e, "stdlib::Constant"));
+    let (b, c) = (add(&mut e, "stdlib::Lerp"), add(&mut e, "stdlib::Lerp"));
+    connect(&mut e, &a, "out", &b, "a");
+    connect(&mut e, &a, "out", &c, "b");
+    let before = edges(&e);
+    e.apply(move_wires(&a, "out", true, (&d, "out")));
+    let asset = &e.doc().unwrap().asset;
+    assert!(!asset.edges.iter().any(|x| x.from.0 == a), "{:?}", asset.edges);
+    assert_eq!(asset.edge_into(&b, "a").unwrap().from, (d.clone(), "out".into()));
+    assert_eq!(asset.edge_into(&c, "b").unwrap().from, (d.clone(), "out".into()));
+    e.apply(Action::Undo);
+    assert_eq!(edges(&e), before, "one undo step");
+}
+
+#[test]
+fn move_wires_rejects_incompatible() {
+    let (_dir, mut e) = project();
+    e.apply(Action::OpenAsset(AssetId::new(AssetType::Material, "env/rock_wet")));
+    let out = output_node(&e);
+    let (v3, lerp) = (add(&mut e, "stdlib::Constant3Vector"), add(&mut e, "stdlib::Lerp"));
+    let make = add(&mut e, "stdlib::MakeMaterialAttributesPbr");
+    connect(&mut e, &v3, "out", &lerp, "a");
+    connect(&mut e, &v3, "out", &out, "base_color");
+    let (before, rev) = (edges(&e), e.doc().unwrap().revision);
+    // The Lerp takes material attributes, `base_color` does not: nothing moves.
+    e.apply(move_wires(&v3, "out", true, (&make, "attributes")));
+    assert_eq!(edges(&e), before);
+    assert_eq!(e.doc().unwrap().revision, rev, "no edit recorded");
+    let last = e.messages.last().expect("a message");
+    assert_eq!(last.level, Level::Warning);
+    assert!(last.text.contains("base_color"), "names the failing wire: {}", last.text);
+}
+
+#[test]
+fn move_wires_rejects_direction_mismatch() {
+    let (_dir, mut e) = project();
+    e.apply(Action::OpenAsset(AssetId::new(AssetType::Material, "env/rock_wet")));
+    let (a, b, c) = (add(&mut e, "stdlib::Constant"), add(&mut e, "stdlib::Lerp"), add(&mut e, "stdlib::Constant"));
+    connect(&mut e, &a, "out", &b, "a");
+    let (before, rev) = (edges(&e), e.doc().unwrap().revision);
+    e.apply(move_wires(&b, "a", false, (&c, "out")));
+    assert_eq!(edges(&e), before, "input wire onto an output");
+    e.apply(move_wires(&a, "out", true, (&b, "b")));
+    assert_eq!(edges(&e), before, "output wires onto an input");
+    e.apply(move_wires(&b, "a", false, (&b, "a")));
+    assert_eq!(edges(&e), before, "onto itself");
+    assert_eq!(e.doc().unwrap().revision, rev);
+}
+
+/// A move that would close a loop changes nothing, also when only a later wire of an output does (Review Focus 4).
+#[test]
+fn move_wires_rejects_cycle() {
+    let (_dir, mut e) = project();
+    e.apply(Action::OpenAsset(AssetId::new(AssetType::Material, "env/rock_wet")));
+    let reject = |e: &mut Editor, action: Action, what: &str| {
+        let (before, rev, n) = (edges(e), e.doc().unwrap().revision, e.messages.len());
+        e.apply(action);
+        assert_eq!(edges(e), before, "{what}");
+        assert_eq!(e.doc().unwrap().revision, rev, "{what}: no edit recorded");
+        assert_eq!(e.messages.len(), n + 1, "{what}: one message");
+        let last = e.messages.last().unwrap();
+        assert_eq!(last.level, Level::Warning, "{what}");
+        assert!(last.text.contains("E002"), "{what}: {}", last.text);
+    };
+
+    // Input: l1 → l2 → l3.a; moving l3.a's wire (from l2) onto l1.b closes l1 → l2 → l1.
+    let (c, l1, l2, l3) = (
+        add(&mut e, "stdlib::Constant"),
+        add(&mut e, "stdlib::Lerp"),
+        add(&mut e, "stdlib::Lerp"),
+        add(&mut e, "stdlib::Lerp"),
+    );
+    connect(&mut e, &c, "out", &l1, "a");
+    connect(&mut e, &l1, "out", &l2, "a");
+    connect(&mut e, &l2, "out", &l3, "a");
+    reject(&mut e, move_wires(&l3, "a", false, (&l1, "b")), "input move");
+
+    // Output: k.out feeds two Lerps; the one whose wire is checked second (edge order) feeds z. Moving k's wires onto
+    // z.out: the first rewired wire is fine, the second closes second → z → second.
+    let (k, p, q, z) = (
+        add(&mut e, "stdlib::Constant"),
+        add(&mut e, "stdlib::Lerp"),
+        add(&mut e, "stdlib::Lerp"),
+        add(&mut e, "stdlib::Lerp"),
+    );
+    connect(&mut e, &k, "out", &p, "a");
+    connect(&mut e, &k, "out", &q, "a");
+    let order: Vec<_> = e.doc().unwrap().asset.edges.iter().filter(|w| w.from.0 == k).map(|w| w.to.0.clone()).collect();
+    assert_eq!(order.len(), 2);
+    connect(&mut e, &order[1], "out", &z, "a");
+    reject(&mut e, move_wires(&k, "out", true, (&z, "out")), "output move");
+}
+
+#[test]
+fn connect_replaces_existing_input_edge() {
+    let (_dir, mut e) = project();
+    e.apply(Action::OpenAsset(AssetId::new(AssetType::Material, "env/rock_wet")));
+    let (a, b, c) = (add(&mut e, "stdlib::Constant"), add(&mut e, "stdlib::Lerp"), add(&mut e, "stdlib::Constant"));
+    connect(&mut e, &a, "out", &b, "a");
+    connect(&mut e, &c, "out", &b, "a");
+    let into: Vec<_> = e.doc().unwrap().asset.edges.iter().filter(|x| x.to == (b.clone(), "a".into())).collect();
+    assert_eq!(into.len(), 1);
+    assert_eq!(into[0].from, (c.clone(), "out".into()));
+}
+
+/// Three new Constant nodes in rock_wet and a comment frame around the first `framed` of them; returns the node
+/// ids and the frame id.
+fn framed_nodes(e: &mut Editor, framed: &[usize]) -> (Vec<NodeId>, String) {
+    open_rock_wet(e);
+    let mut ids = Vec::new();
+    for i in 0..3 {
+        let before: Vec<_> = e.doc().unwrap().asset.nodes.keys().cloned().collect();
+        let pos = (-900.0 + 200.0 * i as f32, 600.0);
+        e.apply(Action::AddNode { kind: "stdlib::Constant".into(), pos, link: None, params: Vec::new() });
+        ids.push(e.doc().unwrap().asset.nodes.keys().find(|k| !before.contains(k)).unwrap().clone());
+    }
+    let frames: Vec<_> = e.doc().unwrap().asset.comments.iter().map(|f| f.id.clone()).collect();
+    e.apply(Action::Select(framed.iter().map(|i| ids[*i].clone()).collect()));
+    e.apply(Action::AddComment(None));
+    let f = e.doc().unwrap().asset.comments.iter().find(|f| !frames.contains(&f.id)).unwrap().id.clone();
+    (ids, f)
+}
+
+fn has_frame(e: &Editor, f: &str) -> bool {
+    e.doc().unwrap().asset.comments.iter().any(|c| c.id == f)
+}
+
+#[test]
+fn deleting_nodes_with_enclosing_frame_removes_it() {
+    let (_dir, mut e) = project();
+    let (ids, f) = framed_nodes(&mut e, &[0, 1]);
+    let (a, b) = (ids[0].clone(), ids[1].clone());
+    e.apply(Action::Select([a.clone(), b.clone()].into()));
+    e.apply(Action::SelectFrames([f.clone()].into()));
+    assert_eq!(e.doc().unwrap().enclosed_frames, BTreeSet::from([f.clone()]));
+    e.apply(Action::DeleteSelection);
+    let d = e.doc().unwrap();
+    assert!(!d.asset.nodes.contains_key(&a) && !d.asset.nodes.contains_key(&b));
+    assert!(!has_frame(&e, &f));
+    assert!(e.doc().unwrap().enclosed_frames.is_empty());
+    // One undo step brings back nodes and frame together (Review Focus 4).
+    e.apply(Action::Undo);
+    let d = e.doc().unwrap();
+    assert!(d.asset.nodes.contains_key(&a) && d.asset.nodes.contains_key(&b));
+    assert!(has_frame(&e, &f));
+    let frame = d.asset.comments.iter().find(|c| c.id == f).unwrap();
+    let mut members = vec![a, b];
+    members.sort();
+    assert_eq!(frame.nodes, members);
+}
+
+#[test]
+fn frame_kept_when_not_all_nodes_selected() {
+    let (_dir, mut e) = project();
+    let (ids, f) = framed_nodes(&mut e, &[0, 2]);
+    let (a, b, c) = (ids[0].clone(), ids[1].clone(), ids[2].clone());
+    e.apply(Action::Select([a.clone(), b.clone()].into()));
+    e.apply(Action::SelectFrames([f.clone()].into()));
+    assert!(e.doc().unwrap().enclosed_frames.is_empty(), "c of the frame is not selected");
+    e.apply(Action::DeleteSelection);
+    let d = e.doc().unwrap();
+    assert!(!d.asset.nodes.contains_key(&a) && !d.asset.nodes.contains_key(&b));
+    assert!(d.asset.nodes.contains_key(&c));
+    assert!(has_frame(&e, &f));
+}
+
+/// A marked frame whose member survives the delete (output nodes are never deleted) stays (decision 0033).
+#[test]
+fn frame_kept_when_a_member_survives_delete() {
+    let (_dir, mut e) = project();
+    open_rock_wet(&mut e);
+    let (out, a) = (output_node(&e), add(&mut e, "stdlib::Constant"));
+    let frames: Vec<_> = e.doc().unwrap().asset.comments.iter().map(|f| f.id.clone()).collect();
+    e.apply(Action::Select([out.clone(), a.clone()].into()));
+    e.apply(Action::AddComment(None));
+    let f = e.doc().unwrap().asset.comments.iter().find(|f| !frames.contains(&f.id)).unwrap().id.clone();
+    let before = e.doc().unwrap().asset.clone();
+    e.apply(Action::Select([out.clone(), a.clone()].into()));
+    e.apply(Action::SelectFrames([f.clone()].into()));
+    assert_eq!(e.doc().unwrap().enclosed_frames, BTreeSet::from([f.clone()]));
+    e.apply(Action::DeleteSelection);
+    let d = e.doc().unwrap();
+    assert!(!d.asset.nodes.contains_key(&a), "the other node is deleted");
+    assert!(d.asset.nodes.contains_key(&out), "the output node is never deleted");
+    assert!(has_frame(&e, &f), "its frame stays");
+    e.apply(Action::Undo);
+    assert_eq!(e.doc().unwrap().asset, before, "one undo step");
+}
+
+#[test]
+fn select_clears_enclosed_frames() {
+    let (_dir, mut e) = project();
+    let (ids, f) = framed_nodes(&mut e, &[0, 1]);
+    e.apply(Action::Select([ids[0].clone(), ids[1].clone()].into()));
+    e.apply(Action::SelectFrames([f.clone()].into()));
+    e.apply(Action::Select([ids[0].clone(), ids[1].clone()].into()));
+    assert!(e.doc().unwrap().enclosed_frames.is_empty(), "a new node selection drops the mark");
+    e.apply(Action::DeleteSelection);
+    assert!(has_frame(&e, &f));
+    // Without nodes a frame is never marked: clicking a frame selects only the frame (design §4.5).
+    e.apply(Action::Select(BTreeSet::new()));
+    e.apply(Action::SelectFrames([f.clone()].into()));
+    assert!(e.doc().unwrap().enclosed_frames.is_empty());
+}
+
+#[test]
+fn frame_hue_edit_is_undoable() {
+    let (_dir, mut e) = project();
+    let (_, f) = framed_nodes(&mut e, &[0]);
+    let hue = |e: &Editor| e.doc().unwrap().asset.comments.iter().find(|c| c.id == f).unwrap().hue;
+    assert_eq!(hue(&e), None);
+    e.apply(Action::SetValue { target: PropTarget::FrameHue(f.clone()), value: Value::Float(200.0), merge: false });
+    assert_eq!(hue(&e), Some(200.0));
+    e.apply(Action::Undo);
+    assert_eq!(hue(&e), None);
+
+    // A slider drag is one undo step; "Default colour" clears the hue.
+    for (v, is_final) in [(10.0, false), (20.0, false), (30.0, true)] {
+        e.apply(Action::SetComponent { target: PropTarget::FrameHue(f.clone()), comp: 0, value: v, is_final });
+    }
+    assert_eq!(hue(&e), Some(30.0));
+    e.apply(Action::SetValue {
+        target: PropTarget::FrameHue(f.clone()),
+        value: Value::Str(String::new()),
+        merge: false,
+    });
+    assert_eq!(hue(&e), None);
+    e.apply(Action::Undo);
+    assert_eq!(hue(&e), Some(30.0));
+    e.apply(Action::Undo);
+    assert_eq!(hue(&e), None, "the drag was one step");
+}
+
+/// Design §4.10: `min` / `max` set on a Float FunctionInput (unsaved, in the open tab) reach the call node's pin.
+#[test]
+fn function_input_range_reaches_call_pin() {
+    let (_dir, mut e) = project();
+    e.apply(Action::OpenAsset(AssetId::new(AssetType::Function, "common/wet_mask")));
+    let input = e
+        .doc()
+        .unwrap()
+        .asset
+        .nodes
+        .iter()
+        .find(|(_, n)| n.kind == "output::FunctionInput" && n.params.get("name") == Some(&Value::Str("wetness".into())))
+        .unwrap()
+        .0
+        .clone();
+    for (key, v) in [("min", 0.2), ("max", 5.0)] {
+        e.apply(Action::SetValue {
+            target: PropTarget::Param { node: input.clone(), key: key.into() },
+            value: Value::Float(v),
+            merge: false,
+        });
+    }
+    e.apply(Action::OpenAsset(AssetId::new(AssetType::Material, "env/rock_wet")));
+    // Live validation refreshes the declared function signatures from the open tabs.
+    e.validate();
+    let call = node_of(&e, "function::common/wet_mask");
+    let d = e.doc().unwrap();
+    let sig = node_signature(&d.asset, &call, &e.registry, &e.functions, &d.id.path).unwrap();
+    assert_eq!(sig.input("wetness").unwrap().range, Some((0.2, 5.0)));
+    assert_eq!(sig.input("base_color").unwrap().range, None, "Float3 input");
+}
+
+/// Review Focus 5: every sample function file (FunctionInputs without `min` / `max`) loads and saves byte-identical.
+#[test]
+fn function_files_unchanged() {
+    let sample = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/sample_game");
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname = \"g\"\n").unwrap();
+    std::fs::create_dir_all(dir.path().join("assets")).unwrap();
+    let p = Project::open(dir.path()).unwrap();
+    let mut files = Vec::new();
+    let mut stack = vec![sample.join("shaders")];
+    while let Some(d) = stack.pop() {
+        for entry in std::fs::read_dir(&d).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.to_string_lossy().ends_with(".function.ron") {
+                files.push(path);
+            }
+        }
+    }
+    assert!(files.len() >= 4, "{files:?}");
+    for file in files {
+        let rel = file.strip_prefix(sample.join("shaders")).unwrap().to_string_lossy().replace('\\', "/");
+        let id = AssetId::new(AssetType::Function, rel.trim_end_matches(".function.ron"));
+        let original = std::fs::read(&file).unwrap();
+        std::fs::create_dir_all(id.file(&p).parent().unwrap()).unwrap();
+        std::fs::write(id.file(&p), &original).unwrap();
+        let asset = assets::load(&p, &id).unwrap();
+        ops::save(&p, &id, &asset).unwrap();
+        assert_eq!(std::fs::read(id.file(&p)).unwrap(), original, "{rel}");
+    }
 }

@@ -61,7 +61,7 @@ pub fn entries(
         });
     }
     for (path, sig) in functions {
-        if path == current {
+        if is_self_call(path, current) {
             continue;
         }
         out.push(Entry {
@@ -75,6 +75,12 @@ pub fn entries(
     }
     out.sort_by(|a, b| (&a.category, &a.name).cmp(&(&b.category, &b.name)));
     out
+}
+
+/// Whether calling the function `path` from the asset `current` would be recursive (E006): the palette hides such
+/// entries and a drop of the function onto the graph is rejected (design §4.11).
+pub fn is_self_call(path: &str, current: &str) -> bool {
+    path == current
 }
 
 /// One "Named Route Usage" entry per declaration in `asset` (UE-like): picking it creates a usage of that route.

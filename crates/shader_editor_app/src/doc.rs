@@ -6,17 +6,14 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use shader_graph_core::consts::NoConsts;
 use shader_graph_core::ir::{with_routes, would_create_cycle};
-use shader_graph_core::model::{Asset, AssetKind, Edge, Frame, MaterialKind, Node, NodeId, new_node_id};
+use shader_graph_core::model::{Asset, Edge, Frame, Node, NodeId, new_node_id};
 use shader_graph_core::registry::{
     FunctionLookup, NoCurves, NoTextures, NodeRole, ROUTE_PARAM, Registry, SigCtx, Signature,
 };
 use shader_graph_core::{Env, PinType, Value, conversion};
-use shader_project::{AssetId, AssetSet, Project, assets, ops};
+use shader_project::AssetId;
 
-use crate::doc_kind::{TabDoc, asset_title, io_error};
 use crate::history::History;
-use crate::tab::ViewKind;
-use crate::ui::icons::IconId;
 
 /// Copied nodes with the edges between them.
 #[derive(Debug, Clone, Default)]
@@ -35,6 +32,10 @@ pub struct Doc {
     pub selection: BTreeSet<NodeId>,
     /// Selected comment frame (frames are not nodes of the model graph).
     pub selected_frame: Option<String>,
+    /// Comment frames a box selection fully enclosed together with `selection` (design §4.5): Delete removes them
+    /// with the nodes. Only frames whose `Frame::nodes` are all selected ([`Doc::enclosed`]); cleared by a new node
+    /// selection.
+    pub enclosed_frames: BTreeSet<String>,
     /// Bumped on every model change; the canvas rebuilds when it differs.
     pub revision: u64,
     /// The generated files were written from this unsaved document (a preview toggle, decision 0022): closing it
@@ -52,6 +53,7 @@ impl Doc {
             history: History::default(),
             selection: BTreeSet::new(),
             selected_frame: None,
+            enclosed_frames: BTreeSet::new(),
             revision: 1,
             regen_from_memory: false,
         }
@@ -147,6 +149,17 @@ impl Doc {
 
     /// Deletes nodes; output nodes of materials are kept (spec §7.3).
     pub fn delete_nodes(&mut self, ids: &BTreeSet<NodeId>, registry: &Registry) -> usize {
+        self.delete_nodes_and_frames(ids, &BTreeSet::new(), registry)
+    }
+
+    /// [`Doc::delete_nodes`] and the comment frames `frames` in one undoable step. A frame with a member node that
+    /// survives (an output node) is kept (decision 0033).
+    pub fn delete_nodes_and_frames(
+        &mut self,
+        ids: &BTreeSet<NodeId>,
+        frames: &BTreeSet<String>,
+        registry: &Registry,
+    ) -> usize {
         let deletable: Vec<NodeId> = ids
             .iter()
             .filter(|id| {
@@ -162,6 +175,8 @@ impl Doc {
             for id in &deletable {
                 a.remove_node(id);
             }
+            let nodes = &a.nodes;
+            a.comments.retain(|f| !frames.contains(&f.id) || f.nodes.iter().any(|n| nodes.contains_key(n)));
         });
         n
     }
@@ -193,7 +208,7 @@ impl Doc {
         self.edit(|a| {
             for (old, node) in &clip.nodes {
                 let mut n = node.clone();
-                n.pos = (n.pos.0 + offset.0, n.pos.1 + offset.1);
+                n.pos = tidy((n.pos.0 + offset.0, n.pos.1 + offset.1));
                 // A usage pasted together with its declaration follows the copy, otherwise the original.
                 if let Some(Value::Str(route)) = n.params.get_mut(ROUTE_PARAM)
                     && let Some(new) = map.get(route.as_str())
@@ -210,7 +225,18 @@ impl Doc {
             }
         });
         self.selection = new_ids.clone();
+        self.enclosed_frames.clear();
         new_ids
+    }
+
+    /// The frames of `frames` that may be deleted together with the node selection `nodes`: there is a node
+    /// selection and every node of the frame is in it.
+    pub fn enclosed(&self, frames: &BTreeSet<String>, nodes: &BTreeSet<NodeId>) -> BTreeSet<String> {
+        if nodes.is_empty() {
+            return BTreeSet::new();
+        }
+        let comments = self.asset.comments.iter().filter(|f| frames.contains(&f.id));
+        comments.filter(|f| f.nodes.iter().all(|n| nodes.contains(n))).map(|f| f.id.clone()).collect()
     }
 
     pub fn add_frame(&mut self, title: &str, nodes: &BTreeSet<NodeId>) -> String {
@@ -225,91 +251,39 @@ impl Doc {
                 rect: rect.unwrap_or((0.0, 0.0, 400.0, 300.0)),
                 nodes: nodes.iter().cloned().collect(),
                 color: None,
+                hue: None,
             });
         });
         id
     }
 }
 
-/// Bounding box of node positions (top-left corners).
-impl TabDoc for Doc {
-    fn asset(&self) -> Option<&AssetId> {
-        Some(&self.id)
-    }
+/// Node positions snap to multiples of this many graph units when touched (design §4.1); positions loaded from a
+/// file are kept as they are.
+pub const GRID_SNAP: f32 = 5.0;
 
-    fn view(&self) -> ViewKind {
-        ViewKind::Graph
-    }
-
-    fn base_title(&self) -> String {
-        asset_title(&self.id)
-    }
-
-    fn icon(&self) -> IconId {
-        IconId::for_asset(Some(self.asset.kind))
-    }
-
-    fn kind_label(&self) -> &'static str {
-        match self.asset.kind {
-            AssetKind::Function => "function",
-            AssetKind::Material(MaterialKind::Pbr3d(_)) => "pbr3d",
-            AssetKind::Material(MaterialKind::Unlit3d(_)) => "unlit3d",
-            AssetKind::Material(MaterialKind::Sprite2d(_)) => "sprite2d",
-        }
-    }
-
-    fn is_dirty(&self) -> bool {
-        Doc::is_dirty(self)
-    }
-
-    fn is_read_only(&self) -> bool {
-        false
-    }
-
-    fn revision(&self) -> u64 {
-        self.revision
-    }
-
-    fn save(&mut self, project: &Project) -> std::io::Result<()> {
-        ops::save(project, &self.id, &self.asset).map_err(io_error)?;
-        self.mark_saved();
-        Ok(())
-    }
-
-    fn changed_on_disk(&self, project: &Project) -> bool {
-        assets::load(project, &self.id).is_ok_and(|a| Asset::from_ron(&self.saved).ok() != Some(a))
-    }
-
-    fn reload_from_disk(&mut self, project: &Project) -> Result<(), String> {
-        self.reload(assets::load(project, &self.id)?);
-        Ok(())
-    }
-
-    fn keep_mine(&mut self, project: &Project) {
-        if let Ok(on_disk) = assets::load(project, &self.id) {
-            self.saved = on_disk.to_ron();
-        }
-    }
-
-    fn rename(&mut self, _project: &Project, from: &AssetId, to: &AssetId) {
-        if self.id != *from {
-            return;
-        }
-        self.id = to.clone();
-        self.asset.name = to.name().to_string();
-        self.mark_saved();
-        self.revision += 1;
-    }
-
-    fn config_key(&self) -> Option<String> {
-        Some(self.id.source_rel())
-    }
-
-    fn override_into(&self, set: &mut AssetSet) {
-        set.assets.insert(self.id.clone(), Ok(self.asset.clone()));
-    }
+/// `p` rounded to the nearest grid point; ties round away from zero (`f32::round`), `-0.0` becomes `0.0`.
+pub fn snap(p: (f32, f32)) -> (f32, f32) {
+    (grid_point(p.0), grid_point(p.1))
 }
 
+/// The grid coordinate nearest to `v` (ties away from zero, never `-0.0`).
+fn grid_point(v: f32) -> f32 {
+    (v / GRID_SNAP).round() * GRID_SNAP + 0.0
+}
+
+/// `p` with float noise removed: a coordinate within `1e-3` of a grid point becomes that point. Moving a node by the
+/// delta that put another one on the grid leaves such noise (`3.3 + 31.7 = 34.999996`); real off-grid positions are
+/// kept.
+pub fn tidy(p: (f32, f32)) -> (f32, f32) {
+    let t = |v: f32| {
+        let g = grid_point(v);
+        if (v - g).abs() < 1e-3 { g } else { v }
+    };
+    (t(p.0), t(p.1))
+}
+
+/// Bounding box of node positions (top-left corners).
 pub fn bounds(asset: &Asset, ids: &BTreeSet<NodeId>) -> Option<(f32, f32, f32, f32)> {
     let mut it = asset.nodes.iter().filter(|(k, _)| ids.is_empty() || ids.contains(*k)).map(|(_, n)| n.pos);
     let first = it.next()?;
@@ -653,5 +627,16 @@ mod tests {
         let v3 = d.add_node("stdlib::Constant3Vector", (0.0, 0.0));
         let reroute2 = d.add_node("stdlib::Reroute", (100.0, 0.0));
         assert_eq!(err(&d, (&v3, "out"), (&reroute2, "in")), None);
+    }
+
+    #[test]
+    fn snap_rounds_to_five() {
+        assert_eq!(snap((12.4, -7.6)), (10.0, -10.0));
+        // Ties round away from zero (`f32::round`).
+        assert_eq!(snap((12.5, 2.5)), (15.0, 5.0));
+        assert_eq!(snap((-12.5, -2.5)), (-15.0, -5.0));
+        assert_eq!(snap((40.0, -5.0)), (40.0, -5.0));
+        assert_eq!(tidy((34.999996, -1.4e-6)), (35.0, 0.0));
+        assert_eq!(tidy((12.3, 4.99)), (12.3, 4.99), "off-grid positions are kept");
     }
 }

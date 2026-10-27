@@ -1,13 +1,13 @@
-//! Shortcuts (spec §9, UE-like), canvas clicks, wire drops and the minimap.
+//! Canvas gestures (spec §9, UE-like): clicks, held key + click node placement, wire drops, and the minimap.
+//! Hotkeys are the editor kinds' input contexts (`editors::main_input`, decision 0032).
 
-use bevy::input_focus::InputFocus;
+use bevy::ecs::system::SystemParam;
 use bevy::picking::hover::HoverMap;
 use bevy::prelude::*;
-use bevy::text::EditableText;
 use bevy::ui::ui_transform::UiGlobalTransform;
 use bevy::window::WindowCloseRequested;
+use bevy_enhanced_input::prelude::ModKeys;
 use bevy_noodle::prelude::*;
-use shader_graph_core::{Hotkey, HotkeyKey};
 
 use super::dialog::open_menu;
 use super::palette::Palette;
@@ -16,7 +16,8 @@ use super::tree::TreeRow;
 use crate::canvas::{EditorCanvas, NodeKey, PinKey, link_of, window_to_graph};
 use crate::doc::connection_error;
 use crate::droppable::Dropped;
-use crate::state::{Action, Actions, Editor, ViewRequest};
+use crate::editors::main_input::{mods, no_command_mods};
+use crate::state::{Action, Actions, Editor};
 
 pub struct InputPlugin;
 
@@ -24,7 +25,7 @@ impl Plugin for InputPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<RightPress>()
             .init_resource::<PreviewKey>()
-            .add_systems(Update, (shortcuts.run_if(not_typing), close_requested, draw_minimap))
+            .add_systems(Update, (close_requested, draw_minimap))
             .add_observer(remember_right_press)
             .add_observer(middle_pan)
             .add_observer(canvas_click)
@@ -34,16 +35,6 @@ impl Plugin for InputPlugin {
             .add_observer(wire_dropped)
             .add_observer(drop_on_canvas);
     }
-}
-
-/// Shortcuts are off while a text field has the focus or a dialog is open.
-pub fn not_typing(
-    focus: Res<InputFocus>,
-    fields: Query<(), With<EditableText>>,
-    editor: Res<Editor>,
-    palette: Res<Palette>,
-) -> bool {
-    editor.dialog.is_none() && !palette.open && focus.get().is_none_or(|f| !fields.contains(f))
 }
 
 /// Graph position under the cursor, if it is over the canvas.
@@ -62,87 +53,26 @@ fn cursor_graph(
     Some((cursor, window_to_graph(cursor, c, t, v, ui_scale)?))
 }
 
-#[allow(clippy::too_many_arguments)]
-fn shortcuts(
-    keys: Res<ButtonInput<KeyCode>>,
-    window: Query<&Window>,
-    ec: Option<Res<EditorCanvas>>,
-    canvases: Query<(&ComputedNode, &UiGlobalTransform, &CanvasView)>,
-    ui_scale: Res<UiScale>,
-    editor: Res<Editor>,
-    mut palette: ResMut<Palette>,
-    mut preview: ResMut<PreviewKey>,
-    mut actions: ResMut<Actions>,
-) {
-    use KeyCode::*;
-    let ctrl = keys.any_pressed([ControlLeft, ControlRight, SuperLeft, SuperRight]);
-    let shift = keys.any_pressed([ShiftLeft, ShiftRight]);
-    // The (hidden) graph canvas has the same rect as the other views: only a graph tab has a graph position.
-    let at =
-        ec.as_ref().filter(|_| editor.doc().is_some()).and_then(|ec| cursor_graph(&window, ec, &canvases, ui_scale.0));
-    let mut push = |a: Action| actions.push(a);
-    if ctrl {
-        match () {
-            _ if keys.just_pressed(KeyS) => push(if shift { Action::SaveAll } else { Action::Save }),
-            _ if keys.just_pressed(KeyZ) => push(if shift { Action::Redo } else { Action::Undo }),
-            _ if keys.just_pressed(KeyY) => push(Action::Redo),
-            _ if keys.just_pressed(KeyC) => push(Action::Copy),
-            _ if keys.just_pressed(KeyX) => push(Action::Cut),
-            _ if keys.just_pressed(KeyV) => push(Action::Paste(at.map(|(_, g)| (g.x, g.y)))),
-            _ if keys.just_pressed(KeyD) => push(Action::Duplicate),
-            _ if keys.just_pressed(KeyA) => push(Action::SelectAll),
-            _ if keys.just_pressed(KeyW) => {
-                // Resolved against the active tab when applied.
-                push(Action::CloseTab(usize::MAX));
-            }
-            _ if keys.just_pressed(Tab) => push(Action::NextTab),
-            _ if keys.just_pressed(KeyO) => push(Action::OpenProjectDialog),
-            _ if keys.just_pressed(KeyL) => push(Action::AutoLayout),
-            _ if keys.just_pressed(KeyQ) => push(Action::Quit),
-            _ => {}
-        }
-        return;
-    }
-    if let Some(key) = pressed_hotkey(&keys) {
-        for a in editor.hotkey_actions(key) {
-            push(a);
-        }
-    }
-    if keys.just_pressed(KeyV) {
-        preview.press();
-    }
-    if keys.just_released(KeyV) && preview.release() {
-        for a in editor.hotkey_actions(Hotkey::plain(HotkeyKey::Letter('v'))) {
-            push(a);
-        }
-    }
-    match () {
-        _ if keys.just_pressed(Delete) || keys.just_pressed(Backspace) => push(Action::DeleteSelection),
-        _ if keys.just_pressed(KeyF) => push(Action::View(ViewRequest::FitSelection)),
-        _ if keys.just_pressed(Home) => push(Action::View(ViewRequest::FitAll)),
-        _ if keys.just_pressed(KeyC) => push(Action::AddComment(at.map(|(_, g)| (g.x, g.y)))),
-        _ if keys.just_pressed(Tab) => {
-            if let Some((screen, graph)) = at {
-                palette.show(screen, graph, None);
-            }
-        }
-        _ => {}
-    }
+/// Where the cursor is over the graph canvas: for hotkeys acting at the cursor (paste, comment, palette).
+#[derive(SystemParam)]
+pub struct CanvasCursor<'w, 's> {
+    window: Query<'w, 's, &'static Window>,
+    ec: Option<Res<'w, EditorCanvas>>,
+    canvases: Query<'w, 's, (&'static ComputedNode, &'static UiGlobalTransform, &'static CanvasView)>,
+    ui_scale: Option<Res<'w, UiScale>>,
 }
 
-/// Hotkey of a node action pressed this frame (decision 0021): the main-row keys need Shift, numpad keys do not.
-fn pressed_hotkey(keys: &ButtonInput<KeyCode>) -> Option<Hotkey> {
-    use KeyCode::*;
-    let shift = keys.any_pressed([ShiftLeft, ShiftRight]);
-    [
-        (Equal, NumpadAdd, HotkeyKey::Plus),
-        (Minus, NumpadSubtract, HotkeyKey::Minus),
-        (Digit8, NumpadMultiply, HotkeyKey::Star),
-        (Slash, NumpadDivide, HotkeyKey::Slash),
-    ]
-    .into_iter()
-    .find(|(main, pad, _)| (shift && keys.just_pressed(*main)) || keys.just_pressed(*pad))
-    .map(|(.., key)| Hotkey::shift(key))
+impl CanvasCursor<'_, '_> {
+    /// Window and graph position of the cursor, if it is over the canvas.
+    pub fn at(&self) -> Option<(Vec2, Vec2)> {
+        let ui_scale = self.ui_scale.as_ref().map_or(1.0, |s| s.0);
+        cursor_graph(&self.window, self.ec.as_deref()?, &self.canvases, ui_scale)
+    }
+
+    /// Graph position of the cursor, as the actions take it.
+    pub fn graph_pos(&self) -> Option<(f32, f32)> {
+        self.at().map(|(_, g)| (g.x, g.y))
+    }
 }
 
 /// `V` toggles the node preview on release, unless `V` + click dropped a `param::Vector` meanwhile
@@ -154,7 +84,7 @@ pub(crate) struct PreviewKey {
 }
 
 impl PreviewKey {
-    fn press(&mut self) {
+    pub(crate) fn press(&mut self) {
         *self = Self { held: true, placed: false };
     }
 
@@ -163,15 +93,15 @@ impl PreviewKey {
     }
 
     /// True when the release toggles the preview.
-    fn release(&mut self) -> bool {
+    pub(crate) fn release(&mut self) -> bool {
         let toggle = self.held && !self.placed;
         *self = Self::default();
         toggle
     }
 }
 
-/// UE: hold a key and click empty canvas to drop a node there.
-fn hotkey_node(keys: &ButtonInput<KeyCode>) -> Option<&'static str> {
+/// UE: hold a key and click empty canvas to drop a node there (decision 0032).
+const NODE_HOTKEYS: [(KeyCode, &str); 18] = {
     use KeyCode::*;
     [
         (Digit1, "stdlib::Constant"),
@@ -186,10 +116,21 @@ fn hotkey_node(keys: &ButtonInput<KeyCode>) -> Option<&'static str> {
         (KeyL, "stdlib::Lerp"),
         (KeyU, "stdlib::TextureCoordinate"),
         (KeyR, "stdlib::Reroute"),
+        (KeyD, "stdlib::Divide"),
+        (KeyO, "stdlib::OneMinus"),
+        (KeyE, "stdlib::Power"),
+        (KeyN, "stdlib::Normalize"),
+        (KeyP, "stdlib::Panner"),
+        (KeyI, "stdlib::If"),
     ]
-    .into_iter()
-    .find(|(k, _)| keys.pressed(*k))
-    .map(|(_, n)| n)
+};
+
+/// The node a held plain key places; none while Ctrl, Alt or Super is held (decision 0032).
+fn hotkey_node(keys: &ButtonInput<KeyCode>) -> Option<&'static str> {
+    if !no_command_mods(keys) {
+        return None;
+    }
+    NODE_HOTKEYS.into_iter().find(|(k, _)| keys.pressed(*k)).map(|(_, n)| n)
 }
 
 /// How far (logical px) the pointer may move between RMB press and release for it to count as a click
@@ -272,12 +213,18 @@ fn canvas_click(
     }
 }
 
-fn ctrl_held(keys: &ButtonInput<KeyCode>) -> bool {
-    keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight])
+/// Alt held: UE's "break" modifier (Alt+LMB on a pin or a wire).
+fn alt(keys: &ButtonInput<KeyCode>) -> bool {
+    mods(keys).contains(ModKeys::ALT)
+}
+
+/// Ctrl (or Super, as in the hotkeys) held: a wire drag moves the pin's wires (decision 0032).
+fn ctrl(keys: &ButtonInput<KeyCode>) -> bool {
+    mods(keys).intersects(ModKeys::CONTROL | ModKeys::SUPER)
 }
 
 /// Right click (not a pan) on an input pin opens its menu (type of polymorphic inputs, reset, disconnect);
-/// Ctrl+LMB on any pin removes its wires.
+/// Alt+LMB on any pin removes its wires (UE).
 fn pin_click(
     click: On<PointerClick>,
     pins: Query<&PinKey>,
@@ -289,7 +236,7 @@ fn pin_click(
 ) {
     let Ok(key) = pins.get(click.event_target()) else { return };
     match click.button {
-        PointerButton::Primary if ctrl_held(&keys) => {
+        PointerButton::Primary if alt(&keys) => {
             actions.push(Action::DisconnectPin { node: key.node.clone(), pin: key.pin.clone(), output: key.output })
         }
         PointerButton::Secondary if !key.output && right.is_click(click.pointer.position) => {
@@ -373,7 +320,7 @@ fn drop_on_canvas(
     actions.push(Action::Drop { item, pos: (at.x, at.y), node });
 }
 
-/// Right click (not a pan) or Ctrl+LMB on a wire removes it; double click inserts a reroute point.
+/// Right click (not a pan) or Alt+LMB on a wire removes it (UE); double click inserts a reroute point.
 #[allow(clippy::too_many_arguments)]
 fn edge_click(
     click: On<PointerClick>,
@@ -395,7 +342,7 @@ fn edge_click(
     let (Ok(a), Ok(b)) = (keys_q.get(ports.output), keys_q.get(ports.input)) else { return };
     let remove = match click.button {
         PointerButton::Secondary => right.is_click(click.pointer.position),
-        PointerButton::Primary => ctrl_held(&keys),
+        PointerButton::Primary => alt(&keys),
         PointerButton::Middle => false,
     };
     match click.button {
@@ -416,6 +363,9 @@ fn edge_click(
 
 /// A wire dropped on empty space opens the palette filtered by its type (auto-connect on pick).
 /// Dropped onto an incompatible port: say why (E002/E003) instead of opening the palette.
+/// With Ctrl held (UE "move wires", decision 0032) a drop on another pin of the same direction moves the wires of
+/// the pin the drag started from there (bevy_noodle has no wire target on such a pin, so the drop lands here);
+/// a drop on empty space does nothing.
 #[allow(clippy::too_many_arguments)]
 fn wire_dropped(
     ev: On<WireDropped>,
@@ -423,6 +373,7 @@ fn wire_dropped(
     keys_q: Query<&PinKey>,
     window: Query<&Window>,
     hover: Res<HoverMap>,
+    keys: Res<ButtonInput<KeyCode>>,
     editor: Res<Editor>,
     mut palette: ResMut<Palette>,
     mut actions: ResMut<Actions>,
@@ -433,6 +384,19 @@ fn wire_dropped(
     }
     let Ok(key) = keys_q.get(ev.from) else { return };
     let target = hover.values().flat_map(|m| m.keys()).find_map(|e| keys_q.get(*e).ok().filter(|k| *k != key));
+    let moving = ctrl(&keys);
+    match target {
+        Some(t) if moving && t.output == key.output => {
+            return actions.push(Action::MoveWires {
+                node: key.node.clone(),
+                pin: key.pin.clone(),
+                output: key.output,
+                to: (t.node.clone(), t.pin.clone()),
+            });
+        }
+        None if moving => return,
+        _ => {}
+    }
     if let (Some(t), Some(d)) = (target, editor.doc()) {
         let (from, to) = if key.output { (key, t) } else { (t, key) };
         let reason = if from.output && !to.output {
@@ -596,20 +560,41 @@ fn look_here<E: EntityEvent + bevy::picking::events::PointerEvent>(
 mod tests {
     use super::*;
 
-    fn keys(pressed: &[KeyCode]) -> ButtonInput<KeyCode> {
-        let mut k = ButtonInput::default();
-        for c in pressed {
-            k.press(*c);
-        }
-        k
-    }
-
     #[test]
-    fn pressed_hotkey_maps_main_row_with_shift_and_numpad() {
-        use KeyCode::*;
-        assert_eq!(pressed_hotkey(&keys(&[ShiftLeft, Equal])), Some(Hotkey::shift(HotkeyKey::Plus)));
-        assert_eq!(pressed_hotkey(&keys(&[Equal])), None);
-        assert_eq!(pressed_hotkey(&keys(&[NumpadDivide])), Some(Hotkey::shift(HotkeyKey::Slash)));
+    fn hotkey_nodes_exist() {
+        let registry = shader_stdlib::registry();
+        for (key, kind) in NODE_HOTKEYS {
+            assert!(registry.get(kind).is_some(), "{key:?} drops `{kind}`, which is not registered");
+        }
+        // UE keys we have nodes for (no BumpOffset in the stdlib).
+        let ue = [
+            (KeyCode::KeyD, "stdlib::Divide"),
+            (KeyCode::KeyO, "stdlib::OneMinus"),
+            (KeyCode::KeyE, "stdlib::Power"),
+            (KeyCode::KeyN, "stdlib::Normalize"),
+            (KeyCode::KeyP, "stdlib::Panner"),
+            (KeyCode::KeyI, "stdlib::If"),
+        ];
+        for (key, kind) in ue {
+            let mut keys = ButtonInput::<KeyCode>::default();
+            keys.press(key);
+            assert_eq!(hotkey_node(&keys), Some(kind), "{key:?}");
+        }
+        let keys: Vec<KeyCode> = NODE_HOTKEYS.iter().map(|(k, _)| *k).collect();
+        assert!(keys.iter().all(|k| keys.iter().filter(|o| *o == k).count() == 1), "one node per key");
+        // Plain keys only (decision 0032): Ctrl+D, Alt+N or Super+A held place nothing; Shift is allowed.
+        for m in [KeyCode::ControlLeft, KeyCode::AltRight, KeyCode::SuperLeft] {
+            for key in [KeyCode::KeyD, KeyCode::KeyN, KeyCode::KeyA] {
+                let mut keys = ButtonInput::<KeyCode>::default();
+                keys.press(m);
+                keys.press(key);
+                assert_eq!(hotkey_node(&keys), None, "{m:?}+{key:?}");
+            }
+        }
+        let mut keys = ButtonInput::<KeyCode>::default();
+        keys.press(KeyCode::ShiftLeft);
+        keys.press(KeyCode::KeyD);
+        assert_eq!(hotkey_node(&keys), Some("stdlib::Divide"));
     }
 
     #[test]

@@ -3,25 +3,26 @@
 //!
 //! Click selects (Shift toggles), drag moves the selection (one undo step; X / Y held: along that axis only, Shift
 //! held: the grabbed point snaps to the 0.1 grid), double click on empty space adds a point, right click opens a
-//! menu, arrow keys nudge. Undo, copy/paste, delete and select-all are the global shortcuts (`ui::input`), routed
-//! to the curve by [`Editor`].
+//! menu. Keys (arrow nudging, undo, copy/paste, delete, select-all) are the curve editor's input context
+//! (`editors::curve`), routed to the curve by [`Editor`].
 
 use std::collections::BTreeSet;
 
 use bevy::prelude::*;
 use bevy::ui::ui_transform::UiGlobalTransform;
+use bevy_enhanced_input::prelude::ModKeys;
 use resvg::tiny_skia;
 use shader_graph_core::Value;
 use shader_graph_core::curve::{Curve, Interp};
 
 use super::dialog::open_icon_menu;
 use super::icons::IconId;
-use super::input::not_typing;
 use super::node_preview::{opaque_image, skia_color};
-use super::{HEADER_BG, TEXT, TEXT_DIM, VIEW_BG, ViewOf, button, icon_button, text};
+use super::{TEXT, TEXT_DIM, VIEW_BG, ViewOf, button, clipped_text, icon_button, icon_tool_button, text, tool_button};
 use crate::curve_doc::CurveDoc;
+use crate::editors::main_input::mods;
 use crate::state::{Action, Actions, CurveAction, Editor, PropTarget};
-use crate::tab::{Lang, Tab, ViewKind};
+use crate::tab::{Lang, ViewKind};
 
 /// Space around the unit square for the axis labels (logical px): left, right, top, bottom.
 const MARGIN: [f32; 4] = [56.0, 32.0, 28.0, 40.0];
@@ -29,12 +30,11 @@ const MARGIN: [f32; 4] = [56.0, 32.0, 28.0, 40.0];
 const HANDLE: f32 = 6.0;
 pub(super) const CURVE_COLOR: Color = Color::srgb_u8(250, 204, 92);
 const POINT_COLOR: Color = Color::srgb(0.86, 0.87, 0.90);
-/// Arrow-key step in curve units (Shift: ten times).
-const NUDGE: f32 = 0.01;
 /// Grid cells per unit: a Shift-drag snaps to the plot's grid lines (0.1).
 const GRID: f32 = 10.0;
 
-/// Header row (path, preview switch), rebuilt with the tab or the preview mode.
+/// The editor topbar row of a curve tab (path, select all / delete, preview switch), rebuilt with the tab or the
+/// preview mode.
 #[derive(Component, Default, Clone)]
 pub struct CurveViewBar;
 
@@ -73,10 +73,7 @@ impl Plugin for CurveViewPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<CurveDrag>()
             // After the actions of this frame's gestures are applied: a drag shows without a frame of lag.
-            .add_systems(
-                Update,
-                (redraw_bar, render_plot, place_handles, nudge_keys.run_if(not_typing)).after(crate::apply_actions),
-            )
+            .add_systems(Update, (redraw_bar, render_plot, place_handles).after(crate::apply_actions))
             .add_observer(handle_press)
             .add_observer(handle_drag_start)
             .add_observer(handle_drag)
@@ -101,15 +98,6 @@ pub fn curve_view() -> impl Scene {
         BackgroundColor(VIEW_BG)
         Visibility::Hidden
         Children [
-            CurveViewBar
-            Node {
-                flex_direction: FlexDirection::Row,
-                align_items: AlignItems::Center,
-                column_gap: px(8),
-                padding: UiRect::new(px(10), px(4), px(2), px(2)),
-            }
-            BackgroundColor(HEADER_BG)
-            --
             // The bottom margin keeps the plot clear of the file type watermark.
             CurveCanvas
             Node { flex_grow: 1.0, min_height: px(0), margin: UiRect::bottom(px(56)) }
@@ -179,7 +167,19 @@ fn redraw_bar(
     let Ok(bar) = bar.single() else { return };
     *last = Some(key);
     commands.entity(bar).despawn_children();
-    commands.spawn_scene(bsn! { @text(c.id.source_rel(), TEXT, 13.0) ChildOf(bar) });
+    commands.spawn_scene(bsn! { @clipped_text(c.id.source_rel(), TEXT, 13.0) ChildOf(bar) });
+    let tools: [Box<dyn Scene>; 2] = [
+        Box::new(tool_button("Select all", Action::SelectAll)),
+        Box::new(icon_tool_button(
+            IconId::Delete,
+            "Delete",
+            Action::DeleteSelection,
+            "Delete the selected points (Del)",
+        )),
+    ];
+    for b in tools {
+        commands.spawn_scene(bsn! { @{b} Node { flex_shrink: 0.0 } ChildOf(bar) });
+    }
     commands.spawn_scene(bsn! { Node { flex_grow: 1.0 } ChildOf(bar) });
     commands.spawn_scene(bsn! { @text("Preview:", TEXT_DIM, 12.0) ChildOf(bar) });
     for interp in Interp::ALL {
@@ -374,7 +374,7 @@ fn handle_press(
     let Ok(h) = handles.get(ev.event_target()) else { return };
     ev.propagate(false);
     let Some(c) = active_curve(&editor) else { return };
-    let toggle = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
+    let toggle = mods(&keys).contains(ModKeys::SHIFT);
     let mut sel = c.selection.clone();
     match ev.button {
         PointerButton::Primary if toggle => {
@@ -427,7 +427,7 @@ struct DragKeys {
 impl DragKeys {
     fn read(keys: &ButtonInput<KeyCode>) -> DragKeys {
         let (x, y) = (keys.pressed(KeyCode::KeyX), keys.pressed(KeyCode::KeyY));
-        let snap = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
+        let snap = mods(keys).contains(ModKeys::SHIFT);
         DragKeys { x_only: x && !y, y_only: y && !x, snap }
     }
 }
@@ -527,7 +527,7 @@ fn canvas_click(
     let Some(c) = active_curve(&editor) else { return };
     let Some(local) = local_pos(node, t, ev.pointer.position) else { return };
     let at = Plot::new(logical_size(node)).to_curve(local);
-    let shift = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
+    let shift = mods(&keys).contains(ModKeys::SHIFT);
     match ev.button {
         PointerButton::Primary if ev.count >= 2 => actions.push(Action::Curve(CurveAction::Add(at))),
         PointerButton::Primary if !shift => actions.push(Action::Curve(CurveAction::Select(BTreeSet::new()))),
@@ -547,26 +547,6 @@ fn canvas_click(
             open_icon_menu(&mut commands, ev.pointer.position, items);
         }
         _ => {}
-    }
-}
-
-/// Arrow keys move the selected points (Shift: ten times further).
-fn nudge_keys(keys: Res<ButtonInput<KeyCode>>, editor: Res<Editor>, mut actions: ResMut<Actions>) {
-    let Some(Tab::Curve(c)) = editor.tab() else { return };
-    if c.selection.is_empty() {
-        return;
-    }
-    let step = if keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]) { NUDGE * 10.0 } else { NUDGE };
-    let delta = [
-        (KeyCode::ArrowLeft, (-step, 0.0)),
-        (KeyCode::ArrowRight, (step, 0.0)),
-        (KeyCode::ArrowUp, (0.0, step)),
-        (KeyCode::ArrowDown, (0.0, -step)),
-    ]
-    .into_iter()
-    .find(|(k, _)| keys.just_pressed(*k));
-    if let Some((_, d)) = delta {
-        actions.push(Action::Curve(CurveAction::Nudge(d)));
     }
 }
 

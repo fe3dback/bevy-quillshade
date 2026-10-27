@@ -1,7 +1,7 @@
 //! Editor state and commands. Plain Rust (wrapped in a Bevy resource): UI systems only push
 //! [`Action`]s, [`Editor::apply`] mutates the model, the canvas and panels redraw from it.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use shader_codegen_wesl::check::BevySources;

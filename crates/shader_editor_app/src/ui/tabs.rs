@@ -7,7 +7,7 @@ use bevy::ui_widgets::Button;
 use super::dialog::open_icon_menu;
 use super::icons::{IconId, icon};
 use super::tooltip::Tooltip;
-use super::{HoverRow, OnActivate, TEXT, TEXT_DIM, text};
+use super::{HoverRow, OnActivate, TEXT, TEXT_DIM, TOPBAR_BG, text};
 use crate::state::{Action, Actions, CloseTabs, Editor, Unsaved};
 use crate::tab::labels;
 
@@ -28,7 +28,8 @@ impl Plugin for TabsPlugin {
 
 /// One compact tab: icon, label (the full path is its tooltip) and a close cross.
 fn tab(i: usize, label: String, full: String, kind: IconId, active: bool) -> impl Scene {
-    let base = if active { Color::srgb_u8(32, 34, 39) } else { Color::srgb_u8(48, 50, 57) };
+    // The active tab has the editor topbar's colour: it joins the strip of its editor kind below the tabs bar.
+    let base = if active { TOPBAR_BG } else { Color::srgb_u8(48, 50, 57) };
     let (hover, act, idx, tip) = (HoverRow { base }, OnActivate(Action::ActivateTab(i)), TabIndexOf(i), Tooltip(full));
     let (close, close_hover) = (OnActivate(Action::CloseTab(i)), HoverRow { base: Color::NONE });
     let close_tip = Tooltip("Close (Ctrl+W, middle click)".into());

@@ -140,6 +140,65 @@ atomic write. Key facts that span several files:
 
 ### Editor (`crates/shader_editor_app`)
 
+Window layout. Requests like "add X to the editor topbar" use exactly these names; use them in code comments, docs
+and commit messages too:
+
+```
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ menu_bar                                                                     │
+├────────────────┬───────────────────────────────────────┬─────────────────────┤
+│ left sidebar   │ tabs bar                              │ right sidebar       │
+│                ├───────────────────────────────────────┤                     │
+│ ┌────────────┐ │ editor topbar                         │ editor kind         │
+│ │project tree│ ├───────────────────────────────────────┤ additional content  │
+│ │            │ │ editor content                        │ (per editor kind)   │
+│ └────────────┘ │                                       │                     │
+│ ┌────────────┐ ├───────────────────────────────────────┤                     │
+│ │assets tree │ │ editor statusbar                      │                     │
+│ │            │ ├───────────────────────────────────────┤                     │
+│ │            │ │ console/logs                          │                     │
+│ └────────────┘ │                                       │                     │
+└────────────────┴───────────────────────────────────────┴─────────────────────┘
+```
+
+- **menu_bar** — global: logo, main menu (File / Assets / Help), global actions; never buttons of one editor kind.
+- **left sidebar** — global: **project tree** (`shaders/**` assets) above **assets tree** (the game's `assets/`,
+  read-only, plus the virtual Internal folder).
+- **tabs bar** — open tabs; visually separate from the editor topbar below it.
+- **editor topbar** / **editor content** / **editor statusbar** / **right sidebar** — owned by the active tab's
+  *editor kind* (graph, text, curve, consts, image, texture — `tab::Tab` / `ViewKind`): its buttons and info, its main
+  view, its status line, its additional content (properties of the selection, hints…).
+- **console/logs** — global: diagnostics and messages, under the editor statusbar.
+
+- **Editor kinds** (`editors/`, decisions 0031, 0032): one module per kind (`editors/<kind>.rs`: graph, text, curve,
+  consts, image, texture) holds **every trait impl of that kind** — `doc_kind::TabDoc` on its document type, and on a
+  zero-sized `<Kind>Editor`:
+  - `editors::EditorAreas`: `VIEW`, `SIDEBAR_TITLE`, `topbar()` / `sidebar()` → `Option<impl Scene>` (`None`: the strip
+    is hidden for the kind), `build(app)` registering the kind's redraw systems, `input(app)` its input context.
+  - `editors::EditorInput` (kinds with hotkeys: graph, curve, text): `type Ctx` and `bindings()`.
+
+  `editors::for_each_kind` (`KindVisitor`) is the one list of kinds; `AreasPlugin` and `InputContextsPlugin` both
+  visit it. The editor statusbar comes from `TabDoc::status` → `StatusInfo` (filled from a `StatusCtx` by
+  `Editor::status_info`). Adding a kind: decision 0031's recipe.
+- **Areas** (`ui/areas.rs`): each area is spawned once in its strip (`EditorTopbar`, `RightSidebar`,
+  `EditorStatusbar`) inside an `AreaOf(ViewKind)` container; `show_active_areas` sets `Node::display` (not
+  `Visibility`, written only on change) so only the active kind's shows and a strip it has nothing for takes no space.
+  Bodies (`*ViewBar`, `*SidebarBody`) are refilled by the kind's systems keyed on what they show (sidebars:
+  `(ui.props, active)` via `SidebarKey`), never every frame. Property widgets and their observers stay in
+  `ui/props.rs`; editor content views stay in `ui::DocArea`.
+- **Input contexts** (`editors/main_input.rs`, decision 0032): bevy_enhanced_input. One `InputRoot` entity carries
+  `MainCtx` (save, undo / redo, close / next tab, open, quit; always active, priority 2) and one context per kind
+  (`GraphCtx`, `CurveCtx`, `TextCtx`; priority 1) that `sync_input_context` activates only while the active tab is of
+  that kind — so a hotkey needs no "is this my tab" guard. The shared edit actions (`EditCopy`, `EditDelete`, …) are
+  bound by each kind that supports them and have one global handler each. Build actions with `hotkey::<A>()`
+  (`consume_input` + `require_reset`) and the `ctrl` / `ctrl_shift` / `shift` / `plain` binding helpers ("Ctrl" = Ctrl
+  or Super); handlers observe `On<Start<A>>` (`on_combo` / `on_plain`) and push `state::Action`s. Plain-key handlers
+  ignore the key while Ctrl, Alt or Super is held (`no_command_mods`). `gate_keyboard` (PreUpdate) hides the keyboard
+  from all contexts while typing (text field focused, palette or dialog open). Activating a context re-inserts its
+  bindings so a key held across a tab switch does not fire (relies on bevy_enhanced_input internals — re-check
+  `tests/input_contexts.rs` on upgrades). Mouse gestures stay picking observers and read modifiers via
+  `main_input::mods()`.
+
 - The model (`shader_graph_core::Asset` inside `doc::Doc`) is the source of truth. Widgets push `state::Action`s →
   `Editor::apply` mutates documents → the bevy_noodle canvas is **rebuilt from the model** on revision change (only when
   no gesture is active). Canvas gestures arrive as `EditApplied` with `EditOrigin::Interaction` and are translated into
@@ -150,16 +209,25 @@ atomic write. Key facts that span several files:
   `PortType::ANY`).
 - Tabs are `tab::Tab` (graph `Doc`, read-only `TextDoc` of a generated file, `CurveDoc`, `ConstsDoc`, read-only
   `ImageDoc` of a game image decoded through `game_image::GameImageCache`, `TextureDoc` of a Texture asset — read-only
-  for a built-in `@internal/…` texture), each implementing `doc_kind::TabDoc` (title, icon, dirty, save, reload,
-  rename, config key, `override_into` for validation; `Tab::doc()`); `Editor::doc()` is `None` on a non-graph tab,
-  `Editor::curve_doc()` / `consts_doc()` / `texture_doc()` give the others. The editable kinds share
-  `history::History<T>`. Each content kind has a view in `ui::DocArea` tagged `ViewOf(ViewKind)` (decision 0014 lists what
-  a new kind needs). WESL/Rust highlighting is our own lexer (`highlight.rs`).
+  for a built-in `@internal/…` texture), each implementing `doc_kind::TabDoc` (title, icon, watermark, dirty, save,
+  reload, rename, config key, `override_into` for validation, editor statusbar data `status` → `StatusInfo`;
+  `Tab::doc()`); `Editor::doc()` is `None` on a non-graph tab, `Editor::curve_doc()` / `consts_doc()` /
+  `texture_doc()` give the others. The editable kinds share
+  `history::History<T>`. Each content kind has a view in `ui::DocArea` tagged `ViewOf(ViewKind)` (decision 0031 lists
+  what a new kind needs). WESL/Rust highlighting is our own lexer (`highlight.rs`).
 - Module seams (decision 0026): `state/*` (types, tabs, regen, watch, apply, `*_ops`, tests), `doc_kind.rs`
-  (`TabDoc`), `ui/node_preview.rs` (generic in-node preview: curve / const / texture kinds in `kinds()`),
-  `ui/tree.rs` (`TreeSource`: Project + read-only Game Assets with the virtual Internal folder), `game_image.rs`
-  (`GameImageCache`: game images and internal textures decoded with `Image::from_buffer`), `droppable.rs`
-  (`DroppableFile`: dragging images / Texture assets onto a graph).
+  (`TabDoc`), `editors/` (see "Editor kinds" above; the document types stay in `doc.rs`, `curve_doc.rs`, `tab.rs`, …;
+  `editors/mod.rs` holds the shared traits and data), `ui/node_preview.rs` (generic in-node preview:
+  curve / const / texture kinds in `kinds()`), `ui/tree.rs` (`TreeSource`: Project + read-only Game Assets with the
+  virtual Internal folder), `game_image.rs` (`GameImageCache`: game images and internal textures decoded with
+  `Image::from_buffer`), `droppable.rs` (`DroppableFile` / `Dropped`: dragging images, Texture, Function and Curve
+  assets onto a graph; a function dropped into itself is refused through `search::is_self_call`, as in the palette).
+- Canvas details (decision 0033): node positions snap to `doc::GRID_SNAP` (5) — pointer drags in the `snap_drag`
+  observer (the lead node only), new / pasted nodes in `Editor::add_node` / `paste`; loaded positions are never
+  rewritten. Node emphasis (selection, pulsing preview, diagnostics) is a bevy_ui `Outline` written by
+  `node_outlines` every frame, and pin hover a `PinHalo` child — neither rebuilds the canvas. A box that fully
+  encloses a comment frame and selects all of its `Frame::nodes` marks it in `Doc::enclosed_frames`, so Delete
+  removes it with the nodes.
 - UI is pure Bevy UI + Feathers (`bsn!`); **no egui**. Workarounds for Feathers 0.20 bugs are in `fixes.rs`.
 - `EditorCorePlugin` runs without a window — logic is tested in `state::tests` and `tests/ui_smoke.rs`.
 - User config: `<OS config dir>/fe3dback/bevy-shader-editor/config.ron` (window size, recent projects, open tabs;
@@ -207,13 +275,26 @@ hand-drawn ones, rasterized at runtime with resvg (`crates/shader_editor_app/src
 ### Visual checks (debug env hooks)
 
 - Editor: `SHADER_EDITOR_SCREENSHOT=out.png [SHADER_EDITOR_OPEN=env/rock_wet.material.ron[#wesl|#rust]|@game/textures/rock_albedo.ktx2|@internal/default]
-  [SHADER_EDITOR_SELECT=stdlib::Lerp] [SHADER_EDITOR_DEMO=palette|wire|dialog|about|quick_start|open_project|welcome|menu|tab_menu|game_file_menu] cargo run -- examples/sample_game`
-  — renders, saves the PNG and exits. `SHADER_EDITOR_INPUT=drag|rmb_click|rmb_pan|mmb_pan|slider|color|pin_rmb|node_rmb|node_dblclick|hover|curve_drag|curve_add|texture_zoom|drop_game_file`
+  [SHADER_EDITOR_SELECT=stdlib::Lerp|c01] [SHADER_EDITOR_DEMO=palette|wire|dialog|about|quick_start[:N]|texture_channel:N|open_project|welcome|menu|tab_menu|game_file_menu] cargo run -- examples/sample_game`
+  — renders, saves the PNG and exits. `SHADER_EDITOR_SELECT` takes a node kind (its first node) or a comment frame
+  id. `SHADER_EDITOR_INPUT=drag|rmb_click|rmb_pan|mmb_pan|slider|color|pin_rmb|node_rmb|node_dblclick|hover|curve_drag|curve_add|texture_zoom|drop_game_file|ctrl_drag_wire|wire_drag|wire_hold|alt_click|box_delete|box_delete_partial`
   (+ `SHADER_EDITOR_INPUT_NODE=<id>`, `SHADER_EDITOR_INPUT_TRACE=1`, `SHADER_EDITOR_ZOOM=<f32>`) plays a scripted mouse
-  gesture through winit's messages and logs the outcome (`demo` lines; `slider`/`color` also log the edited value).
-  `drop_game_file` drags the Game Assets row `SHADER_EDITOR_INPUT_FILE=<path under assets/>` (default: the first one)
-  onto `SHADER_EDITOR_INPUT_NODE` (default: the canvas centre) and logs the graph's texture nodes; it may create a
-  Texture asset, so run it on a copy of the sample game.
+  gesture through winit's messages and logs the outcome (`demo` lines; `slider`/`color` also log the edited value;
+  with `SHADER_EDITOR_SELECT=c01` on rock_wet, `slider` drags that comment's Hue slider).
+  - `drop_game_file` drags the tree row `SHADER_EDITOR_INPUT_FILE` — a Game Assets file as `<path under assets/>`
+    (default: the first one) or a Project asset as `shaders/<path>.<kind>.ron` (e.g.
+    `shaders/common/pulse.curve.ron`) — onto `SHADER_EDITOR_INPUT_NODE` (default: the canvas centre) and logs the
+    graph's texture / curve references and function calls; it may create a Texture asset, so run it on a copy of the
+    sample game.
+  - `hover` rests on the menu_bar's Undo button (its tooltip) or, with `SHADER_EDITOR_INPUT_PIN=<node>.<pin>`, on that
+    pin (hovered pins are logged).
+  - `ctrl_drag_wire` holds Ctrl and drags from `SHADER_EDITOR_INPUT_PIN=<node>.<pin>` (default: the topmost connected
+    input) onto `SHADER_EDITOR_INPUT_TO=<node>.<pin>` (default: the nearest pin of the same direction on another node);
+    `wire_drag` is the same without Ctrl, `wire_hold` keeps the button down (the shot shows the dragged wire);
+    `alt_click` Alt+clicks the `SHADER_EDITOR_INPUT_PIN` pin. All log the wires at both pins before and after.
+  - `box_delete` drags a selection box from outside the first comment frame (or `SHADER_EDITOR_INPUT_FRAME=<id>`) past
+    its far corner and presses Delete; `box_delete_partial` ends the box in the frame's middle. Both log frames, node
+    count, selection and enclosed frames before and after.
 - Sample game: `cd examples/sample_game && SAMPLE_SCREENSHOT=out timeout 180 cargo run` → `out-1.png` 5 s and
   `out-2.png` 25 s (real time) after the first frame, then exits; edit + `regen` in between to verify hot reload (the
   window updates continuously and without vsync in this mode, so it works unfocused under lavapipe too). Render

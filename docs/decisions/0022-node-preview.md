@@ -111,3 +111,5 @@ editor part is in the "Editor" section at the end.
   `IconId::Warning` (icon-rs `WARNING_FILLED`) in the accent color before its title; the diagnostic outline (W107) is
   drawn around it as for any warning. Material tabs with a previewed node get the suffix ` (preview)` in the tab bar
   and the window title; `tab::labels` compares the names without it, so two `rock_wet` tabs still show full paths.
+  *Superseded in part by 0033:* the border is now a 6 px outline pulsing between orange and dark red (selected
+  nodes: a 3 px outline); the warning icon stays.

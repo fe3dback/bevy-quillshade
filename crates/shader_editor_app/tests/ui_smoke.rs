@@ -5,7 +5,7 @@ use bevy::prelude::*;
 use bevy_noodle::prelude::*;
 use bevy_noodle::style::kit;
 use shader_editor_app::EditorCorePlugin;
-use shader_editor_app::canvas::{EditorCanvas, NodeKey, PinKey};
+use shader_editor_app::canvas::{EditorCanvas, NodeKey, PinHalo, PinHovered, PinKey};
 use shader_editor_app::state::{Action, Actions, Editor, PropTarget};
 use shader_editor_app::tab::Lang;
 use shader_editor_app::ui::EditorCanvasMarker;
@@ -149,6 +149,131 @@ fn moving_nodes_updates_model_without_rebuild() {
     assert!(d.is_dirty());
     // Same entity: the canvas was not rebuilt for a move.
     assert!(app.world().get::<NodeKey>(entity).is_some());
+}
+
+/// Design §4.1: a pointer drag snaps the lead node to the 5-unit grid at every step (visibly, not on release);
+/// the other moved nodes follow by the same delta.
+#[test]
+fn dragging_snaps_lead_node_to_grid() {
+    let (_dir, mut app) = app();
+    act(&mut app, Action::OpenAsset(AssetId::new(AssetType::Material, "fx/hologram")));
+    let canvas = app.world().resource::<EditorCanvas>().canvas;
+    let mut ents: Vec<(Entity, String)> = {
+        let w = app.world_mut();
+        w.query::<(Entity, &NodeKey)>().iter(w).map(|(e, k)| (e, k.0.clone())).collect()
+    };
+    ents.sort_by(|a, b| a.1.cmp(&b.1));
+    let (lead, other) = (ents[0].0, ents[1].0);
+    // Off-grid start, like a node of an older file.
+    app.world_mut().get_mut::<NodePosition>(lead).unwrap().0 = Vec2::new(12.3, 7.6);
+    let pos = |app: &App, e: Entity| app.world().get::<NodePosition>(e).unwrap().0;
+    let rel = pos(&app, other) - pos(&app, lead);
+    let step = |app: &mut App, delta: Vec2, total: Vec2, is_final: bool| {
+        let drag = Some(DragProgress { total, is_final });
+        let edit = GraphEdit::MoveNodes { nodes: vec![lead, other], delta, drag };
+        app.world_mut().graph_edit_with_origin(canvas, edit, EditOrigin::Interaction).unwrap();
+    };
+    step(&mut app, Vec2::new(1.0, 0.5), Vec2::new(1.0, 0.5), false);
+    assert_eq!(pos(&app, lead), Vec2::new(15.0, 10.0), "snaps on the first step");
+    step(&mut app, Vec2::new(1.0, 0.5), Vec2::new(2.0, 1.0), false);
+    assert_eq!(pos(&app, lead), Vec2::new(15.0, 10.0), "stays until the next grid point is nearer");
+    step(&mut app, Vec2::new(20.0, -30.0), Vec2::new(22.0, -29.0), false);
+    assert_eq!(pos(&app, lead), Vec2::new(35.0, -20.0));
+    step(&mut app, Vec2::ZERO, Vec2::new(22.0, -29.0), true);
+    assert!((pos(&app, other) - pos(&app, lead) - rel).length() < 1e-3, "relative layout kept");
+    for _ in 0..4 {
+        app.update();
+    }
+    let d = app.world().resource::<Editor>().doc().unwrap();
+    assert_eq!(d.asset.nodes[&ents[0].1].pos, (35.0, -20.0));
+}
+
+/// A pointer drag start, as bevy_picking sends it before the first drag step of a gesture.
+fn drag_start(app: &mut App, entity: Entity) {
+    use bevy::camera::NormalizedRenderTarget;
+    use bevy::picking::backend::HitData;
+    use bevy::picking::events::{Pointer, PointerDragStart};
+    use bevy::picking::pointer::{Location, PointerButton, PointerId};
+    let target = NormalizedRenderTarget::None { width: 800, height: 600 };
+    let pointer = Pointer::new(PointerId::Mouse, Location { target, position: Vec2::ZERO });
+    let hit = HitData::new(Entity::PLACEHOLDER, 0.0, None, None);
+    app.world_mut().trigger(PointerDragStart { entity, pointer, button: PointerButton::Primary, hit });
+}
+
+/// The pointer entering (`over`) or leaving a port, as bevy_picking sends it (also while a wire is dragged).
+fn hover(app: &mut App, entity: Entity, over: bool) {
+    use bevy::camera::NormalizedRenderTarget;
+    use bevy::picking::backend::HitData;
+    use bevy::picking::events::{Pointer, PointerOut, PointerOver};
+    use bevy::picking::pointer::{Location, PointerId};
+    let target = NormalizedRenderTarget::None { width: 800, height: 600 };
+    let pointer = Pointer::new(PointerId::Mouse, Location { target, position: Vec2::ZERO });
+    let hit = HitData::new(Entity::PLACEHOLDER, 0.0, None, None);
+    if over {
+        app.world_mut().trigger(PointerOver { entity, pointer, hit });
+    } else {
+        app.world_mut().trigger(PointerOut { entity, pointer, hit });
+    }
+    app.update();
+}
+
+/// Design §4.8: a hovered pin shows its halo over the dot (1.3x, lighter); bevy_noodle's own port look is untouched.
+#[test]
+fn pin_hover_shows_the_halo() {
+    let (_dir, mut app) = app();
+    act(&mut app, Action::OpenAsset(AssetId::new(AssetType::Material, "fx/hologram")));
+    let pin = {
+        let w = app.world_mut();
+        w.query_filtered::<Entity, With<PinKey>>().iter(w).next().unwrap()
+    };
+    let halo =
+        app.world().get::<Children>(pin).and_then(|c| c.iter().find(|e| app.world().get::<PinHalo>(*e).is_some()));
+    let halo = halo.expect("every pin has a halo child");
+    let shown = |app: &App| *app.world().get::<Visibility>(halo).unwrap() != Visibility::Hidden;
+    assert!(!shown(&app));
+    let port_fill = app.world().get::<BackgroundColor>(pin).unwrap().0;
+    hover(&mut app, pin, true);
+    assert!(app.world().get::<PinHovered>(pin).is_some());
+    assert!(shown(&app));
+    assert!((app.world().get::<UiTransform>(halo).unwrap().scale.x - 1.3).abs() < 1e-6);
+    let halo_fill = app.world().get::<BackgroundColor>(halo).unwrap().0;
+    assert!(halo_fill.luminance() > port_fill.luminance(), "lighter than the dot");
+    assert_eq!(app.world().get::<BackgroundColor>(pin).unwrap().0, port_fill, "the port itself is not restyled");
+    hover(&mut app, pin, false);
+    assert!(app.world().get::<PinHovered>(pin).is_none());
+    assert!(!shown(&app));
+}
+
+/// A drag that never ends (a cancelled touch sends no final step) must not leak its start into the next gesture of
+/// the same node: a new pointer drag start, or any other edit in between, begins a fresh snap drag.
+#[test]
+fn snap_drag_restarts_per_gesture() {
+    let (_dir, mut app) = app();
+    act(&mut app, Action::OpenAsset(AssetId::new(AssetType::Material, "fx/hologram")));
+    let canvas = app.world().resource::<EditorCanvas>().canvas;
+    let lead = {
+        let w = app.world_mut();
+        w.query_filtered::<Entity, With<NodeKey>>().iter(w).next().unwrap()
+    };
+    app.world_mut().get_mut::<NodePosition>(lead).unwrap().0 = Vec2::new(12.3, 7.6);
+    let pos = |app: &App| app.world().get::<NodePosition>(lead).unwrap().0;
+    let step = |app: &mut App, total: Vec2, drag: bool| {
+        let drag = drag.then_some(DragProgress { total, is_final: false });
+        let edit = GraphEdit::MoveNodes { nodes: vec![lead], delta: total, drag };
+        app.world_mut().graph_edit_with_origin(canvas, edit, EditOrigin::Interaction).unwrap();
+    };
+    // An abandoned drag: the lead sits at (15, 10), no final step.
+    step(&mut app, Vec2::new(1.0, 0.5), true);
+    assert_eq!(pos(&app), Vec2::new(15.0, 10.0));
+    // The next gesture starts from where the node is now, not from the old start (12.3, 7.6) → (20, 10).
+    drag_start(&mut app, lead);
+    step(&mut app, Vec2::new(10.0, 0.0), true);
+    assert_eq!(pos(&app), Vec2::new(25.0, 10.0), "a new gesture snaps from the current position");
+    // Abandoned again; a move that is not a drag step in between also ends it.
+    step(&mut app, Vec2::new(0.0, 5.0), false);
+    assert_eq!(pos(&app), Vec2::new(25.0, 15.0));
+    step(&mut app, Vec2::new(10.0, 0.0), true);
+    assert_eq!(pos(&app), Vec2::new(35.0, 15.0));
 }
 
 #[test]

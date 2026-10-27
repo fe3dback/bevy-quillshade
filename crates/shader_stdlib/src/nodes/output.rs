@@ -14,6 +14,13 @@ fn out_pin(id: &str, label: &str, ty: PinType, implicit: &str) -> PinDef {
     PinDef::new(id, label, ty).implicit(implicit)
 }
 
+/// FunctionInput `min` / `max`: shown only for a Float input; never written into a node unless edited, so files
+/// without them stay byte-identical (design §4.10).
+fn range_param(id: &str, label: &str) -> ParamDef {
+    ParamDef::new(id, label, ParamKind::Float { min: None, max: None }, Value::Float(0.0))
+        .shown_if("type", Value::Type(PinType::Float))
+}
+
 fn blend(c: &SigCtx) -> BlendMode {
     c.material_kind().map(|m| m.blend()).unwrap_or(BlendMode::Opaque)
 }
@@ -155,6 +162,9 @@ pub fn register(r: &mut Registry) {
             .param(ParamDef::new("default", "Default", ParamKind::Float4, Value::Float4([0.0; 4])))
             .param(ParamDef::new("required", "Required", ParamKind::Bool, Value::Bool(false)))
             .param(ParamDef::new("order", "Sort Priority", ParamKind::Int { min: None, max: None }, Value::Int(0)))
+            // Slider range of the call nodes' pin when `min < max` (design §4.10); unset by default.
+            .param(range_param("min", "Slider Min"))
+            .param(range_param("max", "Slider Max"))
             .build(
                 |c| {
                     let ty = c.param("type").as_type().unwrap_or(PinType::Float3);

@@ -17,7 +17,7 @@ use shader_graph_core::consts::{ConstType, GlobalConst};
 
 use super::icons::IconId;
 use super::props::{PropField, checkbox_w, linear_color, number, select_w, text_w, vector_fields};
-use super::{HEADER_BG, TEXT, TEXT_DIM, VIEW_BG, ViewOf, icon_button, icon_tool_button, scroll_column, text};
+use super::{TEXT, TEXT_DIM, VIEW_BG, ViewOf, icon_button, icon_tool_button, scroll_column, text};
 use crate::consts_doc::ConstsDoc;
 use crate::state::{Action, Actions, ConstsAction, Editor, PropTarget, display_value};
 use crate::tab::ViewKind;
@@ -29,7 +29,7 @@ const TYPE_W: f32 = 140.0;
 const ERROR: Color = Color::srgb(0.95, 0.42, 0.42);
 const ROW_LINE: Color = Color::srgb_u8(40, 42, 48);
 
-/// Header row (path), rebuilt with the tab.
+/// The editor topbar row of a consts tab (path, count), rebuilt with the tab.
 #[derive(Component, Default, Clone)]
 pub struct ConstsViewBar;
 
@@ -61,16 +61,6 @@ pub fn consts_view() -> impl Scene {
         BackgroundColor(VIEW_BG)
         Visibility::Hidden
         Children [
-            ConstsViewBar
-            Node {
-                flex_direction: FlexDirection::Row,
-                align_items: AlignItems::Center,
-                column_gap: px(8),
-                min_height: px(30),
-                padding: UiRect::new(px(10), px(4), px(2), px(2)),
-            }
-            BackgroundColor(HEADER_BG)
-            --
             // The bottom margin keeps the rows clear of the file type watermark.
             @scroll_column()
             ConstsViewBody

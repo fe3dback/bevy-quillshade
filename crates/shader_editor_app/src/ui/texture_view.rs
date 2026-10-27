@@ -2,7 +2,7 @@
 //! the right, decoded through [`GameImageCache`] with the document's current (unsaved) settings. The mouse wheel
 //! zooms around the pointer, a drag pans, a double click fits the image again; "Tile 3x3" repeats the image so the
 //! address modes show, R | G | B | All shows one channel in grey or the image. Easy mode (decision 0028) is
-//! only the use-case presets in the header, without the form; Advanced is the form with every field. Built-in
+//! only the use-case presets in the editor topbar, without the form; Advanced is the form with every field. Built-in
 //! textures (`@internal/…`) show their values as text.
 //!
 //! Form widgets are the Properties ones ([`PropField`] + `PropTarget::Texture`), so edits take the usual `SetValue` /
@@ -21,7 +21,7 @@ use shader_graph_core::Value;
 use super::dialog::InitText;
 use super::image_view::Checker;
 use super::props::{checkbox_w, integer, labeled, number, section, select_w};
-use super::{HEADER_BG, TEXT, TEXT_DIM, VIEW_BG, ViewOf, chip, scroll_column, text};
+use super::{TEXT, TEXT_DIM, VIEW_BG, ViewOf, chip, scroll_column, text};
 use crate::doc_kind::TabDoc;
 use crate::game_image::{GameImageCache, describe, previewable};
 use crate::state::{Action, Actions, Editor, PropTarget, TextureAction};
@@ -39,15 +39,15 @@ const WARN: Color = Color::srgb(0.95, 0.78, 0.35);
 const ZOOM_MIN: f32 = 1.0 / 16.0;
 const ZOOM_MAX: f32 = 64.0;
 
-/// Header row (Easy / Advanced, presets, channel, tiling, zoom), rebuilt with the form.
+/// The editor topbar row of a texture tab (Easy / Advanced, presets, channel, tiling, zoom), rebuilt with the form.
 #[derive(Component, Default, Clone)]
 pub struct TextureViewBar;
 
-/// The image info (`WxH | format | mips` or `n/a`), in the Properties panel; kept current by the preview.
+/// The image info (`WxH | format | mips` or `n/a`), in the texture kind's right sidebar; kept current by the preview.
 #[derive(Component, Default, Clone)]
 pub struct TextureInfoText;
 
-/// The zoom in the header (`Fit` or a percentage).
+/// The zoom in the editor topbar (`Fit` or a percentage).
 #[derive(Component, Default, Clone)]
 pub struct TextureZoomText;
 
@@ -105,17 +105,6 @@ pub fn texture_view() -> impl Scene {
         BackgroundColor(VIEW_BG)
         Visibility::Hidden
         Children [
-            TextureViewBar
-            Node {
-                flex_direction: FlexDirection::Row,
-                flex_wrap: FlexWrap::Wrap,
-                align_items: AlignItems::Center,
-                column_gap: px(8),
-                min_height: px(30),
-                padding: UiRect::new(px(10), px(10), px(2), px(2)),
-            }
-            BackgroundColor(HEADER_BG)
-            --
             Node { flex_grow: 1.0, min_height: px(0), flex_direction: FlexDirection::Row }
             Children [
                 @scroll_column()
@@ -219,7 +208,7 @@ fn button_group(items: Vec<Box<dyn Scene>>) -> impl Scene {
     }
 }
 
-/// Rebuilds the header and the form when another Texture tab is shown or its form must follow the model.
+/// Rebuilds the editor topbar and the form when another Texture tab is shown or its form must follow the model.
 fn redraw_form(
     editor: Res<Editor>,
     cache: Res<GameImageCache>,

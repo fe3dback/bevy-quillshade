@@ -1,5 +1,7 @@
-//! Window layout (spec §9): main menu + toolbar, asset browser (left), tabs + canvas + log (center), properties
-//! (right); the welcome screen covers the panels while no project is open.
+//! Window layout (spec §9, `CLAUDE.md` → "Editor"): menu_bar (top), left sidebar (project tree, assets tree), center
+//! column (tabs bar, editor topbar, editor content, editor statusbar, console/logs), right sidebar; the welcome screen
+//! covers the panels while no project is open. The editor topbar / statusbar and the right sidebar belong to the
+//! active editor kind ([`areas`], [`crate::editors::EditorAreas`]).
 
 use bevy::feathers::constants::size;
 use bevy::feathers::controls::{ButtonVariant, FeathersButton, FeathersToolButton};
@@ -8,13 +10,16 @@ use bevy::feathers::theme::ThemeBackgroundColor;
 use bevy::feathers::tokens;
 use bevy::input_focus::tab_navigation::TabGroup;
 use bevy::prelude::*;
+use std::path::Path;
+
 use bevy::ui::ui_transform::UiGlobalTransform;
 use bevy::ui_widgets::{Activate, Button, ScrollArea};
 use bevy_noodle::style::kit;
 
-use crate::state::{Action, Actions, Editor, GenFile, Unsaved, ViewRequest};
-use crate::tab::{Lang, Tab, ViewKind};
+use crate::state::{Action, Actions, Editor, Unsaved};
+use crate::tab::ViewKind;
 
+pub mod areas;
 pub mod browser;
 pub mod const_preview;
 pub mod consts_view;
@@ -66,8 +71,9 @@ pub struct EditorCanvasMarker;
 #[derive(Component, Default, Clone)]
 pub struct EmptyHint;
 
+/// The menu_bar's project text (`name  |  N error(s)`, the full path as its tooltip).
 #[derive(Component, Default, Clone)]
-pub struct StatusText;
+pub struct ProjectText;
 
 /// Watermark in the main view's bottom-right corner naming the open document's type.
 #[derive(Component, Default, Clone)]
@@ -83,6 +89,9 @@ pub const ROW_HOVER: Color = Color::srgba(1.0, 1.0, 1.0, 0.06);
 pub const ROW_ACTIVE: Color = Color::srgba(0.35, 0.55, 0.95, 0.30);
 pub const PANEL_BG: Color = Color::srgb_u8(32, 34, 39);
 pub const HEADER_BG: Color = Color::srgb_u8(40, 42, 48);
+/// Background of the editor topbar / statusbar and of the active tab (which so joins its topbar): darker than
+/// [`HEADER_BG`] (the tabs bar), lighter than [`VIEW_BG`].
+pub const TOPBAR_BG: Color = Color::srgb_u8(30, 32, 37);
 pub const BORDER: Color = Color::srgb_u8(20, 21, 24);
 /// Background of document views (the window clear color the graph canvas shows through).
 pub const VIEW_BG: Color = Color::srgb_u8(24, 25, 29);
@@ -105,6 +114,7 @@ impl Plugin for UiPlugin {
             palette::PalettePlugin,
             input::InputPlugin,
             tooltip::TooltipPlugin,
+            areas::AreasPlugin,
         ))
         .add_plugins((
             logo::LogoPlugin,
@@ -112,9 +122,10 @@ impl Plugin for UiPlugin {
             image_view::ImageViewPlugin,
             texture_view::TextureViewPlugin,
             crate::game_image::GameImagePlugin,
+            crate::editors::main_input::InputContextsPlugin,
         ))
         .add_systems(Startup, spawn_layout)
-        .add_systems(Update, (show_active_view, show_empty_hint, show_doc_kind, show_status, redraw_view_tools))
+        .add_systems(Update, (show_active_view, show_empty_hint, show_doc_kind, show_project))
         .add_observer(activate_action)
         .add_observer(open_main_menu)
         .add_observer(row_hover_on)
@@ -234,7 +245,21 @@ pub fn text(s: impl Into<String>, color: Color, font_size: f32) -> impl Scene {
     }
 }
 
+/// One line of text that is clipped instead of wrapped when the row is too narrow (a path in an editor topbar).
+pub fn clipped_text(s: impl Into<String>, color: Color, font_size: f32) -> impl Scene {
+    let (s, layout) = (s.into(), TextLayout::no_wrap());
+    bsn! {
+        Node { min_width: px(0), overflow: Overflow::clip() }
+        Children [ @text(s, color, font_size) layout ]
+    }
+}
+
 fn header(title: &'static str) -> impl Scene {
+    header_row(text(title, TEXT, 14.0))
+}
+
+/// A panel header row holding `title` (a text scene, possibly with a marker).
+fn header_row(title: impl Scene) -> impl Scene {
     bsn! {
         Node {
             flex_direction: FlexDirection::Row,
@@ -244,7 +269,7 @@ fn header(title: &'static str) -> impl Scene {
             min_height: size::HEADER_HEIGHT,
         }
         BackgroundColor(HEADER_BG)
-        Children [ @text(title, TEXT, 14.0) ]
+        Children [ @{title} ]
     }
 }
 
@@ -303,12 +328,10 @@ fn open_main_menu(
     open_icon_menu(&mut commands, center + Vec2::new(-size.x, size.y) / 2.0 + Vec2::Y * 2.0, menu.items());
 }
 
-/// The toolbar part with the actions of the active tab's view (filled by [`redraw_view_tools`]).
-#[derive(Component, Default, Clone)]
-pub struct ViewTools;
-
-/// Logo, main menu, undo/redo, then the actions of the active view.
-fn toolbar() -> impl Scene {
+/// Logo, main menu, undo/redo, then the project name and error count. Nothing of one editor kind (that is the editor
+/// topbar's).
+fn menu_bar() -> impl Scene {
+    let tip = Tooltip::default();
     bsn! {
         Node {
             flex_direction: FlexDirection::Row,
@@ -332,87 +355,21 @@ fn toolbar() -> impl Scene {
             --
             @icon_button(IconId::Redo, Action::Redo, "Redo (Ctrl+Shift+Z, Ctrl+Y)")
             --
-            @sep()
-            --
-            ViewTools
-            Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(2) }
-            --
             Node { flex_grow: 1.0 }
             --
-            StatusText
+            ProjectText
             Text("")
             TextFont { font_size: FontSize::Px(12.0) }
             TextColor(TEXT_DIM)
+            tip
             Node { margin: UiRect::right(px(6)) }
         ]
     }
 }
 
-/// Toolbar actions of the active tab's view.
-fn view_tools(tab: &Tab) -> Vec<Box<dyn Scene>> {
-    match tab {
-        Tab::Graph(_) => vec![
-            Box::new(icon_tool_button(IconId::AutoLayout, "Auto-layout", Action::AutoLayout, "Auto-layout (Ctrl+L)")),
-            Box::new(icon_tool_button(IconId::Comment, "Comment", Action::AddComment(None), "Add a comment frame (C)")),
-            Box::new(icon_tool_button(IconId::Fit, "Fit", Action::View(ViewRequest::FitAll), "Fit the graph (Home)")),
-        ],
-        Tab::Curve(_) => vec![
-            Box::new(tool_button("Select all", Action::SelectAll)),
-            Box::new(icon_tool_button(
-                IconId::Delete,
-                "Delete",
-                Action::DeleteSelection,
-                "Delete the selected points (Del)",
-            )),
-        ],
-        // The add form has its own Add button; an image has nothing to act on (Properties offers its Texture asset);
-        // a Texture tab's form and preview controls are in the view.
-        Tab::Consts(_) | Tab::Image(_) | Tab::Texture(_) => Vec::new(),
-        Tab::Text(t) => {
-            let which = match t.lang {
-                Lang::Wesl => GenFile::Wesl,
-                Lang::Rust => GenFile::Rust,
-            };
-            vec![
-                Box::new(icon_tool_button(IconId::Copy, "Copy", Action::Copy, "Copy the whole file (Ctrl+C)")),
-                Box::new(icon_tool_button(
-                    IconId::for_id(&t.source, None),
-                    "Source",
-                    Action::OpenAsset(t.source.clone()),
-                    "Open the source graph",
-                )),
-                Box::new(icon_tool_button(
-                    IconId::OpenExternal,
-                    "Open externally",
-                    Action::ShowFile(t.source.clone(), which),
-                    "Open in the default application",
-                )),
-            ]
-        }
-    }
-}
-
-fn redraw_view_tools(
-    editor: Res<Editor>,
-    tools: Query<Entity, With<ViewTools>>,
-    mut last: Local<Option<Option<String>>>,
-    mut commands: Commands,
-) {
-    // A text tab's buttons name its source: rebuilt per tab, not per view kind.
-    let key = editor.tab().and_then(|t| t.doc().config_key());
-    if last.as_ref() == Some(&key) {
-        return;
-    }
-    let Ok(tools) = tools.single() else { return };
-    *last = Some(key);
-    commands.entity(tools).despawn_children();
-    for b in editor.tab().map(view_tools).unwrap_or_default() {
-        commands.spawn_scene(bsn! { @{b} ChildOf(tools) });
-    }
-}
-
-fn sep() -> impl Scene {
-    bsn! { Node { width: px(1), height: px(18), margin: UiRect::horizontal(px(4)) } BackgroundColor(BORDER) }
+/// The project's name: the root directory's name (the whole path when it has none, e.g. `/`).
+pub(crate) fn project_name(root: &Path) -> String {
+    root.file_name().map_or_else(|| root.display().to_string(), |n| n.to_string_lossy().into_owned())
 }
 
 /// Scrollable column used by the panels; `marker` tags the entity the panel fills.
@@ -433,11 +390,13 @@ pub fn scroll_column() -> impl Scene {
 fn spawn_layout(mut commands: Commands) {
     commands.spawn(Camera2d);
     commands.spawn_scene(bsn! {
-        Node { width: percent(100), height: percent(100), flex_direction: FlexDirection::Column }
+        // `min_width: 0`: Bevy lays a UI root out in an implicit grid cell, which would otherwise grow to the root's
+        // min-content width (the editor topbar's buttons do not wrap) and push the right sidebar out of the window.
+        Node { width: percent(100), height: percent(100), min_width: px(0), flex_direction: FlexDirection::Column }
         ThemeBackgroundColor(tokens::WINDOW_BG)
         TabGroup
         Children [
-            @toolbar()
+            @menu_bar()
             --
             Node { flex_grow: 1.0, flex_direction: FlexDirection::Row, min_height: px(0) }
             Children [
@@ -455,7 +414,7 @@ fn spawn_layout(mut commands: Commands) {
                     @scroll_column() browser::GameAssetsBody Node { flex_grow: 2.0, flex_basis: px(0) }
                 ]
                 --
-                // Center: tabs, canvas, log.
+                // Center: tabs bar, editor topbar, editor content, editor statusbar, console/logs.
                 Node { flex_grow: 1.0, flex_direction: FlexDirection::Column, min_width: px(0) }
                 Children [
                     tabs::TabsBar
@@ -470,10 +429,17 @@ fn spawn_layout(mut commands: Commands) {
                     }
                     BackgroundColor(HEADER_BG)
                     --
+                    @areas::editor_topbar()
+                    --
                     DocArea
                     Node { flex_grow: 1.0, min_height: px(0) }
                     Children [
                         @kit::canvas() EditorCanvasMarker ViewOf(ViewKind::Graph)
+                        // Dimmer than bevy_noodle's default (design §4.9).
+                        bevy_noodle::style::CanvasGrid {
+                            minor: Color::srgba(1.0, 1.0, 1.0, 0.006),
+                            major: Color::srgba(1.0, 1.0, 1.0, 0.014),
+                        }
                         --
                         @text_view::text_view()
                         --
@@ -486,7 +452,8 @@ fn spawn_layout(mut commands: Commands) {
                         @texture_view::texture_view()
                         --
                         EmptyHint
-                        Node { position_type: PositionType::Absolute, left: px(24), top: px(24) }
+                        // `right` bounds the width: the hint wraps instead of running past the editor content.
+                        Node { position_type: PositionType::Absolute, left: px(24), right: px(24), top: px(24) }
                         Pickable::IGNORE
                         Children [ @text("Double-click an asset in the browser to open it (create one with Assets or a right click in the browser).", TEXT_DIM, 14.0) ]
                         --
@@ -500,6 +467,8 @@ fn spawn_layout(mut commands: Commands) {
                         --
                         @crate::ui::input::minimap()
                     ]
+                    --
+                    @areas::editor_statusbar()
                     --
                     Node { height: px(190), flex_direction: FlexDirection::Column, border: UiRect::top(px(1)) }
                     BackgroundColor(PANEL_BG)
@@ -519,15 +488,7 @@ fn spawn_layout(mut commands: Commands) {
                     ]
                 ]
                 --
-                // Properties.
-                Node { width: px(330), flex_direction: FlexDirection::Column, border: UiRect::left(px(1)) }
-                BackgroundColor(PANEL_BG)
-                BorderColor::all(BORDER)
-                Children [
-                    @header("Properties")
-                    --
-                    @scroll_column() props::PropsBody Node { padding: UiRect::all(px(8)), row_gap: px(6) }
-                ]
+                @areas::right_sidebar()
                 --
                 @welcome::welcome()
             ]
@@ -549,9 +510,9 @@ fn show_empty_hint(editor: Res<Editor>, mut q: Query<&mut Visibility, With<Empty
     }
 }
 
-/// Watermark text: the asset type of a graph, the language of a generated file ([`crate::doc_kind::TabDoc::kind_label`]).
+/// Watermark text: the asset type of a graph, the language of a generated file ([`crate::doc_kind::TabDoc::watermark`]).
 fn show_doc_kind(editor: Res<Editor>, mut q: Query<&mut Text, With<DocKindText>>) {
-    let label = editor.tab().map_or("", |t| t.doc().kind_label());
+    let label = editor.tab().and_then(|t| t.doc().watermark()).unwrap_or("");
     for mut t in &mut q {
         if t.0 != label {
             t.0 = label.into();
@@ -559,20 +520,28 @@ fn show_doc_kind(editor: Res<Editor>, mut q: Query<&mut Text, With<DocKindText>>
     }
 }
 
-fn show_status(editor: Res<Editor>, mut q: Query<&mut Text, With<StatusText>>, mut windows: Query<&mut Window>) {
+/// The menu_bar's project text and tooltip, and the window title.
+fn show_project(
+    editor: Res<Editor>,
+    mut q: Query<(&mut Text, &mut Tooltip), With<ProjectText>>,
+    mut windows: Query<&mut Window>,
+) {
     if !editor.is_changed() {
         return;
     }
-    let status = match &editor.project {
+    let (status, path) = match &editor.project {
         Some(p) => {
             let errors = editor.all_diagnostics().iter().filter(|d| d.is_error()).count();
-            format!("{}  |  {} asset(s)  |  {} error(s)", p.root.display(), editor.disk.len(), errors)
+            (format!("{}  |  {} error(s)", project_name(&p.root), errors), p.root.display().to_string())
         }
-        None => "No project".into(),
+        None => ("No project".into(), "No project open".into()),
     };
-    for mut t in &mut q {
+    for (mut t, mut tip) in &mut q {
         if t.0 != status {
             t.0 = status.clone();
+        }
+        if tip.0 != path {
+            tip.0 = path.clone();
         }
     }
     let title = editor.window_title();
@@ -580,5 +549,18 @@ fn show_status(editor: Res<Editor>, mut q: Query<&mut Text, With<StatusText>>, m
         if w.title != title {
             w.title = title.clone();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::project_name;
+
+    #[test]
+    fn project_name_is_last_component() {
+        assert_eq!(project_name(Path::new("/home/u/games/my_game")), "my_game");
+        assert_eq!(project_name(Path::new("/")), "/");
     }
 }
