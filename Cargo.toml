@@ -4,15 +4,15 @@ members = ["crates/*", "vendor/bevy_noodle"]
 exclude = ["examples/sample_game"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.97.1"
 license = "MIT"
 
 [workspace.dependencies]
-# todo: move dynamic_linking to crate feature (before wide use)
-# system_clipboard: paste from / copy to other applications (without it the clipboard is in-app only)
-bevy = { version = "0.20.0", features = ["bevy_feathers", "system_clipboard", "dynamic_linking"] }
+# system_clipboard: paste from / copy to other applications (without it the clipboard is in-app only).
+# dynamic_linking is the root package's default feature `dynamic_linking`, not set here.
+bevy = { version = "0.20.0", features = ["bevy_feathers", "system_clipboard"] }
 # Local fork of bevy_noodle 0.5.0 (vendor/bevy_noodle/FORK.md).
 bevy_noodle = { path = "vendor/bevy_noodle", features = ["default_style", "scene"] }
 # Input contexts of the editor (decision 0032).
@@ -41,7 +41,8 @@ shader_stdlib = { path = "crates/shader_stdlib" }
 shader_codegen_wesl = { path = "crates/shader_codegen_wesl" }
 shader_codegen_rust = { path = "crates/shader_codegen_rust" }
 shader_project = { path = "crates/shader_project" }
-shader_editor_app = { path = "crates/shader_editor_app" }
+# Without its default dynamic_linking: the root package's feature of that name decides.
+shader_editor_app = { path = "crates/shader_editor_app", default-features = false }
 
 [package]
 name = "bevy-quillshade"
@@ -54,6 +55,12 @@ license = "MIT"
 [[bin]]
 name = "shader-editor"
 path = "src/main.rs"
+
+[features]
+# Fast incremental builds while developing (bevy/dynamic_linking). Release binaries are built with
+# `--no-default-features`: a dynamically linked one needs libbevy_dylib and Rust's libstd next to it.
+default = ["dynamic_linking"]
+dynamic_linking = ["shader_editor_app/dynamic_linking"]
 
 [dependencies]
 clap = { workspace = true }
@@ -73,3 +80,7 @@ debug = false
 [profile.dev.package.bevy_noodle]
 opt-level = 3
 debug = false
+
+# Release binaries (CI `dist` job): without symbols they are ~40% smaller; panics still name the location.
+[profile.release]
+strip = true

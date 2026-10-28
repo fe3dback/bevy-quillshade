@@ -445,7 +445,7 @@ dependencies = [
 
 [[package]]
 name = "bevy-quillshade"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "clap",
  "shader_codegen_wesl",
@@ -5224,7 +5224,7 @@ dependencies = [
 
 [[package]]
 name = "shader_codegen_rust"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ron",
  "serde",
@@ -5235,7 +5235,7 @@ dependencies = [
 
 [[package]]
 name = "shader_codegen_wesl"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "insta",
  "naga",
@@ -5246,7 +5246,7 @@ dependencies = [
 
 [[package]]
 name = "shader_editor_app"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bevy",
  "bevy_enhanced_input",
@@ -5265,7 +5265,7 @@ dependencies = [
 
 [[package]]
 name = "shader_graph_core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ron",
  "serde",
@@ -5275,7 +5275,7 @@ dependencies = [
 
 [[package]]
 name = "shader_project"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "insta",
  "ktx2",
@@ -5294,7 +5294,7 @@ dependencies = [
 
 [[package]]
 name = "shader_stdlib"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ron",
  "serde",

@@ -42,9 +42,13 @@ use canvas::{CanvasPlugin, CanvasSystems, EditorCanvas};
 use config::UserConfig;
 use state::{Action, Actions, Editor};
 
-/// Editor version (Help → About, `--version`); CI sets it on release.
-pub const EDITOR_VERSION: &str = "0.2";
-pub const PROJECT_URL: &str = "https://github.com/fe3dback/bevy-shader-vibe";
+/// Editor version (Help → About, `--version`): the release tag, which CI passes as `SHADER_EDITOR_VERSION` at build
+/// time; the workspace version otherwise.
+pub const EDITOR_VERSION: &str = match option_env!("SHADER_EDITOR_VERSION") {
+    Some(v) => v,
+    None => env!("CARGO_PKG_VERSION"),
+};
+pub const PROJECT_URL: &str = "https://github.com/fe3dback/bevy-quillshade";
 pub const AUTHORS: &str = "claude code / fe3dback";
 pub const LICENSE: &str = "MIT";
 /// Shown small and dimmed on the welcome screen and in About.

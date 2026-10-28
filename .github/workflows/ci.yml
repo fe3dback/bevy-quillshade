@@ -2,12 +2,52 @@ name: CI
 
 on:
   push:
+    branches: [master]
+    # A semver tag (`0.3.0`, `v0.3.0`, `0.3.0-rc.1`) also builds the release binaries and publishes a GitHub release.
+    tags: ["[0-9]+.[0-9]+.[0-9]+*", "v[0-9]+.[0-9]+.[0-9]+*"]
   pull_request:
+  workflow_dispatch:
+
+# A newer push to the same branch / PR cancels the running check; tag (release) runs are never cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 env:
   CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN: "1.97.1"
+  LINUX_DEPS: libudev-dev libasound2-dev libwayland-dev libxkbcommon-dev
 
 jobs:
+  # Platform-independent checks, run once (Linux).
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: clippy, rustfmt
+      - name: Linux dependencies
+        run: sudo apt-get update && sudo apt-get install -y $LINUX_DEPS
+      # Dependencies of both workspaces (the sample game is a separate one with its own target dir). Only master writes
+      # the cache (branches and PRs restore it), so the 10 GB repo limit is not churned by every branch.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            examples/sample_game -> target
+          cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      # The committed generated crate; that it matches a fresh regen is checked by the `test` job on every OS.
+      - name: Generated crate builds and is clippy-clean
+        working-directory: examples/sample_game
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
   test:
     strategy:
       fail-fast: false
@@ -18,19 +58,25 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.97.1"
-          components: clippy, rustfmt
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
       - name: Linux dependencies
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libudev-dev libasound2-dev libwayland-dev libxkbcommon-dev
+        run: sudo apt-get update && sudo apt-get install -y $LINUX_DEPS
       - uses: Swatinem/rust-cache@v2
-      - name: Format
-        run: cargo fmt --all --check
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        with:
+          cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/master' }}
       # Unit, pipeline, snapshot (+ WESL compile against Bevy 0.20 sources) and UI smoke tests.
+      # bevy/dynamic_linking links std dynamically. Cargo puts the toolchain's libstd on the loader path for test
+      # binaries but not for rustdoc, whose doctest binaries then fail with "libstd-….so: cannot open shared object
+      # file" (Linux, macOS; Windows finds it through PATH).
       - name: Test
-        run: cargo test --workspace --no-fail-fast
+        shell: bash
+        run: |
+          lib="$(rustc --print target-libdir)"
+          export LD_LIBRARY_PATH="$lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          export DYLD_FALLBACK_LIBRARY_PATH="$lib${DYLD_FALLBACK_LIBRARY_PATH:+:$DYLD_FALLBACK_LIBRARY_PATH}"
+          cargo test --workspace --no-fail-fast
       - name: CLI check of the sample project (headless, compile-checks WESL)
         run: cargo run -- check examples/sample_game --compile
       - name: Generated crate is up to date
@@ -45,6 +91,75 @@ jobs:
             echo "$untracked"
             exit 1
           fi
-      - name: Generated crate builds and is clippy-clean
-        working-directory: examples/sample_game
-        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  # Release binaries for a semver tag, built only after every check passed.
+  dist:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [lint, test]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The oldest supported Ubuntu runner: the binary needs this glibc or newer.
+          - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+          - { os: macos-latest, target: aarch64-apple-darwin }
+          - { os: macos-latest, target: x86_64-apple-darwin }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: ${{ matrix.target }}
+      - name: Linux dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y $LINUX_DEPS
+      # `EDITOR_VERSION` (About, `--version`) comes from the tag, without a leading `v`.
+      - name: Version from the tag
+        shell: bash
+        run: echo "SHADER_EDITOR_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+      # No dynamic_linking: the binary must run on its own.
+      - name: Build
+        run: cargo build --release --locked --no-default-features --target ${{ matrix.target }}
+      - name: Package
+        shell: bash
+        run: |
+          name="shader-editor-$SHADER_EDITOR_VERSION-${{ matrix.target }}"
+          mkdir -p "dist/$name"
+          cp README.md "dist/$name/"
+          if [ "$RUNNER_OS" = Windows ]; then
+            cp "target/${{ matrix.target }}/release/shader-editor.exe" "dist/$name/"
+            (cd dist && 7z a "$name.zip" "$name")
+          else
+            cp "target/${{ matrix.target }}/release/shader-editor" "dist/$name/"
+            tar -C dist -czf "dist/$name.tar.gz" "$name"
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+          if-no-files-found: error
+
+  release:
+    needs: dist
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
+      # GITHUB_TOKEN is issued to every run; `contents: write` above lets it create the release.
+      - name: Publish the GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          prerelease=""
+          case "$GITHUB_REF_NAME" in *-*) prerelease="--prerelease" ;; esac
+          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" \
+            --generate-notes --verify-tag $prerelease

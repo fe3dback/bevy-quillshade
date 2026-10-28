@@ -50,6 +50,11 @@ instead of a running world:
 
 ## Quick Start
 
+### Download
+
+Prebuilt binaries for Linux (x86_64), Windows (x86_64) and macOS (Apple Silicon, Intel) are attached to every
+[release](https://github.com/fe3dback/bevy-quillshade/releases).
+
 ### Installation from source
 
 Requires Rust ≥ 1.97.1 and the same system dependencies as Bevy itself (see
@@ -58,7 +63,8 @@ Requires Rust ≥ 1.97.1 and the same system dependencies as Bevy itself (see
 ```sh
 git clone https://github.com/fe3dback/bevy-quillshade
 cd bevy-quillshade
-cargo build --release
+# Without the default `dynamic_linking` feature (fast builds while developing) the binary runs on its own.
+cargo build --release --no-default-features
 ./target/release/shader-editor
 ```
 

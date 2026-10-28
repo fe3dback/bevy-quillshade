@@ -5,6 +5,11 @@ edition = { workspace = true }
 rust-version = { workspace = true }
 license = { workspace = true }
 
+[features]
+# Fast incremental builds (`cargo test -p shader_editor_app`); see the root package's feature.
+default = ["dynamic_linking"]
+dynamic_linking = ["bevy/dynamic_linking"]
+
 [dependencies]
 bevy = { workspace = true }
 bevy_noodle = { workspace = true }

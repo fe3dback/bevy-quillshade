@@ -19,8 +19,10 @@ changing codegen, file format or editor architecture. Manual pre-release UI chec
 - Toolchain comes from the nix dev shell (`flake.nix`, `.envrc`): Rust ≥ 1.97.1 (MSRV, required by bevy_noodle),
   `kache` as rustc wrapper. `rust-toolchain.toml.disabled` is intentionally disabled. **Never run `nix` commands** —
   use plain `cargo`.
-- Debug builds use `bevy/dynamic_linking`; start binaries through `cargo run` (it puts `libbevy_dylib` on the path).
-  Running the built binary directly only works for release builds.
+- `bevy/dynamic_linking` is the default feature `dynamic_linking` of the root package and of `shader_editor_app`
+  (the workspace dependency on `shader_editor_app` has `default-features = false`, so the root feature decides): start
+  such binaries through `cargo run` (it puts `libbevy_dylib` on the path). A standalone binary needs
+  `cargo build --release --no-default-features` (what the release job builds).
 - GUI windows need the Bevy runtime libs (libxkbcommon, wayland, vulkan-loader) on `LD_LIBRARY_PATH` — the nix shell
   provides them; software Vulkan (lavapipe) is fine for screenshots.
 
@@ -45,10 +47,16 @@ INSTA_UPDATE=always cargo test -p shader_project --test snapshots  # accept inte
 CLI exit codes: `0` ok, `1` validation errors, `2` project failed to open / write error. Diagnostics go to stderr as
 `path:node[.pin]:CODE: text`.
 
-CI (`.github/workflows/ci.yml`, Linux/Windows/macOS) additionally runs `regen examples/sample_game` and fails on
-`git diff` or a new untracked file (`git status --porcelain`) — **any codegen change must be followed by regenerating
-the sample game and committing the result** (new files included), then
+CI (`.github/workflows/ci.yml`): job `lint` (Linux: fmt, clippy, clippy of the sample's generated crate) and job
+`test` (Linux/Windows/macOS: tests, `check --compile`, then `regen examples/sample_game`, failing on `git diff` or a
+new untracked file, `git status --porcelain`) — **any codegen change must be followed by regenerating the sample game
+and committing the result** (new files included), then
 `cd examples/sample_game && cargo clippy --workspace --all-targets -- -D warnings` must pass on the generated crate.
+Only master saves the `Swatinem/rust-cache` caches (branches and PRs restore them). Doctests need the toolchain's
+`rustc --print target-libdir` on the loader path under `dynamic_linking` (cargo adds it for test binaries, not for
+rustdoc). Pushing a semver tag (`0.3.0` / `v0.3.0`; `-suffix` = prerelease) also runs `dist` (release binaries without
+`dynamic_linking` for Linux x86_64, Windows x86_64, macOS arm64 / x86_64; `SHADER_EDITOR_VERSION` = the tag without `v`
+becomes `EDITOR_VERSION`) and `release` (`gh release create` with `GITHUB_TOKEN`, generated notes).
 
 `cargo run -p shader_project --example make_sample -- examples/sample_game` rewrites the sample's `shaders/` from the
 fixture graphs in `crates/shader_project/src/fixtures.rs` and regenerates — it overwrites hand edits to fixture-named
