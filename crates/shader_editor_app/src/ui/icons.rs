@@ -90,10 +90,13 @@ pub enum IconId {
     Clear,
     ArrowUp,
     ArrowDown,
+    /// Navigation Back / Forward (the menu_bar, View menu; decision 0041).
+    Back,
+    Forward,
 }
 
 impl IconId {
-    pub const ALL: [IconId; 43] = [
+    pub const ALL: [IconId; 45] = [
         IconId::File,
         IconId::Folder,
         IconId::FolderOpen,
@@ -137,6 +140,8 @@ impl IconId {
         IconId::Clear,
         IconId::ArrowUp,
         IconId::ArrowDown,
+        IconId::Back,
+        IconId::Forward,
     ];
 
     fn source(self) -> Icon {
@@ -184,6 +189,8 @@ impl IconId {
             IconId::Clear => icon_rs::REMOVE_CIRCLE,
             IconId::ArrowUp => icon_rs::ARROW_UP,
             IconId::ArrowDown => icon_rs::ARROW_DOWN,
+            IconId::Back => icon_rs::CHEVRON_LEFT,
+            IconId::Forward => icon_rs::CHEVRON_RIGHT,
         }
     }
 

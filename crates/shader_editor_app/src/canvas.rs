@@ -23,7 +23,8 @@ use shader_project::AssetId;
 use crate::doc::{connection_error, node_signature, route_declarations, tidy};
 use crate::editors::main_input::typing_into;
 use crate::inline::{Inline, inline_for_param, inline_for_pin, inline_scene};
-use crate::state::{Action, Actions, Editor, Link, PropTarget, ViewRequest, display_value};
+use crate::state::{Action, Actions, Editor, Link, NavView, PropTarget, ViewRequest, display_value};
+use crate::tab::TabKey;
 use crate::ui::icons::{IconId, icon};
 use crate::ui::props::PropField;
 use crate::ui::{ACCENT, node_preview};
@@ -94,6 +95,7 @@ impl Plugin for CanvasPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<PendingMoves>()
             .init_resource::<MoveVerdicts>()
+            .init_resource::<SettleState>()
             .add_systems(
                 Update,
                 (
@@ -107,6 +109,7 @@ impl Plugin for CanvasPlugin {
                     node_outlines,
                     keep_center_on_resize,
                     apply_view_requests,
+                    report_settled_view,
                 )
                     .chain()
                     .in_set(CanvasSystems),
@@ -676,6 +679,16 @@ pub fn rebuild_canvas(world: &mut World) {
     // View per document.
     if !same_doc {
         let view = world.get::<CanvasView>(canvas).map(|v| (v.pan, v.zoom));
+        // The outgoing graph's last view goes into its history entry, so Back returns there (decision 0041); it may
+        // not have settled yet. A canvas that is not laid out has no centre.
+        let outgoing = world
+            .get::<CanvasView>(canvas)
+            .zip(world.get::<ComputedNode>(canvas))
+            .filter(|(_, c)| (c.size() * c.inverse_scale_factor()).min_element() > 1.0)
+            .map(nav_view);
+        if let (Some((old, _)), Some(v)) = (&shown, outgoing) {
+            world.resource_mut::<Editor>().bypass_change_detection().nav.amend_last_of(&TabKey::Asset(old.clone()), v);
+        }
         let mut ec = world.resource_mut::<EditorCanvas>();
         if let (Some((old, _)), Some(v)) = (&shown, view) {
             ec.views.insert(old.clone(), v);
@@ -1064,6 +1077,15 @@ fn apply_view_requests(
     if size.min_element() <= 1.0 {
         return;
     }
+    // Back / Forward's camera restore (decision 0041) needs only the canvas size, not the nodes' layout. It lands
+    // after `rebuild_canvas`'s per-document restore (the wait for `shown` above).
+    if let ViewRequest::Set { centre, zoom } = editor.view_requests[0] {
+        editor.view_requests.remove(0);
+        // Not `clamp`, which panics on inverted limits (as in `CanvasView::zoom_around`).
+        view.zoom = zoom.max(view.min_zoom).min(view.max_zoom);
+        view.pan = size / 2.0 - centre * view.zoom;
+        return;
+    }
     let req = editor.view_requests[0].clone();
     let sel = &d.selection;
     let rects: Vec<Rect> = nodes
@@ -1100,6 +1122,60 @@ fn keep_center_on_resize(
 /// Graph-space center of the visible canvas (its view and laid-out node).
 pub fn view_center(view: &CanvasView, c: &ComputedNode) -> Vec2 {
     view.canvas_to_graph(c.size() * c.inverse_scale_factor() / 2.0)
+}
+
+/// The canvas camera as a navigation history view.
+fn nav_view((view, c): (&CanvasView, &ComputedNode)) -> NavView {
+    NavView { centre: view_center(view, c), zoom: view.zoom }
+}
+
+/// How long the shown graph's camera must rest before [`report_settled_view`] records it (seconds).
+pub const NAV_SETTLE_SECS: f32 = 0.3;
+
+/// [`report_settled_view`]'s polling state.
+#[derive(Resource, Default)]
+struct SettleState {
+    /// The document and camera of the previous frame.
+    last: Option<(AssetId, NavView)>,
+    /// How long `last` has been unchanged.
+    still: f32,
+}
+
+/// Records the shown graph's camera in the navigation history once it has rested for [`NAV_SETTLE_SECS`] with no
+/// gesture running and no camera request pending (navigation design "Recording camera views", decision 0041).
+/// Polling catches every path that moves the camera (pan / zoom gestures, minimap, Fit, the per-document restore)
+/// without a fork event. Small moves amend the current entry, large jumps push one (`NavHistory::note_view`). A
+/// resting camera is reported once: while it equals the current entry's view there is nothing to record.
+fn report_settled_view(world: &mut World) {
+    let Some(canvas) = world.get_resource::<EditorCanvas>().map(|ec| ec.canvas) else { return };
+    let shown = world.resource::<EditorCanvas>().shown.as_ref().map(|s| s.0.clone());
+    let editor = world.resource::<Editor>();
+    let active = editor.doc().map(|d| d.id.clone());
+    let pending = !editor.view_requests.is_empty();
+    let recorded = editor.nav.current().and_then(|e| e.view);
+    let Some(id) = active.filter(|a| Some(a) == shown.as_ref()) else { return };
+    if pending || !idle(world) {
+        return;
+    }
+    let Some((view, c)) = world.get::<CanvasView>(canvas).zip(world.get::<ComputedNode>(canvas)) else { return };
+    let min_side = (c.size() * c.inverse_scale_factor()).min_element();
+    if min_side <= 1.0 {
+        return; // not laid out
+    }
+    let now = nav_view((view, c));
+    let dt = world.resource::<Time>().delta_secs();
+    let mut state = world.resource_mut::<SettleState>();
+    if state.last.as_ref() == Some(&(id.clone(), now)) {
+        state.still += dt;
+    } else {
+        state.last = Some((id.clone(), now));
+        state.still = 0.0;
+    }
+    if state.still < NAV_SETTLE_SECS || recorded == Some(now) {
+        return;
+    }
+    // The history is navigation state only: no redraw or validation keys on it (decision 0041).
+    world.resource_mut::<Editor>().bypass_change_detection().nav.note_view(&TabKey::Asset(id), now, min_side);
 }
 
 /// Link for a palette opened from a wire drop.

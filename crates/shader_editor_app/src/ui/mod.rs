@@ -13,7 +13,7 @@ use bevy::feathers::theme::ThemeBackgroundColor;
 use bevy::feathers::tokens;
 use bevy::input_focus::tab_navigation::TabGroup;
 use bevy::prelude::*;
-use bevy::ui::Pressed;
+use bevy::ui::{InteractionDisabled, Pressed};
 use bevy::ui_widgets::{Activate, MenuButton, ScrollArea};
 use bevy_noodle::style::kit;
 
@@ -147,6 +147,7 @@ impl Plugin for UiPlugin {
                 show_doc_kind,
                 show_project,
                 fill_main_menus,
+                sync_nav_buttons,
                 main_menu_barrier,
                 show_left_sidebar,
             ),
@@ -283,8 +284,23 @@ impl MainMenu {
         }
     }
 
+    /// The menu's entries: its [`items`](Self::items), the View toggles checked from `editor`'s config, Back / Forward
+    /// dimmed at the ends of the history (decision 0041; whether the entry still opens is not checked).
+    pub fn entries(self, editor: &Editor) -> Vec<dialog::MenuEntry> {
+        let [back, forward] = nav_enabled(editor);
+        let mut entries: Vec<_> = self.items(&editor.config).into_iter().map(dialog::MenuEntry::from).collect();
+        for entry in &mut entries {
+            entry.disabled = match entry.action {
+                Action::NavBack if !back => Some("Nothing to go back to".into()),
+                Action::NavForward if !forward => Some("Nothing to go forward to".into()),
+                _ => None,
+            };
+        }
+        entries
+    }
+
     /// The menu's items; `config` checks the View toggles that are on.
-    pub fn items(self, config: &UserConfig) -> Vec<(Option<IconId>, String, Action)> {
+    fn items(self, config: &UserConfig) -> Vec<(Option<IconId>, String, Action)> {
         let check = |on: bool| on.then_some(IconId::Check);
         match self {
             MainMenu::File => vec![
@@ -304,6 +320,9 @@ impl MainMenu {
             // Design §3: each panel's mark is its own flag, also while Zen mode hides the panel.
             MainMenu::View => vec![
                 (check(config.zen_mode), "Zen mode\t`".into(), Action::ToggleZen),
+                menu_separator(),
+                (Some(IconId::Back), "Back\tCtrl+[".into(), Action::NavBack),
+                (Some(IconId::Forward), "Forward\tCtrl+]".into(), Action::NavForward),
                 menu_separator(),
                 (check(config.show_left_sidebar), "Show project\tCtrl+1".into(), Action::ToggleLeftSidebar),
                 (check(config.show_log), "Show console\tCtrl+2".into(), Action::ToggleLog),
@@ -390,31 +409,71 @@ pub fn main_menu_barrier(
     }
 }
 
-/// (Re)fills the main menus' popups: when spawned and when a View toggle changed (its check mark).
+/// (Re)fills the main menus' popups: when spawned, when a View toggle changed (its check mark) and when Back / Forward
+/// became possible or impossible (dimmed).
 pub fn fill_main_menus(
     editor: Res<Editor>,
     popups: Query<(Entity, &MainMenuPopup)>,
     added: Query<(), Added<MainMenuPopup>>,
-    mut last: Local<Option<[bool; 4]>>,
+    mut last: Local<Option<[bool; 6]>>,
     mut commands: Commands,
 ) {
     let c = &editor.config;
-    let key = [c.zen_mode, c.show_left_sidebar, c.show_log, c.show_properties];
+    let [back, forward] = nav_enabled(&editor);
+    let key = [c.zen_mode, c.show_left_sidebar, c.show_log, c.show_properties, back, forward];
     if *last == Some(key) && added.is_empty() {
         return;
     }
     *last = Some(key);
     for (popup, MainMenuPopup(menu)) in &popups {
         commands.entity(popup).despawn_children();
-        let entries = menu.items(&editor.config).into_iter().map(dialog::MenuEntry::from).collect();
-        for row in dialog::menu_rows(entries) {
+        for row in dialog::menu_rows(menu.entries(&editor)) {
             commands.spawn_scene(bsn! { @{row} ChildOf(popup) });
         }
     }
 }
 
-/// Logo, main menu, undo/redo, then the project name and error count. Nothing of one editor kind (that is the editor
-/// topbar's).
+/// Whether Back / Forward can go anywhere (decision 0041; whether the entry still opens is not checked): the View menu
+/// items and the menu_bar buttons are dimmed when not.
+fn nav_enabled(editor: &Editor) -> [bool; 2] {
+    [editor.nav.can_back(editor.active_key().as_ref()), editor.nav.can_forward()]
+}
+
+/// A menu_bar Back / Forward button ([`sync_nav_buttons`]): `0` is Back, `1` Forward (the index into [`nav_enabled`]).
+#[derive(Component, Default, Clone, Copy)]
+pub struct NavButton(pub usize);
+
+/// Dims the menu_bar's Back / Forward buttons at the ends of the history: `InteractionDisabled` (no `Activate`, Feathers'
+/// disabled look) and the icon's alpha, which Feathers does not dim. Written only on change.
+fn sync_nav_buttons(
+    editor: Res<Editor>,
+    buttons: Query<(Entity, &NavButton, Has<InteractionDisabled>)>,
+    children: Query<&Children>,
+    mut images: Query<&mut ImageNode>,
+    mut commands: Commands,
+) {
+    let enabled = nav_enabled(&editor);
+    for (button, NavButton(i), disabled) in &buttons {
+        let on = enabled.get(*i).copied().unwrap_or(false);
+        if on != disabled {
+            continue;
+        }
+        if on {
+            commands.entity(button).remove::<InteractionDisabled>();
+        } else {
+            commands.entity(button).insert(InteractionDisabled);
+        }
+        let tint = if on { TEXT } else { TEXT.with_alpha(widgets::DISABLED_ICON_ALPHA) };
+        for e in children.iter_descendants(button) {
+            if let Ok(mut image) = images.get_mut(e) {
+                image.color = tint;
+            }
+        }
+    }
+}
+
+/// Logo, main menu, Back / Forward (decision 0041), then the project name and error count. Nothing of one editor kind
+/// (that is the editor topbar's).
 fn menu_bar() -> impl Scene {
     let tip = Tooltip::default();
     let menus: Vec<Box<dyn Scene>> =
@@ -434,9 +493,9 @@ fn menu_bar() -> impl Scene {
             --
             {menus}
             --
-            @icon_button(IconId::Undo, Action::Undo, "Undo (Ctrl+Z)")
+            @icon_button(IconId::Back, Action::NavBack, "Back (Ctrl+[, mouse back button)") NavButton(0)
             --
-            @icon_button(IconId::Redo, Action::Redo, "Redo (Ctrl+Shift+Z, Ctrl+Y)")
+            @icon_button(IconId::Forward, Action::NavForward, "Forward (Ctrl+], mouse forward button)") NavButton(1)
             --
             Node { flex_grow: 1.0 }
             --
@@ -687,10 +746,12 @@ fn show_project(
 mod tests {
     use std::path::Path;
 
+    use shader_project::{AssetId, AssetType, Project, fixtures};
+
     use super::icons::IconId;
     use super::{MainMenu, plural, project_name};
     use crate::config::UserConfig;
-    use crate::state::Action;
+    use crate::state::{Action, Editor};
 
     #[test]
     fn plural_words() {
@@ -699,8 +760,9 @@ mod tests {
         assert_eq!(plural(0, "node", "nodes"), "0 nodes");
     }
 
-    /// Design §3: the View menu lists Zen mode, a separator and the three panels with their hotkeys; each check mark
-    /// is its own flag (Zen on does not clear the panels' marks); Edit sits between File and View.
+    /// Design §3: the View menu lists Zen mode, a separator, Back / Forward and a separator (decision 0041), and the
+    /// three panels with their hotkeys; each check mark is its own flag (Zen on does not clear the panels' marks); Edit
+    /// sits between File and View.
     #[test]
     fn view_menu_check_marks_follow_config() {
         let marks = |zen_mode, show_left_sidebar, show_log, show_properties| {
@@ -713,15 +775,27 @@ mod tests {
             [
                 (None, "Zen mode\t`".to_string(), Action::ToggleZen),
                 (None, String::new(), Action::None),
+                (Some(IconId::Back), "Back\tCtrl+[".to_string(), Action::NavBack),
+                (Some(IconId::Forward), "Forward\tCtrl+]".to_string(), Action::NavForward),
+                (None, String::new(), Action::None),
                 (check, "Show project\tCtrl+1".to_string(), Action::ToggleLeftSidebar),
                 (check, "Show console\tCtrl+2".to_string(), Action::ToggleLog),
                 (check, "Show properties\tCtrl+3".to_string(), Action::ToggleProperties),
             ]
         );
         let icons = |m: Vec<(Option<IconId>, String, Action)>| m.into_iter().map(|i| i.0).collect::<Vec<_>>();
-        assert_eq!(icons(marks(true, true, true, true)), [check, None, check, check, check]);
-        assert_eq!(icons(marks(true, false, true, false)), [check, None, None, check, None]);
-        assert_eq!(icons(marks(false, true, false, true)), [None, None, check, None, check]);
+        assert_eq!(
+            icons(marks(true, true, true, true)),
+            [check, None, Some(IconId::Back), Some(IconId::Forward), None, check, check, check]
+        );
+        assert_eq!(
+            icons(marks(true, false, true, false)),
+            [check, None, Some(IconId::Back), Some(IconId::Forward), None, None, check, None]
+        );
+        assert_eq!(
+            icons(marks(false, true, false, true)),
+            [None, None, Some(IconId::Back), Some(IconId::Forward), None, check, None, check]
+        );
 
         let edit = MainMenu::Edit.items(&UserConfig::default());
         let edit: Vec<_> = edit.into_iter().map(|(_, label, action)| (label, action)).collect();
@@ -730,6 +804,31 @@ mod tests {
             [("Undo\tCtrl+Z".to_string(), Action::Undo), ("Redo\tCtrl+Shift+Z".to_string(), Action::Redo)]
         );
         assert_eq!(&MainMenu::ORDER[..3], [MainMenu::File, MainMenu::Edit, MainMenu::View]);
+    }
+
+    /// Decision 0041: Back / Forward are dimmed (with the reason) at the ends of the history; validity is not checked.
+    #[test]
+    fn view_menu_back_forward_disabled_at_ends() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname = \"g\"\n").unwrap();
+        std::fs::create_dir_all(dir.path().join("assets")).unwrap();
+        fixtures::save_all(&Project::open(dir.path()).unwrap()).unwrap();
+        let mut e = Editor::default();
+        e.open_project(dir.path()).unwrap();
+        let disabled = |e: &Editor| {
+            let entries = MainMenu::View.entries(e);
+            let of = |action: Action| entries.iter().find(|m| m.action == action).unwrap().disabled.clone();
+            (of(Action::NavBack), of(Action::NavForward))
+        };
+        let back = Some("Nothing to go back to".to_string());
+        let forward = Some("Nothing to go forward to".to_string());
+
+        e.apply(Action::OpenAsset(AssetId::new(AssetType::Material, "env/rock_wet")));
+        assert_eq!(disabled(&e), (back.clone(), forward.clone()), "one tab");
+        e.apply(Action::OpenAsset(AssetId::new(AssetType::Material, "fx/hologram")));
+        assert_eq!(disabled(&e), (None, forward.clone()), "a second tab");
+        e.apply(Action::NavBack);
+        assert_eq!(disabled(&e), (back, None), "back at the first");
     }
 
     #[test]

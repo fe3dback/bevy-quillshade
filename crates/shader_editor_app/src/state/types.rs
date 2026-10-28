@@ -166,6 +166,12 @@ pub enum GenFile {
 pub enum ViewRequest {
     FitAll,
     FitSelection,
+    /// Back / Forward restores a graph camera: `centre` (graph space) at the middle of the canvas, at `zoom`
+    /// (decision 0041).
+    Set {
+        centre: bevy::math::Vec2,
+        zoom: f32,
+    },
 }
 
 /// How far in `t` pasted / duplicated curve points land from the copied ones.
@@ -333,6 +339,9 @@ pub enum Action {
     ToggleProperties,
     /// View → Zen mode (`` ` ``): flips [`UserConfig::zen_mode`] and saves the user config.
     ToggleZen,
+    /// Back / Forward through the navigation history (decision 0041).
+    NavBack,
+    NavForward,
     Save,
     SaveAll,
     RegenAll,
@@ -542,6 +551,8 @@ pub struct Editor {
     pub dialog: Option<Dialog>,
     pub ui: UiRev,
     pub view_requests: Vec<ViewRequest>,
+    /// Visited tabs and graph views for Back / Forward (in memory only, decision 0041).
+    pub nav: NavHistory,
     pub(super) watcher: Option<std::sync::Mutex<ShadersWatcher>>,
     pub config: UserConfig,
     pub config_path: Option<PathBuf>,
@@ -582,6 +593,7 @@ impl Default for Editor {
             dialog: None,
             ui: UiRev::default(),
             view_requests: Vec::new(),
+            nav: NavHistory::default(),
             watcher: None,
             config: UserConfig::default(),
             config_path: None,

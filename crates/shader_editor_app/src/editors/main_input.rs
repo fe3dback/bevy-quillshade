@@ -1,7 +1,8 @@
 //! Hotkeys through bevy_enhanced_input (design §2.2, decision 0032).
 //!
 //! One entity, [`InputRoot`], carries every input context: [`MainCtx`] (save, undo / redo, tabs, open project, quit,
-//! the View toggles Ctrl+1 / 2 / 3 and `` ` `` Zen mode — always active and evaluated first, priority 2) and one
+//! the View toggles Ctrl+1 / 2 / 3 and `` ` `` Zen mode, Back / Forward on Ctrl+[ / ], the browser keys and the mouse
+//! side buttons ([`on_nav`], decision 0041) — always active and evaluated first, priority 2) and one
 //! context per editor kind that has hotkeys ([`EditorInput::Ctx`], priority 1), active only while the active tab is of
 //! that kind ([`sync_input_context`]).
 //! A kind's hotkeys therefore need no "is this tab of my kind" guard.
@@ -82,6 +83,8 @@ impl Plugin for InputContextsPlugin {
         on_combo::<ToggleLog>(app, state::Action::ToggleLog);
         on_combo::<ToggleProperties>(app, state::Action::ToggleProperties);
         on_plain::<ToggleZen>(app, state::Action::ToggleZen);
+        on_nav::<NavBack>(app, state::Action::NavBack);
+        on_nav::<NavForward>(app, state::Action::NavForward);
         on_combo::<EditCopy>(app, state::Action::Copy);
         on_combo::<EditCut>(app, state::Action::Cut);
         on_combo::<EditPaste>(app, state::Action::Paste(None));
@@ -166,6 +169,16 @@ pub struct ToggleProperties;
 #[action_output(bool)]
 pub struct ToggleZen;
 
+/// Ctrl+[, the browser Back key, the mouse back button: View → Back (decision 0041).
+#[derive(InputAction)]
+#[action_output(bool)]
+pub struct NavBack;
+
+/// Ctrl+], the browser Forward key, the mouse forward button: View → Forward (decision 0041).
+#[derive(InputAction)]
+#[action_output(bool)]
+pub struct NavForward;
+
 // Edit actions several kinds bind in their own contexts; `Editor` routes them to the active tab.
 
 #[derive(InputAction)]
@@ -195,7 +208,13 @@ pub struct EditSelectAll;
 pub struct EditDelete;
 
 fn main_bindings() -> impl Scene {
-    use KeyCode::{Backquote, Digit1, Digit2, Digit3, KeyO, KeyQ, KeyS, KeyW, KeyY, KeyZ, Tab};
+    use KeyCode::{
+        Backquote, BracketLeft, BracketRight, BrowserBack, BrowserForward, Digit1, Digit2, Digit3, KeyO, KeyQ, KeyS,
+        KeyW, KeyY, KeyZ, Tab,
+    };
+    // Physical keys: Ctrl+[ / ] are the same keys on any layout (`х` / `ъ` on the Russian one).
+    let back = ctrl(BracketLeft).into_iter().chain([BrowserBack.into(), MouseButton::Back.into()]);
+    let forward = ctrl(BracketRight).into_iter().chain([BrowserForward.into(), MouseButton::Forward.into()]);
     bsn! {
         Actions<MainCtx> [
             @{hotkey::<SaveAll>(ctrl_shift(KeyS))}
@@ -221,6 +240,10 @@ fn main_bindings() -> impl Scene {
             @{hotkey::<ToggleProperties>(ctrl(Digit3))}
             --
             @{hotkey::<ToggleZen>(plain([Backquote]))}
+            --
+            @{hotkey::<NavBack>(back)}
+            --
+            @{hotkey::<NavForward>(forward)}
         ]
     }
 }
@@ -536,6 +559,22 @@ pub fn plain<const N: usize>(keys: [KeyCode; N]) -> [Binding; N] {
 /// Pushes `action` when `A` (bound to Ctrl / Super combinations) starts.
 pub fn on_combo<A: InputAction>(app: &mut App, action: state::Action) {
     app.add_observer(move |_: On<Start<A>>, mut actions: ResMut<state::Actions>| actions.push(action.clone()));
+}
+
+/// Pushes `action` when `A` (Back / Forward) starts, unless the user is typing ([`KeyboardGate::typing`]) or a mouse
+/// button of a gesture (left, right, middle) is held. The gate hides only the keyboard from the contexts, so the mouse
+/// side buttons would otherwise go through an open dialog, the palette or a menu, and in the middle of a drag.
+pub fn on_nav<A: InputAction>(app: &mut App, action: state::Action) {
+    app.add_observer(
+        move |_: On<Start<A>>,
+              gate: Res<KeyboardGate>,
+              mouse: Res<ButtonInput<MouseButton>>,
+              mut actions: ResMut<state::Actions>| {
+            if !gate.typing && !mouse.any_pressed([MouseButton::Left, MouseButton::Right, MouseButton::Middle]) {
+                actions.push(action.clone());
+            }
+        },
+    );
 }
 
 /// Pushes `action` when `A` (bound to plain keys) starts, unless Ctrl, Alt or Super is held.

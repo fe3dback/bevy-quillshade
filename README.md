@@ -212,13 +212,15 @@ how to hook the generated crate into the game. Open / New Project show the syste
 xdg-desktop-portal); cancel it to type or paste the path instead (Browse... reopens it).
 
 The menu_bar holds the logo and the main menu — **File** (Open Project, New Project, Close Project, Save, Save All,
-Quit), **Edit** (Undo, Redo), **View** (Zen mode, then Show project, Show console, Show properties: checked while on;
-the project hidden leaves its width to the editor, the console hidden keeps only its header bar with the counts, the
-properties hidden leave the width to the editor content; Zen mode hides the left and right sidebars and the whole
-console, whatever their own marks say, and turned off shows exactly the checked ones; all four are remembered),
+Quit), **Edit** (Undo, Redo), **View** (Zen mode; Back / Forward through the visited tabs and graph camera positions,
+dimmed at the ends of the history, which lives in memory only; then Show project, Show console, Show properties:
+checked while on; the project hidden leaves its width to the editor, the console hidden keeps only its header bar with
+the counts, the properties hidden leave the width to the editor content; Zen mode hides the left and right sidebars and
+the whole console, whatever their own marks say, and turned off shows exactly the checked ones; Zen mode and the
+three panels are remembered across restarts, the Back / Forward history is not),
 **Assets** (create a Pbr3d/Unlit3d/Sprite2d material, a function, a curve, a global constant table, a gradient
 collection, a folder; Regenerate) and **Help** (Quick Start: how to hook a game up, one tab per step; Project Page;
-About: version, link, author, license) — then Undo / Redo and, on the right, the project name and its error count (the
+About: version, link, author, license) — then Back / Forward and, on the right, the project name and its error count (the
 full path is the tooltip).
 
 Under the tabs bar, the editor topbar holds the buttons of the active tab's kind (graph: Auto-layout, Comment, Fit,
@@ -290,9 +292,10 @@ of the output pins (aspect kept; the built-in default without one; "n/a" for a m
 does not load); it follows unsaved edits of an open Texture tab, and a `TextureSample` wired straight to a TextureObject
 or texture parameter shows that node's texture.
 
-Tabs and menus show icons too; Undo / Redo are icon-only buttons — hover a menu_bar or editor topbar button for its
-name and hotkey. Main and RMB menus are Feathers menus: while one is open it has the keyboard (Up / Down, Home / End,
-Enter or Space activate, Esc closes); a click outside only closes it.
+Tabs and menus show icons too; Back / Forward are icon-only buttons (dimmed when there is nowhere to go; Undo / Redo
+live in the Edit menu) — hover a menu_bar or editor topbar button for its name and hotkey. Main and RMB menus are
+Feathers menus: while one is open it has the keyboard (Up / Down, Home / End, Enter or Space activate, Esc closes); a
+click outside only closes it.
 Tabs are compact and wrap onto more rows when there are many; a tab shows the file name only (`rock_wet`), the full path
 when several open tabs share that name, and the full path as its tooltip. RMB on a tab: Close / Close All / Close
 Others / Close to the Left / Close to the Right / Close Unmodified. The bottom-right corner of the main view shows the
@@ -386,6 +389,23 @@ Color, `full` every field.
 beyond about 53° is 0 — and `Angle` is the slope in degrees (0 = flat, 90 = wall). Normal defaults to the vertex
 normal; wire a perturbed normal in for "pixel normals". `examples/sample_game` has a two-layer terrain
 (`env/terrain_layers`, rock from the `common/rock_layer` function on the slopes, grass on top).
+
+**Procedural masks** (Utility, decision 0039) are generic building blocks in 3D (Position defaults to the world
+position, so a mask is seamless across meshes and needs no UVs; feed `(x, 0, z)` for a top-down layout):
+`FractalNoise` (value / Perlin octaves in `0..1`: `FBM`, `Turbulence` or `Ridged`, with Octaves, Lacunarity, Gain,
+Seed), `Voronoi` (cell units: `F1` / `F2` distances to the nearest / second nearest point, `Border` the exact distance
+to the cell edge, so `SmoothStep` on it gives lines of equal width, `Cell` a random `0..1` per cell; Randomness 0 is a
+regular grid) and `DomainWarp` (the position displaced by up to Strength along a Perlin FBM, to bend straight cell
+edges). For example dirt paths over generated terrain: `DomainWarp` → `Voronoi` `Border` → `SmoothStep` → the alpha of
+a `Lerp` between dirt and grass, with `FractalNoise` breaking up the dirt.
+
+**Pattern masks** (Utility, decision 0040) have a **Mapping** setting: `Triplanar` (default: world Position and
+Normal, the three axis planes blended by the normal) or `UV`. `Checkerboard` gives a `Mask` (0 / 1) and a `Color`
+(Color A / B) of Size squares; `Grid` anti-aliased lines (1 on the lines, Ben Golus' "pristine grid") every Cell Size
+with a per-axis Line Width in cells. `BlockoutGrid` is a level-design prototype color built from both: Floor Color on
+surfaces facing up / down, Wall Color elsewhere, darkened in OKLab by checkerboards of Cell Size and Cell Size / 10,
+with Line Color grid lines every Cell Size. `Grid` and `BlockoutGrid` use derivatives (fragment stage only, E009 in
+World Position Offset).
 
 **Color** nodes (decision 0036) take and return linear RGB (`Float3`, as a texture gives it) and work in a
 perceptual space inside, so a shift looks the same in darks and lights: `HueShift`, `Saturation`, `Lightness`,
@@ -484,6 +504,7 @@ the title the same way.
 | Gradients: nudge the selected stop / delete it | Left / Right (Shift: ×10) / Delete, Backspace |
 | Gradients: copy / paste the whole gradient (stops + name) / duplicate it into the next empty slot | Ctrl+C / Ctrl+V / Ctrl+D |
 | Open project / quit | Ctrl+O / Ctrl+Q |
+| Back / forward through visited tabs and graph camera positions | Ctrl+[ / Ctrl+] (Cmd on macOS), mouse back / forward buttons |
 | Show / hide the project (left sidebar) / the console messages / the properties (right sidebar) | Ctrl+1 / Ctrl+2 (or the chevron in the console header) / Ctrl+3 |
 | Zen mode: hide both sidebars and the whole console (Ctrl+1/2/3 still set what comes back) | `` ` `` |
 | Move the keyboard focus over buttons and fields / press the focused button | Tab, Shift+Tab / Enter, Space |

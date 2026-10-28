@@ -105,6 +105,7 @@ impl Editor {
         for t in &mut self.tabs {
             t.doc_mut().rename(&project, id, &new_id);
         }
+        self.nav.rename(id, &new_id);
         if id.ty == AssetType::Function {
             let (old_kind, new_kind) =
                 (format!("{FUNCTION_PREFIX}{}", id.path), format!("{FUNCTION_PREFIX}{}", new_id.path));

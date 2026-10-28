@@ -38,3 +38,99 @@ fn sg_perlin_noise3(p: vec3<f32>) -> f32 {
     let x11 = mix(sg_grad3(i + e.yxx, f - e.yxx), sg_grad3(i + e.xxx, f - e.xxx), u.x);
     return saturate(mix(mix(x00, x10, u.y), mix(x01, x11, u.y), u.z) * 0.5 + 0.5);
 }
+
+// Seed as an offset of the lattice (decision 0039): one seed = one independent copy of the pattern.
+fn sg_seed_offset(seed: f32) -> vec3<f32> {
+    return seed * vec3<f32>(127.1, 311.7, 74.7);
+}
+
+// One octave of value (`perlin` false) or Perlin noise in 0..1.
+fn sg_noise3(p: vec3<f32>, perlin: bool) -> f32 {
+    if perlin {
+        return sg_perlin_noise3(p);
+    }
+    return sg_value_noise3(p);
+}
+
+// Fractal noise in 0..1: `mode` 0 = FBM, 1 = turbulence (|noise| octaves), 2 = ridged ((1 - |noise|)² octaves).
+// Octaves are clamped to 1..12; each one is shifted so the octaves do not line up at the origin.
+fn sg_fractal_noise3(p: vec3<f32>, octaves: i32, lacunarity: f32, gain: f32, seed: f32, perlin: bool, mode: i32) -> f32 {
+    var q = p + sg_seed_offset(seed);
+    var amp = 1.0;
+    var sum = 0.0;
+    var norm = 0.0;
+    for (var o = 0; o < clamp(octaves, 1, 12); o++) {
+        let n = sg_noise3(q, perlin);
+        var v = n;
+        if mode == 1 {
+            v = abs(n * 2.0 - 1.0);
+        } else if mode == 2 {
+            let r = 1.0 - abs(n * 2.0 - 1.0);
+            v = r * r;
+        }
+        sum += v * amp;
+        norm += amp;
+        amp *= gain;
+        q = q * lacunarity + vec3<f32>(1.7, 9.2, 4.3);
+    }
+    return sum / max(norm, 1e-6);
+}
+
+// Domain warp: `p` displaced by up to `strength` along a 3D FBM (Perlin) sampled at `p * scale`.
+fn sg_domain_warp3(p: vec3<f32>, scale: f32, strength: f32, octaves: i32, seed: f32) -> vec3<f32> {
+    let q = p * scale;
+    let w = vec3<f32>(
+        sg_fractal_noise3(q, octaves, 2.0, 0.5, seed, true, 0),
+        sg_fractal_noise3(q + vec3<f32>(5.2, 1.3, 7.7), octaves, 2.0, 0.5, seed, true, 0),
+        sg_fractal_noise3(q + vec3<f32>(9.1, 4.8, 2.6), octaves, 2.0, 0.5, seed, true, 0),
+    );
+    return p + (w * 2.0 - 1.0) * strength;
+}
+
+// Voronoi (cellular) noise in cell units: x = F1 (distance to the nearest feature point), y = F2 (to the second
+// nearest), z = distance to the nearest cell border, w = random value of the nearest cell in 0..1. The border is the
+// exact distance to the bisector planes (second pass around the nearest cell, decision 0039), so lines of equal width
+// come from `smoothstep` on it, unlike F2 - F1. `randomness` 0 = a regular grid, 1 = fully jittered.
+fn sg_voronoi3(p: vec3<f32>, randomness: f32, seed: f32) -> vec4<f32> {
+    let i = floor(p);
+    let f = fract(p);
+    let so = sg_seed_offset(seed);
+    let jitter = saturate(randomness);
+    var f1 = 8.0;
+    var f2 = 8.0;
+    var mr = vec3<f32>(0.0);
+    var mg = vec3<f32>(0.0);
+    var cell = 0.0;
+    for (var z = -1; z <= 1; z++) {
+        for (var y = -1; y <= 1; y++) {
+            for (var x = -1; x <= 1; x++) {
+                let g = vec3<f32>(f32(x), f32(y), f32(z));
+                let r = g + sg_hash33(i + g + so) * jitter - f;
+                let d = dot(r, r);
+                if d < f1 {
+                    f2 = f1;
+                    f1 = d;
+                    mr = r;
+                    mg = g;
+                    cell = sg_hash31(i + g + so);
+                } else if d < f2 {
+                    f2 = d;
+                }
+            }
+        }
+    }
+    var border = 8.0;
+    for (var z = -1; z <= 1; z++) {
+        for (var y = -1; y <= 1; y++) {
+            for (var x = -1; x <= 1; x++) {
+                let g = mg + vec3<f32>(f32(x), f32(y), f32(z));
+                let r = g + sg_hash33(i + g + so) * jitter - f;
+                let dr = r - mr;
+                if dot(dr, dr) > 1e-5 {
+                    border = min(border, dot(0.5 * (mr + r), normalize(dr)));
+                }
+            }
+        }
+    }
+    return vec4<f32>(sqrt(f1), sqrt(f2), border, cell);
+}

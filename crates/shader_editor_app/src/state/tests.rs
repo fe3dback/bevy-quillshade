@@ -3988,3 +3988,182 @@ fn route_declaration_pastes_as_usage() {
     assert_eq!(kinds(&e, "stdlib::NamedRoute"), before + 1);
     assert_eq!(kinds(&e, "stdlib::NamedRouteUsage"), 0);
 }
+
+// ---- navigation history (decision 0041) ----
+
+fn nav_a() -> AssetId {
+    AssetId::new(AssetType::Material, "env/rock_wet")
+}
+
+fn nav_b() -> AssetId {
+    AssetId::new(AssetType::Material, "fx/hologram")
+}
+
+/// Opens `env/rock_wet`, `fx/hologram` and the curve `common/pulse`, in that order.
+fn nav_open_abc(e: &mut Editor) {
+    for id in [nav_a(), nav_b(), pulse()] {
+        e.apply(Action::OpenAsset(id));
+    }
+}
+
+fn key(id: &AssetId) -> TabKey {
+    TabKey::Asset(id.clone())
+}
+
+fn nav_tabs(e: &Editor) -> Vec<TabKey> {
+    e.nav.entries().iter().map(|n| n.tab.clone()).collect()
+}
+
+#[test]
+fn nav_records_tab_switches() {
+    let (_dir, mut e) = project();
+    nav_open_abc(&mut e);
+    assert_eq!(nav_tabs(&e), vec![key(&nav_a()), key(&nav_b()), key(&pulse())]);
+    e.apply(Action::NavBack);
+    assert_eq!(e.active_key(), Some(key(&nav_b())));
+    e.apply(Action::NavBack);
+    assert_eq!(e.active_key(), Some(key(&nav_a())));
+    e.apply(Action::NavForward);
+    assert_eq!(e.active_key(), Some(key(&nav_b())));
+    assert_eq!(e.nav.entries().len(), 3);
+    assert!(!e.is_dirty());
+}
+
+#[test]
+fn nav_back_reopens_closed_tab() {
+    let (_dir, mut e) = project();
+    e.apply(Action::OpenAsset(nav_a()));
+    e.apply(Action::OpenAsset(nav_b()));
+    e.apply(Action::CloseTab(usize::MAX));
+    assert_eq!(e.active_key(), Some(key(&nav_a())));
+    assert_eq!(nav_tabs(&e), vec![key(&nav_a()), key(&nav_b()), key(&nav_a())]);
+    e.apply(Action::NavBack);
+    assert_eq!(e.active_key(), Some(key(&nav_b())));
+    assert_eq!(e.tabs.len(), 2);
+    assert_eq!(e.active, Some(1), "a reopened tab is appended");
+}
+
+#[test]
+fn nav_back_reopens_last_closed_tab() {
+    let (_dir, mut e) = project();
+    e.apply(Action::OpenAsset(nav_a()));
+    e.apply(Action::CloseTab(usize::MAX));
+    assert_eq!(e.active, None);
+    e.apply(Action::NavBack);
+    assert_eq!(e.active_key(), Some(key(&nav_a())));
+    assert_eq!(e.tabs.len(), 1);
+}
+
+#[test]
+fn nav_skips_deleted_and_drops_it() {
+    let (_dir, mut e) = project();
+    nav_open_abc(&mut e);
+    e.apply(Action::Delete(nav_b()));
+    assert!(!e.disk.contains(&nav_b()));
+    assert_eq!(e.active_key(), Some(key(&pulse())));
+    e.apply(Action::NavBack);
+    assert_eq!(e.active_key(), Some(key(&nav_a())));
+    e.apply(Action::NavBack);
+    assert_eq!(e.active_key(), Some(key(&nav_a())), "nothing further back");
+    assert_eq!(nav_tabs(&e), vec![key(&nav_a()), key(&pulse())]);
+}
+
+#[test]
+fn nav_skips_unopenable_keeps_it() {
+    let (_dir, mut e) = project();
+    nav_open_abc(&mut e);
+    // B's tab is closed (otherwise Back just activates it), then its file breaks.
+    e.apply(Action::CloseTab(e.asset_index(&nav_b()).unwrap()));
+    let file = e.project.as_ref().unwrap().root.join(nav_b().source_rel());
+    std::fs::write(&file, "not ron (").unwrap();
+    e.rescan();
+    assert!(e.disk.contains(&nav_b()));
+    e.apply(Action::NavBack);
+    assert_eq!(e.active_key(), Some(key(&nav_a())));
+    assert!(nav_tabs(&e).contains(&key(&nav_b())), "kept: the file may be fixed");
+    assert!(e.dialog.is_none(), "the walk shows no error dialog, the console has the error");
+    assert!(e.messages.iter().any(|m| m.level == Level::Error && m.text.contains("cannot open")));
+}
+
+#[test]
+fn nav_open_tab_of_vanished_file_is_not_gone() {
+    let (_dir, mut e) = project();
+    e.apply(Action::OpenAsset(nav_a()));
+    e.apply(Action::OpenAsset(nav_b()));
+    // A's file disappears behind the editor's back; its tab stays open.
+    let file = e.project.as_ref().unwrap().root.join(nav_a().source_rel());
+    std::fs::remove_file(&file).unwrap();
+    e.rescan();
+    assert!(!e.disk.contains(&nav_a()));
+    assert!(e.asset_index(&nav_a()).is_some());
+    e.apply(Action::NavBack);
+    assert_eq!(e.active_key(), Some(key(&nav_a())));
+    assert_eq!(nav_tabs(&e), vec![key(&nav_a()), key(&nav_b())], "the open tab's entry is kept");
+}
+
+#[test]
+fn nav_end_of_list_logs_nothing() {
+    let (_dir, mut e) = project();
+    e.apply(Action::OpenAsset(nav_a()));
+    let before = e.messages.len();
+    e.apply(Action::NavBack);
+    e.apply(Action::NavForward);
+    assert_eq!(e.active_key(), Some(key(&nav_a())));
+    assert_eq!(e.messages.len(), before, "no message at an end of the list");
+}
+
+#[test]
+fn nav_follows_rename() {
+    let (_dir, mut e) = project();
+    e.apply(Action::OpenAsset(nav_a()));
+    e.apply(Action::OpenAsset(nav_b()));
+    e.apply(Action::RenameDialog(nav_a()));
+    e.apply(Action::Submit("env/rock_dry".into()));
+    let moved = AssetId::new(AssetType::Material, "env/rock_dry");
+    assert!(e.disk.contains(&moved));
+    e.apply(Action::NavBack);
+    assert_eq!(e.active_key(), Some(key(&moved)));
+}
+
+#[test]
+fn nav_navigation_records_nothing() {
+    let (_dir, mut e) = project();
+    nav_open_abc(&mut e);
+    e.apply(Action::NavBack);
+    e.apply(Action::NavBack);
+    assert_eq!(e.nav.entries().len(), 3);
+    assert_eq!(e.nav.current().map(|n| &n.tab), Some(&key(&nav_a())));
+}
+
+#[test]
+fn nav_cleared_on_project_open() {
+    let (dir, mut e) = project();
+    e.apply(Action::OpenAsset(nav_a()));
+    e.apply(Action::OpenAsset(nav_b()));
+    e.open_project(dir.path()).unwrap();
+    assert_eq!(nav_tabs(&e), vec![key(&nav_b())], "only the restored active tab");
+    e.close_project(Unsaved::Discard);
+    assert!(e.nav.entries().is_empty());
+}
+
+#[test]
+fn nav_back_restores_view_request() {
+    let (_dir, mut e) = project();
+    e.apply(Action::OpenAsset(nav_a()));
+    let view = NavView { centre: bevy::math::Vec2::new(10.0, 20.0), zoom: 0.5 };
+    e.nav.note_view(&key(&nav_a()), view, 600.0);
+    e.apply(Action::OpenAsset(nav_b()));
+    e.apply(Action::NavBack);
+    assert_eq!(e.active_key(), Some(key(&nav_a())));
+    assert_eq!(e.view_requests, vec![ViewRequest::Set { centre: bevy::math::Vec2::new(10.0, 20.0), zoom: 0.5 }]);
+}
+
+#[test]
+fn nav_ignored_while_dialog_open() {
+    let (_dir, mut e) = project();
+    e.apply(Action::OpenAsset(nav_a()));
+    e.apply(Action::OpenAsset(nav_b()));
+    e.dialog = Some(Dialog::About);
+    e.apply(Action::NavBack);
+    assert_eq!(e.active_key(), Some(key(&nav_b())));
+}

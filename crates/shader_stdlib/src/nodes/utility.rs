@@ -1,13 +1,14 @@
-//! Utility category: If, logic, shading helpers, FunctionCall, Custom, Reroute, Named Route, Sample Curve.
+//! Utility category: If, logic, shading helpers, noise / Voronoi / domain warp / pattern masks, FunctionCall, Custom, Reroute, Named Route, Sample Curve.
 
 use shader_graph_core::ident::{function_ident, output_ident};
 use shader_graph_core::registry::{
     Builtin, FUNCTION_CALL_KIND, FUNCTION_PREFIX, NodeRole, Operand, ParamDef, ParamKind, PinDef, ROUTE_PARAM,
-    Registry, Signature,
+    Registry, Signature, Stage,
 };
 use shader_graph_core::{Code, EmitCtx, Interp, PinType, SigCtx, Value};
 
 use crate::def::{def, pin_in, pin_out, poly_ins, poly_out, sig};
+use crate::nodes::coords::implicit_uv;
 
 const CAT: &str = "Utility";
 
@@ -15,6 +16,48 @@ const CAT: &str = "Utility";
 pub const SAMPLE_CURVE_KIND: &str = "stdlib::SampleCurve";
 /// Property of [`SAMPLE_CURVE_KIND`]: the Curve asset path, `""` = none.
 pub const CURVE_PARAM: &str = "curve";
+
+/// Position input of the noise nodes: the connected value, or the world position.
+fn noise_position(c: &mut EmitCtx) -> String {
+    if c.is_connected("position") { c.input("position") } else { c.builtin(Builtin::WorldPosition) }
+}
+
+/// Mapping of the pattern nodes: world-space triplanar (Position + Normal) or a UV.
+fn mapping_param() -> ParamDef {
+    ParamDef::new(
+        "mapping",
+        "Mapping",
+        ParamKind::Enum(vec!["Triplanar".into(), "UV".into()]),
+        Value::Str("Triplanar".into()),
+    )
+}
+
+fn is_uv_mapping(c: &EmitCtx) -> bool {
+    c.param("mapping").as_str() == "UV"
+}
+
+fn mapping_inputs(c: &SigCtx) -> Vec<PinDef> {
+    if c.param("mapping").as_str() == "UV" {
+        vec![pin_in("uv", "UVs", PinType::Float2, 0.0).implicit("uv0")]
+    } else {
+        vec![
+            pin_in("position", "Position", PinType::Float3, 0.0).implicit("world position"),
+            pin_in("normal", "Normal", PinType::Float3, 0.0).implicit("vertex normal"),
+        ]
+    }
+}
+
+/// Normal input: the connected value, or the vertex normal.
+fn implicit_normal(c: &mut EmitCtx) -> String {
+    if c.is_connected("normal") { c.input("normal") } else { c.builtin(Builtin::WorldNormal) }
+}
+
+/// E009 for derivative-based nodes wired into the vertex stage (World Position Offset).
+fn fragment_only(c: &mut EmitCtx) {
+    if c.stage == Stage::Vertex {
+        c.diag(Code::E009, "derivatives are only available in the fragment stage");
+    }
+}
 
 pub fn register(r: &mut Registry) {
     r.register(
@@ -174,15 +217,233 @@ pub fn register(r: &mut Registry) {
                     )
                 },
                 |c| {
-                    let p = if c.is_connected("position") {
-                        c.input("position")
-                    } else {
-                        c.builtin(Builtin::WorldPosition)
-                    };
+                    let p = noise_position(c);
                     let func =
                         if c.param("function").as_str() == "Value" { "sg_value_noise3" } else { "sg_perlin_noise3" };
                     let f = c.stdlib("noise", func);
                     let e = format!("{f}({p} * {})", c.input("scale"));
+                    c.define("out", e);
+                },
+            ),
+    );
+
+    // Procedural masks (decision 0039): building blocks only, all in 3D like Noise.
+    r.register(
+        def("stdlib::FractalNoise", "FractalNoise", CAT)
+            .kw(&["noise", "fbm", "fractal", "octaves", "turbulence", "ridged", "mask"])
+            .desc("Several octaves of value / Perlin noise in 0..1: FBM, Turbulence (|noise|) or Ridged (ridges and valleys).")
+            .param(ParamDef::new(
+                "function",
+                "Function",
+                ParamKind::Enum(vec!["Value".into(), "Perlin".into()]),
+                Value::Str("Perlin".into()),
+            ))
+            .param(ParamDef::new(
+                "type",
+                "Type",
+                ParamKind::Enum(vec!["FBM".into(), "Turbulence".into(), "Ridged".into()]),
+                Value::Str("FBM".into()),
+            ))
+            .build(
+                |_| {
+                    sig(
+                        vec![
+                            pin_in("position", "Position", PinType::Float3, 0.0).implicit("world position"),
+                            pin_in("scale", "Scale", PinType::Float, 1.0),
+                            pin_in("octaves", "Octaves", PinType::Int, 4.0).range(1.0, 12.0),
+                            pin_in("lacunarity", "Lacunarity", PinType::Float, 2.0).range(1.0, 4.0),
+                            pin_in("gain", "Gain", PinType::Float, 0.5).range(0.0, 1.0),
+                            pin_in("seed", "Seed", PinType::Float, 0.0),
+                        ],
+                        vec![pin_out("out", "", PinType::Float)],
+                    )
+                },
+                |c| {
+                    let p = noise_position(c);
+                    let perlin = c.param("function").as_str() != "Value";
+                    let mode = match c.param("type").as_str() {
+                        "Turbulence" => 1,
+                        "Ridged" => 2,
+                        _ => 0,
+                    };
+                    let f = c.stdlib("noise", "sg_fractal_noise3");
+                    let e = format!(
+                        "{f}({p} * {}, {}, {}, {}, {}, {perlin}, {mode}i)",
+                        c.input("scale"),
+                        c.input("octaves"),
+                        c.input("lacunarity"),
+                        c.input("gain"),
+                        c.input("seed"),
+                    );
+                    c.define("out", e);
+                },
+            ),
+    );
+
+    r.register(
+        def("stdlib::Voronoi", "Voronoi", CAT)
+            .kw(&["voronoi", "cellular", "worley", "cells", "cracks", "border", "mask"])
+            .desc(
+                "Cellular noise in cell units: F1 / F2 = distance to the nearest / second nearest point, Border = \
+                 distance to the cell edge (equal-width lines), Cell = random 0..1 per cell.",
+            )
+            .build(
+                |_| {
+                    sig(
+                        vec![
+                            pin_in("position", "Position", PinType::Float3, 0.0).implicit("world position"),
+                            pin_in("scale", "Scale", PinType::Float, 1.0),
+                            pin_in("randomness", "Randomness", PinType::Float, 1.0).range(0.0, 1.0),
+                            pin_in("seed", "Seed", PinType::Float, 0.0),
+                        ],
+                        vec![
+                            pin_out("f1", "F1", PinType::Float),
+                            pin_out("f2", "F2", PinType::Float),
+                            pin_out("border", "Border", PinType::Float),
+                            pin_out("cell", "Cell", PinType::Float),
+                        ],
+                    )
+                },
+                |c| {
+                    let p = noise_position(c);
+                    let f = c.stdlib("noise", "sg_voronoi3");
+                    let e = format!("{f}({p} * {}, {}, {})", c.input("scale"), c.input("randomness"), c.input("seed"));
+                    c.define_typed("v_", PinType::Float4.wesl(), e);
+                    let v = c.var("v_");
+                    for (id, ch) in [("f1", "x"), ("f2", "y"), ("border", "z"), ("cell", "w")] {
+                        c.alias(id, Operand::Value(format!("{v}.{ch}")));
+                    }
+                },
+            ),
+    );
+
+    r.register(
+        def("stdlib::DomainWarp", "DomainWarp", CAT)
+            .kw(&["warp", "domain warp", "distort", "displace", "noise"])
+            .desc("Position displaced by up to Strength along a Perlin FBM; feed it into the Position of a noise node.")
+            .build(
+                |_| {
+                    sig(
+                        vec![
+                            pin_in("position", "Position", PinType::Float3, 0.0).implicit("world position"),
+                            pin_in("scale", "Scale", PinType::Float, 1.0),
+                            pin_in("strength", "Strength", PinType::Float, 0.5).range(0.0, 2.0),
+                            pin_in("octaves", "Octaves", PinType::Int, 2.0).range(1.0, 12.0),
+                            pin_in("seed", "Seed", PinType::Float, 0.0),
+                        ],
+                        vec![pin_out("out", "", PinType::Float3)],
+                    )
+                },
+                |c| {
+                    let p = noise_position(c);
+                    let f = c.stdlib("noise", "sg_domain_warp3");
+                    let e = format!(
+                        "{f}({p}, {}, {}, {}, {})",
+                        c.input("scale"),
+                        c.input("strength"),
+                        c.input("octaves"),
+                        c.input("seed"),
+                    );
+                    c.define("out", e);
+                },
+            ),
+    );
+
+    // Pattern masks (decision 0040): world-space triplanar by default, or UV.
+    r.register(
+        def("stdlib::Checkerboard", "Checkerboard", CAT)
+            .kw(&["checker", "checkerboard", "chess", "tiles", "pattern", "mask"])
+            .desc("Checkerboard of Size squares: Mask 0 / 1 and Color A / B. Triplanar in world space, or on a UV.")
+            .param(mapping_param())
+            .build(
+                |c| {
+                    let mut ins = mapping_inputs(c);
+                    ins.push(pin_in("size", "Size", PinType::Float, 1.0));
+                    ins.push(PinDef::new("color_a", "Color A", PinType::Float3).default(Value::Float3([0.2; 3])));
+                    ins.push(PinDef::new("color_b", "Color B", PinType::Float3).default(Value::Float3([0.8; 3])));
+                    sig(ins, vec![pin_out("mask", "Mask", PinType::Float), pin_out("color", "Color", PinType::Float3)])
+                },
+                |c| {
+                    let size = c.input("size");
+                    let e = if is_uv_mapping(c) {
+                        let uv = implicit_uv(c, "uv");
+                        format!("{}({uv}, {size})", c.stdlib("pattern", "sg_checker"))
+                    } else {
+                        let (p, n) = (noise_position(c), implicit_normal(c));
+                        format!("{}({p}, {n}, {size})", c.stdlib("pattern", "sg_checker3"))
+                    };
+                    c.define("mask", e);
+                    let e = format!("mix({}, {}, {})", c.input("color_a"), c.input("color_b"), c.var("mask"));
+                    c.define("color", e);
+                },
+            ),
+    );
+
+    r.register(
+        def("stdlib::Grid", "Grid", CAT)
+            .kw(&["grid", "lines", "pristine grid", "pattern", "mask"])
+            .desc(
+                "Anti-aliased grid lines (1 on the lines) every Cell Size, Line Width in cells per axis. Triplanar in \
+                 world space, or on a UV. Fragment stage only.",
+            )
+            .param(mapping_param())
+            .build(
+                |c| {
+                    let mut ins = mapping_inputs(c);
+                    ins.push(pin_in("cell", "Cell Size", PinType::Float, 1.0));
+                    ins.push(pin_in("line_width", "Line Width", PinType::Float2, 0.02));
+                    sig(ins, vec![pin_out("out", "", PinType::Float)])
+                },
+                |c| {
+                    fragment_only(c);
+                    let (cell, width) = (c.input("cell"), c.input("line_width"));
+                    let e = if is_uv_mapping(c) {
+                        let uv = implicit_uv(c, "uv");
+                        format!("{}({uv} / {cell}, {width})", c.stdlib("pattern", "sg_pristine_grid"))
+                    } else {
+                        let (p, n) = (noise_position(c), implicit_normal(c));
+                        format!("{}({p}, {n}, {cell}, {width})", c.stdlib("pattern", "sg_grid3"))
+                    };
+                    c.define("out", e);
+                },
+            ),
+    );
+
+    r.register(
+        def("stdlib::BlockoutGrid", "BlockoutGrid", CAT)
+            .kw(&["blockout", "prototype", "grid", "checker", "level design", "greybox"])
+            .desc(
+                "Level-design blockout color: Floor Color on surfaces facing up / down, Wall Color elsewhere, \
+                 checkered by Cell Size and Cell Size / 10 cubes, with Line Color grid lines. Fragment stage only.",
+            )
+            .build(
+                |_| {
+                    sig(
+                        vec![
+                            pin_in("position", "Position", PinType::Float3, 0.0).implicit("world position"),
+                            pin_in("normal", "Normal", PinType::Float3, 0.0).implicit("vertex normal"),
+                            pin_in("cell", "Cell Size", PinType::Float, 1.0),
+                            pin_in("line_width", "Line Width", PinType::Float2, 0.02),
+                            PinDef::new("floor_color", "Floor Color", PinType::Float3)
+                                .default(Value::Float3([0.3, 0.32, 0.35])),
+                            PinDef::new("wall_color", "Wall Color", PinType::Float3).default(Value::Float3([0.6; 3])),
+                            PinDef::new("line_color", "Line Color", PinType::Float3).default(Value::Float3([0.02; 3])),
+                        ],
+                        vec![pin_out("out", "", PinType::Float3)],
+                    )
+                },
+                |c| {
+                    fragment_only(c);
+                    let (p, n) = (noise_position(c), implicit_normal(c));
+                    let f = c.stdlib("pattern", "sg_blockout_grid");
+                    let e = format!(
+                        "{f}({p}, {n}, {}, {}, {}, {}, {})",
+                        c.input("cell"),
+                        c.input("line_width"),
+                        c.input("floor_color"),
+                        c.input("wall_color"),
+                        c.input("line_color"),
+                    );
                     c.define("out", e);
                 },
             ),

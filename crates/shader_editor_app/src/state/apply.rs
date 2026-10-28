@@ -15,10 +15,19 @@ impl Editor {
         {
             self.ui.tabs += 1;
             // The mode alone, with no node previewed before or after, generates nothing different.
-            if preview.node.is_none() && self.tabs[i].graph().is_some_and(|d| d.asset.preview.node.is_none()) {
-                return;
+            let previewed =
+                preview.node.is_some() || self.tabs[i].graph().is_some_and(|d| d.asset.preview.node.is_some());
+            if previewed {
+                self.regenerate_from_memory(i);
             }
-            self.regenerate_from_memory(i);
+        }
+        self.follow_active();
+    }
+
+    /// Records a change of the active tab, by whatever path it came, in the navigation history (decision 0041).
+    pub(super) fn follow_active(&mut self) {
+        if let Some(k) = self.active_key() {
+            self.nav.visit(k);
         }
     }
 
@@ -121,6 +130,8 @@ impl Editor {
                 self.config.zen_mode = !self.config.zen_mode;
                 self.save_config();
             }
+            Action::NavBack => self.navigate(NavDir::Back),
+            Action::NavForward => self.navigate(NavDir::Forward),
             Action::Save => {
                 if let Some(i) = self.active
                     && self.save(i)

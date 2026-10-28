@@ -6,6 +6,7 @@ use std::collections::BTreeSet;
 
 use bevy::input::ButtonState;
 use bevy::input::keyboard::{Key, KeyboardInput, NativeKey};
+use bevy::input::mouse::MouseButtonInput;
 use bevy::input_focus::InputFocus;
 use bevy::prelude::*;
 use bevy::text::EditableText;
@@ -73,6 +74,19 @@ fn send(app: &mut App, keys: &[KeyCode], state: ButtonState) {
             window: Entity::PLACEHOLDER,
         });
     }
+}
+
+/// Sends a mouse `button` press or release — what winit sends — and runs one update.
+fn mouse(app: &mut App, button: MouseButton, state: ButtonState) {
+    app.world_mut().write_message(MouseButtonInput { button, state, window: Entity::PLACEHOLDER });
+    app.update();
+}
+
+/// Clicks a mouse `button`: press, one more held frame, release.
+fn click(app: &mut App, button: MouseButton) {
+    mouse(app, button, ButtonState::Pressed);
+    app.update();
+    mouse(app, button, ButtonState::Released);
 }
 
 /// Presses `keys` (in this order, in one frame) and runs `frames` updates while they are held.
@@ -188,21 +202,15 @@ fn typing_blocks_all_hotkeys() {
 /// stay off only while a mouse button is held.
 #[test]
 fn read_only_focused_text_blocks_hotkeys_only_while_held() {
-    use bevy::input::mouse::MouseButtonInput;
     use bevy::text::TextReadWriteMode;
 
     let (_dir, mut app) = app(|e| e.open_asset(&material()));
     let field = app.world_mut().spawn((EditableText::default(), TextReadWriteMode::Static)).id();
     app.world_mut().insert_resource(InputFocus::from_entity(field));
-    let mouse = |app: &mut App, state| {
-        let input = MouseButtonInput { button: MouseButton::Left, state, window: Entity::PLACEHOLDER };
-        app.world_mut().write_message(input);
-        app.update();
-    };
-    mouse(&mut app, ButtonState::Pressed);
+    mouse(&mut app, MouseButton::Left, ButtonState::Pressed);
     tap(&mut app, &[KeyCode::Delete]);
     assert_eq!(seen(&mut app), vec![], "held: a scrub drag");
-    mouse(&mut app, ButtonState::Released);
+    mouse(&mut app, MouseButton::Left, ButtonState::Released);
     app.update();
     tap(&mut app, &[KeyCode::Delete]);
     assert_eq!(seen(&mut app), vec![Action::DeleteSelection], "released");
@@ -897,4 +905,69 @@ fn focused_list_keeps_its_arrows() {
     assert_eq!(stop_ts(&app), before, "the list's key");
     tap(&mut app, &[KeyCode::ControlLeft, KeyCode::KeyC]);
     assert_eq!(seen(&mut app), vec![Action::Copy], "other hotkeys still work");
+}
+
+// ---- navigation history (decision 0041) ----
+
+#[test]
+fn ctrl_brackets_navigate() {
+    let (_dir, mut app) = app(|e| e.open_asset(&material()));
+    for ctrl in [KeyCode::ControlLeft, KeyCode::SuperLeft] {
+        tap(&mut app, &[ctrl, KeyCode::BracketLeft]);
+        assert_eq!(seen(&mut app), vec![Action::NavBack], "{ctrl:?}");
+        tap(&mut app, &[ctrl, KeyCode::BracketRight]);
+        assert_eq!(seen(&mut app), vec![Action::NavForward], "{ctrl:?}");
+    }
+}
+
+/// Some mice and drivers send the browser keys instead of the side buttons.
+#[test]
+fn browser_keys_navigate() {
+    let (_dir, mut app) = app(|e| e.open_asset(&material()));
+    tap(&mut app, &[KeyCode::BrowserBack]);
+    assert_eq!(seen(&mut app), vec![Action::NavBack]);
+    tap(&mut app, &[KeyCode::BrowserForward]);
+    assert_eq!(seen(&mut app), vec![Action::NavForward]);
+}
+
+#[test]
+fn mouse_side_buttons_navigate() {
+    let (_dir, mut app) = app(|e| e.open_asset(&material()));
+    click(&mut app, MouseButton::Back);
+    assert_eq!(seen(&mut app), vec![Action::NavBack]);
+    click(&mut app, MouseButton::Forward);
+    assert_eq!(seen(&mut app), vec![Action::NavForward]);
+}
+
+/// The typing gate hides only the keyboard: the side buttons check it themselves (dialog, palette), and do nothing
+/// during a gesture (a mouse button held).
+#[test]
+fn mouse_back_ignored_while_typing() {
+    let (_dir, mut app) = app(|e| e.open_asset(&material()));
+    let message = Dialog::Message { title: "t".into(), message: "m".into() };
+    app.world_mut().resource_mut::<Editor>().dialog = Some(message);
+    app.update();
+    click(&mut app, MouseButton::Back);
+    assert_eq!(seen(&mut app), vec![], "a dialog");
+    app.world_mut().resource_mut::<Editor>().dialog = None;
+    app.update();
+
+    let mut palette = Palette::default();
+    palette.show(Vec2::ZERO, Vec2::ZERO, None);
+    app.world_mut().insert_resource(palette);
+    app.update();
+    click(&mut app, MouseButton::Back);
+    assert_eq!(seen(&mut app), vec![], "the palette");
+    app.world_mut().resource_mut::<Palette>().open = false;
+    app.update();
+
+    for held in [MouseButton::Left, MouseButton::Right, MouseButton::Middle] {
+        mouse(&mut app, held, ButtonState::Pressed);
+        click(&mut app, MouseButton::Back);
+        mouse(&mut app, held, ButtonState::Released);
+        assert_eq!(seen(&mut app), vec![], "{held:?} held");
+    }
+
+    click(&mut app, MouseButton::Back);
+    assert_eq!(seen(&mut app), vec![Action::NavBack], "nothing in the way");
 }

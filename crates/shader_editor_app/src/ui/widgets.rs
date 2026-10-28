@@ -47,7 +47,7 @@ fn corners(i: usize, n: usize) -> RoundedCorners {
 }
 
 /// The alpha of a disabled button's icon: Feathers dims a disabled caption text, our icons carry their own tint.
-const DISABLED_ICON_ALPHA: f32 = 0.3;
+pub(crate) const DISABLED_ICON_ALPHA: f32 = 0.3;
 /// The alpha of a disabled but selected button's icon: a disabled group still shows its stored choice (design §5.4).
 const DISABLED_SELECTED_ICON_ALPHA: f32 = 0.9;
 

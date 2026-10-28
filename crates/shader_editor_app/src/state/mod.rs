@@ -43,6 +43,7 @@ mod consts_ops;
 mod curve_ops;
 mod gradient_ops;
 mod graph_ops;
+mod nav;
 mod regen;
 mod tabs;
 #[cfg(test)]
@@ -52,6 +53,7 @@ mod types;
 mod watch;
 
 use consts_ops::usage_message;
+pub use nav::*;
 pub use types::*;
 
 /// Label of a preview mode in the Properties select (`Unlit`, `Lit`, `Full`).

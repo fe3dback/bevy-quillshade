@@ -2865,7 +2865,14 @@ fn main_menu_is_a_feathers_menu_with_check_marks() {
     };
     assert!(!popup_shown(&mut app), "closed");
     let check = || vec![IconId::Check];
-    assert_eq!(menu_item_icons(&mut app), [vec![], check(), check(), check()], "Zen off, every panel shown");
+    let no = Vec::new;
+    let (back, forward) = (|| vec![IconId::Back], || vec![IconId::Forward]);
+    // Zen mode, Back, Forward, the three panels.
+    assert_eq!(
+        menu_item_icons(&mut app),
+        [no(), back(), forward(), check(), check(), check()],
+        "Zen off, every panel shown"
+    );
 
     click(&mut app, button);
     app.update();
@@ -2906,7 +2913,11 @@ fn main_menu_is_a_feathers_menu_with_check_marks() {
 
     app.world_mut().resource_mut::<Editor>().config.show_log = false;
     app.update();
-    assert_eq!(menu_item_icons(&mut app), [vec![], check(), vec![], check()], "the check mark follows the config");
+    assert_eq!(
+        menu_item_icons(&mut app),
+        [no(), back(), forward(), check(), no(), check()],
+        "the check mark follows the config"
+    );
 }
 
 /// The texts of each menu item (its label, then its hotkey), in order.
@@ -2935,8 +2946,9 @@ fn menu_item_texts(app: &mut App) -> Vec<Vec<String>> {
         .collect()
 }
 
-/// Design §3: the View menu lists Zen mode, a separator, then the three panels, each with its hotkey; the check marks
-/// follow the four flags, also a panel's own flag while Zen mode hides it.
+/// Design §3: the View menu lists Zen mode, a separator, Back / Forward (decision 0041), a separator, then the three
+/// panels, each with its hotkey; the check marks follow the four flags, also a panel's own flag while Zen mode hides
+/// it.
 #[test]
 fn view_menu_marks_follow_flags() {
     use bevy::feathers::controls::FeathersMenuDivider;
@@ -2954,19 +2966,22 @@ fn view_menu_marks_follow_flags() {
         texts,
         [
             vec!["Zen mode".to_string(), "`".into()],
+            vec!["Back".into(), "Ctrl+[".into()],
+            vec!["Forward".into(), "Ctrl+]".into()],
             vec!["Show project".into(), "Ctrl+1".into()],
             vec!["Show console".into(), "Ctrl+2".into()],
             vec!["Show properties".into(), "Ctrl+3".into()],
         ]
     );
-    // The separator sits between Zen mode and the panels.
+    // The separators sit between Zen mode, Back / Forward and the panels.
     let rows: Vec<(bool, bool)> = {
         let w = app.world_mut();
         let popup = w.query_filtered::<&Children, With<MenuPopup>>().single(w).unwrap().to_vec();
         let mut kind = w.query::<(Has<FeathersMenuDivider>, Has<bevy::feathers::controls::FeathersMenuItem>)>();
         popup.into_iter().filter_map(|e| kind.get(w, e).ok()).filter(|(d, i)| *d || *i).collect()
     };
-    assert_eq!(rows, [(false, true), (true, false), (false, true), (false, true), (false, true)]);
+    let (item, divider) = ((false, true), (true, false));
+    assert_eq!(rows, [item, divider, item, item, divider, item, item, item]);
 
     let check = || vec![IconId::Check];
     let set = |app: &mut App, f: fn(&mut shader_editor_app::config::UserConfig)| {
@@ -2975,11 +2990,17 @@ fn view_menu_marks_follow_flags() {
         app.update();
         menu_item_icons(app)
     };
-    assert_eq!(set(&mut app, |_| {}), [vec![], check(), check(), check()]);
-    assert_eq!(set(&mut app, |c| c.show_left_sidebar = false), [vec![], vec![], check(), check()]);
-    assert_eq!(set(&mut app, |c| c.zen_mode = true), [check(), vec![], check(), check()]);
-    assert_eq!(set(&mut app, |c| c.show_properties = false), [check(), vec![], check(), vec![]], "in Zen too");
-    assert_eq!(set(&mut app, |c| c.show_log = false), [check(), vec![], vec![], vec![]]);
+    // Zen mode and the panels; Back / Forward (between them) keep their arrows, no mark.
+    let marks = |app: &mut App, f| {
+        let icons = set(app, f);
+        assert_eq!(icons[1..3], [vec![IconId::Back], vec![IconId::Forward]], "Back / Forward");
+        [icons[0].clone(), icons[3].clone(), icons[4].clone(), icons[5].clone()]
+    };
+    assert_eq!(marks(&mut app, |_| {}), [vec![], check(), check(), check()]);
+    assert_eq!(marks(&mut app, |c| c.show_left_sidebar = false), [vec![], vec![], check(), check()]);
+    assert_eq!(marks(&mut app, |c| c.zen_mode = true), [check(), vec![], check(), check()]);
+    assert_eq!(marks(&mut app, |c| c.show_properties = false), [check(), vec![], check(), vec![]], "in Zen too");
+    assert_eq!(marks(&mut app, |c| c.show_log = false), [check(), vec![], vec![], vec![]]);
 }
 
 /// Design §3: Zen mode hides the whole console/logs, its header included (and from Tab: `Visibility::Hidden`); off,
@@ -3652,4 +3673,203 @@ fn sample_gradient_properties_list_the_used_slots() {
     };
     assert_eq!(params, Some(Value::Int(picked as i32)));
     assert!(rows(&mut app).contains(&(picked, true)), "the picked row is selected after the refill");
+}
+
+// ---------------------------------------------------------------------------------------------
+// Navigation history: graph camera views (decision 0041)
+
+/// Fixed 50 ms frames, so the settle time of the view polling is reached in a known number of updates.
+fn nav_app() -> (tempfile::TempDir, App) {
+    let (dir, mut app) = app();
+    app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(std::time::Duration::from_secs_f32(0.05)));
+    let canvas = app.world().resource::<EditorCanvas>().canvas;
+    app.world_mut().entity_mut(canvas).insert(ComputedNode {
+        size: Vec2::new(800.0, 600.0),
+        inverse_scale_factor: 1.0,
+        ..default()
+    });
+    (dir, app)
+}
+
+/// No UI layout runs headless: gives every node that has no size yet one, so a Fit can measure the graph.
+fn lay_out_nodes(app: &mut App) {
+    let w = app.world_mut();
+    let bare: Vec<Entity> = w
+        .query_filtered::<(Entity, &ComputedNode), With<NodeKey>>()
+        .iter(w)
+        .filter(|(_, c)| c.size == Vec2::ZERO)
+        .map(|(e, _)| e)
+        .collect();
+    for e in bare {
+        w.entity_mut(e).insert(ComputedNode { size: Vec2::new(200.0, 120.0), inverse_scale_factor: 1.0, ..default() });
+    }
+}
+
+/// Ten 50 ms frames (0.5 s, past `NAV_SETTLE_SECS`), nodes laid out before each.
+fn settle(app: &mut App) {
+    for _ in 0..10 {
+        lay_out_nodes(app);
+        app.update();
+    }
+}
+
+/// The canvas camera as a history view.
+fn nav_view_now(app: &App) -> shader_editor_app::state::NavView {
+    let canvas = app.world().resource::<EditorCanvas>().canvas;
+    let view = app.world().get::<CanvasView>(canvas).unwrap();
+    let computed = app.world().get::<ComputedNode>(canvas).unwrap();
+    shader_editor_app::state::NavView {
+        centre: shader_editor_app::canvas::view_center(view, computed),
+        zoom: view.zoom,
+    }
+}
+
+fn set_camera(app: &mut App, f: impl FnOnce(&mut CanvasView)) {
+    let canvas = app.world().resource::<EditorCanvas>().canvas;
+    f(&mut app.world_mut().get_mut::<CanvasView>(canvas).unwrap());
+}
+
+fn nav_len(app: &App) -> usize {
+    app.world().resource::<Editor>().nav.entries().len()
+}
+
+fn current_nav_view(app: &App) -> Option<shader_editor_app::state::NavView> {
+    app.world().resource::<Editor>().nav.current().and_then(|e| e.view)
+}
+
+fn assert_view_near(
+    got: Option<shader_editor_app::state::NavView>,
+    want: shader_editor_app::state::NavView,
+    what: &str,
+) {
+    let got = got.unwrap_or_else(|| panic!("{what}: no view"));
+    assert!(
+        (got.centre - want.centre).length() < 1e-3 && (got.zoom - want.zoom).abs() < 1e-3,
+        "{what}: {got:?} != {want:?}"
+    );
+}
+
+fn hologram() -> AssetId {
+    AssetId::new(AssetType::Material, "fx/hologram")
+}
+
+fn rock_wet() -> AssetId {
+    AssetId::new(AssetType::Material, "env/rock_wet")
+}
+
+/// Navigation design "Recording camera views": once the camera rests, the current entry gets its centre and zoom.
+#[test]
+fn settled_view_is_recorded() {
+    let (_dir, mut app) = nav_app();
+    act(&mut app, Action::OpenAsset(hologram()));
+    act(&mut app, Action::View(shader_editor_app::state::ViewRequest::FitAll));
+    settle(&mut app);
+    assert!(app.world().resource::<Editor>().view_requests.is_empty(), "the Fit was carried out");
+    assert_view_near(current_nav_view(&app), nav_view_now(&app), "the fitted view");
+}
+
+/// A small pan amends the current entry; one of more than half the canvas's smaller side pushes a new one.
+#[test]
+fn large_pan_pushes_entry_small_amends() {
+    let (_dir, mut app) = nav_app();
+    act(&mut app, Action::OpenAsset(hologram()));
+    settle(&mut app);
+    let len = nav_len(&app);
+    set_camera(&mut app, |v| v.pan += Vec2::new(10.0, 0.0));
+    settle(&mut app);
+    assert_eq!(nav_len(&app), len, "a small pan amends");
+    assert_view_near(current_nav_view(&app), nav_view_now(&app), "amended");
+    set_camera(&mut app, |v| v.pan += Vec2::new(800.0, 0.0));
+    settle(&mut app);
+    assert_eq!(nav_len(&app), len + 1, "a large pan pushes");
+    assert_view_near(current_nav_view(&app), nav_view_now(&app), "pushed");
+}
+
+/// Back to a closed graph tab reopens it at its recorded camera, not at the Fit its opening queues.
+#[test]
+fn nav_back_restores_camera_over_fit() {
+    let (_dir, mut app) = nav_app();
+    act(&mut app, Action::OpenAsset(hologram()));
+    settle(&mut app);
+    set_camera(&mut app, |v| {
+        v.zoom = 0.37;
+        v.pan = Vec2::new(123.0, -45.0);
+    });
+    settle(&mut app);
+    let recorded = nav_view_now(&app);
+    act(&mut app, Action::OpenAsset(rock_wet()));
+    settle(&mut app);
+    let a = app.world().resource::<Editor>().doc_index(&hologram()).unwrap();
+    act(&mut app, Action::CloseTab(a));
+    assert!(app.world().resource::<Editor>().doc_index(&hologram()).is_none());
+    act(&mut app, Action::NavBack);
+    settle(&mut app);
+    assert_eq!(app.world().resource::<Editor>().doc().map(|d| d.id.clone()), Some(hologram()), "A reopened");
+    assert_view_near(Some(nav_view_now(&app)), recorded, "A's camera");
+}
+
+/// Back walks camera entries of one open tab too: B → A's last view → A's older view.
+#[test]
+fn back_to_open_tab_restores_older_view() {
+    let (_dir, mut app) = nav_app();
+    act(&mut app, Action::OpenAsset(hologram()));
+    settle(&mut app);
+    set_camera(&mut app, |v| {
+        v.zoom = 0.5;
+        v.pan = Vec2::new(100.0, 50.0);
+    });
+    settle(&mut app);
+    let v1 = nav_view_now(&app);
+    let len = nav_len(&app);
+    set_camera(&mut app, |v| v.pan += Vec2::new(2000.0, 0.0));
+    settle(&mut app);
+    let v2 = nav_view_now(&app);
+    assert_eq!(nav_len(&app), len + 1, "V2 is a jump");
+    act(&mut app, Action::OpenAsset(rock_wet()));
+    settle(&mut app);
+
+    act(&mut app, Action::NavBack);
+    settle(&mut app);
+    assert_eq!(app.world().resource::<Editor>().doc().map(|d| d.id.clone()), Some(hologram()));
+    assert_view_near(Some(nav_view_now(&app)), v2, "first Back: A's last view");
+    act(&mut app, Action::NavBack);
+    settle(&mut app);
+    assert_view_near(Some(nav_view_now(&app)), v1, "second Back: A's older view");
+}
+
+/// A canvas resize keeps the centre (`keep_center_on_resize`), so it is no camera change for the history.
+#[test]
+fn resize_pushes_no_nav_entry() {
+    let (_dir, mut app) = nav_app();
+    act(&mut app, Action::OpenAsset(hologram()));
+    settle(&mut app);
+    let len = nav_len(&app);
+    assert!(current_nav_view(&app).is_some());
+    let canvas = app.world().resource::<EditorCanvas>().canvas;
+    app.world_mut().entity_mut(canvas).insert(ComputedNode {
+        size: Vec2::new(1600.0, 600.0),
+        inverse_scale_factor: 1.0,
+        ..default()
+    });
+    settle(&mut app);
+    assert_eq!(nav_len(&app), len, "a resize pushes nothing");
+}
+
+/// Back to an open graph tab: the entry's camera wins over the tab's own saved view, which `rebuild_canvas` restores
+/// earlier in the same frame.
+#[test]
+fn back_set_lands_after_per_doc_restore() {
+    use shader_editor_app::state::NavView;
+    use shader_editor_app::tab::TabKey;
+    let (_dir, mut app) = nav_app();
+    act(&mut app, Action::OpenAsset(hologram()));
+    settle(&mut app);
+    act(&mut app, Action::OpenAsset(rock_wet()));
+    settle(&mut app);
+    // A's entry differs from the view the canvas saved for A when it switched to B.
+    let want = NavView { centre: Vec2::new(-321.0, 654.0), zoom: 1.7 };
+    app.world_mut().resource_mut::<Editor>().nav.amend_last_of(&TabKey::Asset(hologram()), want);
+    act(&mut app, Action::NavBack);
+    assert_eq!(app.world().resource::<Editor>().doc().map(|d| d.id.clone()), Some(hologram()));
+    assert_view_near(Some(nav_view_now(&app)), want, "the entry's camera");
 }

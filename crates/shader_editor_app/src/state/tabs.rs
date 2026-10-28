@@ -24,21 +24,82 @@ impl Editor {
         self.current_folder.clear();
         self.rescan();
         self.refresh_game_files();
-        for key in &tabs.open {
-            match parse_config_key(key) {
-                Some(TabKey::Asset(id)) if self.disk.contains(&id) => self.open_asset(&id),
-                Some(TabKey::Generated(id, lang)) if self.disk.contains(&id) => self.show_generated(&id, lang),
-                Some(TabKey::GameImage(path)) if self.game_files.contains(&path) => self.open_game_image(&path),
-                Some(TabKey::Internal(id)) => self.open_asset(&AssetId::new(AssetType::Texture, id)),
-                _ => {}
+        self.nav.clear();
+        for key in tabs.open.iter().filter_map(|k| parse_config_key(k)) {
+            if self.key_exists(&key) {
+                self.open_key(&key);
             }
         }
         self.active = tabs.active.filter(|i| *i < self.tabs.len()).or(self.active);
+        self.follow_active();
         let root = self.project.as_ref().map(|p| p.root.display().to_string()).unwrap_or_default();
         self.info(format!("Opened project {root}"));
         self.save_config();
         self.touch_all();
         Ok(())
+    }
+
+    /// Whether what `key` names still exists: the asset on disk, the game file, the built-in texture.
+    fn key_exists(&self, key: &TabKey) -> bool {
+        match key {
+            TabKey::Asset(id) | TabKey::Generated(id, _) => self.disk.contains(id),
+            TabKey::GameImage(path) => self.game_files.contains(path),
+            TabKey::Internal(id) => shader_stdlib::internal::internal_texture(id).is_some(),
+        }
+    }
+
+    /// Opens (or activates) the tab `key` names; nothing may open (a load error is logged).
+    fn open_key(&mut self, key: &TabKey) {
+        match key {
+            TabKey::Asset(id) => self.open_asset(id),
+            TabKey::Generated(id, lang) => self.show_generated(id, *lang),
+            TabKey::GameImage(path) => self.open_game_image(path),
+            TabKey::Internal(id) => self.open_asset(&AssetId::new(AssetType::Texture, id)),
+        }
+    }
+
+    /// Index of the open tab `key` names.
+    fn key_index(&self, key: &TabKey) -> Option<usize> {
+        self.tabs.iter().position(|t| t.doc().config_key().and_then(|k| parse_config_key(&k)).as_ref() == Some(key))
+    }
+
+    /// The active tab's identity ([`TabDoc::config_key`](crate::doc_kind::TabDoc::config_key) parsed back).
+    pub fn active_key(&self) -> Option<TabKey> {
+        parse_config_key(&self.tab()?.doc().config_key()?)
+    }
+
+    /// Back / Forward (decision 0041): walks the history to the next entry that opens, dropping entries whose
+    /// target is gone and skipping (keeping) ones that fail to open, then restores the entry's graph view.
+    /// An open tab is never gone, even if its file vanished; a load error is only logged (no dialog), and at an end
+    /// of the list nothing happens. Ignored while a dialog is open.
+    pub fn navigate(&mut self, dir: NavDir) {
+        if self.dialog.is_some() || self.project.is_none() {
+            return;
+        }
+        let mut nav = std::mem::take(&mut self.nav);
+        let active = self.active_key();
+        let reached = nav.step(dir, active.as_ref(), |entry| {
+            if let Some(i) = self.key_index(&entry.tab) {
+                self.activate(i);
+                return Reach::Opened;
+            }
+            if !self.key_exists(&entry.tab) {
+                return Reach::Gone;
+            }
+            // A load error is also shown in a dialog (`io_error`); the walk goes on, so keep only the console line.
+            let had_dialog = self.dialog.is_some();
+            self.open_key(&entry.tab);
+            if !had_dialog {
+                self.dialog = None;
+            }
+            if self.active_key().as_ref() == Some(&entry.tab) { Reach::Opened } else { Reach::Failed }
+        });
+        self.nav = nav;
+        if let Some(NavEntry { view: Some(v), .. }) = reached {
+            // Replaces the FitAll a reopened graph tab queued.
+            self.view_requests.clear();
+            self.view_requests.push(ViewRequest::Set { centre: v.centre, zoom: v.zoom });
+        }
     }
 
     pub fn save_tabs_to_config(&mut self) {
@@ -409,6 +470,7 @@ impl Editor {
         self.game_files.clear();
         self.tabs.clear();
         self.active = None;
+        self.nav.clear();
         self.functions.clear();
         self.diags.clear();
         self.project_diags.clear();

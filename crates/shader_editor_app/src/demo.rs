@@ -12,7 +12,7 @@
 //! the middle of that node (opens the file it refers to) or, with `SHADER_EDITOR_INPUT_AT=header`, its header (the
 //! rename dialog, design §5.5; the active tab and the dialog are logged), `frame_dblclick` double-clicks the title
 //! strip of the first comment frame (or `SHADER_EDITOR_INPUT_FRAME`; the dialog is logged), `hover` rests on the
-//! menu_bar's Undo button (its tooltip), on the widget whose tooltip starts with `SHADER_EDITOR_INPUT_TIP` or, with
+//! menu_bar's Back button (its tooltip), on the widget whose tooltip starts with `SHADER_EDITOR_INPUT_TIP` or, with
 //! `SHADER_EDITOR_INPUT_PIN=<node>.<pin>`, on that pin (its hover look, design §4.8; hovered pins are logged),
 //! `curve_drag` drags the second point of an open curve, `curve_add` double-clicks below it, `texture_zoom` turns
 //! the wheel 10 notches over the preview of an open image or Texture tab (left of its centre),
@@ -363,7 +363,7 @@ pub fn scripted_input(
                 vec![Step::Move(logical(t, c))]
             }
             "hover" => {
-                let tip = std::env::var("SHADER_EDITOR_INPUT_TIP").unwrap_or_else(|_| "Undo (".into());
+                let tip = std::env::var("SHADER_EDITOR_INPUT_TIP").unwrap_or_else(|_| "Back (".into());
                 let Some((_, t, c)) = tips.iter().find(|t| t.0.0.starts_with(&tip)) else {
                     error!("demo {name}: no widget with the tooltip {tip:?}");
                     return;

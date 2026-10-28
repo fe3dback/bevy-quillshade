@@ -209,9 +209,11 @@ and commit messages too:
   Bodies (`*ViewBar`, `*SidebarBody`) are refilled by the kind's systems keyed on what they show (sidebars:
   `(ui.props, active)` via `SidebarKey`), never every frame. Property widgets and their observers stay in
   `ui/props.rs`; editor content views stay in `ui::DocArea`.
-- **Input contexts** (`editors/main_input.rs`, decisions 0032, 0034, 0035): bevy_enhanced_input. One `InputRoot` entity
-  carries `MainCtx` (save, undo / redo, close / next tab, open, quit, the View toggles Ctrl+1 `ToggleLeftSidebar` /
-  Ctrl+2 `ToggleLog` / Ctrl+3 `ToggleProperties` / `` ` `` `ToggleZen`; always active, priority 2) and one context per
+- **Input contexts** (`editors/main_input.rs`, decisions 0032, 0034, 0035, 0041): bevy_enhanced_input. One `InputRoot`
+  entity carries `MainCtx` (save, undo / redo, close / next tab, open, quit, the View toggles Ctrl+1
+  `ToggleLeftSidebar` / Ctrl+2 `ToggleLog` / Ctrl+3 `ToggleProperties` / `` ` `` `ToggleZen`, `NavBack` / `NavForward`
+  on Ctrl+[ / Ctrl+], the mouse side buttons and the Browser keys — `on_nav` drops them while typing or with L / R / M
+  held, as the gate hides only the keyboard; always active, priority 2) and one context per
   kind (`GraphCtx` — palette on Space, Esc `CancelWire`, …; `CurveCtx`, `TextCtx`, `GradientsCtx`; priority 1) that
   `sync_input_context` activates only while the active tab is of that kind — so a hotkey needs no "is this my tab"
   guard. The shared edit actions (`EditCopy`, `EditDelete`, …) are bound by each kind that supports them and have one
@@ -260,7 +262,8 @@ and commit messages too:
   Internal folder), `game_image.rs` (`GameImageCache`: game images and internal textures decoded with
   `Image::from_buffer`), `droppable.rs` (`DroppableFile` / `Dropped`: dragging images, Texture, Function, Curve and
   gradient collection assets onto a graph; a function dropped into itself is refused through `search::is_self_call`, as
-  in the palette).
+  in the palette), `state/nav.rs` (`NavHistory`, decision 0041: the in-memory Back / Forward list of tabs and graph
+  camera views, fed by `Editor::follow_active` and the canvas's settled-view polling).
 - Canvas details (decisions 0033, 0034, 0035): node positions snap to `doc::GRID_SNAP` (10) — pointer drags through the
   bevy_noodle fork's `CanvasInteraction::snap` (the grabbed node; `attach_canvas`), new / pasted nodes in
   `Editor::add_node` / `paste`; loaded positions are never rewritten. Comment frames are `NodeFrame`s: dragging one
@@ -377,7 +380,7 @@ hand-drawn ones, rasterized at runtime with resvg (`crates/shader_editor_app/src
     `shaders/common/pulse.curve.ron`) — onto `SHADER_EDITOR_INPUT_NODE` (default: the canvas centre) and logs the
     graph's texture / curve references and function calls; it may create a Texture asset, so run it on a copy of the
     sample game.
-  - `hover` rests on the menu_bar's Undo button (its tooltip), on the widget whose tooltip starts with
+  - `hover` rests on the menu_bar's Back button (its tooltip), on the widget whose tooltip starts with
     `SHADER_EDITOR_INPUT_TIP=<prefix>` or, with `SHADER_EDITOR_INPUT_PIN=<node>.<pin>`, on that pin (hovered pins are
     logged).
   - `ctrl_drag_wire` holds Ctrl and drags from `SHADER_EDITOR_INPUT_PIN=<node>.<pin>` (default: the topmost connected
