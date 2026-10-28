@@ -274,9 +274,10 @@ Texture Asset" follows the same rule), sRGB and Expand grayscale (both need a re
 is not previewed — the editor always expands) and the sampler. **Easy** mode (the editor topbar's Easy | Advanced; the
 default unless the sampler is one no preset describes — then Easy is disabled) has no form: "Use for" **Default** (no
 sampler stored: the game's default, with Bevy's `ImagePlugin::default()` Linear and Clamp to edge), **Pixel art**
-(Nearest, Clamp to edge), **UI** (bilinear, Clamp to edge), **3D** (trilinear, Repeat) or **Ground** (trilinear + 16x
-anisotropy, Repeat) sets the whole sampler for that use (sRGB stays; one undo step); one of them is always selected,
-read back from the sampler in the file. **Advanced** is the form: path, sRGB, Expand grayscale, "Default" (= the app's
+(Nearest, Clamp to edge), **UI** (bilinear, Clamp to edge), **3D** (trilinear, Repeat), **Normal map** (3D's sampler,
+sRGB off) or **Ground** (trilinear + 16x anisotropy, Repeat) sets the whole sampler and the sRGB flag for that use (sRGB
+on except for Normal map; one undo step); one of them is always selected, read back from the sampler and sRGB flag in
+the file (linear data under any other preset opens in Advanced). **Advanced** is the form: path, sRGB, Expand grayscale, "Default" (= the app's
 default sampler: with Bevy's `ImagePlugin::default()` Linear filters and Clamp to edge, *not* Repeat; turning it off
 starts from those values) and every sampler field. The image path, size, format and mip count are
 in the right sidebar. The preview is decoded with the current, unsaved settings: the wheel zooms around the pointer

@@ -292,8 +292,9 @@ pub fn effective_sampler(settings: &TextureSettings) -> SamplerSettings {
 }
 
 /// Easy mode's presets: what the texture is for, each the whole sampler that suits it best (after the filtering guide
-/// the user referred to, decision 0028). Easy mode always has one selected: the file stores it through the sampler it
-/// writes, and [`FilterPreset::of`] reads it back (design §6.3).
+/// the user referred to, decision 0028) plus the sRGB flag (decision 0042: only Normal map is linear data). Easy mode
+/// always has one selected: the file stores it through the sampler and sRGB flag it writes, and [`FilterPreset::of`]
+/// reads it back (design §6.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FilterPreset {
     /// No sampler stored: the game's default (with Bevy's `ImagePlugin::default()`: Linear, Clamp to edge).
@@ -304,13 +305,21 @@ pub enum FilterPreset {
     Ui,
     /// Trilinear, Repeat.
     ThreeD,
+    /// 3D's sampler on linear data (sRGB off).
+    NormalMap,
     /// Trilinear + 16x anisotropy, Repeat.
     Ground,
 }
 
 impl FilterPreset {
-    pub const ALL: [FilterPreset; 5] =
-        [FilterPreset::Default, FilterPreset::PixelArt, FilterPreset::Ui, FilterPreset::ThreeD, FilterPreset::Ground];
+    pub const ALL: [FilterPreset; 6] = [
+        FilterPreset::Default,
+        FilterPreset::PixelArt,
+        FilterPreset::Ui,
+        FilterPreset::ThreeD,
+        FilterPreset::NormalMap,
+        FilterPreset::Ground,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -318,6 +327,7 @@ impl FilterPreset {
             FilterPreset::PixelArt => "Pixel art",
             FilterPreset::Ui => "UI",
             FilterPreset::ThreeD => "3D",
+            FilterPreset::NormalMap => "Normal map",
             FilterPreset::Ground => "Ground",
         }
     }
@@ -330,6 +340,7 @@ impl FilterPreset {
             FilterPreset::PixelArt => "Pixel art: Nearest filters (crisp texels), Clamp to edge",
             FilterPreset::Ui => "UI, sprites: bilinear filtering, Clamp to edge",
             FilterPreset::ThreeD => "3D surfaces: trilinear filtering, Repeat (tiles when UVs leave 0..1)",
+            FilterPreset::NormalMap => "Normal maps, other linear data: sRGB off, trilinear filtering, Repeat",
             FilterPreset::Ground => "Ground, floors: trilinear + 16x anisotropy (sharp at grazing angles), Repeat",
         }
     }
@@ -341,7 +352,7 @@ impl FilterPreset {
             FilterPreset::Default => return None,
             FilterPreset::PixelArt => (Nearest, Nearest, Nearest, AddressMode::ClampToEdge, 1),
             FilterPreset::Ui => (Linear, Linear, Nearest, AddressMode::ClampToEdge, 1),
-            FilterPreset::ThreeD => (Linear, Linear, Linear, AddressMode::Repeat, 1),
+            FilterPreset::ThreeD | FilterPreset::NormalMap => (Linear, Linear, Linear, AddressMode::Repeat, 1),
             FilterPreset::Ground => (Linear, Linear, Linear, AddressMode::Repeat, MAX_ANISOTROPY),
         };
         Some(SamplerSettings {
@@ -356,19 +367,26 @@ impl FilterPreset {
         })
     }
 
-    /// The preset whose sampler the settings have: [`FilterPreset::Default`] for no sampler, `None` for a custom
-    /// one (also one equal to the game's default: it is stored, so it is not "Default").
-    pub fn of(settings: &TextureSettings) -> Option<Self> {
-        FilterPreset::ALL.into_iter().find(|p| settings.sampler == p.sampler())
+    /// The preset's sRGB flag: color data except for [`FilterPreset::NormalMap`].
+    pub fn is_srgb(self) -> bool {
+        self != FilterPreset::NormalMap
     }
 
-    /// `settings` with this preset's sampler (sRGB and grayscale expansion stay).
+    /// The preset whose sampler and sRGB flag the settings have: [`FilterPreset::Default`] for no sampler on sRGB
+    /// data, `None` for a custom sampler (also one equal to the game's default: it is stored, so it is not
+    /// "Default") or linear data under a sampler other than Normal map's.
+    pub fn of(settings: &TextureSettings) -> Option<Self> {
+        FilterPreset::ALL.into_iter().find(|p| settings.sampler == p.sampler() && settings.is_srgb == p.is_srgb())
+    }
+
+    /// `settings` with this preset's sampler and sRGB flag (grayscale expansion stays).
     pub fn apply(self, settings: &TextureSettings) -> TextureSettings {
-        TextureSettings { sampler: self.sampler(), ..settings.clone() }
+        TextureSettings { sampler: self.sampler(), is_srgb: self.is_srgb(), ..settings.clone() }
     }
 }
 
-/// Easy mode loses nothing on these settings: their sampler is a preset's ([`FilterPreset::Default`]: none).
+/// Easy mode loses nothing on these settings: their sampler and sRGB flag are a preset's ([`FilterPreset::Default`]:
+/// no sampler, sRGB).
 pub fn fits_easy(settings: &TextureSettings) -> bool {
     FilterPreset::of(settings).is_some()
 }
@@ -461,10 +479,11 @@ mod tests {
         assert_eq!(FilterPreset::of(&TextureSettings::default()), Some(FilterPreset::Default));
         assert_eq!(FilterPreset::ALL[0], FilterPreset::Default, "the first preset");
         assert_eq!(FilterPreset::Default.sampler(), None);
-        let s3d = FilterPreset::ThreeD.apply(&TextureSettings { is_srgb: false, ..TextureSettings::default() });
+        let s3d =
+            FilterPreset::ThreeD.apply(&TextureSettings { expand_grayscale: false, ..TextureSettings::default() });
         let back = FilterPreset::Default.apply(&s3d);
-        assert!(back.sampler.is_none());
-        assert!(!back.is_srgb, "loader settings stay");
+        assert!(back.sampler.is_none() && back.is_srgb);
+        assert!(!back.expand_grayscale, "grayscale expansion stays");
         // A custom sampler equal to the game's default is still a custom one: no preset.
         let custom = TextureSettings { sampler: Some(SamplerSettings::image_plugin_default()), ..Default::default() };
         assert_eq!(FilterPreset::of(&custom), None);
@@ -476,11 +495,19 @@ mod tests {
         let d = TextureSettings::default();
         assert!(fits_easy(&d));
         for p in FilterPreset::ALL {
-            let s = p.apply(&TextureSettings { is_srgb: false, ..d.clone() });
+            let s = p.apply(&TextureSettings { is_srgb: !p.is_srgb(), expand_grayscale: false, ..d.clone() });
             assert_eq!(FilterPreset::of(&s), Some(p));
-            assert!(!s.is_srgb, "loader settings stay");
+            assert_eq!(s.is_srgb, p.is_srgb(), "{p:?} sets sRGB");
+            assert!(!s.expand_grayscale, "grayscale expansion stays");
             assert!(s.sampler.is_none_or(|s| s.check().is_ok()), "{p:?}");
         }
+        // Normal map: 3D's sampler on linear data; linear data under any other preset's sampler is no preset.
+        assert_eq!(FilterPreset::NormalMap.sampler(), FilterPreset::ThreeD.sampler());
+        assert!(!FilterPreset::NormalMap.is_srgb());
+        let linear = |p: FilterPreset| TextureSettings { is_srgb: false, ..p.apply(&d) };
+        assert_eq!(FilterPreset::of(&linear(FilterPreset::ThreeD)), Some(FilterPreset::NormalMap));
+        assert_eq!(FilterPreset::of(&linear(FilterPreset::Default)), None);
+        assert!(!fits_easy(&linear(FilterPreset::Ground)));
         let ground = FilterPreset::Ground.sampler().unwrap();
         assert_eq!((ground.anisotropy_clamp, ground.address_mode_v), (MAX_ANISOTROPY, AddressMode::Repeat));
         let ui = FilterPreset::Ui.sampler().unwrap();

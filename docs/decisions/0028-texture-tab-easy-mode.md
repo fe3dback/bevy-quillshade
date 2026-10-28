@@ -19,7 +19,8 @@ axis — and the PNG loader generates no mipmaps (only KTX2 / DDS / Basis files 
 - **Presets** (`FilterPreset`, each a whole sampler with default LOD clamps; after the filtering guide the user referred
   to, address modes chosen per use): Pixel art = Nearest ×3, Clamp to edge; UI = Linear / Linear / Nearest
   (bilinear), Clamp to edge; 3D = Linear ×3, Repeat; Ground = Linear ×3 + anisotropy 16, Repeat. A preset replaces the
-  sampler only (sRGB and grayscale expansion stay) as one undo step. A default sampler is no preset (none highlighted):
+  sampler only (sRGB and grayscale expansion stay) as one undo step (superseded by 0042: presets also set sRGB, new
+  Normal map preset). A default sampler is no preset (none highlighted):
   3D differs from it by Repeat, which tiled 3D textures need.
 - **Channel view** R | G | B | All (`TextureDoc::channel`, `Action::TextureChannel`, also on built-in textures): one
   channel shows as a grey image — `GameImageCache::get_channel` decodes the image again and copies the channel into

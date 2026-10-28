@@ -11,8 +11,6 @@ use super::{HoverRow, ROW_ACTIVE, TEXT, TEXT_DIM, text};
 use crate::search::{self, Entry, WireEnd};
 use crate::state::{Action, Actions, Editor, Link};
 
-const MAX_ROWS: usize = 60;
-
 /// Open palette: where it is and what it may connect to.
 #[derive(Resource, Default)]
 pub struct Palette {
@@ -27,6 +25,7 @@ pub struct Palette {
     results: Vec<usize>,
     query: Option<String>,
     highlight: usize,
+    /// The query the rows were built for and the row highlighted in them.
     rows_for: Option<(Option<String>, usize)>,
 }
 
@@ -53,7 +52,7 @@ pub struct PalettePlugin;
 impl Plugin for PalettePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Palette>()
-            .add_systems(Update, (spawn_or_close, filter, keys, rows).chain())
+            .add_systems(Update, (spawn_or_close, filter, keys, rows, follow_highlight).chain())
             .add_observer(click_row)
             .add_observer(click_outside);
     }
@@ -169,9 +168,7 @@ fn filter(mut palette: ResMut<Palette>, editor: Res<Editor>, inputs: Query<&Edit
     if palette.query.as_deref() == Some(q.as_str()) {
         return;
     }
-    let results = results_for(&editor, palette.link.as_ref(), &palette.entries, &q);
-    let results: Vec<usize> = results.into_iter().take(MAX_ROWS).collect();
-    palette.results = results;
+    palette.results = results_for(&editor, palette.link.as_ref(), &palette.entries, &q);
     palette.query = Some(q);
     palette.highlight = 0;
 }
@@ -208,17 +205,38 @@ fn keys(
     }
 }
 
-fn rows(mut palette: ResMut<Palette>, list: Query<Entity, With<PaletteList>>, mut commands: Commands) {
+/// Rebuilds the rows when the results change (every node, no cap: an empty query lists all categories); moving the
+/// highlight only restyles two rows.
+fn rows(
+    mut palette: ResMut<Palette>,
+    mut list: Query<(Entity, &mut ScrollPosition), With<PaletteList>>,
+    mut styled: Query<(&PaletteRow, &mut HoverRow, &mut BackgroundColor)>,
+    mut commands: Commands,
+) {
     if !palette.open {
         palette.rows_for = None;
         return;
     }
-    let Ok(list) = list.single() else { return };
+    let Ok((list, mut scroll)) = list.single_mut() else { return };
     let key = (palette.query.clone(), palette.highlight);
     if palette.rows_for.as_ref() == Some(&key) {
         return;
     }
+    if let Some((query, _)) = &palette.rows_for
+        && *query == key.0
+    {
+        for (row, mut hover, mut bg) in &mut styled {
+            let base = if row.0 == key.1 { ROW_ACTIVE } else { Color::NONE };
+            if hover.base != base {
+                hover.base = base;
+                bg.0 = base;
+            }
+        }
+        palette.rows_for = Some(key);
+        return;
+    }
     palette.rows_for = Some(key);
+    scroll.0 = Vec2::ZERO;
     commands.entity(list).despawn_children();
     if palette.results.is_empty() {
         commands.spawn_scene(bsn! { @text("No matching nodes", TEXT_DIM, 12.0) ChildOf(list) });
@@ -235,6 +253,40 @@ fn rows(mut palette: ResMut<Palette>, list: Query<Entity, With<PaletteList>>, mu
             ChildOf(list)
             Children [ @text(name, TEXT, 13.0) -- Node { flex_grow: 1.0 } -- @text(cat, TEXT_DIM, 11.0) ]
         });
+    }
+}
+
+/// Scrolls the list so the highlighted row is visible (arrows past the visible rows). Reads the previous frame's
+/// layout: only the highlight moved since, the rows did not.
+fn follow_highlight(
+    palette: Res<Palette>,
+    mut list: Query<(&ComputedNode, &UiGlobalTransform, &mut ScrollPosition), With<PaletteList>>,
+    rows: Query<(&PaletteRow, &ComputedNode, &UiGlobalTransform)>,
+    mut last: Local<Option<(Option<String>, usize)>>,
+) {
+    if !palette.open {
+        *last = None;
+        return;
+    }
+    let key = (palette.query.clone(), palette.highlight);
+    if last.as_ref() == Some(&key) {
+        return;
+    }
+    let query_changed = last.as_ref().is_none_or(|(q, _)| *q != key.0);
+    *last = Some(key);
+    if query_changed {
+        return;
+    }
+    let Ok((list_node, list_at, mut scroll)) = list.single_mut() else { return };
+    let Some((_, row_node, row_at)) = rows.iter().find(|(r, ..)| r.0 == palette.highlight) else { return };
+    let s = list_node.inverse_scale_factor;
+    let top = (row_at.translation.y - row_node.size.y / 2.0 - (list_at.translation.y - list_node.size.y / 2.0)) * s;
+    let bottom = top + row_node.size.y * s;
+    let view = list_node.size.y * s;
+    if top < 0.0 {
+        scroll.0.y += top;
+    } else if bottom > view {
+        scroll.0.y += bottom - view;
     }
 }
 
