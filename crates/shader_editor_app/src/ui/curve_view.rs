@@ -3,7 +3,8 @@
 //!
 //! Click selects (Shift toggles), drag moves the selection (one undo step; X / Y held: along that axis only, Shift
 //! held: the grabbed point snaps to the 0.1 grid), double click on empty space adds a point, right click opens a
-//! menu. Keys (arrow nudging, undo, copy/paste, delete, select-all) are the curve editor's input context
+//! menu. The value axis labels are in the curve's output range (decision 0038); points move in normalized space.
+//! Keys (arrow nudging, undo, copy/paste, delete, select-all) are the curve editor's input context
 //! (`editors::curve`), routed to the curve by [`Editor`].
 
 use std::collections::BTreeSet;
@@ -22,7 +23,7 @@ use super::widgets::{Caption, GroupButton, button_group};
 use super::{TEXT, TEXT_DIM, VIEW_BG, ViewOf, clipped_text, icon_button, icon_tool_button, text, tool_button};
 use crate::curve_doc::CurveDoc;
 use crate::keys::mods;
-use crate::state::{Action, Actions, CurveAction, Editor, PropTarget};
+use crate::state::{Action, Actions, CurveAction, Editor, PropTarget, display_value};
 use crate::tab::{Lang, ViewKind};
 
 /// Space around the unit square for the axis labels (logical px): left, right, top, bottom.
@@ -140,12 +141,12 @@ impl Plot {
     }
 }
 
-fn logical_size(node: &ComputedNode) -> Vec2 {
+pub(super) fn logical_size(node: &ComputedNode) -> Vec2 {
     node.size() * node.inverse_scale_factor()
 }
 
 /// Canvas-local logical position of a window position, if it is inside the canvas.
-fn local_pos(node: &ComputedNode, t: &UiGlobalTransform, window_pos: Vec2) -> Option<Vec2> {
+pub(super) fn local_pos(node: &ComputedNode, t: &UiGlobalTransform, window_pos: Vec2) -> Option<Vec2> {
     let n = node.normalize_point(*t, window_pos / node.inverse_scale_factor())?;
     (n.x.abs() <= 0.5 && n.y.abs() <= 0.5).then(|| (n + 0.5) * logical_size(node))
 }
@@ -288,7 +289,7 @@ fn draw_curves(pixmap: &mut tiny_skia::Pixmap, curve: &Curve, preview: Interp, s
         let mut pb = tiny_skia::PathBuilder::new();
         for k in 0..=steps {
             let t = k as f32 / steps as f32;
-            let p = plot.to_local((t, curve.sample_with(t, interp, &slopes))) * scale;
+            let p = plot.to_local((t, curve.sample_normalized_with(t, interp, &slopes))) * scale;
             if k == 0 { pb.move_to(p.x, p.y) } else { pb.line_to(p.x, p.y) }
         }
         if let Some(path) = pb.finish() {
@@ -299,12 +300,17 @@ fn draw_curves(pixmap: &mut tiny_skia::Pixmap, curve: &Curve, preview: Interp, s
     }
 }
 
+/// An axis label's text: 3 decimals at most, no trailing zeros (`0`, `0.5`, `-2`).
+fn axis_text(v: f32) -> String {
+    format!("{}", display_value(v) + 0.0)
+}
+
+/// The axis labels; the value axis ones get their text (real units) in [`place_handles`].
 fn spawn_axis_labels(canvas: Entity, commands: &mut Commands) {
     for (along_t, v) in [(true, 0.0), (true, 0.5), (true, 1.0), (false, 0.0), (false, 0.5), (false, 1.0)] {
-        let label = if v == 0.5 { "0.5".to_string() } else { format!("{v}") };
         commands.spawn((
             AxisLabel(along_t, v),
-            Text::new(label),
+            Text::new(axis_text(v)),
             TextFont { font_size: FontSize::Px(12.0), ..default() },
             TextColor(TEXT_DIM),
             Node { position_type: PositionType::Absolute, ..default() },
@@ -319,7 +325,7 @@ fn place_handles(
     editor: Res<Editor>,
     canvas: Query<(Entity, &ComputedNode), With<CurveCanvas>>,
     mut handles: Query<(Entity, &CurveHandle, &mut Node, &mut BackgroundColor, &mut BorderColor)>,
-    mut labels: Query<(&AxisLabel, &mut Node, &ComputedNode), Without<CurveHandle>>,
+    mut labels: Query<(&AxisLabel, &mut Node, &ComputedNode, &mut Text), Without<CurveHandle>>,
     mut commands: Commands,
 ) {
     let Some(c) = active_curve(&editor) else { return };
@@ -358,7 +364,14 @@ fn place_handles(
             ChildOf(canvas),
         ));
     }
-    for (label, mut node, computed) in &mut labels {
+    for (label, mut node, computed, mut text) in &mut labels {
+        if !label.0 {
+            // The value axis is in real units (the curve's output range, decision 0038).
+            let real = axis_text(c.curve.to_real(label.1));
+            if text.0 != real {
+                text.0 = real;
+            }
+        }
         let size = logical_size(computed);
         let at = if label.0 {
             plot.to_local((label.1, 0.0)) + Vec2::new(-size.x / 2.0, 8.0)
@@ -565,6 +578,12 @@ mod tests {
 
     fn drag(keys: DragKeys) -> Vec<(f32, f32)> {
         dragged(&FROM, &[1].into(), 1, (0.12, -0.2), keys).0
+    }
+
+    #[test]
+    fn axis_labels_are_short() {
+        assert_eq!(["0", "0.5", "1", "-2", "4", "0.333"], [0.0, 0.5, 1.0, -2.0, 4.0, 1.0 / 3.0].map(axis_text));
+        assert_eq!(axis_text(-0.0), "0");
     }
 
     #[test]

@@ -8,7 +8,7 @@ use shader_graph_core::consts::NoConsts;
 use shader_graph_core::ir::{with_routes, would_create_cycle};
 use shader_graph_core::model::{Asset, Edge, Frame, Node, NodeId, new_node_id};
 use shader_graph_core::registry::{
-    FunctionLookup, NoCurves, NoTextures, NodeRole, ROUTE_PARAM, Registry, SigCtx, Signature,
+    FunctionLookup, NoCurves, NoGradients, NoTextures, NodeRole, ROUTE_PARAM, Registry, SigCtx, Signature,
 };
 use shader_graph_core::{Env, PinType, Value, conversion};
 use shader_project::AssetId;
@@ -20,6 +20,9 @@ use crate::history::History;
 pub struct ClipboardData {
     pub nodes: BTreeMap<NodeId, Node>,
     pub edges: Vec<Edge>,
+    /// The graph the nodes were copied from: a Named Route declaration pasted back into it becomes a usage
+    /// (decision 0038).
+    pub source: Option<AssetId>,
 }
 
 #[derive(Debug, Clone)]
@@ -205,26 +208,48 @@ impl Doc {
             .filter(|e| nodes.contains_key(&e.from.0) && nodes.contains_key(&e.to.0))
             .cloned()
             .collect();
-        ClipboardData { nodes, edges }
+        ClipboardData { nodes, edges, source: Some(self.id.clone()) }
     }
 
     /// Pastes with fresh ids at `offset`; selects and returns the new nodes.
-    pub fn paste(&mut self, clip: &ClipboardData, offset: (f32, f32)) -> BTreeSet<NodeId> {
+    ///
+    /// A Named Route declaration whose original still is a declaration of this graph is pasted as a usage of it
+    /// (decision 0038): its output wires leave the usage, wires into it are dropped (a usage has no input).
+    pub fn paste(&mut self, clip: &ClipboardData, offset: (f32, f32), registry: &Registry) -> BTreeSet<NodeId> {
         let map: BTreeMap<NodeId, NodeId> = clip.nodes.keys().map(|k| (k.clone(), new_node_id())).collect();
         let new_ids: BTreeSet<NodeId> = map.values().cloned().collect();
+        let role = |n: &Node| registry.get(&n.kind).map(|d| d.role());
+        let declaration = |n: &Node| role(n) == Some(NodeRole::RouteDeclaration);
+        let usage_kind = registry.defs().find(|d| d.role() == NodeRole::RouteUsage).map(|d| d.info().id.clone());
+        let as_usage: BTreeSet<&NodeId> = match (&usage_kind, &clip.source) {
+            (Some(_), Some(source)) if *source == self.id => clip
+                .nodes
+                .iter()
+                .filter(|(id, n)| declaration(n) && self.asset.nodes.get(*id).is_some_and(declaration))
+                .map(|(id, _)| id)
+                .collect(),
+            _ => BTreeSet::new(),
+        };
         self.edit(|a| {
             for (old, node) in &clip.nodes {
                 let mut n = node.clone();
+                if as_usage.contains(old)
+                    && let Some(kind) = &usage_kind
+                {
+                    n = Node::new(kind.clone(), n.pos).with_param(ROUTE_PARAM, Value::Str(old.clone()));
+                }
                 n.pos = tidy((n.pos.0 + offset.0, n.pos.1 + offset.1));
-                // A usage pasted together with its declaration follows the copy, otherwise the original.
+                // A usage pasted together with a duplicated declaration follows the copy, otherwise the original.
                 if let Some(Value::Str(route)) = n.params.get_mut(ROUTE_PARAM)
+                    && !as_usage.contains(route)
                     && let Some(new) = map.get(route.as_str())
                 {
                     *route = new.clone();
                 }
                 a.nodes.insert(map[old].clone(), n);
             }
-            for e in &clip.edges {
+            // Both route nodes are pass-throughs with the output `out`, so output wires keep their pin.
+            for e in clip.edges.iter().filter(|e| !as_usage.contains(&e.to.0)) {
                 a.edges.push(Edge {
                     from: (map[&e.from.0].clone(), e.from.1.clone()),
                     to: (map[&e.to.0].clone(), e.to.1.clone()),
@@ -338,6 +363,7 @@ pub fn node_signature(
         curves: &NoCurves,
         consts: &NoConsts,
         textures: &NoTextures,
+        gradients: &NoGradients,
     };
     Some(def.signature(&SigCtx {
         node_id: id,
@@ -390,6 +416,7 @@ fn output_type(
         curves: &NoCurves,
         consts: &NoConsts,
         textures: &NoTextures,
+        gradients: &NoGradients,
     };
     let sig = def.signature(&SigCtx {
         node_id: node,
@@ -555,12 +582,115 @@ mod tests {
         let sel: BTreeSet<NodeId> = [a.clone(), b.clone(), out.clone()].into();
         let clip = d.copy(&sel, &reg);
         assert_eq!(clip.nodes.len(), 2);
-        let pasted = d.paste(&clip, (40.0, 40.0));
+        let pasted = d.paste(&clip, (40.0, 40.0), &reg);
         assert_eq!(pasted.len(), 2);
         assert_eq!(d.asset.nodes.len(), 5);
         assert_eq!(d.asset.edges.len(), 2);
         assert_eq!(d.delete_nodes(&sel, &reg), 2);
         assert!(d.asset.nodes.contains_key(&out));
+    }
+
+    const DECL: &str = "stdlib::NamedRoute";
+    const USAGE: &str = "stdlib::NamedRouteUsage";
+
+    fn route_of(d: &Doc, id: &str) -> Option<String> {
+        match d.asset.nodes[id].params.get(ROUTE_PARAM) {
+            Some(Value::Str(s)) => Some(s.clone()),
+            _ => None,
+        }
+    }
+
+    fn count(d: &Doc, kind: &str) -> usize {
+        d.asset.nodes.values().filter(|n| n.kind == kind).count()
+    }
+
+    /// Decision 0038: a declaration pasted into its own graph becomes a usage of the original, at the pasted place.
+    #[test]
+    fn pasted_route_declaration_becomes_its_usage() {
+        let reg = shader_stdlib::registry();
+        let mut d = doc();
+        let decl = d.add_node(DECL, (100.0, 50.0));
+        let clip = d.copy(&[decl.clone()].into(), &reg);
+        let pasted = d.paste(&clip, (40.0, 20.0), &reg);
+        assert_eq!(pasted.len(), 1);
+        let id = pasted.first().unwrap();
+        assert_eq!(d.asset.nodes[id].kind, USAGE);
+        assert_eq!(route_of(&d, id), Some(decl.clone()));
+        assert_eq!(d.asset.nodes[id].pos, (140.0, 70.0));
+        assert_eq!(count(&d, DECL), 1, "no duplicate declaration");
+        assert_eq!(d.selection, pasted);
+        d.undo();
+        assert_eq!(count(&d, USAGE), 0, "one undo step");
+    }
+
+    /// Wires leaving the declaration leave the usage; wires into it are dropped (a usage has no input).
+    #[test]
+    fn pasted_route_declaration_keeps_output_wires() {
+        let reg = shader_stdlib::registry();
+        let mut d = doc();
+        let src = d.add_node("stdlib::Constant", (0.0, 0.0));
+        let decl = d.add_node(DECL, (100.0, 0.0));
+        let add = d.add_node("stdlib::Add", (200.0, 0.0));
+        d.edit(|m| m.connect((&src, "out"), (&decl, "in")));
+        d.edit(|m| m.connect((&decl, "out"), (&add, "a")));
+        let clip = d.copy(&[src.clone(), decl.clone(), add.clone()].into(), &reg);
+        let pasted = d.paste(&clip, (0.0, 300.0), &reg);
+        let of = |kind: &str| pasted.iter().find(|id| d.asset.nodes[*id].kind == kind).unwrap().clone();
+        let (usage, add2, src2) = (of(USAGE), of("stdlib::Add"), of("stdlib::Constant"));
+        assert_eq!(route_of(&d, &usage), Some(decl.clone()));
+        let edges: Vec<_> = d.asset.edges.iter().filter(|e| pasted.contains(&e.to.0)).cloned().collect();
+        assert_eq!(edges.len(), 1, "{edges:?}");
+        assert_eq!((edges[0].from.clone(), edges[0].to.clone()), ((usage.clone(), "out".into()), (add2, "a".into())));
+        assert!(d.asset.edges.iter().all(|e| e.from.0 != src2), "the wire into the declaration is dropped");
+    }
+
+    /// A usage copied with its declaration keeps pointing at the original once the declaration pastes as a usage.
+    #[test]
+    fn pasted_route_with_usage_points_at_original() {
+        let reg = shader_stdlib::registry();
+        let mut d = doc();
+        let decl = d.add_node(DECL, (0.0, 0.0));
+        let usage = d.add_node_with(USAGE, (200.0, 0.0), &[(ROUTE_PARAM.into(), Value::Str(decl.clone()))]);
+        let clip = d.copy(&[decl.clone(), usage].into(), &reg);
+        let pasted = d.paste(&clip, (0.0, 100.0), &reg);
+        assert_eq!(pasted.len(), 2);
+        for id in &pasted {
+            assert_eq!(d.asset.nodes[id].kind, USAGE);
+            assert_eq!(route_of(&d, id), Some(decl.clone()));
+        }
+        assert_eq!(count(&d, DECL), 1);
+    }
+
+    /// Without the original declaration in the target graph a usage would dangle: the declaration is duplicated and
+    /// a usage pasted with it follows the copy (decision 0011).
+    #[test]
+    fn pasted_route_declaration_duplicates_without_original() {
+        let reg = shader_stdlib::registry();
+        let mut d = doc();
+        let decl = d.add_node(DECL, (0.0, 0.0));
+        let usage = d.add_node_with(USAGE, (200.0, 0.0), &[(ROUTE_PARAM.into(), Value::Str(decl.clone()))]);
+        let sel: BTreeSet<NodeId> = [decl.clone(), usage].into();
+        let clip = d.copy(&sel, &reg);
+        // Another graph.
+        let mut other = Doc::new(AssetId::new(AssetType::Material, "other"), d.asset.clone());
+        let pasted = other.paste(&clip, (0.0, 100.0), &reg);
+        let new_decl = pasted.iter().find(|id| other.asset.nodes[*id].kind == DECL).expect("a duplicate").clone();
+        let new_usage = pasted.iter().find(|id| other.asset.nodes[*id].kind == USAGE).unwrap();
+        assert_eq!(route_of(&other, new_usage), Some(new_decl.clone()));
+        // The same graph after the original was deleted.
+        d.delete_nodes(&sel, &reg);
+        let pasted = d.paste(&clip, (0.0, 100.0), &reg);
+        assert_eq!(count(&d, DECL), 1, "duplicated");
+        let new_decl = pasted.iter().find(|id| d.asset.nodes[*id].kind == DECL).unwrap();
+        let new_usage = pasted.iter().find(|id| d.asset.nodes[*id].kind == USAGE).unwrap();
+        assert_eq!(route_of(&d, new_usage).as_ref(), Some(new_decl));
+        // A node with the original id that is no declaration any more does not count either (same asset id).
+        let mut e = doc();
+        e.edit(|m| {
+            m.nodes.insert(decl.clone(), Node::new("stdlib::Add", (0.0, 0.0)));
+        });
+        let pasted = e.paste(&clip, (0.0, 100.0), &reg);
+        assert!(pasted.iter().any(|id| e.asset.nodes[id].kind == DECL));
     }
 
     const MAKE: &str = "stdlib::MakeMaterialAttributesPbr";

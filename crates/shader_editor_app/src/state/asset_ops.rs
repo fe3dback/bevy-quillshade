@@ -1,5 +1,5 @@
 use super::*;
-use shader_graph_core::registry::{curve_refs, texture_refs};
+use shader_graph_core::registry::{curve_refs, gradient_refs, texture_refs};
 
 impl Editor {
     pub(super) fn submit(&mut self, text: &str) {
@@ -25,6 +25,7 @@ impl Editor {
                     (_, Some(m)) => ops::create_material(&project, text, m),
                     (NewKind::Curve, None) => ops::create_curve(&project, text),
                     (NewKind::Consts, None) => ops::create_consts(&project, text),
+                    (NewKind::Gradients, None) => ops::create_gradients(&project, text),
                     (_, None) => ops::create_function(&project, text),
                 };
                 match r {
@@ -129,6 +130,9 @@ impl Editor {
             AssetType::Texture => self.follow_ref_rewrite(texture_refs, &id.path, |a, r| {
                 ops::rename_texture_refs(a, r, &id.path, &new_id.path);
             }),
+            AssetType::Gradients => self.follow_ref_rewrite(gradient_refs, &id.path, |a, r| {
+                ops::rename_gradient_refs(a, r, &id.path, &new_id.path);
+            }),
             _ => {}
         }
         self.info(format!("Renamed {} -> {}", id.source_rel(), new_id.source_rel()));
@@ -151,10 +155,15 @@ impl Editor {
         self.info(format!("Deleted {}", id.source_rel()));
         self.wesl_lines.remove(id);
         self.rescan();
-        if id.ty == AssetType::Texture {
-            self.follow_ref_rewrite(texture_refs, &id.path, |a, r| {
+        match id.ty {
+            AssetType::Texture => self.follow_ref_rewrite(texture_refs, &id.path, |a, r| {
                 ops::clear_texture_refs(a, r, &id.path);
-            });
+            }),
+            // The slot parameters of the same nodes are zeroed too (gradient design §6).
+            AssetType::Gradients => self.follow_ref_rewrite(gradient_refs, &id.path, |a, r| {
+                ops::clear_gradient_refs(a, r, &id.path);
+            }),
+            _ => {}
         }
         let left = self.global_consts();
         let lost: Vec<String> = owned.into_iter().filter(|n| !left.contains_key(n)).collect();

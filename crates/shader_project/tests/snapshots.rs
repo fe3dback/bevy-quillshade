@@ -10,7 +10,9 @@ use std::collections::BTreeMap;
 use shader_codegen_wesl::check::BevySources;
 use shader_graph_core::consts::NoConsts;
 use shader_graph_core::model::{AssetKind, MaterialKind, SpriteSettings, UnlitSettings};
-use shader_graph_core::registry::{FUNCTION_CALL_KIND, NoCurves, NoFunctions, NoTextures, NodeRole, SigCtx};
+use shader_graph_core::registry::{
+    FUNCTION_CALL_KIND, NoCurves, NoFunctions, NoGradients, NoTextures, NodeRole, SigCtx,
+};
 use shader_graph_core::{Asset, Env, PinType, Value, conversion};
 use shader_project::fixtures::{self, GraphBuilder};
 use shader_project::regen::{rust_file, wesl_file};
@@ -50,6 +52,7 @@ fn node_material(kind: &str) -> Option<(String, Asset)> {
         curves: &NoCurves,
         consts: &NoConsts,
         textures: &NoTextures,
+        gradients: &NoGradients,
     };
     let sig = def.signature(&SigCtx {
         node_id: &n,

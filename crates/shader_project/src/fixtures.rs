@@ -2,11 +2,13 @@
 
 use shader_graph_core::consts::{ConstType, GlobalConst, GlobalConsts};
 use shader_graph_core::curve::Curve;
+use shader_graph_core::gradient::{GradientCollection, Stop, srgb_to_linear};
 use shader_graph_core::model::{
     Asset, AssetKind, BlendMode, MaterialKind, Node, PbrOutputMode, PbrSettings, SpriteSettings, UnlitSettings,
 };
 use shader_graph_core::texture::{AddressMode, FilterMode, SamplerSettings, TextureAsset, TextureSettings};
 use shader_graph_core::{PinType, Value};
+use shader_stdlib::nodes::color::{GRADIENT_COLLECTION_PARAM, GRADIENT_SLOT_PARAM, SAMPLE_GRADIENT_KIND};
 
 use crate::assets::{AssetId, AssetType};
 use crate::layout::Project;
@@ -566,15 +568,16 @@ pub fn rock_layer() -> Asset {
 
 /// Layered terrain (decision 0023): Pbr3d `Wrapped`, grass on flat ground and the `common/rock_layer` function on
 /// slopes, blended by `WorldAlignedBlend` through one `Lerp` of material attributes; WPO lifts the surface a bit.
+/// The grass is tinted by height (decision 0037): the "Terrain height" gradient of `common/terrain` sampled at
+/// `saturate(world_position.y * 0.25 + 0.5)`.
 pub fn terrain_layers() -> Asset {
     let kind =
         AssetKind::Material(MaterialKind::Pbr3d(PbrSettings { output: PbrOutputMode::Wrapped, ..Default::default() }));
     let mut g = GraphBuilder::new("terrain_layers", kind);
     let out = g.node("output::Pbr3d", (900.0, 0.0));
     let grass_color =
-        g.node_p("stdlib::Constant3Vector", (0.0, -150.0), &[("value", Value::Float3([0.15, 0.45, 0.1]))]);
+        g.node_p("stdlib::Constant3Vector", (-150.0, -150.0), &[("value", Value::Float3([0.15, 0.45, 0.1]))]);
     let grass = g.node("stdlib::MakeMaterialAttributesPbr", (250.0, -150.0));
-    g.link((&grass_color, "out"), (&grass, "base_color"));
     g.input(&grass, "roughness", f(0.7));
     let rock_color = g.node_p("stdlib::Constant3Vector", (0.0, 100.0), &[("value", Value::Float3([0.4, 0.38, 0.35]))]);
     let rock = g.node("function::common/rock_layer", (250.0, 100.0));
@@ -587,6 +590,32 @@ pub fn terrain_layers() -> Asset {
     g.link((&blend, "out"), (&out, "attributes"));
     let lift = g.node_p("stdlib::Constant3Vector", (600.0, 250.0), &[("value", Value::Float3([0.0, 0.02, 0.0]))]);
     g.link((&lift, "out"), (&out, shader_graph_core::ir::WPO_PIN));
+    // Height tint: T = saturate(world_position.y * 0.25 + 0.5) picks a color of `common/terrain` slot 0.
+    let wp = g.node("stdlib::WorldPosition", (-750.0, -350.0));
+    let br = g.node("stdlib::BreakOutFloat3", (-600.0, -350.0));
+    g.link((&wp, "out"), (&br, "v"));
+    let scale = g.node("stdlib::Multiply", (-450.0, -350.0));
+    g.link((&br, "y"), (&scale, "a"));
+    g.input(&scale, "b", f(0.25));
+    let offset = g.node("stdlib::Add", (-300.0, -350.0));
+    g.link((&scale, "out"), (&offset, "a"));
+    g.input(&offset, "b", f(0.5));
+    let height = g.node("stdlib::Saturate", (-150.0, -350.0));
+    g.link((&offset, "out"), (&height, "x"));
+    let terrain = &gradients()[0].1;
+    let gradient = g.node_p(
+        SAMPLE_GRADIENT_KIND,
+        (0.0, -350.0),
+        &[
+            (GRADIENT_COLLECTION_PARAM, s("common/terrain")),
+            (GRADIENT_SLOT_PARAM, Value::Int(terrain.slots[0].id as i32)),
+        ],
+    );
+    g.link((&height, "out"), (&gradient, "t"));
+    let tint = g.node("stdlib::Multiply", (100.0, -150.0));
+    g.link((&grass_color, "out"), (&tint, "a"));
+    g.link((&gradient, "rgb"), (&tint, "b"));
+    g.link((&tint, "out"), (&grass, "base_color"));
     g.finish()
 }
 
@@ -736,6 +765,29 @@ pub fn curves() -> Vec<(&'static str, Curve)> {
     ]
 }
 
+/// Gradient collection fixtures (decision 0037): (`shaders/`-relative path, collection). Slot ids come from a fixed
+/// sequence, so `make_sample` is reproducible. Colors are given as sRGB hex and stored linear.
+pub fn gradients() -> Vec<(&'static str, GradientCollection)> {
+    let rgb = |hex: u32| {
+        let c = |shift: u32| srgb_to_linear(((hex >> shift) & 0xff) as f32 / 255.0);
+        [c(16), c(8), c(0), 1.0]
+    };
+    let stop = |t: f32, hex: u32| Stop { t, color: rgb(hex), mid: 0.5 };
+    let mut next = 1000;
+    let mut terrain = GradientCollection::new(|| {
+        next += 7;
+        next
+    });
+    let height = &mut terrain.slots[0];
+    height.name = "Terrain height".into();
+    height.stops =
+        vec![stop(0.0, 0x2e6b2e), stop(0.45, 0x8a6a3c), Stop { mid: 0.3, ..stop(0.8, 0xe8e8e8) }, stop(1.0, 0xffffff)];
+    let water = &mut terrain.slots[1];
+    water.name = "Water depth".into();
+    water.stops = vec![stop(0.0, 0x7fd4e8), stop(0.5, 0x1f78b4), stop(1.0, 0x0a1f4d)];
+    vec![("common/terrain", terrain)]
+}
+
 /// Texture asset fixtures (design §1.1): (`shaders/`-relative path, asset). The images are in
 /// `examples/sample_game/assets/textures/`; `rock_albedo` and `water_normal` are `.ktx2` (made from the `.png` next to
 /// them by the `png_to_ktx2` example, design §4.4), the rest `.png`, so the sample exercises both formats.
@@ -768,7 +820,7 @@ pub fn textures() -> Vec<(&'static str, TextureAsset)> {
     ]
 }
 
-/// Writes every fixture (graphs, curves, constant tables, Texture assets) into `project`.
+/// Writes every fixture (graphs, curves, constant tables, Texture assets, gradient collections) into `project`.
 pub fn save_all(project: &Project) -> Result<(), OpError> {
     for (path, texture) in textures() {
         ops::save_texture(project, &AssetId::new(AssetType::Texture, path), &texture)?;
@@ -782,6 +834,9 @@ pub fn save_all(project: &Project) -> Result<(), OpError> {
     }
     for (path, table) in const_tables() {
         ops::save_consts(project, &AssetId::new(AssetType::Consts, path), &table)?;
+    }
+    for (path, collection) in gradients() {
+        ops::save_gradients(project, &AssetId::new(AssetType::Gradients, path), &collection)?;
     }
     Ok(())
 }

@@ -2,6 +2,7 @@ use super::*;
 use crate::doc::snap;
 use crate::droppable::{DroppableFile, Dropped, ImageFile, droppable_for};
 use shader_graph_core::model::Edge;
+use shader_stdlib::nodes::color::{GRADIENT_COLLECTION_PARAM, SAMPLE_GRADIENT_KIND};
 use shader_stdlib::nodes::utility::{CURVE_PARAM, SAMPLE_CURVE_KIND};
 
 impl Editor {
@@ -11,6 +12,7 @@ impl Editor {
                 self.copy_text = t.text.clone();
                 return;
             }
+            Some(Tab::Gradients(_)) => return self.gradients_action(GradientsAction::CopySlot),
             Some(Tab::Curve(c)) => {
                 let points = c.selected_points();
                 if !points.is_empty() {
@@ -30,6 +32,9 @@ impl Editor {
     }
 
     pub(super) fn paste(&mut self, at: Option<(f32, f32)>) {
+        if self.gradients_doc().is_some() {
+            return self.gradients_action(GradientsAction::PasteSlot);
+        }
         if self.curve_doc().is_some() {
             if let Some(points) = self.curve_clipboard.clone() {
                 // Shifted in t: a copy on top of the original would be invisible but change the slopes.
@@ -46,7 +51,8 @@ impl Editor {
         let Some(clip) = self.clipboard.clone() else { return };
         self.paste_count += 1;
         let step = 40.0 * self.paste_count as f32;
-        let Some(d) = self.doc_mut() else { return };
+        let registry = &self.registry;
+        let Some(d) = self.active.and_then(|i| self.tabs.get_mut(i)).and_then(Tab::graph_mut) else { return };
         let ids: BTreeSet<NodeId> = BTreeSet::new();
         let tmp = Asset { nodes: clip.nodes.clone(), ..Asset::new("clip", AssetKind::Function) };
         let offset = match (at, bounds(&tmp, &ids)) {
@@ -58,11 +64,14 @@ impl Editor {
             let to = snap((n.pos.0 + offset.0, n.pos.1 + offset.1));
             (to.0 - n.pos.0, to.1 - n.pos.1)
         });
-        d.paste(&clip, offset);
+        d.paste(&clip, offset, registry);
         self.ui.props += 1;
     }
 
     pub(super) fn delete_selection(&mut self) {
+        if self.gradients_doc().is_some() {
+            return self.gradients_action(GradientsAction::DeleteSelected);
+        }
         if let Some(c) = self.curve_doc_mut() {
             c.delete_selected();
             self.ui.props += 1;
@@ -123,8 +132,9 @@ impl Editor {
 
     /// A drop from a sidebar tree onto the active graph (design §4.3, §4.11). A game file is resolved through its
     /// [`DroppableFile`] (an image's Texture asset is created when there is none: on disk, outside the undo history);
-    /// a Texture asset / built-in texture or a Curve asset is the reference itself. Over a node with a param of that
-    /// reference's kind the param is set; otherwise (empty canvas or any other node) the droppable's node is added at
+    /// a Texture asset / built-in texture, a Curve asset or a gradient collection is the reference itself. Over a node
+    /// with a param of that reference's kind the param is set (a collection resets the node's slot, as in
+    /// [`Self::set_value`]); otherwise (empty canvas or any other node) the droppable's node is added at
     /// `pos`. A Function asset always adds its call node, unless the call would be recursive (as in the palette).
     /// Either way one undo step.
     pub(super) fn drop_item(&mut self, item: Dropped, pos: (f32, f32), node: Option<NodeId>) {
@@ -141,6 +151,9 @@ impl Editor {
             }
             Dropped::Texture(value) => (ImageFile.node_kind(), ImageFile.param(), ImageFile.param_kind(), value),
             Dropped::Curve(value) => (SAMPLE_CURVE_KIND, CURVE_PARAM, ParamKind::Curve, value),
+            Dropped::Gradients(value) => {
+                (SAMPLE_GRADIENT_KIND, GRADIENT_COLLECTION_PARAM, ParamKind::GradientCollection, value)
+            }
             Dropped::Function(path) => {
                 if search::is_self_call(&path, &d.id.path) {
                     let msg = format!("Function `{path}` cannot call itself (recursion)");
@@ -273,8 +286,13 @@ impl Editor {
     pub fn current_value(&self, target: &PropTarget) -> Option<Value> {
         match target {
             PropTarget::CurvePoint(i) => {
-                let (t, v) = *self.curve_doc()?.curve.points.get(*i)?;
-                return Some(Value::Float2([t, v]));
+                let curve = &self.curve_doc()?.curve;
+                let (t, v) = *curve.points.get(*i)?;
+                return Some(Value::Float2([t, curve.to_real(v)]));
+            }
+            PropTarget::CurveRange => {
+                let curve = &self.curve_doc()?.curve;
+                return Some(Value::Float2([curve.min, curve.max]));
             }
             PropTarget::CurvePreview => return Some(Value::Str(self.curve_doc()?.preview.label().into())),
             PropTarget::Const(name) => return Some(self.consts_doc()?.table.get(name)?.value.clone()),
@@ -285,6 +303,17 @@ impl Editor {
             PropTarget::ConstDraftType => return Some(Value::Str(self.consts_doc()?.draft_ty.label().into())),
             PropTarget::Texture(f) => return Some(f.get(&self.texture_doc()?.asset.settings)),
             PropTarget::PreviewTiled => return Some(Value::Bool(self.tab()?.preview()?.tiled())),
+            PropTarget::GradientStop(i, 0) => {
+                return Some(Value::Float(self.gradients_doc()?.current()?.stops.get(*i)?.t));
+            }
+            PropTarget::GradientStop(..) => return None,
+            PropTarget::GradientMid(i) => {
+                return Some(Value::Float(self.gradients_doc()?.current()?.stops.get(*i)?.mid));
+            }
+            PropTarget::GradientName => return Some(Value::Str(self.gradients_doc()?.current()?.name.clone())),
+            PropTarget::GradientColor(i) => {
+                return Some(Value::Color(self.gradients_doc()?.current()?.stops.get(*i)?.color));
+            }
             _ => {}
         }
         let d = self.doc()?;
@@ -374,6 +403,9 @@ impl Editor {
         }
         if is_final && let Some(t) = self.texture_doc_mut() {
             t.end_merge();
+        }
+        if is_final && let Some(g) = self.gradients_doc_mut() {
+            g.end_merge();
         }
     }
 
@@ -588,8 +620,9 @@ impl Editor {
     }
 
     /// The editor asset node `node` of the active graph refers to (decision 0023): a function call's function, a
-    /// Sample Curve's curve, a `Global*` node's constant table, a texture node's Texture asset. `None` for user nodes,
-    /// unset params and dangling targets. Drives node double-click and the props panel's "Open …" button.
+    /// Sample Curve's curve, a `Global*` node's constant table, a texture node's Texture asset, a Sample Gradient's
+    /// collection. `None` for user nodes, unset params and dangling targets. Drives node double-click and the props
+    /// panel's "Open …" button.
     pub fn referenced_asset(&self, node: &str) -> Option<AssetId> {
         let n = self.doc()?.asset.nodes.get(node)?;
         if let Some(path) = n.kind.strip_prefix(FUNCTION_PREFIX) {
@@ -606,6 +639,12 @@ impl Editor {
                 ParamKind::GlobalConst(_) => {
                     if let Some((table, _)) = self.global_consts().remove(v) {
                         return Some(table);
+                    }
+                }
+                ParamKind::GradientCollection => {
+                    let id = AssetId::new(AssetType::Gradients, v);
+                    if self.disk.gradients.contains_key(&id) {
+                        return Some(id);
                     }
                 }
                 ParamKind::Texture => {
@@ -684,7 +723,12 @@ impl Editor {
                     let mut points = c.curve.points.clone();
                     let Some(p) = points.get_mut(*i) else { return };
                     let f = value.floats();
-                    *p = (f[0], f.get(1).copied().unwrap_or(p.1));
+                    // The value field is in real units; an unchanged one keeps the stored value exactly.
+                    let v = match f.get(1) {
+                        Some(x) if *x != c.curve.to_real(p.1) => c.curve.to_normalized(*x),
+                        _ => p.1,
+                    };
+                    *p = (f[0], v);
                     // The point stays selected wherever the re-sort puts it.
                     let (points, selection) = CurveDoc::moved(&points, &[*i].into(), (0.0, 0.0));
                     let moved = selection != BTreeSet::from([*i]);
@@ -694,6 +738,21 @@ impl Editor {
                         c.end_merge();
                         self.ui.props += 1;
                     }
+                }
+                if !merge {
+                    self.ui.props += 1;
+                }
+                return;
+            }
+            PropTarget::CurveRange => {
+                let f = value.floats();
+                let Some(c) = self.curve_doc_mut() else { return };
+                let (min, max) = (f.first().copied().unwrap_or(c.curve.min), f.get(1).copied().unwrap_or(c.curve.max));
+                if let Err(e) = c.set_range(min, max, key) {
+                    self.push_msg(Level::Warning, format!("Range not changed: {e}"));
+                    // The field shows the stored value again.
+                    self.ui.props += 1;
+                    return;
                 }
                 if !merge {
                     self.ui.props += 1;
@@ -757,8 +816,30 @@ impl Editor {
                 }
                 return;
             }
+            PropTarget::GradientStop(i, 0) => {
+                return self.gradients_action(GradientsAction::SetStopT(*i, value.as_f32(), key.map(str::to_string)));
+            }
+            PropTarget::GradientStop(..) => return,
+            PropTarget::GradientMid(i) => {
+                return self.gradients_action(GradientsAction::SetMid(*i, value.as_f32(), key.map(str::to_string)));
+            }
+            PropTarget::GradientName => {
+                let name = value.as_str().to_string();
+                return self.gradients_action(GradientsAction::SetName(name, key.map(str::to_string)));
+            }
+            PropTarget::GradientColor(i) => {
+                let c = value.coerce(PinType::Color).floats();
+                let color = [0, 1, 2, 3].map(|k| c.get(k).copied().unwrap_or(1.0));
+                return self.gradients_action(GradientsAction::SetStopColor(*i, color, key.map(str::to_string)));
+            }
             _ => {}
         }
+        // Gradient design §6: slot ids of one collection mean nothing in another, so picking another collection resets
+        // the node's slot (`0`: none) in the same undo step.
+        let reset_slot = match &target {
+            PropTarget::Param { node, key: k } => self.slot_param_reset_by(node, k, &value),
+            _ => None,
+        };
         let Some(d) = self.doc_mut() else { return };
         let mut refresh = !merge;
         match &target {
@@ -767,6 +848,9 @@ impl Editor {
                 d.edit_merge(key, |a| {
                     if let Some(n) = a.nodes.get_mut(node) {
                         n.params.insert(k.clone(), value.clone());
+                        if let Some(slot) = &reset_slot {
+                            n.params.insert(slot.clone(), Value::Int(0));
+                        }
                     }
                 });
             }
@@ -845,6 +929,7 @@ impl Editor {
                 refresh = hue.is_none();
             }
             PropTarget::CurvePoint(_)
+            | PropTarget::CurveRange
             | PropTarget::OutputMode
             | PropTarget::CurvePreview
             | PropTarget::Const(_)
@@ -852,11 +937,30 @@ impl Editor {
             | PropTarget::ConstDraftName
             | PropTarget::ConstDraftType
             | PropTarget::Texture(_)
-            | PropTarget::PreviewTiled => {}
+            | PropTarget::PreviewTiled
+            | PropTarget::GradientStop(..)
+            | PropTarget::GradientMid(_)
+            | PropTarget::GradientName
+            | PropTarget::GradientColor(_) => {}
         }
         if refresh {
             self.ui.props += 1;
         }
+    }
+
+    /// The `GradientSlot` param of `node` that setting its param `key` to `value` resets: `key` is a
+    /// `GradientCollection` param, `value` another collection than the current one and a slot is picked.
+    fn slot_param_reset_by(&self, node: &str, key: &str, value: &Value) -> Option<String> {
+        let n = self.doc()?.asset.nodes.get(node)?;
+        let params = self.registry.get(&n.kind)?.params();
+        if !params.iter().any(|p| p.id == key && p.kind == ParamKind::GradientCollection) {
+            return None;
+        }
+        if self.registry.resolved_params(&n.kind, &n.params).get(key) == Some(value) {
+            return None;
+        }
+        let slot = params.into_iter().find(|p| p.kind == ParamKind::GradientSlot)?;
+        n.params.get(&slot.id).is_some_and(|v| *v != Value::Int(0)).then_some(slot.id)
     }
 
     /// Estimated node height for layout (title + one row per pin).

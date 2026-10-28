@@ -237,16 +237,19 @@ pub fn material_module(ir: &Ir, source_file: &str) -> String {
         line(&mut o, &format!("    pub params: {},", names.params));
     }
     for t in &ir.textures {
-        if let TextureSource::Fixed { node, origin } = &t.source {
-            // The texture id is not written here: swapping a node's texture keeps the Rust code (design §1.3).
-            let of = match origin {
-                Some(f) => format!("node `{node}` of function `{f}`"),
-                None => format!("node `{node}`"),
-            };
-            line(
-                &mut o,
-                &format!("    /// Fixed texture of {of}; `new` sets `Handle::default()` (Bevy's white image)."),
-            );
+        // The texture id is not written here: swapping a node's texture keeps the Rust code (design §1.3); a
+        // collection id is only in the doc, so swapping collections changes the code only with the bindings
+        // (gradient design §7).
+        let of = match &t.source {
+            TextureSource::Param(_) => None,
+            TextureSource::Fixed { node, origin: Some(f) } => {
+                Some(format!("Fixed texture of node `{node}` of function `{f}`"))
+            }
+            TextureSource::Fixed { node, origin: None } => Some(format!("Fixed texture of node `{node}`")),
+            TextureSource::Gradient(c) => Some(format!("Gradient collection `{c}`")),
+        };
+        if let Some(of) = of {
+            line(&mut o, &format!("    /// {of}; `new` sets `Handle::default()` (Bevy's white image)."));
         }
         line(&mut o, &format!("    #[texture({})]", t.binding));
         line(&mut o, &format!("    #[sampler({})]", t.binding + 1));
@@ -394,7 +397,9 @@ pub fn material_module(ir: &Ir, source_file: &str) -> String {
         for t in &ir.textures {
             match t.source {
                 TextureSource::Param(_) => line(&mut o, &format!("            {},", t.ident)),
-                TextureSource::Fixed { .. } => line(&mut o, &format!("            {}: Handle::default(),", t.ident)),
+                TextureSource::Fixed { .. } | TextureSource::Gradient(_) => {
+                    line(&mut o, &format!("            {}: Handle::default(),", t.ident))
+                }
             }
         }
         line(&mut o, "        }");

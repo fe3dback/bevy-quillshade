@@ -56,12 +56,14 @@ shaders/                      # graph sources, under VCS
   common/pulse.curve.ron
   common/tuning.consts.ron    # global constants (no generated file of their own)
   textures/rock.texture.ron   # Texture asset: a game image + loader settings (no generated file)
+  common/terrain.gradients.ron  # gradient collection: 128 color gradients, baked into one PNG
 assets/shaders/autogen/       # AUTOGEN WESL: stdlib/, functions/, curves/, one file per material
-  baked.ron                   # baked manifest: every Texture asset + every material's values
+  baked.ron                   # baked manifest: every Texture asset and gradient collection + every material's values
   dir_env/mat_rock_wet.wesl
   functions/dir_common/fun_wet_mask.wesl
   curves/dir_common/crv_pulse.wesl
 assets/shaders/internal/      # AUTOGEN internal textures (default.png) + `.autogen` marker file
+assets/shaders/gradients/     # AUTOGEN baked gradient collections (common/terrain.png) + `.autogen` marker file
 crates/shaders/               # AUTOGEN Rust crate (src/materials/dir_env/mat_rock_wet.rs, src/baked/, …)
 ```
 
@@ -132,29 +134,33 @@ fn loading_screen(mut progress: MessageReader<BakedMaterialsProgress>) {
 - Parameters are fields prefixed with `inp_`: the `wetness` parameter is `RockWetParams::inp_wetness`; textures are
   fields of the main type (`RockWetExt::inp_albedo`). A fixed texture (a `TextureSample` / `TextureObject` node with
   its Texture property, design §1.3) is a field `ft_<node id>` (`ft_<function path>_<node id>` for a node inside a
-  called function) after the texture parameters (bindings `101/102`, `103/104`, … in that order).
+  called function) after the texture parameters (bindings `101/102`, `103/104`, … in that order). A gradient
+  collection sampled by `Sample Gradient` nodes (decision 0037) is one field `gc_<collection path>` per collection
+  (`/` → `_`, e.g. `gc_common_terrain`) after those, however many nodes and functions use it.
   `{Name}Params::default()` holds the graph's default values. The constructor `new` and the setters `set_inp_*` are
   crate-internal (`pub(crate)`): games take materials from `BakedMaterials`, whose values come from the graph (design
   §3.1).
   Type names (`RockWetExt`, `RockWetMaterial`, `RockWetParams`) are re-exported from the crate root, so the module
   path (`shaders::materials::dir_env::mat_rock_wet`) is rarely needed.
 - **Baked materials** (design §3). Regeneration writes `assets/shaders/autogen/baked.ron`: every valid Texture asset (id
-  → image path + loader settings, used or not) plus the internal textures, and every material (id → parameter defaults
-  by `inp_*` name, Texture asset id of every texture binding). The crate embeds it as `shaders::COMPILED_MANIFEST`. A
-  Texture asset with an error (E011, E012, E013, E014) is left out and the bindings using it get `@internal/default`
-  (its `BakedTextures` field stays, so the game still compiles, and holds the default texture at runtime); a material
-  that fails to build keeps its previous entry, like its Rust module (if a foreign file blocks `baked.ron`, E008, the
-  crate compiles that file instead). `shaders::BakedMaterials` (a resource) holds a handle per material, nested by
-  folder: `baked.env.rock_wet`, `baked.kw.dir_loop.mat_type`; `shaders::BakedTextures` an image handle per texture:
-  `tex.textures.rock_albedo`, `tex.internal.default`. Field names are the plain folder / asset names; a Rust keyword
-  gets its prefix (`dir_`, `mat_`, `tex_`), and a folder and an asset with the same name in one folder are both prefixed
-  (`env.dir_water.x`, `env.mat_water`). Both resources also map asset ids — the path under `shaders/` without the
-  extension, as in the manifest — to handles, for game data that names materials or textures (decision 0030):
+  → image path + loader settings, used or not) plus the internal textures and the baked gradient collections (id
+  `@gradients/<path>`), and every material (id → parameter defaults by `inp_*` name, Texture asset id of every texture
+  binding). The crate embeds it as `shaders::COMPILED_MANIFEST`. A Texture asset with an error (E011, E012, E013, E014)
+  is left out and the bindings using it get `@internal/default` (its `BakedTextures` field stays, so the game still
+  compiles, and holds the default texture at runtime); a material that fails to build keeps its previous entry, like its
+  Rust module (if a foreign file blocks `baked.ron`, E008, the crate compiles that file instead).
+  `shaders::BakedMaterials` (a resource) holds a handle per material, nested by folder: `baked.env.rock_wet`,
+  `baked.kw.dir_loop.mat_type`; `shaders::BakedTextures` an image handle per texture: `tex.textures.rock_albedo`,
+  `tex.internal.default`, `tex.gradients.common.terrain` (`internal` and `gradients` are reserved root groups: a root
+  folder of that name becomes `dir_internal` / `dir_gradients`). Field names are the plain folder / asset names; a Rust
+  keyword gets its prefix (`dir_`, `mat_`, `tex_`), and a folder and an asset with the same name in one folder are both
+  prefixed (`env.dir_water.x`, `env.mat_water`). Both resources also map asset ids — the path under `shaders/` without
+  the extension, as in the manifest — to handles, for game data that names materials or textures (decision 0030):
   `baked.get::<RockWetMaterial>("env/rock_wet")` (typed; `None` for an unknown id or another material type; the map
-  itself is `baked.by_path: HashMap<String, UntypedHandle>`) and `tex.get("textures/rock_albedo")` /
-  `tex.by_path: HashMap<String, Handle<Image>>` (filled by `load()`, follows hot reloads, and also holds a texture
-  created in the editor after the build that a material uses). `by_path` is reserved at the root: a root folder
-  `by_path/` becomes `dir_by_path`.
+  itself is `baked.by_path: HashMap<String, UntypedHandle>`) and `tex.get("textures/rock_albedo")` / `tex.by_path:
+  HashMap<String, Handle<Image>>` (filled by `load()`, follows hot reloads, and also holds a texture created in the
+  editor after the build that a material uses). `by_path` is reserved at the root: a root folder `by_path/` becomes
+  `dir_by_path`.
 - **Loading** (design §3.3): `ShadersPlugin` registers the materials and creates `BakedMaterials` with reserved handles
   (usable in `Startup`) and `BakedTextures` with default handles. `shaders::BakedMaterialsLoader` (a `SystemParam`)
   `load()`s once (idempotent; returns the number of textures being loaded, `BakedMaterialsProgress` `total`; optional —
@@ -177,23 +183,26 @@ fn loading_screen(mut progress: MessageReader<BakedMaterialsProgress>) {
   old image, e.g. a spawned `Sprite`, keep it); a sampler change (set on the loaded image, the materials using it are
   refreshed); a texture created in the editor and used by a material (loaded by path, but not in `BakedTextures`);
   another TextureSample / TextureObject node wired in place of the one the game was built with (texture bindings are
-  matched by number, decision 0029). These need a rebuild (`cargo run` again): `is_srgb` / `expand_grayscale` (Bevy
-  keeps the first load's settings), adding / removing / renaming / retyping a parameter or a texture binding, adding or
-  removing World Position Offset, adding / removing / renaming a material or changing its kind or blend settings, new
-  `BakedTextures` fields. A material whose bindings changed stops rendering until the rebuild instead of crashing the
-  game: each generated material passes its `LAYOUT_FEATURE` (`SG_LAYOUT_<hash>`) as a shader def, and the WESL does not
-  compile without its own (Bevy logs "no definition in scope for identifier:
+  matched by number, decision 0029); any edit of a gradient collection — colors, stops, midpoints, clearing, filling or
+  reordering slots (only the PNG reloads; a reorder also rewrites the row literal in the WESL; decision 0037). These
+  need a rebuild (`cargo run` again): `is_srgb` / `expand_grayscale` (Bevy keeps the first load's settings), adding /
+  removing / renaming / retyping a parameter or a texture binding, adding or removing World Position Offset, adding /
+  removing / renaming a material or changing its kind or blend settings, new `BakedTextures` fields, the first use of a
+  gradient collection in a material (a new binding). A material whose bindings changed stops rendering until the rebuild
+  instead of crashing the game: each generated material passes its `LAYOUT_FEATURE` (`SG_LAYOUT_<hash>`) as a shader
+  def, and the WESL does not compile without its own (Bevy logs "no definition in scope for identifier:
   `material_layout_changed__rebuild_the_game`", the game logs that the material changed; decision 0029). Anything out of
   sync with the compiled code — a material or key the code does not know, a key the manifest lacks or retypes — keeps
   the compiled value and logs one warning per key ("rebuild the game"); a `baked.ron` that does not parse or has another
   version logs a warning and changes nothing. Textures loaded by a hot reload are not counted in
   `BakedMaterialsProgress` after `BakedMaterialsReady`; one that fails falls back to `@internal/default` as above.
 
-Full example — [`examples/sample_game`](examples/sample_game): one mesh per reference
-material, using only `BakedMaterialsLoader` / `BakedMaterials` / `BakedTextures` (no `assets.load`, no material
-constructors; parameter values are the graph defaults). Its images are Texture assets in both formats:
-`rock_albedo` / `water_normal` are uncompressed `.ktx2`, the rest `.png`. While the game is running, saving a graph in
-the editor (Ctrl+S) rewrites the `.wesl` and `baked.ron`, and Bevy reloads the shader and the values without a restart.
+Full example — [`examples/sample_game`](examples/sample_game): one mesh per reference material, using only
+`BakedMaterialsLoader` / `BakedMaterials` / `BakedTextures` (no `assets.load`, no material constructors; parameter
+values are the graph defaults). Its images are Texture assets in both formats: `rock_albedo` / `water_normal` are
+uncompressed `.ktx2`, the rest `.png`. The terrain sphere (`env/terrain_layers`) tints its grass by height with the
+"Terrain height" gradient of `common/terrain`. While the game is running, saving a graph in the editor (Ctrl+S) rewrites
+the `.wesl` and `baked.ron`, and Bevy reloads the shader and the values without a restart.
 
 ## Editor
 
@@ -203,33 +212,35 @@ how to hook the generated crate into the game. Open / New Project show the syste
 xdg-desktop-portal); cancel it to type or paste the path instead (Browse... reopens it).
 
 The menu_bar holds the logo and the main menu — **File** (Open Project, New Project, Close Project, Save, Save All,
-Quit), **Edit** (Undo, Redo), **View** (Zen mode, then Show project, Show console, Show properties: checked while
-on; the project hidden leaves its width to the editor, the console hidden keeps only its header bar with the counts,
-the properties hidden leave the width to the editor content; Zen mode hides the left and right sidebars and the whole
+Quit), **Edit** (Undo, Redo), **View** (Zen mode, then Show project, Show console, Show properties: checked while on;
+the project hidden leaves its width to the editor, the console hidden keeps only its header bar with the counts, the
+properties hidden leave the width to the editor content; Zen mode hides the left and right sidebars and the whole
 console, whatever their own marks say, and turned off shows exactly the checked ones; all four are remembered),
-**Assets** (create a Pbr3d/Unlit3d/Sprite2d material, a function, a curve, a global constant table, a folder;
-Regenerate) and **Help** (Quick Start: how to hook a game up, one tab per step; Project Page; About: version, link,
-author, license) — then Undo / Redo and, on the right, the project name and its error count (the full path is the
-tooltip).
+**Assets** (create a Pbr3d/Unlit3d/Sprite2d material, a function, a curve, a global constant table, a gradient
+collection, a folder; Regenerate) and **Help** (Quick Start: how to hook a game up, one tab per step; Project Page;
+About: version, link, author, license) — then Undo / Redo and, on the right, the project name and its error count (the
+full path is the tooltip).
 
 Under the tabs bar, the editor topbar holds the buttons of the active tab's kind (graph: Auto-layout, Comment, Fit,
 a material's Preview mode group, then on the right icon-only generated WESL and — for a material — Rust; curve: path,
 Select all, Delete, preview mode, generated WESL; constant table: path; generated file: path, Copy, Source,
 Open externally; game image: path, size, channel, tiling, zoom; Texture asset: Easy / Advanced, presets, channel,
-tiling, zoom). Under the editor content, the editor statusbar of a graph, curve or constant table shows
-`● unsaved`, the asset's error / warning count (click: show the first problem) and its size (nodes, wires, comments
-and generated WESL lines, points, constants).
+tiling, zoom; gradient collection: path, slot, Duplicate / Clear / Move up / Move down). Under the editor content,
+the editor statusbar of a graph, curve, constant table or gradient collection shows `● unsaved`, the asset's error /
+warning count (click: show the first problem) and its size (nodes, wires, comments and generated WESL lines, points,
+constants, `N / 128 used · 128×128 RGBA8`).
 
 On the left is the asset browser — the **Project** panel (the `shaders/` tree: double click opens an asset; RMB on a
 folder or on the empty space below the tree creates a Pbr3d/Unlit3d/Sprite2d material, a function, a curve, a global
-constant table, a folder; RMB on an asset: rename, move (also by dragging onto a folder), delete, show the generated
-WESL/Rust in a read-only, syntax-highlighted tab), in the center the tabs and the canvas, on the right the right
-sidebar of the active tab's kind, titled after it (graph: **Properties** — node parameters, input default values, asset
-blend mode / two-sided / shading / output, or a selected comment frame's title and hue; **Curve**: the selected point
-and hotkeys; **Constants**: usage; **Generated File**: source and line count; **Image**: its Texture asset;
-**Texture**: image info, problems, hotkeys), at the bottom the log (click — focus the node). The browser is an
-IDE-style file tree: folders with expand carets, an icon per asset kind (function, Pbr3d, Unlit3d, Sprite2d, curve,
-constant table, texture); the active tab's asset is highlighted, unsaved assets get an orange dot after the name.
+constant table, a gradient collection, a folder; RMB on an asset: rename, move (also by dragging onto a folder), delete,
+show the generated WESL/Rust in a read-only, syntax-highlighted tab), in the center the tabs and the canvas, on the
+right the right sidebar of the active tab's kind, titled after it (graph: **Properties** — node parameters, input
+default values, asset blend mode / two-sided / shading / output, or a selected comment frame's title and hue; **Curve**:
+the output range (Min / Max), the selected point and hotkeys; **Constants**: usage; **Generated File**: source and line count; **Image**: its Texture
+asset; **Texture**: image info, problems, hotkeys; **Gradients**: the selected gradient's name, the list of all 128
+slots, hotkeys), at the bottom the log (click — focus the node). The browser is an IDE-style file tree: folders with
+expand carets, an icon per asset kind (function, Pbr3d, Unlit3d, Sprite2d, curve, constant table, texture, gradient
+collection); the active tab's asset is highlighted, unsaved assets get an orange dot after the name.
 
 The Project tree ends with the virtual read-only **Internal** folder of the editor's built-in textures
 (`@internal/default`; no rename / move / delete). Below it the read-only **Game Assets** panel lists the game's images
@@ -241,10 +252,12 @@ file. **Drag an image onto a graph** (design §4.3): on empty canvas (or onto a 
 a `TextureSample` at the drop point referencing the image's Texture asset; onto a `TextureSample`, `TextureObject` or
 texture parameter node it sets that node's texture. When no Texture asset points at the image yet, one is created with
 default settings (same name rule as Create Texture Asset); Ctrl+Z reverts only the graph edit, the created asset stays.
-A Texture asset or `Internal` → `default` dragged from the Project tree works the same way. A **Function** asset
-dragged onto a graph adds its call node at the drop point (a function dropped into its own graph is refused, as in the
-palette; indirect recursion is reported by regeneration as E006). A **Curve** asset dropped onto a `Sample Curve` node
-sets its curve, anywhere else it adds a `Sample Curve` reading it. Each drop is one undo step (decision 0033).
+A Texture asset or `Internal` → `default` dragged from the Project tree works the same way. A **Function** asset dragged
+onto a graph adds its call node at the drop point (a function dropped into its own graph is refused, as in the palette;
+indirect recursion is reported by regeneration as E006). A **Curve** asset dropped onto a `Sample Curve` node sets its
+curve, anywhere else it adds a `Sample Curve` reading it; a **Gradient Collection** likewise sets the collection of a
+`Sample Gradient` (its gradient is reset unless the collection stays the same) or adds one with no gradient picked.
+Each drop is one undo step (decision 0033).
 
 Double-click an image to open it in a read-only **image tab**: the image fitted to the view (transparent parts over a
 checkerboard), `WxH | format | mips` in its editor topbar, a load / decode error as text (decoded by Bevy, like the game
@@ -283,7 +296,8 @@ Enter or Space activate, Esc closes); a click outside only closes it.
 Tabs are compact and wrap onto more rows when there are many; a tab shows the file name only (`rock_wet`), the full path
 when several open tabs share that name, and the full path as its tooltip. RMB on a tab: Close / Close All / Close
 Others / Close to the Left / Close to the Right / Close Unmodified. The bottom-right corner of the main view shows the
-open document's type (`pbr3d`, `unlit3d`, `sprite2d`, `function`, `curve`, `consts`, `image`, `texture`, or
+open document's type (`pbr3d`, `unlit3d`, `sprite2d`, `function`, `curve`, `consts`, `image`, `texture`,
+`gradients`, or
 `wesl`/`rust` for a generated file) as a faint watermark over the view.
 Generated-file tabs refresh after every regeneration; Ctrl+C there copies the whole file, and the editor topbar
 has "Open in the default application". Icons come from [icon-rs](https://crates.io/crates/icon-rs), plus a few
@@ -330,9 +344,12 @@ what the editor showed (W107).
 
 **Curves** (`+Curve`) are 1D functions on the unit square: points `(t, value)`, both in `0..1`. A curve tab shows the
 plot with draggable points; the `Catmull-Rom` / `Simple` switch in its editor topbar only changes the preview — the file
-stores just the points. The `Sample Curve` node (Utility) picks a curve of the project in Properties, has a `Type`
-(`Catmull-Rom` — smooth, may overshoot between points; `Simple` — linear) and returns the value at `T`; outside the
-first/last point the curve holds the end values. The node shows a small read-only plot of its curve (with a line at `T`
+stores just the points and the output range. The range (**Min** / **Max** in the right sidebar, default `0` / `1`,
+decision 0038) scales the output: a point value `v` gives `min + v·(max − min)`, so the points stay in `0..1` and
+changing the range keeps the shape; the plot's value axis and the selected point's Value field are in these real
+units. The `Sample Curve` node (Utility) picks a curve of the project in Properties, has a `Type`
+(`Catmull-Rom` — smooth, may overshoot between points; `Simple` — linear) and returns the value at `T` in the curve's
+output range; outside the first/last point the curve holds the end values. The node shows a small read-only plot of its curve (with a line at `T`
 while `T` is not connected; "n/a" when no curve is selected). Renaming a curve updates the nodes that use it.
 
 **Global constants** (`+Global Consts`, decision 0017) are tables of named values shared by every shader: the tab
@@ -379,6 +396,25 @@ Photoshop; `Exposure` in stops. `MakeHSV` / `BreakHSV` and the same for HSL, OKL
 floats (hues in turns, `0..1`); `LinearToSRGB` / `SRGBToLinear` convert raw data. Every amount is an ordinary input,
 so a noise or slope mask can drive the variation per pixel.
 
+**Gradient collections** (New Gradient Collection, decision 0037; like UE's Curve Atlas) hold 128 color gradients —
+for example a landscape colored by height. Each slot has a stable id (nodes refer to it, so slots can be reordered
+freely), an optional name and up to 32 color stops (`t` and a linear RGBA color in `0..1`); a slot without stops is
+empty. Between two stops the colors are mixed in OKLab; a midpoint diamond per segment sets where they mix 50/50
+(Photoshop-style), and two stops at the same `t` make a hard edge. Regeneration bakes each collection into a 128×128
+PNG (`assets/shaders/gradients/<path>.png`, one row per slot, sRGB): editing a gradient changes only that image, so
+the running game updates without recompiling a shader. The **gradients tab** shows the selected slot's bar over a
+checkerboard with the stop handles above it, the midpoint diamonds below it and a `t` ruler; under it the selected
+stop's `T` and color, or the selected diamond's `Midpoint`. Click the bar (or above it) to add a stop with the color
+found there; drag a stop or a diamond; click a stop (or its color swatch) to open the Feathers color picker (wheel,
+sliders, hex, recent colors; one undo step per drag). The editor topbar duplicates the slot into the next empty one,
+clears it or moves it up / down; the right sidebar holds the slot's name and the list of all 128 slots (empty ones
+hatched). The **Sample Gradient** node (Color) picks a collection and one of its non-empty gradients in Properties
+("None" first) and returns the linear `RGB`, `A` and `RGBA` at `T` (`0..1`, clamped; the node shows the gradient as a
+strip above its pins, its title is the collection's name). Without a gradient it outputs white (W111); an empty
+gradient also gives white with W111, but the node keeps sampling its row, so filling the slot later changes no shader
+code. A material gets one texture binding per collection however many nodes or functions sample it. Renaming a
+collection updates the nodes that use it; deleting it clears them (W111).
+
 **Textures**: a Texture asset is picked in the Texture property of `TextureSample` and `TextureObject` (Texture), or
 as the Default Texture of `TextureSampleParameter2D` / `TextureObjectParameter` (Parameters). `TextureSample`'s `Tex`
 input is optional and overrides its property when connected (like UE); `TextureObject` outputs its texture as a
@@ -393,9 +429,9 @@ function a fixed texture becomes a hidden trailing texture + sampler argument `f
 own, a material as one binding per node of origin, however often the function is called. Two such names that collide
 (`a/b_c` and `a_b/c` with the same node id) are E006.
 
-**Double click on a node** that refers to another file — a function call, Sample Curve, a Global* node — opens that
-function / curve / constant table (or switches to its tab); Properties shows the same as an "Open …" button. User
-nodes are not editor assets and do nothing.
+**Double click on a node** that refers to another file — a function call, Sample Curve, a Global* node, Sample Gradient
+— opens that function / curve / constant table / gradient collection (or switches to its tab); Properties shows the same
+as an "Open …" button. User nodes are not editor assets and do nothing.
 
 **Double click on a node header** renames a node with a name or label — a parameter, a function's input / output, a
 Named Route declaration (its name; its usages follow), a Constant / Constant2–4Vector (its label; empty clears it) — in
@@ -426,7 +462,7 @@ the title the same way.
 | New wire from a pin (from a connected input too: connecting replaces its wire) | LMB drag from the pin onto another pin (the wire snaps to the nearest pin it can connect to within 40 px of the cursor) |
 | Move a wire to another input / all wires of an output to another output (all or nothing, one undo step) | Ctrl+LMB drag from the pin onto the other pin (the wires follow the cursor; they snap only to pins they can move to, the nearest within 40 px) |
 | Cancel a wire drag (a new wire or wires being moved) | Esc |
-| Named route: a wire without a visible wire (Named Route + one usage per place) | palette: "Named Route", then "Named Route Usage: {name}" |
+| Named route: a wire without a visible wire (Named Route + one usage per place; a copied declaration pasted or duplicated into its own graph becomes a usage of it, into another graph a copy) | palette: "Named Route", then "Named Route Usage: {name}"; or copy the declaration and paste (Ctrl+C / Ctrl+V, Ctrl+D) |
 | Name a wire: a Named Route fed by it (listed first unless the query matches another node better; its rename dialog opens, as for every Named Route added from the palette) | release a wire from an output on empty space, pick "Named Route" |
 | Auto-layout the selection (or the whole graph) | Ctrl+L |
 | Close tab / next tab | Ctrl+W (or MMB on the tab) / Ctrl+Tab |
@@ -435,30 +471,34 @@ the title the same way.
 | Open a game image / a built-in texture | double click in Game Assets / in Project → Internal |
 | Add a `TextureSample` for an image, or set a texture node's texture | drag an image (Game Assets), a Texture asset or `Internal` → `default` (Project) onto the canvas / onto the node |
 | Add a function call / a `Sample Curve`, or set a `Sample Curve`'s curve | drag a Function / Curve asset (Project) onto the canvas / onto the node |
+| Add a `Sample Gradient`, or set a `Sample Gradient`'s collection | drag a Gradient Collection asset (Project) onto the canvas / onto the node |
 | Image / Texture tab preview: zoom / pan / fit | wheel (around the pointer) / drag / double click |
-| Open the function / curve / constant table a node refers to | double click on the node |
+| Open the function / curve / constant table / gradient collection a node refers to | double click on the node |
 | Scroll a generated file horizontally | Shift+wheel |
 | Curve: add a point / move / multi-select | double click on empty space / drag a point / Shift+click |
 | Curve drag: lock to the T / value axis, snap to the 0.1 grid | hold X / Y, hold Shift |
 | Curve: nudge the selected points | arrow keys (Shift: ×10) |
 | Curve: point menu / plot menu (add point, select all, preview mode) | RMB on a point / on empty space |
+| Gradients: add a stop (with the color found there) / move a stop or a midpoint | click on or above the bar / drag the stop or the diamond |
+| Gradients: pick a stop's color | click the stop (or its color swatch) |
+| Gradients: nudge the selected stop / delete it | Left / Right (Shift: ×10) / Delete, Backspace |
+| Gradients: copy / paste the whole gradient (stops + name) / duplicate it into the next empty slot | Ctrl+C / Ctrl+V / Ctrl+D |
 | Open project / quit | Ctrl+O / Ctrl+Q |
 | Show / hide the project (left sidebar) / the console messages / the properties (right sidebar) | Ctrl+1 / Ctrl+2 (or the chevron in the console header) / Ctrl+3 |
 | Zen mode: hide both sidebars and the whole console (Ctrl+1/2/3 still set what comes back) | `` ` `` |
 | Move the keyboard focus over buttons and fields / press the focused button | Tab, Shift+Tab / Enter, Space |
 
-Hotkeys belong to the active tab's editor kind (graph, curve, generated file) or are global (save, undo, tabs, open,
-quit, the View toggles); none fires while a text field, the palette, a dialog, a menu or a select's list has the
-keyboard, and Ctrl, Alt or Super held blocks the single-key ones (decisions 0032, 0034). Keyboard focus is Bevy's
+Hotkeys belong to the active tab's editor kind (graph, curve, generated file, gradients) or are global (save, undo,
+tabs, open, quit, the View toggles); none fires while a text field, the palette, a dialog, a menu or a select's list has
+the keyboard, and Ctrl, Alt or Super held blocks the single-key ones (decisions 0032, 0034). Keyboard focus is Bevy's
 default (decision 0035): a click focuses the button or field under it, a click on the canvas clears it; while a button
-has the focus, Space and Enter press it instead of acting as hotkeys (so after a toolbar click or a menu pick, click
-the canvas before Space opens the palette); Ctrl+Tab clears the focus. Pan — drag with the right
-(or middle) mouse button (an RMB press that does not move is a click), zoom — wheel, box select — LMB on empty space;
-the minimap in the bottom left is clickable. Unsaved
-tabs are marked with `*` (browser rows with an orange dot); on close and on an external change of the file (git
-checkout) the editor asks what to do. Window size, recent projects, open tabs and the View toggles are stored in
-`<config dir>/fe3dback/bevy-shader-editor/config.ron`, where the config dir is `%APPDATA%` on Windows,
-`~/Library/Application Support` on macOS and `$XDG_CONFIG_HOME` (else `~/.config`) elsewhere (decision 0018).
+has the focus, Space and Enter press it instead of acting as hotkeys (so after a toolbar click or a menu pick, click the
+canvas before Space opens the palette); Ctrl+Tab clears the focus. Pan — drag with the right (or middle) mouse button
+(an RMB press that does not move is a click), zoom — wheel, box select — LMB on empty space; the minimap in the bottom
+left is clickable. Unsaved tabs are marked with `*` (browser rows with an orange dot); on close and on an external
+change of the file (git checkout) the editor asks what to do. Window size, recent projects, open tabs and the View
+toggles are stored in `<config dir>/fe3dback/bevy-shader-editor/config.ron`, where the config dir is `%APPDATA%` on
+Windows, `~/Library/Application Support` on macOS and `$XDG_CONFIG_HOME` (else `~/.config`) elsewhere (decision 0018).
 
 ## File formats
 
@@ -500,8 +540,10 @@ Asset(
   `min` / `max` (Slider Min / Max): when `min < max`, that input of every call node gets an inline number field
   dragged within this range (editor only, no codegen effect; omitted from the file unless set).
 - A curve (`*.curve.ron`): `Curve(format_version: 1, name: "pulse", points: [(0.0, 0.0), (0.25, 1.0), (1.0, 0.0)])`
-  — points sorted by `t`, clamped to `0..1`. It is generated into `autogen/curves/dir_<dir>/crv_<name>.wesl` (a
-  const array of `(t, value, slope)` and `sample_curve_simple` / `sample_curve_catmullrom`); shaders import the one
+  — points sorted by `t`, clamped to `0..1`; optional `min: -2.0, max: 10.0` (after `name`, omitted at the default
+  `0` / `1`; `min >= max` or a non-finite bound fails to load, E009) map a point value `v` to `min + v·(max − min)`.
+  It is generated into `autogen/curves/dir_<dir>/crv_<name>.wesl` (a
+  const array of `(t, value, slope)` with values and slopes already in the output range, and `sample_curve_simple` / `sample_curve_catmullrom`); shaders import the one
   they sample.
 - A global constant table (`*.consts.ron`): `GlobalConsts(format_version: 1, name: "tuning", consts:
   [GlobalConst(name: "glow_amount", ty: F32, value: Float(0.35)), ...])`, `ty` one of `F32`, `Vec2`, `Vec3`,
@@ -532,6 +574,23 @@ Asset(
     ),
   )
   ```
+- A gradient collection (`*.gradients.ron`, decision 0037): exactly 128 slots, one per line; `id` (`1..=2147483647`,
+  unique, generated at creation, never changed) is what nodes store, `name` is editor-only, `stops` hold `t`, a linear
+  RGBA `color` and `mid` — the midpoint of the segment to the next stop (`0.01..0.99`, default 0.5). An empty `name`,
+  empty `stops` and `mid: 0.5` are omitted. Values are clamped, stops sorted by `t`; a wrong slot count, a zero,
+  too large or duplicate id or more than 32 stops fail to load (E009). Nodes store the collection's id and the slot
+  id (`params: {"collection": Str("common/terrain"), "gradient": Int(1007)}`).
+
+  ```ron
+  GradientCollection(
+    format_version: 1,
+    slots: [
+      Slot(id: 1007, name: "Terrain height", stops: [Stop(t: 0.0, color: (0.027, 0.147, 0.027, 1.0)), Stop(t: 0.8, color: (0.807, 0.807, 0.807, 1.0), mid: 0.3), Stop(t: 1.0, color: (1.0, 1.0, 1.0, 1.0))]),
+      Slot(id: 1014),
+      ...
+    ],
+  )
+  ```
 - User node (`shaders/.nodes/*.ron`):
 
   ```ron
@@ -550,8 +609,9 @@ Asset(
   names of generated code and must not start with `n_`, `b_`, `sg_` or `_`.
 - Autogen files start with the marker `AUTOGENERATED by shader-editor v1 … do not edit`; the editor does not
   overwrite files without the marker (E008), binary ones included, nor files it cannot read (E008). Binary files
-  cannot carry the marker, so `assets/shaders/internal/` is owned through its marker file `.autogen`; a non-empty
-  `internal/` without it, or a regular file at that path, is left alone (E008). Writes are atomic and happen only when
+  cannot carry the marker, so `assets/shaders/internal/` and `assets/shaders/gradients/` are owned through their
+  marker file `.autogen`; a non-empty directory without it, or a regular file at that path, is left alone (E008).
+  `gradients/` is claimed only while the project has a gradient collection. Writes are atomic and happen only when
   the content changes; orphaned files are deleted.
 
 ## Diagnostics
@@ -563,10 +623,10 @@ Asset(
 | E003 | incompatible types (no allowed auto-conversion; a Global* node reading a constant of another type) |
 | E004 | required input not connected (or a Named Route Usage without its declaration, a Sample Curve without a curve) |
 | E005 | invalid or duplicate name (also a global constant defined in two tables) |
-| E006 | nonexistent function / recursive functions / missing or broken curve / missing global constant / missing Texture asset / clashing hidden texture names of two functions |
+| E006 | nonexistent function / recursive functions / missing or broken curve / missing global constant / missing Texture asset / clashing hidden texture names of two functions / missing or broken gradient collection, or a gradient id not in it / two gradient collections (or a collection and a fixed texture) with the same generated name (`a/b_c` and `a_b/c`) |
 | E007 | WESL of a Custom node does not parse |
-| E008 | an autogen file without the marker (or one that cannot be read) blocks the write (or `assets/shaders/internal/` without its `.autogen` marker file, or not a directory) |
-| E009 | unknown node / broken file |
+| E008 | an autogen file without the marker (or one that cannot be read) blocks the write (or `assets/shaders/internal/` / `assets/shaders/gradients/` without its `.autogen` marker file, or not a directory) |
+| E009 | unknown node / broken file (a curve: also `min >= max`; a gradient collection: also a slot count other than 128, a zero / too large / duplicate slot id, more than 32 stops) |
 | E010 | generated WESL failed wesl+naga (`--compile`, saving in the editor) |
 | E011 | two or more Texture assets point at the same game file (reported at each of them) |
 | E012 | invalid Texture asset path: empty, absolute, with `.` / `..` / empty components, `\` or `#`, or not `.ktx2` / `.png` |
@@ -578,6 +638,7 @@ Asset(
 | W108 | node preview changes the generated Rust crate (extra parameters or builtins): rebuild the game, and again after turning preview off |
 | W109 | the image of a Texture asset does not exist under `assets/` (it may be added later) |
 | W110 | a texture node without a texture (no Texture property, no connected Tex, no parameter default): uses the internal default texture `@internal/default` |
+| W111 | a Sample Gradient without a collection or gradient (outputs white, no texture binding), or with an empty gradient (outputs white, still sampled) |
 
 An error blocks generation only of its own asset; the rest are regenerated.
 
@@ -602,11 +663,11 @@ match their `.png`.
 
 | Crate | Role |
 | --- | --- |
-| `shader_graph_core` | model, types and conversions, node registry, validation, IR (no Bevy) |
+| `shader_graph_core` | model, types and conversions, node registry, validation, IR, curve / gradient collection math (no Bevy) |
 | `shader_stdlib` | standard library nodes, stdlib WESL modules, user nodes, internal textures |
 | `shader_codegen_wesl` | WESL generation, compile check (wesl + naga) |
 | `shader_codegen_rust` | generation of `crates/shaders` and of the baked manifest `baked.ron` (decision 0025) |
-| `shader_project` | project layout, regeneration pipeline, atomic writes, asset operations, watcher, game image scan |
+| `shader_project` | project layout, regeneration pipeline, gradient PNG baking, atomic writes, asset operations, watcher, game image scan |
 | `shader_editor_app` | GUI on Bevy + Feathers + bevy_noodle |
 | `bevy_noodle` (`vendor/bevy_noodle`) | local fork of bevy_noodle 0.5.0, the node-graph canvas; changes from upstream in its `FORK.md` |
 
@@ -623,4 +684,7 @@ keeps the first load's settings), and the editor cannot preview `expand_grayscal
 texture (MipValueMode None / Bias) cannot be used in World Position Offset — its `textureSample` would end up in the
 vertex shader, which WGSL forbids, and live validation does not report it (a material's own texture nodes switch to
 `textureSampleLevel` there); a texture that failed to load in the game is retried only when its path changes (decisions
-0024, 0025). Details — [`docs/decisions/0010-v1-limitations.md`](docs/decisions/0010-v1-limitations.md).
+0024, 0025). Gradient collections (decision 0037): `t` has a resolution of 1/128 (a hard edge smears over about one
+texel), channels are 8-bit (slight banding is possible in dark, smooth gradients), colors are not HDR, and the gradient
+is chosen at generation time — there is no material parameter to switch it at runtime. Details —
+[`docs/decisions/0010-v1-limitations.md`](docs/decisions/0010-v1-limitations.md).

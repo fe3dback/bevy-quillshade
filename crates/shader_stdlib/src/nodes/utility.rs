@@ -406,6 +406,12 @@ fn function_call_emit(c: &mut EmitCtx) {
         let (tex, s) = c.hidden_texture(h);
         args.push(format!("{tex}, {s}"));
     }
+    // Hidden gradient collections of the callee (gradient design §7), after its fixed textures: the caller's own
+    // hidden argument or material binding, one per collection.
+    for g in &f.gradients {
+        let (tex, s) = c.gradient(g);
+        args.push(format!("{tex}, {s}"));
+    }
     // Prefixed WESL names (decision 0020): `fun_{name}(..)`, result fields `.out_{port}`.
     let call = format!("{}({})", function_ident(&f.name), args.join(", "));
     if f.outputs.len() == 1 {

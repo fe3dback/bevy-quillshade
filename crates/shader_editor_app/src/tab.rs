@@ -15,6 +15,7 @@ use crate::curve_doc::CurveDoc;
 use crate::doc::Doc;
 use crate::doc_kind::{PreviewDoc, TabDoc};
 use crate::game_image::{Channel, FileStamp};
+use crate::gradients_doc::GradientsDoc;
 use crate::texture_doc::TextureDoc;
 
 /// The view that shows a tab's content.
@@ -32,6 +33,8 @@ pub enum ViewKind {
     Image,
     /// Texture asset: settings form + preview (design §4.4).
     Texture,
+    /// Gradient collection: the selected slot's stops + the list of slots (gradient design §8).
+    Gradients,
 }
 
 /// Generated file shown in a text tab.
@@ -153,6 +156,7 @@ pub enum Tab {
     Consts(ConstsDoc),
     Image(ImageDoc),
     Texture(TextureDoc),
+    Gradients(GradientsDoc),
 }
 
 impl Tab {
@@ -165,6 +169,7 @@ impl Tab {
             Tab::Consts(c) => c,
             Tab::Image(i) => i,
             Tab::Texture(t) => t,
+            Tab::Gradients(g) => g,
         }
     }
 
@@ -176,6 +181,7 @@ impl Tab {
             Tab::Consts(c) => c,
             Tab::Image(i) => i,
             Tab::Texture(t) => t,
+            Tab::Gradients(g) => g,
         }
     }
 
@@ -295,6 +301,20 @@ impl Tab {
     pub fn texture_mut(&mut self) -> Option<&mut TextureDoc> {
         match self {
             Tab::Texture(t) => Some(t),
+            _ => None,
+        }
+    }
+
+    pub fn gradients(&self) -> Option<&GradientsDoc> {
+        match self {
+            Tab::Gradients(g) => Some(g),
+            _ => None,
+        }
+    }
+
+    pub fn gradients_mut(&mut self) -> Option<&mut GradientsDoc> {
+        match self {
+            Tab::Gradients(g) => Some(g),
             _ => None,
         }
     }

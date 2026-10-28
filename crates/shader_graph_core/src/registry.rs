@@ -6,6 +6,7 @@ use std::sync::Arc;
 use crate::consts::{ConstLookup, ConstType, GlobalConst};
 use crate::curve::{Interp, curve_fn_alias};
 use crate::diag::{Code, Diagnostic};
+use crate::gradient::GradientCollection;
 use crate::model::{AssetKind, NodeId};
 use crate::preview::ShaderOutputDto;
 use crate::types::PinType;
@@ -44,6 +45,12 @@ pub enum ParamKind {
     /// Id of a Texture asset of the project (`textures/env/rock`) or of an internal texture (`@internal/default`);
     /// `""` = none (stored as `Value::Str`; design §1.2).
     Texture,
+    /// Id of a gradient collection asset of the project (`common/terrain`); `""` = none (stored as `Value::Str`;
+    /// gradient design §6).
+    GradientCollection,
+    /// Id of a slot ([`crate::gradient::Slot::id`]) of the collection chosen by the node's
+    /// [`ParamKind::GradientCollection`] param; `0` = none (stored as `Value::Int`; gradient design §6).
+    GradientSlot,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -245,6 +252,22 @@ pub fn texture_refs(asset: &crate::model::Asset, registry: &Registry) -> Vec<(No
     out
 }
 
+/// Gradient collection ids `asset` refers to through [`ParamKind::GradientCollection`] parameters:
+/// `(node id, param id, collection id)`; empty references are skipped (gradient design §6).
+pub fn gradient_refs(asset: &crate::model::Asset, registry: &Registry) -> Vec<(NodeId, String, String)> {
+    let mut out = Vec::new();
+    for (id, n) in &asset.nodes {
+        let Some(def) = registry.get(&n.kind) else { continue };
+        for p in def.params().into_iter().filter(|p| p.kind == ParamKind::GradientCollection) {
+            let collection = n.params.get(&p.id).unwrap_or(&p.default).as_str();
+            if !collection.is_empty() {
+                out.push((id.clone(), p.id, collection.to_string()));
+            }
+        }
+    }
+    out
+}
+
 #[derive(Debug, Clone)]
 pub struct NodeInfo {
     pub id: String,
@@ -383,6 +406,10 @@ pub struct FunctionSig {
     /// Hidden fixed-texture arguments (design §1.3), appended after the builtins in this order (sorted by
     /// `(origin, node)`): the function's own fixed textures and those of the functions it calls, transitively.
     pub textures: Vec<HiddenTexture>,
+    /// Hidden gradient collection arguments (gradient design §7), appended after the fixed textures: collection ids
+    /// used by the function or, transitively, by the functions it calls; sorted. Each is a texture + sampler
+    /// argument [`gradient_ident`] / `{ident}_sampler`.
+    pub gradients: Vec<String>,
 }
 
 /// Fixed texture of a node inside a function (design §1.3), passed to the function as a hidden trailing texture +
@@ -469,6 +496,26 @@ impl TextureLookup for BTreeSet<String> {
     }
 }
 
+/// Gradient collections nodes can sample (loaded without errors; gradient design §6).
+pub trait GradientLookup {
+    fn collection(&self, id: &str) -> Option<&GradientCollection>;
+}
+
+/// No gradient collections (tests, signatures).
+pub struct NoGradients;
+
+impl GradientLookup for NoGradients {
+    fn collection(&self, _id: &str) -> Option<&GradientCollection> {
+        None
+    }
+}
+
+impl GradientLookup for BTreeMap<String, GradientCollection> {
+    fn collection(&self, id: &str) -> Option<&GradientCollection> {
+        self.get(id)
+    }
+}
+
 /// Graph-wide information available to node definitions.
 pub struct Env<'a> {
     pub asset_kind: AssetKind,
@@ -478,6 +525,7 @@ pub struct Env<'a> {
     pub curves: &'a dyn CurveLookup,
     pub consts: &'a dyn ConstLookup,
     pub textures: &'a dyn TextureLookup,
+    pub gradients: &'a dyn GradientLookup,
 }
 
 /// Inputs for computing a node signature.
@@ -547,6 +595,17 @@ pub fn fixed_texture_ident(origin: Option<&str>, node: &str) -> String {
         None => format!("ft_{node}"),
         Some(origin) => format!("ft_{}_{node}", origin.replace('/', "_")),
     }
+}
+
+/// Identifier of the baked texture of gradient collection `collection` (gradient design §7): `gc_{path with / → _}`
+/// (`common/terrain` → `gc_common_terrain`); the sampler is `{ident}_sampler`. One material binding per collection,
+/// and the same name for the hidden argument of a function using it.
+///
+/// Prefix `gc_` is not a user prefix of decision 0020 and not a generator name (`n_`, `b_`, `sg_`, `ft_`), so it
+/// never clashes with other identifiers. Two collections collide only as `a/b_c` vs `a_b/c`, or as `x` vs
+/// `x_sampler` (the latter's texture is the former's sampler); `build_ir` reports both as E006.
+pub fn gradient_ident(collection: &str) -> String {
+    format!("gc_{}", collection.replace('/', "_"))
 }
 
 /// Value flowing along an edge in generated code.
@@ -634,6 +693,9 @@ pub struct EmitSink {
     /// the material being built ([`EmitCtx::fixed_texture`]); `Some(fn)` = a node inside function `fn` (the function
     /// being built, or one it calls: [`EmitCtx::hidden_texture`]). One entry per node, however often it is used.
     pub fixed_textures: BTreeMap<(Option<String>, NodeId), String>,
+    /// Gradient collections sampled, directly or through called functions (gradient design §7): one binding / hidden
+    /// argument per collection ([`EmitCtx::gradient`]).
+    pub gradients: BTreeSet<String>,
     /// Sink-node values: material output pins / function outputs, keyed by pin or output name.
     pub outputs: BTreeMap<String, String>,
     pub diagnostics: Vec<Diagnostic>,
@@ -772,6 +834,15 @@ impl EmitCtx<'_> {
     pub fn hidden_texture(&mut self, h: &HiddenTexture) -> (String, String) {
         let tex = h.ident();
         self.sink.fixed_textures.insert((Some(h.origin.clone()), h.node.clone()), h.texture.clone());
+        (tex.clone(), format!("{tex}_sampler"))
+    }
+
+    /// Uses the baked texture of gradient collection `collection` (gradient design §7): a material binding, or a hidden
+    /// trailing argument inside a function, one per collection however many nodes or called functions use it.
+    /// Returns the texture and sampler identifiers ([`gradient_ident`]).
+    pub fn gradient(&mut self, collection: &str) -> (String, String) {
+        self.sink.gradients.insert(collection.into());
+        let tex = gradient_ident(collection);
         (tex.clone(), format!("{tex}_sampler"))
     }
 

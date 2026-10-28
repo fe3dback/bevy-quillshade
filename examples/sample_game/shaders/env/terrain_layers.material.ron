@@ -15,7 +15,7 @@ Asset(
     ),
     "n02": Node(
       kind: "stdlib::Constant3Vector",
-      pos: (0.0, -202.5),
+      pos: (-210.0, -202.5),
       params: {
         "value": Float3((0.15, 0.45, 0.1)),
       },
@@ -57,6 +57,50 @@ Asset(
         "value": Float3((0.0, 0.02, 0.0)),
       },
     ),
+    "n09": Node(
+      kind: "stdlib::WorldPosition",
+      pos: (-1050.0, -472.5),
+      params: {},
+    ),
+    "n10": Node(
+      kind: "stdlib::BreakOutFloat3",
+      pos: (-840.0, -472.5),
+      params: {},
+    ),
+    "n11": Node(
+      kind: "stdlib::Multiply",
+      pos: (-630.0, -472.5),
+      params: {},
+      inputs: {
+        "b": Float(0.25),
+      },
+    ),
+    "n12": Node(
+      kind: "stdlib::Add",
+      pos: (-420.0, -472.5),
+      params: {},
+      inputs: {
+        "b": Float(0.5),
+      },
+    ),
+    "n13": Node(
+      kind: "stdlib::Saturate",
+      pos: (-210.0, -472.5),
+      params: {},
+    ),
+    "n14": Node(
+      kind: "stdlib::SampleGradient",
+      pos: (0.0, -472.5),
+      params: {
+        "collection": Str("common/terrain"),
+        "gradient": Int(1007),
+      },
+    ),
+    "n15": Node(
+      kind: "stdlib::Multiply",
+      pos: (140.0, -202.5),
+      params: {},
+    ),
   },
   edges: [
     Edge(
@@ -68,7 +112,7 @@ Asset(
       to: ("n01", "world_position_offset"),
     ),
     Edge(
-      from: ("n02", "out"),
+      from: ("n15", "out"),
       to: ("n03", "base_color"),
     ),
     Edge(
@@ -86,6 +130,34 @@ Asset(
     Edge(
       from: ("n03", "attributes"),
       to: ("n07", "b"),
+    ),
+    Edge(
+      from: ("n09", "out"),
+      to: ("n10", "v"),
+    ),
+    Edge(
+      from: ("n10", "y"),
+      to: ("n11", "a"),
+    ),
+    Edge(
+      from: ("n11", "out"),
+      to: ("n12", "a"),
+    ),
+    Edge(
+      from: ("n12", "out"),
+      to: ("n13", "x"),
+    ),
+    Edge(
+      from: ("n13", "out"),
+      to: ("n14", "t"),
+    ),
+    Edge(
+      from: ("n02", "out"),
+      to: ("n15", "a"),
+    ),
+    Edge(
+      from: ("n14", "rgb"),
+      to: ("n15", "b"),
     ),
   ],
   comments: [],

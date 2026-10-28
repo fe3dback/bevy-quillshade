@@ -79,7 +79,8 @@ atomic write. Key facts that span several files:
   layout (fields sorted vec4 → vec3+pad → vec2 → scalars, padded to 16 bytes); the WESL struct and the Rust `Params`
   struct are both derived from it, and the generated crate has a `min_size` test checking they match. Bindings: uniform
   `@binding(100)`, textures/samplers `101/102`, `103/104`, … from `Ir::textures` (texture parameters `inp_*`, then
-  fixed textures `ft_*` — one per node, also per node inside a called function; read by WESL, Rust and `binding_of`).
+  fixed textures `ft_*` — one per node, also per node inside a called function —, then gradient collections `gc_*` —
+  one per collection; read by WESL, Rust and `binding_of`).
 - **Node registry**: every node implements `NodeDef` (`shader_graph_core::registry`). Stdlib nodes are Rust code built
   with the closure builder in `crates/shader_stdlib/src/def.rs` (`def(id, name, cat).kw(..).param(..).build(sig, emit)`)
   and registered per category in `crates/shader_stdlib/src/nodes/*.rs`. Reusable WESL helpers live in
@@ -90,7 +91,8 @@ atomic write. Key facts that span several files:
   `AssetType::Curve`, kept in `AssetSet::curves` (not `assets`). Each becomes its own module
   `autogen/curves/dir_…/crv_<name>.wesl`; the `stdlib::SampleCurve` node (param of `ParamKind::Curve`) imports
   `sample_curve_simple`/`sample_curve_catmullrom` from it under a per-curve alias (`curve_fn_alias`).
-  `curve_refs` finds the nodes referring to a curve (deps, rename). `Curve::sample` is the reference math.
+  `curve_refs` finds the nodes referring to a curve (deps, rename). `Curve::sample` is the reference math, in the output
+  range `min..max` (decision 0038) baked into the module's `POINTS` — the stored points stay normalized.
 - **Global constant tables** (`shaders/**/*.consts.ron`, decision 0017) are not graphs either:
   `shader_graph_core::consts::GlobalConsts`, `AssetType::Consts`, `AssetSet::consts`; they generate no file. The
   `stdlib::Global*` nodes (param `const`, `ParamKind::GlobalConst(ty)`) inline the value as a literal through
@@ -104,17 +106,29 @@ atomic write. Key facts that span several files:
   `ParamKind::Texture` (`texture_refs`: deps, rename rewrite, delete clears → W110 + `@internal/default`; missing →
   E006); old image-path defaults fail in `assets::load`. **Internal textures** (`shader_stdlib::internal`,
   `@internal/default`) are embedded PNGs written to `assets/shaders/internal/` on every regen.
+- **Gradient collections** (`shaders/**/*.gradients.ron`, decision 0037) are not graphs either:
+  `shader_graph_core::gradient::GradientCollection` (exactly 128 slots with stable random ids `1..=i32::MAX`, ≤ 32
+  stops, `mid` on the left stop; `Slot::sample` = OKLab reference math in `f64`), `AssetType::Gradients`,
+  `AssetSet::gradients`; no WESL / Rust file. Regen bakes each into a 128×128 sRGB PNG (`bake_rgba8`,
+  `shader_project::gradient_png`, byte-deterministic `png` + fdeflate) in `assets/shaders/gradients/<path>.png`,
+  owned like `internal/` through `.autogen` (only while the project has a collection), listed in the manifest as
+  `@gradients/<path>` (`BakedTextures.gradients`). `stdlib::SampleGradient` (params `ParamKind::GradientCollection` +
+  `GradientSlot`) samples it through `texture.wesl::sg_sample_gradient` at texel centres with a row literal = the
+  slot's position (`GradientLookup`, `Env::gradients`); one binding `gc_<path>` per collection per material
+  (`TextureSource::Gradient`), hidden trailing `gc_*` arguments in functions (`FunctionSig::gradients`, after `ft_*`),
+  E006 on identifier clashes. W111: no gradient (white, no binding) or an empty one (still sampled, so slot contents
+  never change code). `gradient_refs`: deps (a reorder regenerates the row literal only), rename rewrite, delete
+  clears collection + slot. Color / stop / slot edits change only the PNG.
 - **Baked manifest** (decision 0025): regen writes `assets/shaders/autogen/baked.ron` (`shader_codegen_rust::manifest`:
-  every valid Texture asset + every material's values / texture ids). The generated crate embeds it
-  (`COMPILED_MANIFEST`, `include_str!`) and overlays the runtime file on hot reload; `crates/shaders/src/baked/mod.rs`
-  is the static template `crates/shader_codegen_rust/templates/baked_mod.rs` (`BakedMaterialsLoader`, progress,
-  overlay), `baked/{materials,textures}.rs` come from `shader_codegen_rust::baked`. Generated `new` / `set_*` are
-  `pub(crate)`; games use `BakedMaterials` / `BakedTextures` (nested fields, or `by_path` / `get` by asset id,
-  decision 0030). **Layout guard** (decision 0029): every material WESL
-  compiles only with its `Ir::layout_feature()` (`SG_LAYOUT_<hash>`), which the generated `specialize` enables, so a
-  hot-reloaded shader with other bindings fails to compile instead of crashing the game; `check::Files::enable` does
-  the same for the compile check. The manifest's `layout` / `bindings` let the runtime match texture bindings by
-  position.
+  every valid Texture asset and gradient collection + every material's values / texture ids). The generated crate embeds
+  it (`COMPILED_MANIFEST`, `include_str!`) and overlays the runtime file on hot reload;
+  `crates/shaders/src/baked/mod.rs` is the static template `crates/shader_codegen_rust/templates/baked_mod.rs`
+  (`BakedMaterialsLoader`, progress, overlay), `baked/{materials,textures}.rs` come from `shader_codegen_rust::baked`.
+  Generated `new` / `set_*` are `pub(crate)`; games use `BakedMaterials` / `BakedTextures` (nested fields, or `by_path`
+  / `get` by asset id, decision 0030). **Layout guard** (decision 0029): every material WESL compiles only with its
+  `Ir::layout_feature()` (`SG_LAYOUT_<hash>`), which the generated `specialize` enables, so a hot-reloaded shader with
+  other bindings fails to compile instead of crashing the game; `check::Files::enable` does the same for the compile
+  check. The manifest's `layout` / `bindings` let the runtime match texture bindings by position.
 - **Node kinds** are string paths: `stdlib::*`, `param::*`, `output::*`, `function::<sub/name>`, `user::<id>`.
 - **Material Attributes** (decision 0023): `PinType::MaterialAttributesPbr` is the WESL struct of the stdlib module
   `material.wesl`; field ids / defaults / activity live in `shader_graph_core::attributes` (shared by Make/Break, the
@@ -130,13 +144,15 @@ atomic write. Key facts that span several files:
 - **Functions** are separate WESL modules imported by materials via relative `super::` paths (`codegen_wesl::paths`) —
   no inlining (decision 0002). Builtins a function needs (UV, time, world position…) become trailing hidden `b_*`
   parameters filled in by the caller (decision 0005); its fixed textures follow as hidden `ft_<fn>_<node>` texture +
-  sampler parameters (`FunctionSig::textures`, decision 0024). Changing a function regenerates its dependents
+  sampler parameters (`FunctionSig::textures`, decision 0024), then one `gc_<path>` pair per gradient collection
+  (`FunctionSig::gradients`, decision 0037). Changing a function regenerates its dependents
   (`DepGraph`).
 - **Writer** (`shader_project::writer`): all files go to temp first, then a series of renames; files are rewritten only
   if content changed (avoids spurious hot-reloads); orphans with the autogen marker are deleted; files *without* the
   `// AUTOGENERATED by shader-editor v…` marker are never touched (E008), binary ones included. Contents are bytes:
-  internal textures (`shader_stdlib::internal`) go to `assets/shaders/internal/`, owned through the marker file
-  `.autogen` (no marker in a non-empty dir → E008, nothing touched there). The editor never edits the game's root
+  internal textures (`shader_stdlib::internal`) go to `assets/shaders/internal/` and baked gradient collections to
+  `assets/shaders/gradients/`, each owned through the marker file `.autogen` (no marker in a non-empty dir → E008,
+  nothing touched there). The editor never edits the game's root
   `Cargo.toml` (W105 instead).
 - **Errors block only their own asset**; the rest of the project still regenerates.
 - **Material kinds**: Pbr3d → `ExtendedMaterial<StandardMaterial, {Name}Ext>` (shadows/prepass/deferred for free);
@@ -171,17 +187,17 @@ and commit messages too:
 - **left sidebar** — global: **project tree** (`shaders/**` assets) above **assets tree** (the game's `assets/`,
   read-only, plus the virtual Internal folder).
 - **tabs bar** — open tabs; visually separate from the editor topbar below it.
-- **editor topbar** / **editor content** / **editor statusbar** / **right sidebar** — owned by the active tab's
-  *editor kind* (graph, text, curve, consts, image, texture — `tab::Tab` / `ViewKind`): its buttons and info, its main
-  view, its status line, its additional content (properties of the selection, hints…).
+- **editor topbar** / **editor content** / **editor statusbar** / **right sidebar** — owned by the active tab's *editor
+  kind* (graph, text, curve, consts, image, texture, gradients — `tab::Tab` / `ViewKind`): its buttons and info, its
+  main view, its status line, its additional content (properties of the selection, hints…).
 - **console/logs** — global: diagnostics and messages, under the editor statusbar.
 
 - **Editor kinds** (`editors/`, decisions 0031, 0032): one module per kind (`editors/<kind>.rs`: graph, text, curve,
-  consts, image, texture) holds **every trait impl of that kind** — `doc_kind::TabDoc` on its document type, and on a
-  zero-sized `<Kind>Editor`:
+  consts, image, texture, gradients) holds **every trait impl of that kind** — `doc_kind::TabDoc` on its document type,
+  and on a zero-sized `<Kind>Editor`:
   - `editors::EditorAreas`: `VIEW`, `SIDEBAR_TITLE`, `topbar()` / `sidebar()` → `Option<impl Scene>` (`None`: the strip
     is hidden for the kind), `build(app)` registering the kind's redraw systems, `input(app)` its input context.
-  - `editors::EditorInput` (kinds with hotkeys: graph, curve, text): `type Ctx` and `bindings()`.
+  - `editors::EditorInput` (kinds with hotkeys: graph, curve, text, gradients): `type Ctx` and `bindings()`.
 
   `editors::for_each_kind` (`KindVisitor`) is the one list of kinds; `AreasPlugin` and `InputContextsPlugin` both
   visit it. The editor statusbar comes from `TabDoc::status` → `StatusInfo` (filled from a `StatusCtx` by
@@ -193,27 +209,27 @@ and commit messages too:
   Bodies (`*ViewBar`, `*SidebarBody`) are refilled by the kind's systems keyed on what they show (sidebars:
   `(ui.props, active)` via `SidebarKey`), never every frame. Property widgets and their observers stay in
   `ui/props.rs`; editor content views stay in `ui::DocArea`.
-- **Input contexts** (`editors/main_input.rs`, decisions 0032, 0034, 0035): bevy_enhanced_input. One `InputRoot`
-  entity carries `MainCtx` (save, undo / redo, close / next tab, open, quit, the View toggles Ctrl+1
-  `ToggleLeftSidebar` / Ctrl+2 `ToggleLog` / Ctrl+3 `ToggleProperties` / `` ` `` `ToggleZen`; always active,
-  priority 2) and one context per kind (`GraphCtx` — palette on Space, Esc
-  `CancelWire`, …; `CurveCtx`, `TextCtx`; priority 1) that `sync_input_context` activates only while the active tab is
-  of that kind — so a hotkey needs no "is this my tab" guard. The shared edit actions (`EditCopy`, `EditDelete`, …) are
-  bound by each kind that supports them and have one global handler each. Build actions with `hotkey::<A>()`
-  (`consume_input` + `require_reset`) and the `ctrl` / `ctrl_shift` / `shift` / `plain` binding helpers ("Ctrl" = Ctrl
-  or Super); handlers observe `On<Start<A>>` (`on_combo` / `on_plain`) and push `state::Action`s; a hold-to-fire key
-  is `held_hotkey::<A>(bindings, secs)` (a one-shot `Hold`, handlers observe `Fire`: hold C `AddComment`, which arms
-  only on a fresh C press so a C left down after Ctrl+C never fires). Plain-key handlers
-  ignore the key while Ctrl, Alt or Super is held (`keys::no_command_mods`). `gate_keyboard` (PreUpdate, before
-  `InputFocusSystems::Dispatch`) hides the keyboard from all contexts while typing (text field focused, palette,
-  dialog, menu or popup open; a scrubbed number field only while LMB is held, `typing_into`; Space / Enter while a
-  focused button or checkbox takes them, `PRESS_KEYS`: the widget wins). Keyboard focus is Bevy's default (decision
-  0035): Tab walks every tabbable widget, a canvas click clears the focus; only additions are kept —
-  `tab_into_number_input`, `drop_hidden_focus`, the palette's modal `TabGroup`, `Visibility::Hidden` on hidden areas —
-  plus one exception, Ctrl+Tab (`NextTab`) clears the focus (`drop_focus`). Activating a context
-  re-inserts its bindings so a key held across a tab switch does not fire (relies on bevy_enhanced_input internals —
-  re-check `tests/input_contexts.rs` on upgrades). Mouse gestures stay picking observers and read modifiers via
-  `keys::mods()` (`keys.rs`, below both `ui` and `editors`).
+- **Input contexts** (`editors/main_input.rs`, decisions 0032, 0034, 0035): bevy_enhanced_input. One `InputRoot` entity
+  carries `MainCtx` (save, undo / redo, close / next tab, open, quit, the View toggles Ctrl+1 `ToggleLeftSidebar` /
+  Ctrl+2 `ToggleLog` / Ctrl+3 `ToggleProperties` / `` ` `` `ToggleZen`; always active, priority 2) and one context per
+  kind (`GraphCtx` — palette on Space, Esc `CancelWire`, …; `CurveCtx`, `TextCtx`, `GradientsCtx`; priority 1) that
+  `sync_input_context` activates only while the active tab is of that kind — so a hotkey needs no "is this my tab"
+  guard. The shared edit actions (`EditCopy`, `EditDelete`, …) are bound by each kind that supports them and have one
+  global handler each. Build actions with `hotkey::<A>()` (`consume_input` + `require_reset`) and the `ctrl` /
+  `ctrl_shift` / `shift` / `plain` binding helpers ("Ctrl" = Ctrl or Super); handlers observe `On<Start<A>>` (`on_combo`
+  / `on_plain`) and push `state::Action`s; a hold-to-fire key is `held_hotkey::<A>(bindings, secs)` (a one-shot `Hold`,
+  handlers observe `Fire`: hold C `AddComment`, which arms only on a fresh C press so a C left down after Ctrl+C never
+  fires). Plain-key handlers ignore the key while Ctrl, Alt or Super is held (`keys::no_command_mods`). `gate_keyboard`
+  (PreUpdate, before `InputFocusSystems::Dispatch`) hides the keyboard from all contexts while typing (text field
+  focused, palette, dialog, menu or popup open; a scrubbed number field only while LMB is held, `typing_into`; Space /
+  Enter while a focused button or checkbox takes them, `PRESS_KEYS`, and arrows / Home / End / Space / Enter while a
+  focused list box takes them, `LIST_KEYS`: the widget wins). Keyboard focus is Bevy's default (decision 0035): Tab
+  walks every tabbable widget, a canvas click clears the focus; only additions are kept — `tab_into_number_input`,
+  `drop_hidden_focus`, the palette's modal `TabGroup`, `Visibility::Hidden` on hidden areas — plus one exception,
+  Ctrl+Tab (`NextTab`) clears the focus (`drop_focus`). Activating a context re-inserts its bindings so a key held
+  across a tab switch does not fire (relies on bevy_enhanced_input internals — re-check `tests/input_contexts.rs` on
+  upgrades). Mouse gestures stay picking observers and read modifiers via `keys::mods()` (`keys.rs`, below both `ui` and
+  `editors`).
 
 - The model (`shader_graph_core::Asset` inside `doc::Doc`) is the source of truth. Widgets push `state::Action`s →
   `Editor::apply` mutates documents → the bevy_noodle canvas is **rebuilt from the model** on revision change (only when
@@ -231,19 +247,20 @@ and commit messages too:
   `GraphQuery::wire_of(canvas)`, as noodle's own cancel does.
 - Tabs are `tab::Tab` (graph `Doc`, read-only `TextDoc` of a generated file, `CurveDoc`, `ConstsDoc`, read-only
   `ImageDoc` of a game image decoded through `game_image::GameImageCache`, `TextureDoc` of a Texture asset — read-only
-  for a built-in `@internal/…` texture), each implementing `doc_kind::TabDoc` (title, icon, watermark, dirty, save,
-  reload, rename, config key, `override_into` for validation, editor statusbar data `status` → `StatusInfo`;
-  `Tab::doc()`); `Editor::doc()` is `None` on a non-graph tab, `Editor::curve_doc()` / `consts_doc()` /
-  `texture_doc()` give the others. The editable kinds share
-  `history::History<T>`. Each content kind has a view in `ui::DocArea` tagged `ViewOf(ViewKind)` (decision 0031 lists
-  what a new kind needs). WESL/Rust highlighting is our own lexer (`highlight.rs`).
-- Module seams (decision 0026): `state/*` (types, tabs, regen, watch, apply, `*_ops`, tests), `doc_kind.rs`
-  (`TabDoc`), `editors/` (see "Editor kinds" above; the document types stay in `doc.rs`, `curve_doc.rs`, `tab.rs`, …;
-  `editors/mod.rs` holds the shared traits and data), `ui/node_preview.rs` (generic in-node preview:
-  curve / const / texture kinds in `kinds()`), `ui/tree.rs` (`TreeSource`: Project + read-only Game Assets with the
-  virtual Internal folder), `game_image.rs` (`GameImageCache`: game images and internal textures decoded with
-  `Image::from_buffer`), `droppable.rs` (`DroppableFile` / `Dropped`: dragging images, Texture, Function and Curve
-  assets onto a graph; a function dropped into itself is refused through `search::is_self_call`, as in the palette).
+  for a built-in `@internal/…` texture, `GradientsDoc` of a gradient collection), each implementing `doc_kind::TabDoc`
+  (title, icon, watermark, dirty, save, reload, rename, config key, `override_into` for validation, editor statusbar
+  data `status` → `StatusInfo`; `Tab::doc()`); `Editor::doc()` is `None` on a non-graph tab, `Editor::curve_doc()` /
+  `consts_doc()` / `texture_doc()` / `gradients_doc()` give the others. The editable kinds share `history::History<T>`.
+  Each content kind has a view in `ui::DocArea` tagged `ViewOf(ViewKind)` (decision 0031 lists what a new kind needs).
+  WESL/Rust highlighting is our own lexer (`highlight.rs`).
+- Module seams (decision 0026): `state/*` (types, tabs, regen, watch, apply, `*_ops`, tests), `doc_kind.rs` (`TabDoc`),
+  `editors/` (see "Editor kinds" above; the document types stay in `doc.rs`, `curve_doc.rs`, `tab.rs`, …;
+  `editors/mod.rs` holds the shared traits and data), `ui/node_preview.rs` (generic in-node preview: curve / const /
+  texture / gradient kinds in `kinds()`), `ui/tree.rs` (`TreeSource`: Project + read-only Game Assets with the virtual
+  Internal folder), `game_image.rs` (`GameImageCache`: game images and internal textures decoded with
+  `Image::from_buffer`), `droppable.rs` (`DroppableFile` / `Dropped`: dragging images, Texture, Function, Curve and
+  gradient collection assets onto a graph; a function dropped into itself is refused through `search::is_self_call`, as
+  in the palette).
 - Canvas details (decisions 0033, 0034, 0035): node positions snap to `doc::GRID_SNAP` (10) — pointer drags through the
   bevy_noodle fork's `CanvasInteraction::snap` (the grabbed node; `attach_canvas`), new / pasted nodes in
   `Editor::add_node` / `paste`; loaded positions are never rewritten. Comment frames are `NodeFrame`s: dragging one
@@ -276,6 +293,14 @@ and commit messages too:
   header) is hidden only by Zen, `Panel::Log` (its messages) also by `show_log` off.
 - `ui/image_preview.rs` (`ImagePreviewPlugin`, `doc_kind::PreviewDoc`): the zoom / pan / fit / channel / tiling preview
   shared by the image and Texture tabs; one camera per tab, keyed by `(ViewKind, image path)`.
+- Gradients tab (decision 0037): `gradients_doc.rs` (`GradientsDoc`, `History<GradientCollection>`, editor-only slot /
+  `GradientSel` selection), `editors/gradients.rs` (editor topbar, right sidebar with one persistent
+  `FeathersListView` of 128 slot rows, `GradientsCtx`), `ui/gradient_view.rs` (bar, stop handles, midpoint diamonds;
+  a stop drag starts after `DRAG_THRESHOLD`, 3 px), `ui/gradient_strip.rs` (`GradientStrip`: every gradient preview
+  rasterizes the baked row, so it shows what the game samples), `ui/gradient_preview.rs` (the Sample Gradient node
+  strip). Stop colors use **one hidden `FeathersColorInput`** (`StopColorInput`) placed over the selected stop and
+  opened with `MenuEvent` `Open` (`open_stop_color`); `ValueChange<Color>` → linear `SetStopColor` merged until
+  `is_final`; `dialog::menu_barrier` while its popup is open.
 - Graph editor topbar: static tools plus `GraphTopbarDynamic` (`redraw_graph_topbar`: Preview mode `button_group`,
   generated WESL / Rust buttons). Rename by double click: `Editor::rename_target` / `header_action`, the
   `canvas::NodeHeader` / `FrameTitleStrip` markers, `Action::TextDialog` → `Submit::SetText` (the sidebar's
@@ -328,11 +353,15 @@ hand-drawn ones, rasterized at runtime with resvg (`crates/shader_editor_app/src
 
 ### Visual checks (debug env hooks)
 
-- Editor: `SHADER_EDITOR_SCREENSHOT=out.png [SHADER_EDITOR_OPEN=env/rock_wet.material.ron[#wesl|#rust]|@game/textures/rock_albedo.ktx2|@internal/default]
-  [SHADER_EDITOR_SELECT=stdlib::Lerp|c01] [SHADER_EDITOR_DEMO=palette|wire|dialog|about|quick_start[:N]|texture_channel:N|open_project|welcome|menu[:<name>]|tab_menu|game_file_menu[:2]] cargo run -- examples/sample_game`
-  — renders, saves the PNG and exits. `SHADER_EDITOR_SELECT` takes a node kind (its first node) or a comment frame
-  id. `menu:<name>` opens that main menu (`file`, `edit`, `view`, `assets`, `help`); `game_file_menu` opens the RMB
-  menu of the first game image that has a Texture asset (its item disabled), `game_file_menu:2` of the first without.
+- Editor: `SHADER_EDITOR_SCREENSHOT=out.png [SHADER_EDITOR_OPEN=env/rock_wet.material.ron[#wesl|#rust]|@game/textures/rock_albedo.ktx2|@internal/default|common/terrain.gradients.ron]
+  [SHADER_EDITOR_SELECT=stdlib::Lerp|c01|<slot>[:s<stop>|:m<segment>]]
+  [SHADER_EDITOR_DEMO=palette|wire|dialog|about|quick_start[:N]|texture_channel:N|open_project|welcome|menu[:<name>]|tab_menu|game_file_menu[:2]|gradient_color]
+  cargo run -- examples/sample_game` — renders, saves the PNG and exits. `SHADER_EDITOR_SELECT` takes a node kind
+  (its first node) or a comment frame id; on a gradients tab a slot position (`3`), with `:s<stop>` / `:m<segment>`
+  also selecting that stop / midpoint (`0:s1`, `0:m2`). `menu:<name>` opens that main menu (`file`, `edit`, `view`,
+  `assets`, `help`); `game_file_menu` opens the RMB menu of the first game image that has a Texture asset (its item
+  disabled), `game_file_menu:2` of the first without; `gradient_color` (on a gradients tab) selects stop 0 of the
+  selected slot and opens its Feathers color picker.
   `SHADER_EDITOR_INPUT=drag|rmb_click|rmb_pan|mmb_pan|slider|color|pin_rmb|node_rmb|node_dblclick|frame_dblclick|hover|curve_drag|curve_add|texture_zoom|drop_game_file|ctrl_drag_wire|ctrl_wire_hold|wire_drag|wire_hold|alt_click|box_delete|box_delete_partial|type_field|menu_click|menu_close|tab[:N]`
   (+ `SHADER_EDITOR_INPUT_NODE=<id>`, `SHADER_EDITOR_INPUT_TRACE=1`, `SHADER_EDITOR_ZOOM=<f32>`) plays a scripted mouse
   gesture through winit's messages and logs the outcome (`demo` lines; `slider`/`color` also log the edited value;
@@ -377,7 +406,7 @@ hand-drawn ones, rasterized at runtime with resvg (`crates/shader_editor_app/src
   window updates continuously and without vsync in this mode, so it works unfocused under lavapipe too). Render
   comparison (PSNR) is not automated.
 
-## File format (`*.material.ron` / `*.function.ron`; curves: decision 0015; textures: decision 0024)
+## File format (`*.material.ron` / `*.function.ron`; curves, textures, gradients: decisions 0015, 0024, 0037)
 
 Serialized `Asset { format_version, kind, name, nodes, edges, comments, meta, preview }` (`preview` omitted when
 default, decision 0022) with struct names, 2-space indent, nodes in a `BTreeMap` by id. Asset name comes from the file
@@ -395,6 +424,6 @@ the keyword check). Loading probes `format_version` first; bump it on incompatib
   diagnostic codes, generated API, crate roles, limitations, dev commands.
 - Record non-obvious implementation choices or deviations from the spec as a new `docs/decisions/NNNN-*.md` and add it
   to `docs/decisions/README.md` (never delete an old decision — mark it "superseded by NNNN").
-- Never hand-edit autogen output (`examples/sample_game/assets/shaders/{autogen,internal}/**`,
+- Never hand-edit autogen output (`examples/sample_game/assets/shaders/{autogen,internal,gradients}/**`,
   `examples/sample_game/crates/shaders/**`, `crates/shader_project/tests/snapshots/*.snap`) — change the generator and
   regenerate.

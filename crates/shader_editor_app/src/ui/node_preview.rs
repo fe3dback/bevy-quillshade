@@ -1,5 +1,5 @@
 //! Generic read-only preview rows inside canvas nodes (curve plot of a Sample Curve node, value of a `Global*`
-//! node's constant, thumbnail of a texture node's Texture asset): a node whose definition [`NodePreview::applies`]
+//! node's constant, thumbnail of a texture node's Texture asset, strip of a Sample Gradient's gradient): a node whose definition [`NodePreview::applies`]
 //! gets one row per preview kind, between its title and its pins, or a column left of its output pins
 //! ([`NodePreview::BESIDE_OUTPUTS`]).
 //!
@@ -28,6 +28,7 @@ use shader_graph_core::registry::NodeDef;
 use super::TEXT_DIM;
 use super::const_preview::ConstPreview;
 use super::curve_preview::CurvePreview;
+use super::gradient_preview::GradientPreview;
 use super::texture_preview::TexturePreview;
 use crate::doc::Doc;
 use crate::game_image::GameImageCache;
@@ -146,8 +147,13 @@ impl Kind {
 }
 
 /// Every preview kind, in row order.
-fn kinds() -> [Kind; 3] {
-    [Kind::of::<CurvePreview>(), Kind::of::<ConstPreview>(), Kind::of::<TexturePreview>()]
+fn kinds() -> [Kind; 4] {
+    [
+        Kind::of::<CurvePreview>(),
+        Kind::of::<ConstPreview>(),
+        Kind::of::<TexturePreview>(),
+        Kind::of::<GradientPreview>(),
+    ]
 }
 
 /// The previews of model node `node` of definition `def` (used by the canvas when it builds the node).

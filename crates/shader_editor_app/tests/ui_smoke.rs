@@ -171,7 +171,7 @@ fn node_drag(app: &mut App, node: Entity, step: WireStep, by: Vec2, total: Vec2)
     let zoom = app.world().get::<CanvasView>(canvas).unwrap().zoom;
     let (delta, distance) = (by * zoom, total * zoom);
     let target = NormalizedRenderTarget::None { width: 800, height: 600 };
-    let pointer = Pointer::new(PointerId::Mouse, Location { target, position: Vec2::ZERO });
+    let pointer = Pointer::new(PointerId::Mouse, Location { target: target.clone(), position: Vec2::ZERO });
     let (hit, button, entity) = (HitData::new(Entity::PLACEHOLDER, 0.0, None, None), PointerButton::Primary, node);
     let w = app.world_mut();
     match step {
@@ -806,7 +806,7 @@ fn click(app: &mut App, entity: Entity) {
     use bevy::picking::events::{PointerClick, PointerPress, PointerRelease};
     use bevy::picking::pointer::{Location, PointerButton, PointerId};
     let target = NormalizedRenderTarget::None { width: 800, height: 600 };
-    let pointer = Pointer::new(PointerId::Mouse, Location { target, position: Vec2::ZERO });
+    let pointer = Pointer::new(PointerId::Mouse, Location { target: target.clone(), position: Vec2::ZERO });
     let hit = HitData::new(Entity::PLACEHOLDER, 0.0, None, None);
     let button = PointerButton::Primary;
     let w = app.world_mut();
@@ -837,7 +837,7 @@ fn dblclick(app: &mut App, entity: Entity) {
     use bevy::picking::events::PointerClick;
     use bevy::picking::pointer::{Location, PointerButton, PointerId};
     let target = NormalizedRenderTarget::None { width: 800, height: 600 };
-    let pointer = Pointer::new(PointerId::Mouse, Location { target, position: Vec2::ZERO });
+    let pointer = Pointer::new(PointerId::Mouse, Location { target: target.clone(), position: Vec2::ZERO });
     let hit = HitData::new(Entity::PLACEHOLDER, 0.0, None, None);
     let w = app.world_mut();
     w.register_component::<Window>();
@@ -1499,7 +1499,7 @@ fn scrub_drag_gates_hotkeys_only_while_held() {
     let (text, s) = (text_in(&mut app, root), scrubber(&mut app, root));
 
     let target = NormalizedRenderTarget::None { width: 800, height: 600 };
-    let pointer = Pointer::new(PointerId::Mouse, Location { target, position: Vec2::ZERO });
+    let pointer = Pointer::new(PointerId::Mouse, Location { target: target.clone(), position: Vec2::ZERO });
     let hit = HitData::new(Entity::PLACEHOLDER, 0.0, None, None);
     let button = PointerButton::Primary;
     app.world_mut().register_component::<Window>();
@@ -2051,7 +2051,7 @@ fn click_into_field_keeps_focus() {
         (|mut next: ResMut<PressNext>, mut commands: Commands| {
             let Some(entity) = next.0.take() else { return };
             let target = NormalizedRenderTarget::None { width: 800, height: 600 };
-            let pointer = Pointer::new(PointerId::Mouse, Location { target, position: Vec2::ZERO });
+            let pointer = Pointer::new(PointerId::Mouse, Location { target: target.clone(), position: Vec2::ZERO });
             let hit = HitData::new(Entity::PLACEHOLDER, 0.0, None, None);
             commands.trigger(PointerPress { entity, pointer, button: PointerButton::Primary, hit, count: 1 });
         })
@@ -3201,7 +3201,7 @@ fn main_menu_button_resets_on_every_close() {
     assert_eq!(state(&app, view_menu), closed);
 }
 
-/// The subpane titles under `root`, in display order (a Feathers `subpane_header` is told by its theme token).
+/// The shown subpane titles under `root`, in display order (a Feathers `subpane_header` is told by its theme token).
 fn subpane_titles(app: &mut App, root: Entity) -> Vec<String> {
     use bevy::feathers::theme::ThemeBackgroundColor;
     use bevy::feathers::tokens::SUBPANE_HEADER_BG;
@@ -3215,6 +3215,10 @@ fn subpane_titles(app: &mut App, root: Entity) -> Vec<String> {
         }
     }
     fn walk(w: &World, e: Entity, out: &mut Vec<String>) {
+        // Another kind's area (`Display::None`) is not shown.
+        if w.get::<Node>(e).is_some_and(|n| n.display == Display::None) {
+            return;
+        }
         if w.get::<ThemeBackgroundColor>(e).is_some_and(|c| c.0 == SUBPANE_HEADER_BG) {
             let mut title = Vec::new();
             texts(w, e, &mut title);
@@ -3251,6 +3255,38 @@ fn graph_sidebar_has_no_info_and_description_is_last() {
     }
 }
 
+/// The curve editor's right sidebar: the point count is in the editor statusbar only; the "Curve" subpane holds the
+/// output range's Min / Max fields (decision 0038).
+#[test]
+fn curve_sidebar_shows_the_range_not_the_point_count() {
+    use shader_editor_app::ui::areas::{AreasPlugin, RightSidebar, right_sidebar};
+    use shader_editor_app::ui::props::PropsPlugin;
+
+    fn texts(w: &World, e: Entity, out: &mut Vec<String>) {
+        if w.get::<Node>(e).is_some_and(|n| n.display == Display::None) {
+            return;
+        }
+        if let Some(t) = w.get::<Text>(e) {
+            out.push(t.0.clone());
+        }
+        for c in w.get::<Children>(e).into_iter().flatten() {
+            texts(w, *c, out);
+        }
+    }
+    let (_dir, mut app) = app();
+    app.add_plugins((AreasPlugin, PropsPlugin));
+    app.world_mut().spawn_scene(right_sidebar()).unwrap();
+    let sidebar = app.world_mut().query_filtered::<Entity, With<RightSidebar>>().single(app.world()).unwrap();
+    act(&mut app, Action::OpenAsset(AssetId::new(AssetType::Curve, "common/pulse")));
+    let mut shown = Vec::new();
+    texts(app.world(), sidebar, &mut shown);
+    assert!(shown.iter().any(|t| t == "Type: Curve"), "{shown:?}");
+    assert!(!shown.iter().any(|t| t.contains("points")), "{shown:?}");
+    for label in ["Min", "Max"] {
+        assert!(shown.iter().any(|t| t == label), "{label}: {shown:?}");
+    }
+}
+
 /// Design §6.1: the editor topbar's Comment button (`AddComment(None)`, also hold C off the canvas) puts a frame
 /// around no node at the visible canvas centre, snapped to the grid.
 #[test]
@@ -3282,4 +3318,338 @@ fn comment_button_adds_frame_at_view_centre() {
     assert_eq!(snapped, (710.0, -90.0));
     assert_eq!(f.rect, (snapped.0, snapped.1, 400.0, 300.0));
     assert!(f.nodes.is_empty());
+}
+
+/// Opens a new gradient collection `common/ramps` (created on disk first) in the app's editor.
+fn open_gradients(app: &mut App) -> AssetId {
+    let id = {
+        let mut e = app.world_mut().resource_mut::<Editor>();
+        let id = shader_project::ops::create_gradients(e.project.as_ref().unwrap(), "common/ramps").unwrap();
+        e.rescan();
+        id
+    };
+    act(app, Action::OpenAsset(id.clone()));
+    id
+}
+
+/// Gradient design §8: a collection tab fills the editor topbar (Duplicate / Clear / Move up / Move down), the right
+/// sidebar (the Name field and a Feathers list of all 128 slots, the selected one `Selected`) and the editor content
+/// (the bar with one handle per stop and one diamond per segment).
+#[test]
+fn gradients_tab_fills_its_areas() {
+    use bevy::feathers::controls::{FeathersListRow, FeathersListView};
+    use bevy::ui::Selected;
+    use shader_editor_app::editors::gradients::{GradientsViewBar, SlotRow};
+    use shader_editor_app::state::GradientsAction;
+    use shader_editor_app::ui::areas::{AreasPlugin, editor_topbar, right_sidebar};
+    use shader_editor_app::ui::gradient_strip::{GradientStrip, GradientStripPlugin};
+    use shader_editor_app::ui::gradient_view::{
+        GradientCanvas, GradientViewPlugin, MidHandle, StopHandle, gradient_view,
+    };
+    use shader_editor_app::ui::props::PropsPlugin;
+    use shader_editor_app::ui::tooltip::Tooltip;
+
+    let (_dir, mut app) = app();
+    app.add_plugins((AreasPlugin, PropsPlugin, GradientStripPlugin, GradientViewPlugin));
+    app.world_mut().spawn_scene(editor_topbar()).unwrap();
+    app.world_mut().spawn_scene(right_sidebar()).unwrap();
+    app.world_mut().spawn_scene(gradient_view()).unwrap();
+    let id = open_gradients(&mut app);
+
+    let w = app.world_mut();
+    let bar = w.query_filtered::<Entity, With<GradientsViewBar>>().single(w).unwrap();
+    let tips: Vec<String> = w.query::<&Tooltip>().iter(w).map(|t| t.0.clone()).collect();
+    for tip in
+        ["Duplicate gradient into the next empty slot", "Clear gradient", "Move gradient up", "Move gradient down"]
+    {
+        assert!(tips.iter().any(|t| t == tip), "no topbar button {tip:?}: {tips:?}");
+    }
+    assert!(w.get::<Children>(bar).is_some_and(|c| !c.is_empty()), "the topbar row is filled");
+    assert_eq!(w.query::<&FeathersListView>().iter(w).count(), 1, "one slot list");
+    assert_eq!(w.query::<(&FeathersListRow, &SlotRow)>().iter(w).count(), 128, "a row per slot");
+    assert!(w.query::<&GradientCanvas>().iter(w).count() == 1, "the editor content");
+    let strips: Vec<String> = w.query::<&GradientStrip>().iter(w).map(|s| s.collection.clone()).collect();
+    assert!(strips.len() >= 128 && strips.iter().all(|c| *c == id.path), "every row shows its slot: {strips:?}");
+
+    let selected = |app: &mut App| {
+        let w = app.world_mut();
+        w.query_filtered::<&SlotRow, With<Selected>>().iter(w).map(|r| r.0).collect::<Vec<_>>()
+    };
+    assert_eq!(selected(&mut app), [0]);
+    act(&mut app, Action::Gradients(GradientsAction::SelectSlot(3)));
+    assert_eq!(selected(&mut app), [3]);
+
+    // Stops and midpoints get their handles.
+    for t in [0.1, 0.5, 0.9] {
+        act(&mut app, Action::Gradients(GradientsAction::AddStop(t)));
+    }
+    let w = app.world_mut();
+    assert_eq!(w.query::<&StopHandle>().iter(w).count(), 3);
+    assert_eq!(w.query::<&MidHandle>().iter(w).count(), 2);
+}
+
+/// Gradient design §8: dragging a stop handle moves its `t` as one undo step and keeps hold of the stop when it passes
+/// another one (the re-sort gives it a new index); a click on the bar adds a stop there, a drag across it does not.
+#[test]
+fn gradient_stop_drag_and_bar_click() {
+    use bevy::picking::backend::HitData;
+    use bevy::picking::events::{PointerClick, PointerDrag, PointerDragEnd, PointerDragStart, PointerPress};
+    use bevy::picking::pointer::{Location, PointerButton, PointerId};
+    use shader_editor_app::state::GradientsAction;
+    use shader_editor_app::ui::gradient_strip::GradientStripPlugin;
+    use shader_editor_app::ui::gradient_view::{GradientCanvas, GradientViewPlugin, StopHandle, gradient_view};
+
+    let (_dir, mut app) = app();
+    app.add_plugins((GradientStripPlugin, GradientViewPlugin));
+    app.world_mut().spawn_scene(gradient_view()).unwrap();
+    open_gradients(&mut app);
+    for t in [0.2, 0.8] {
+        act(&mut app, Action::Gradients(GradientsAction::AddStop(t)));
+    }
+    // A laid-out canvas 500 logical px wide (no UI layout runs here), centred on the window origin.
+    let canvas = app.world_mut().query_filtered::<Entity, With<GradientCanvas>>().single(app.world()).unwrap();
+    let laid_out = ComputedNode { size: Vec2::new(500.0, 138.0), inverse_scale_factor: 1.0, ..ComputedNode::default() };
+    app.world_mut().entity_mut(canvas).insert(laid_out);
+    let ts = |app: &App| {
+        let g = app.world().resource::<Editor>().gradients_doc().unwrap();
+        g.collection.slots[g.slot].stops.iter().map(|s| s.t).collect::<Vec<_>>()
+    };
+    let handle = |app: &mut App, index: usize| {
+        let w = app.world_mut();
+        w.query::<(Entity, &StopHandle)>().iter(w).find(|(_, h)| h.index() == index).unwrap().0
+    };
+    let target = bevy::camera::NormalizedRenderTarget::None { width: 800, height: 600 };
+    let pointer = Pointer::new(PointerId::Mouse, Location { target: target.clone(), position: Vec2::ZERO });
+    let hit = HitData::new(Entity::PLACEHOLDER, 0.0, None, None);
+    let button = PointerButton::Primary;
+    let drag = |app: &mut App, entity: Entity, steps: &[f32]| {
+        let w = app.world_mut();
+        w.trigger(PointerDragStart { entity, pointer: pointer.clone(), button, hit: hit.clone() });
+        w.flush();
+        app.update();
+        for &dx in steps {
+            let distance = Vec2::new(dx, 3.0);
+            let w = app.world_mut();
+            w.trigger(PointerDrag { entity, pointer: pointer.clone(), button, distance, delta: Vec2::ZERO });
+            w.flush();
+            app.update();
+        }
+        let distance = Vec2::new(*steps.last().unwrap(), 3.0);
+        let w = app.world_mut();
+        w.trigger(PointerDragEnd { entity, pointer: pointer.clone(), button, distance });
+        w.flush();
+        app.update();
+    };
+
+    let first = handle(&mut app, 0);
+    drag(&mut app, first, &[50.0, 100.0]);
+    let moved = ts(&app);
+    assert!((moved[0] - 0.4).abs() < 1e-5, "{moved:?}");
+    act(&mut app, Action::Undo);
+    assert_eq!(ts(&app), [0.2, 0.8], "one undo step");
+
+    // Past the other stop: the dragged stop is now stop 1 and keeps following the pointer.
+    let first = handle(&mut app, 0);
+    drag(&mut app, first, &[350.0, 400.0]);
+    let passed = ts(&app);
+    assert!((passed[0] - 0.8).abs() < 1e-5 && (passed[1] - 1.0).abs() < 1e-5, "{passed:?}");
+
+    // A press on the bar, 100 px from its left end, then a release there: bevy_picking's click, after `moved` px of
+    // drag on the bar.
+    let at = Location { target, position: Vec2::new(-250.0 + 100.0, -69.0 + 50.0) };
+    let bar_click = |app: &mut App, moved: f32| {
+        let pointer = Pointer::new(PointerId::Mouse, at.clone());
+        let w = app.world_mut();
+        w.trigger(PointerPress { entity: canvas, pointer: pointer.clone(), button, hit: hit.clone(), count: 1 });
+        if moved > 0.0 {
+            let distance = Vec2::new(moved, 0.0);
+            w.trigger(PointerDrag { entity: canvas, pointer: pointer.clone(), button, distance, delta: distance });
+        }
+        let duration = std::time::Duration::from_millis(50);
+        w.trigger(PointerClick { entity: canvas, pointer, button, hit: hit.clone(), duration, count: 1 });
+        w.flush();
+        app.update();
+    };
+    bar_click(&mut app, 40.0);
+    assert_eq!(ts(&app).len(), 2, "a drag on the bar adds no stop: {:?}", ts(&app));
+    bar_click(&mut app, 2.0);
+    let added = ts(&app);
+    assert!(added.len() == 3 && (added[0] - 0.2).abs() < 1e-5, "a jitter under the threshold clicks: {added:?}");
+}
+
+/// Gradient design §8: a click on a stop handle (press and release without a drag) opens Feathers' color picker
+/// popup for that stop; a drag on the handle moves the stop and never opens it. The picker starts from the stop's
+/// linear color, and its changes during one pick are one undo step.
+#[test]
+fn gradient_stop_click_opens_the_color_picker() {
+    use bevy::feathers::controls::{ColorInputSettings, ColorInputValue, FeathersMenuPopup};
+    use bevy::picking::backend::HitData;
+    use bevy::picking::events::{
+        PointerClick, PointerDrag, PointerDragEnd, PointerDragStart, PointerPress, PointerRelease,
+    };
+    use bevy::picking::pointer::{Location, PointerButton, PointerId};
+    use bevy::ui_widgets::ValueChange;
+    use shader_editor_app::state::GradientsAction;
+    use shader_editor_app::ui::gradient_strip::GradientStripPlugin;
+    use shader_editor_app::ui::gradient_view::{GradientCanvas, GradientViewPlugin, StopHandle, gradient_view};
+
+    let (_dir, mut app) = app();
+    app.init_resource::<ColorInputSettings>();
+    app.add_plugins((GradientStripPlugin, GradientViewPlugin));
+    app.world_mut().spawn_scene(gradient_view()).unwrap();
+    open_gradients(&mut app);
+    for t in [0.2, 0.8] {
+        act(&mut app, Action::Gradients(GradientsAction::AddStop(t)));
+    }
+    act(&mut app, Action::Gradients(GradientsAction::SetStopColor(0, [0.25, 0.5, 0.75, 1.0], None)));
+    let canvas = app.world_mut().query_filtered::<Entity, With<GradientCanvas>>().single(app.world()).unwrap();
+    let laid_out = ComputedNode { size: Vec2::new(500.0, 138.0), inverse_scale_factor: 1.0, ..ComputedNode::default() };
+    app.world_mut().entity_mut(canvas).insert(laid_out);
+    app.world_mut().register_component::<Window>();
+    let handle = |app: &mut App, index: usize| {
+        let w = app.world_mut();
+        w.query::<(Entity, &StopHandle)>().iter(w).find(|(_, h)| h.index() == index).unwrap().0
+    };
+    let popups = |app: &mut App| {
+        let w = app.world_mut();
+        w.query_filtered::<&ChildOf, With<FeathersMenuPopup>>().iter(w).map(|c| c.parent()).collect::<Vec<_>>()
+    };
+    let colors = |app: &App| {
+        let g = app.world().resource::<Editor>().gradients_doc().unwrap();
+        g.collection.slots[g.slot].stops.iter().map(|s| s.color).collect::<Vec<_>>()
+    };
+
+    // A drag in bevy_picking's order: press, drag, then on release click (over the same entity), release, drag end.
+    let target = bevy::camera::NormalizedRenderTarget::None { width: 800, height: 600 };
+    let pointer = Pointer::new(PointerId::Mouse, Location { target, position: Vec2::ZERO });
+    let hit = HitData::new(Entity::PLACEHOLDER, 0.0, None, None);
+    let button = PointerButton::Primary;
+    let first = handle(&mut app, 0);
+    let w = app.world_mut();
+    w.trigger(PointerPress { entity: first, pointer: pointer.clone(), button, hit: hit.clone(), count: 1 });
+    w.trigger(PointerDragStart { entity: first, pointer: pointer.clone(), button, hit: hit.clone() });
+    let by = Vec2::new(40.0, 0.0);
+    w.trigger(PointerDrag { entity: first, pointer: pointer.clone(), button, distance: by, delta: by });
+    w.flush();
+    app.update();
+    let w = app.world_mut();
+    let duration = std::time::Duration::from_millis(50);
+    w.trigger(PointerClick { entity: first, pointer: pointer.clone(), button, hit: hit.clone(), duration, count: 1 });
+    w.trigger(PointerRelease { entity: first, pointer: pointer.clone(), button, hit: hit.clone() });
+    w.trigger(PointerDragEnd { entity: first, pointer: pointer.clone(), button, distance: by });
+    w.flush();
+    app.update();
+    app.update();
+    assert!(popups(&mut app).is_empty(), "a drag does not open the picker");
+    let ts = |app: &App| {
+        let g = app.world().resource::<Editor>().gradients_doc().unwrap();
+        g.collection.slots[g.slot].stops.iter().map(|s| s.t).collect::<Vec<_>>()
+    };
+    assert!((ts(&app)[0] - 0.28).abs() < 1e-5, "the drag moved the stop: {:?}", ts(&app));
+
+    // A click opens it, anchored on the picker that holds the stop's color.
+    let first = handle(&mut app, 0);
+    click(&mut app, first);
+    app.update();
+    app.update();
+    let open = popups(&mut app);
+    assert_eq!(open.len(), 1, "a click opens the picker");
+    let shown = app.world().get::<ColorInputValue>(open[0]).expect("the popup hangs from a color input").0;
+    let lin = shown.to_linear().to_f32_array();
+    assert!(lin.iter().zip([0.25, 0.5, 0.75, 1.0]).all(|(a, b)| (a - b).abs() < 1e-4), "{lin:?}");
+    // Decision 0034: a click barrier under the popup while it is open.
+    let barriers = |app: &mut App| {
+        let w = app.world_mut();
+        let z = shader_editor_app::ui::dialog::MENU_BARRIER_Z;
+        w.query::<&GlobalZIndex>().iter(w).filter(|g| g.0 == z).count()
+    };
+    assert_eq!(barriers(&mut app), 1, "the barrier is up");
+
+    // The picker's changes (sRGB `Color`s) are stored linear; one pick is one undo step.
+    let before = colors(&app);
+    for (value, is_final) in [(Color::srgb(1.0, 0.0, 0.0), false), (Color::srgb(0.5, 0.5, 0.5), true)] {
+        app.world_mut().trigger(ValueChange { source: open[0], value, is_final });
+        app.world_mut().flush();
+        app.update();
+    }
+    let grey = Color::srgb(0.5, 0.5, 0.5).to_linear().to_f32_array();
+    assert!(colors(&app)[0].iter().zip(grey).all(|(a, b)| (a - b).abs() < 1e-5), "{:?}", colors(&app));
+    // Closed (an outside click on the barrier drops the focus, Feathers then despawns the popup).
+    let popup = app.world_mut().query_filtered::<Entity, With<FeathersMenuPopup>>().single(app.world()).unwrap();
+    app.world_mut().entity_mut(popup).despawn();
+    app.update();
+    app.update();
+    assert_eq!(barriers(&mut app), 0, "the barrier goes with the popup");
+    act(&mut app, Action::Undo);
+    assert_eq!(colors(&app), before, "one pick is one undo step");
+}
+
+/// Gradient design §6: a selected Sample Gradient shows its collection select and a Feathers list of the collection's
+/// non-empty slots after a "None" row, the picked one `Selected`; clicking a row sets the gradient.
+#[test]
+fn sample_gradient_properties_list_the_used_slots() {
+    use bevy::feathers::controls::{FeathersListRow, FeathersListView};
+    use bevy::ui::Selected;
+    use bevy::ui_widgets::ValueChange;
+    use shader_editor_app::state::GradientsAction;
+    use shader_editor_app::ui::areas::{AreasPlugin, editor_topbar, right_sidebar};
+    use shader_editor_app::ui::gradient_strip::GradientStripPlugin;
+    use shader_editor_app::ui::props::{PropsPlugin, SlotChoice, SlotPicker};
+    use shader_graph_core::Value;
+    use shader_stdlib::nodes::color::{GRADIENT_COLLECTION_PARAM, GRADIENT_SLOT_PARAM, SAMPLE_GRADIENT_KIND};
+
+    let (_dir, mut app) = app();
+    app.add_plugins((AreasPlugin, PropsPlugin, GradientStripPlugin));
+    app.world_mut().spawn_scene(editor_topbar()).unwrap();
+    app.world_mut().spawn_scene(right_sidebar()).unwrap();
+    open_gradients(&mut app);
+    // Slots 0 and 2 get stops; slot 2's id is picked below.
+    for slot in [0, 2] {
+        act(&mut app, Action::Gradients(GradientsAction::SelectSlot(slot)));
+        act(&mut app, Action::Gradients(GradientsAction::AddStop(0.5)));
+    }
+    let picked = app.world().resource::<Editor>().gradients_doc().unwrap().collection.slots[2].id;
+    act(&mut app, Action::OpenAsset(AssetId::new(AssetType::Material, "env/rock_wet")));
+    let add = Action::AddNode { kind: SAMPLE_GRADIENT_KIND.into(), pos: (-900.0, 0.0), link: None, params: Vec::new() };
+    act(&mut app, add);
+    let node = added(&app, SAMPLE_GRADIENT_KIND, (-900.0, 0.0));
+    let set = |key: &str, value: Value| Action::SetValue {
+        target: PropTarget::Param { node: node.clone(), key: key.into() },
+        value,
+        merge: false,
+    };
+    act(&mut app, set(GRADIENT_COLLECTION_PARAM, Value::Str("common/ramps".into())));
+    act(&mut app, Action::Select([node.clone()].into()));
+
+    let rows = |app: &mut App| {
+        let w = app.world_mut();
+        let mut rows: Vec<(u32, bool)> = w
+            .query_filtered::<(&SlotChoice, Has<Selected>), With<FeathersListRow>>()
+            .iter(w)
+            .map(|(c, s)| (c.0, s))
+            .collect();
+        rows.sort();
+        rows
+    };
+    let w = app.world_mut();
+    let list = w.query_filtered::<Entity, (With<FeathersListView>, With<SlotPicker>)>().single(w).unwrap();
+    let mut want = vec![(0, true), (picked, false)];
+    let first = app.world().resource::<Editor>().gradient_collection("common/ramps").unwrap().slots[0].id;
+    want.push((first, false));
+    want.sort();
+    assert_eq!(rows(&mut app), want, "None + the two non-empty slots");
+
+    let row = {
+        let w = app.world_mut();
+        w.query::<(Entity, &SlotChoice)>().iter(w).find(|(_, c)| c.0 == picked).unwrap().0
+    };
+    app.world_mut().trigger(ValueChange { source: list, value: row, is_final: true });
+    app.update();
+    app.update();
+    let params = {
+        let e = app.world().resource::<Editor>();
+        e.doc().unwrap().asset.nodes[&node].params.get(GRADIENT_SLOT_PARAM).cloned()
+    };
+    assert_eq!(params, Some(Value::Int(picked as i32)));
+    assert!(rows(&mut app).contains(&(picked, true)), "the picked row is selected after the refill");
 }

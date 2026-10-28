@@ -4,7 +4,7 @@
 
 use std::collections::BTreeSet;
 
-use shader_graph_core::curve::{Curve, Interp};
+use shader_graph_core::curve::{Curve, Interp, range_error};
 use shader_project::AssetId;
 
 use crate::history::History;
@@ -59,6 +59,22 @@ impl CurveDoc {
         if changed {
             self.revision += 1;
         }
+    }
+
+    /// Sets the output range (decision 0038) as one undoable step (merged with the previous one of the same `key`);
+    /// an invalid range (`min >= max`, non-finite) changes nothing and is returned as an error.
+    pub fn set_range(&mut self, min: f32, max: f32, key: Option<&str>) -> Result<(), String> {
+        if let Some(e) = range_error(min, max) {
+            return Err(e);
+        }
+        let before = self.curve.clone();
+        (self.curve.min, self.curve.max) = (min, max);
+        let changed = self.curve != before;
+        self.history.record(changed.then_some(before), key);
+        if changed {
+            self.revision += 1;
+        }
+        Ok(())
     }
 
     /// Adds a point and selects it.
@@ -226,6 +242,20 @@ mod tests {
         assert_eq!(selection, [1].into());
         assert!(d.undo());
         assert_eq!(d.curve.points, vec![(0.0, 0.0), (0.5, 0.5), (1.0, 1.0)]);
+    }
+
+    #[test]
+    fn range_edits_keep_the_points_and_refuse_empty_ranges() {
+        let mut d = doc();
+        assert!(d.set_range(-1.0, 3.0, None).is_ok());
+        assert_eq!((d.curve.min, d.curve.max, d.curve.points.len()), (-1.0, 3.0, 2));
+        assert!(d.is_dirty());
+        assert!(d.set_range(3.0, 3.0, None).is_err());
+        assert!(d.set_range(f32::NAN, 3.0, None).is_err());
+        assert_eq!((d.curve.min, d.curve.max), (-1.0, 3.0));
+        assert!(d.undo());
+        assert_eq!((d.curve.min, d.curve.max), (0.0, 1.0));
+        assert!(!d.undo(), "a refused edit is no step");
     }
 
     #[test]

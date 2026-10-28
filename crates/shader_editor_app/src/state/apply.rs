@@ -148,6 +148,9 @@ impl Editor {
                 self.delete_selection();
             }
             Action::Paste(at) => self.paste(at),
+            Action::Duplicate if self.gradients_doc().is_some() => {
+                self.gradients_action(GradientsAction::DuplicateSlot);
+            }
             Action::Duplicate if self.curve_doc().is_some() => {
                 if let Some(c) = self.curve_doc_mut() {
                     let copies: Vec<(f32, f32)> =
@@ -258,9 +261,13 @@ impl Editor {
                 if let Some(t) = self.texture_doc_mut() {
                     t.end_merge();
                 }
+                if let Some(g) = self.gradients_doc_mut() {
+                    g.end_merge();
+                }
                 self.ui.props += 1;
             }
             Action::Curve(a) => self.curve_action(a),
+            Action::Gradients(a) => self.gradients_action(a),
             Action::Consts(a) => self.consts_action(a),
             Action::Texture(a) => self.texture_action(a),
             Action::SetPinType { node, ty } => self.set_pin_type(&node, ty),
@@ -487,6 +494,13 @@ impl Editor {
                     c.undo()
                 } else {
                     c.redo()
+                }
+            }
+            Some(Tab::Gradients(g)) => {
+                if undo {
+                    g.undo()
+                } else {
+                    g.redo()
                 }
             }
             _ => false,

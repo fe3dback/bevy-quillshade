@@ -13,23 +13,35 @@ import bevy_pbr::render::{mesh_bindings::mesh, mesh_functions, skinning, morph, 
 import super::super::functions::dir_common::fun_rock_layer::fun_rock_layer;
 import super::super::stdlib::material::{MaterialAttributesPbr, sg_lerp_attributes_pbr};
 import super::super::stdlib::shading::{sg_slope_angle, sg_world_aligned_blend};
+import super::super::stdlib::texture::sg_sample_gradient;
 import super::super::stdlib::transform::sg_tbn;
 
+@group(constants::MATERIAL_BIND_GROUP) @binding(101) var gc_common_terrain: texture_2d<f32>;
+@group(constants::MATERIAL_BIND_GROUP) @binding(102) var gc_common_terrain_sampler: sampler;
 // The game's compiled material enables this feature; after a change of parameters, texture bindings or
 // World Position Offset the shader stops compiling here until the game is rebuilt.
-@if(!SG_LAYOUT_7a07b390)
+@if(!SG_LAYOUT_50ec9cbe)
 const_assert material_layout_changed__rebuild_the_game;
 
 @fragment
 fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> FragmentOutput {
     var pbr_input = pbr_input_from_standard_material(in, is_front);
     // --- builtins ---
+    let b_world_position: vec3<f32> = in.world_position.xyz;
     let b_world_normal: vec3<f32> = pbr_input.world_normal;
     // --- graph ---
-    let n_n03_attributes: MaterialAttributesPbr = MaterialAttributesPbr(vec3<f32>(0.15, 0.45, 0.1), 0.0f, 0.5f, 0.7f, vec3<f32>(0.0, 0.0, 0.0), 1.0f, 1.0f, vec3<f32>(0.0, 0.0, 1.0), 1.0f);
     let n_n05_layer: MaterialAttributesPbr = fun_rock_layer(vec3<f32>(0.4, 0.38, 0.35));
     let n_n06_mask: f32 = sg_world_aligned_blend(b_world_normal, vec3<f32>(0.0, 1.0, 0.0), 10.0f, -0.7f);
     let n_n06_angle: f32 = sg_slope_angle(b_world_normal, vec3<f32>(0.0, 1.0, 0.0));
+    let n_n10_x: f32 = (b_world_position).x;
+    let n_n10_y: f32 = (b_world_position).y;
+    let n_n10_z: f32 = (b_world_position).z;
+    let n_n11_out: f32 = (n_n10_y * 0.25f);
+    let n_n12_out: f32 = (n_n11_out + 0.5f);
+    let n_n13_out: f32 = saturate(n_n12_out);
+    let n_n14_rgba: vec4<f32> = sg_sample_gradient(gc_common_terrain, gc_common_terrain_sampler, n_n13_out, 0.00390625f);
+    let n_n15_out: vec3<f32> = (vec3<f32>(0.15, 0.45, 0.1) * n_n14_rgba.rgb);
+    let n_n03_attributes: MaterialAttributesPbr = MaterialAttributesPbr(n_n15_out, 0.0f, 0.5f, 0.7f, vec3<f32>(0.0, 0.0, 0.0), 1.0f, 1.0f, vec3<f32>(0.0, 0.0, 1.0), 1.0f);
     let n_n07_out: MaterialAttributesPbr = sg_lerp_attributes_pbr(n_n05_layer, n_n03_attributes, n_n06_mask);
     // --- outputs ---
     pbr_input.material.base_color = vec4<f32>(n_n07_out.base_color, pbr_input.material.base_color.a);

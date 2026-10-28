@@ -4,21 +4,22 @@
 //! subpanes ([`super::widgets::subpane_box`]).
 
 use bevy::feathers::controls::{
-    ColorSwatchValue, FeathersCheckbox, FeathersColorSwatch, FeathersNumberInput, FeathersSelect, FeathersTextInput,
-    FeathersTextInputContainer, HardLimit, NumberInputPrecision, NumberInputRange, NumberInputValue, OptionIndex,
-    SoftLimit, list_rows_from_strings,
+    ColorSwatchValue, FeathersCheckbox, FeathersColorSwatch, FeathersListView, FeathersNumberInput, FeathersSelect,
+    FeathersTextInput, FeathersTextInputContainer, HardLimit, NumberInputPrecision, NumberInputRange, NumberInputValue,
+    OptionIndex, SoftLimit, list_rows_from_strings,
 };
 use bevy::feathers::display::caption;
 use bevy::feathers::tokens;
 use bevy::prelude::*;
 use bevy::text::{EditableText, TextEditChange};
-use bevy::ui::Checked;
+use bevy::ui::{Checked, Selected};
 use bevy::ui_widgets::ValueChange;
 use bevy_noodle::prelude::GraphQuery;
 use shader_graph_core::registry::ParamKind;
 use shader_graph_core::{PinType, Value};
 
 use super::dialog::InitText;
+use super::gradient_strip::{GradientStrip, slot_list_row};
 use super::widgets::checkbox;
 use super::{TEXT, TEXT_DIM, text};
 use crate::state::{Action, Actions, Editor, PropTarget, display_value};
@@ -45,6 +46,10 @@ pub struct FieldText {
     ready: bool,
 }
 
+/// Dim hint over an empty text field ([`text_hint`]): Bevy 0.20's text input has no placeholder of its own.
+#[derive(Component, Default, Clone)]
+pub struct Placeholder;
+
 /// Color preview kept in sync with the model.
 #[derive(Component, Default, Clone)]
 pub struct SwatchOf(pub PropTarget);
@@ -53,12 +58,13 @@ pub struct PropsPlugin;
 
 impl Plugin for PropsPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, update_swatches)
+        app.add_systems(Update, (update_swatches, show_placeholders))
             .add_observer(number_f32)
             .add_observer(number_i32)
             .add_observer(color)
             .add_observer(checkbox_changed)
             .add_observer(select)
+            .add_observer(pick_slot)
             .add_observer(text_changed);
     }
 }
@@ -94,6 +100,14 @@ pub(crate) fn value_row(
 ) -> Box<dyn Scene> {
     match kind {
         ParamKind::Bool => checkbox_row(&label, target, v.as_bool()),
+        // The slot list takes the full width, under its label.
+        ParamKind::GradientSlot => {
+            let widget = value_widget(target, kind, v, choices);
+            Box::new(bsn! {
+                Node { flex_direction: FlexDirection::Column, row_gap: px(4) }
+                Children [ @text(label, TEXT, 13.0) -- @{widget} ]
+            })
+        }
         _ => Box::new(labeled(label, value_widget(target, kind, v, choices))),
     }
 }
@@ -245,8 +259,43 @@ pub(crate) fn text_w(target: PropTarget, v: String, multiline: bool) -> Box<dyn 
     }
 }
 
+/// A one-line [`text_w`] showing `hint` while it is empty.
+pub(crate) fn text_hint(target: PropTarget, v: String, hint: &str) -> Box<dyn Scene> {
+    let sync = FieldText { ready: v.is_empty(), last: v.clone() };
+    let vis = if v.is_empty() { Visibility::Inherited } else { Visibility::Hidden };
+    let (field, init, hint) = (PropField { target, ..Default::default() }, InitText(v), hint.to_string());
+    Box::new(bsn! {
+        @FeathersTextInputContainer
+        Node { flex_grow: 0.0, width: percent(100) }
+        Children [
+            @FeathersTextInput field init sync
+            --
+            Placeholder
+            Text(hint)
+            TextFont { font_size: FontSize::Px(13.0) }
+            TextColor(TEXT_DIM)
+            Node { position_type: PositionType::Absolute, left: px(8) }
+            Pickable::IGNORE
+            vis
+        ]
+    })
+}
+
+/// Shows each [`Placeholder`] exactly while the text field next to it is empty.
+fn show_placeholders(
+    mut hints: Query<(&ChildOf, &mut Visibility), With<Placeholder>>,
+    children: Query<&Children>,
+    texts: Query<&EditableText>,
+) {
+    for (parent, mut vis) in &mut hints {
+        let siblings = children.get(parent.parent()).into_iter().flatten();
+        let empty = siblings.filter_map(|c| texts.get(*c).ok()).all(|t| t.value().to_string().is_empty());
+        vis.set_if_neq(if empty { Visibility::Inherited } else { Visibility::Hidden });
+    }
+}
+
 /// Select of `(stored value, label)` choices with a leading `(none)` (= empty string): named route declarations
-/// (node ids), curve assets (paths), global constants (names).
+/// (node ids), curve assets (paths), global constants (names), Texture assets, gradient collections (paths).
 fn keyed_select(target: PropTarget, choices: &[(String, String)], current: &str) -> Box<dyn Scene> {
     let options: Vec<String> =
         std::iter::once("(none)".to_string()).chain(choices.iter().map(|r| r.1.clone())).collect();
@@ -258,13 +307,86 @@ fn keyed_select(target: PropTarget, choices: &[(String, String)], current: &str)
 }
 
 /// Choices of reference parameters: named route declarations of the asset, curve assets of the project, global
-/// constants (of the parameter's type), Texture assets and built-in textures.
+/// constants (of the parameter's type), Texture assets and built-in textures, gradient collections and the slots of
+/// the node's collection.
 #[derive(Default, Clone)]
 pub(crate) struct Choices {
     pub routes: Vec<(String, String)>,
     pub curves: Vec<(String, String)>,
     pub consts: Vec<(String, String)>,
     pub textures: Vec<(String, String)>,
+    pub gradients: Vec<(String, String)>,
+    pub slots: GradientSlots,
+}
+
+/// What a `GradientSlot` parameter can pick (gradient design §6): the slots of the node's collection that hold a
+/// gradient (and the picked one even if it is empty), in collection order.
+#[derive(Default, Clone)]
+pub(crate) struct GradientSlots {
+    /// The collection's asset path; empty without a loadable collection.
+    pub collection: String,
+    pub slots: Vec<SlotEntry>,
+}
+
+/// One pickable slot: its position in the collection, id and name.
+#[derive(Clone)]
+pub(crate) struct SlotEntry {
+    pub pos: usize,
+    pub id: u32,
+    pub name: String,
+}
+
+/// The slot list of a `GradientSlot` parameter (a `FeathersListView`) and the parameter it sets.
+#[derive(Component, Default, Clone)]
+pub struct SlotPicker(pub PropTarget);
+
+/// A row of a [`SlotPicker`]: the slot id it picks (`0`: none).
+#[derive(Component, Default, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SlotChoice(pub u32);
+
+/// Ink of the "None" row's name, on its white strip.
+const NONE_INK: Color = Color::srgb(0.15, 0.15, 0.15);
+
+/// The slot list of a `GradientSlot` parameter (gradient design §6): "None" (a white strip, as the node outputs
+/// without a gradient), then each pickable slot as a [`GradientStrip`] with its name; the row of `current` is
+/// `Selected` (the sidebar is refilled after each pick, so the model stays the source of truth).
+fn slot_picker(target: PropTarget, current: u32, slots: &GradientSlots) -> Box<dyn Scene> {
+    let row = |id: u32| -> Box<dyn Scene> {
+        let choice = SlotChoice(id);
+        if id == current { Box::new(bsn! { choice Selected }) } else { Box::new(bsn! { choice }) }
+    };
+    let mut rows: Vec<Box<dyn SceneList>> = vec![slot_list_row(
+        String::new(),
+        row(0),
+        Box::new(bsn! { BackgroundColor(Color::WHITE) }),
+        Box::new(bsn! { Text("None") TextColor(NONE_INK) TextShadow { color: Color::NONE } }),
+    )];
+    for s in &slots.slots {
+        let strip = GradientStrip { collection: slots.collection.clone(), slot: s.id };
+        let name = s.name.clone();
+        rows.push(slot_list_row(
+            s.pos.to_string(),
+            row(s.id),
+            Box::new(bsn! { strip ImageNode }),
+            Box::new(bsn! { Text(name) }),
+        ));
+    }
+    let rows: Box<dyn SceneList> = Box::new(rows);
+    let picker = SlotPicker(target);
+    Box::new(bsn! { @FeathersListView { @rows: rows } picker Node { flex_grow: 1.0, max_height: px(220) } })
+}
+
+/// A row picked in a [`SlotPicker`] (click, or Space / Enter on the list's active row) sets its parameter.
+fn pick_slot(
+    ev: On<ValueChange<Entity>>,
+    pickers: Query<&SlotPicker>,
+    rows: Query<&SlotChoice>,
+    mut actions: ResMut<Actions>,
+) {
+    if let (Ok(picker), Ok(choice)) = (pickers.get(ev.source), rows.get(ev.value)) {
+        let value = Value::Int(i32::try_from(choice.0).unwrap_or(0));
+        actions.push(Action::SetValue { target: picker.0.clone(), value, merge: false });
+    }
 }
 
 /// Widget editing a value of `kind` (a bool: an uncaptioned checkbox, for rows that show the label themselves).
@@ -275,6 +397,9 @@ pub(crate) fn value_widget(target: PropTarget, kind: &ParamKind, v: &Value, choi
         ParamKind::GlobalConst(_) => keyed_select(target, &choices.consts, v.as_str()),
         // `(none)`: the node uses the default texture (W110).
         ParamKind::Texture => keyed_select(target, &choices.textures, v.as_str()),
+        // `(none)`: the node outputs white (W111); picking a collection resets the slot (gradient design §6).
+        ParamKind::GradientCollection => keyed_select(target, &choices.gradients, v.as_str()),
+        ParamKind::GradientSlot => slot_picker(target, u32::try_from(v.as_i32()).unwrap_or(0), &choices.slots),
         ParamKind::Float { min, max } => number_ranged(target, 0, v.as_f32(), soft_range(*min, *max), None),
         ParamKind::Float2 => vector(target, &v.coerce(PinType::Float2).floats(), false),
         ParamKind::Float3 => vector(target, &v.coerce(PinType::Float3).floats(), false),

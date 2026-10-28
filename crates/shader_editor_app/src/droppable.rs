@@ -3,8 +3,9 @@
 //! dropping one adds a `stdlib::TextureSample` referencing the image's Texture asset, which is created when no Texture
 //! asset points at the file yet. A Texture asset of the Project tree (or a built-in `@internal/…` texture) dropped the
 //! same way only skips the lookup. Function and Curve assets of the Project tree are droppable too (design §4.11): a
-//! Function adds its call node, a Curve sets a node's curve param or adds a `stdlib::SampleCurve`. The drop itself is
-//! [`crate::state::Action::Drop`].
+//! Function adds its call node, a Curve sets a node's curve param or adds a `stdlib::SampleCurve`; a gradient collection
+//! likewise sets a node's collection or adds a `stdlib::SampleGradient` with no gradient picked (gradient design §6).
+//! The drop itself is [`crate::state::Action::Drop`].
 
 use shader_graph_core::registry::ParamKind;
 use shader_project::game_assets;
@@ -78,11 +79,13 @@ pub enum Dropped {
     Function(String),
     /// A Curve asset of the Project tree, path without suffix: the value of a `ParamKind::Curve` param.
     Curve(String),
+    /// A gradient collection of the Project tree, path without suffix: the value of a `GradientCollection` param.
+    Gradients(String),
 }
 
 impl Dropped {
-    /// What dragging `row` onto a graph drops: a droppable game file, a Texture / Function / Curve asset or a
-    /// built-in texture.
+    /// What dragging `row` onto a graph drops: a droppable game file, a Texture / Function / Curve / gradient
+    /// collection asset or a built-in texture.
     pub fn from_row(row: &TreeRow) -> Option<Dropped> {
         match &row.item {
             TreeItem::GameFile(path) if droppable_for(path).is_some() => Some(Dropped::GameFile(path.clone())),
@@ -90,6 +93,7 @@ impl Dropped {
                 AssetType::Texture => Some(Dropped::Texture(id.path.clone())),
                 AssetType::Function => Some(Dropped::Function(id.path.clone())),
                 AssetType::Curve => Some(Dropped::Curve(id.path.clone())),
+                AssetType::Gradients => Some(Dropped::Gradients(id.path.clone())),
                 _ => None,
             },
             TreeItem::Internal(id) => Some(Dropped::Texture(id.clone())),

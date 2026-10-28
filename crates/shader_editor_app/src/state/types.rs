@@ -9,11 +9,19 @@ pub enum NewKind {
     Function,
     Curve,
     Consts,
+    Gradients,
 }
 
 impl NewKind {
-    pub const ALL: [NewKind; 6] =
-        [NewKind::Pbr3d, NewKind::Unlit3d, NewKind::Sprite2d, NewKind::Function, NewKind::Curve, NewKind::Consts];
+    pub const ALL: [NewKind; 7] = [
+        NewKind::Pbr3d,
+        NewKind::Unlit3d,
+        NewKind::Sprite2d,
+        NewKind::Function,
+        NewKind::Curve,
+        NewKind::Consts,
+        NewKind::Gradients,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -23,6 +31,7 @@ impl NewKind {
             NewKind::Function => "Function",
             NewKind::Curve => "Curve",
             NewKind::Consts => "Global Consts",
+            NewKind::Gradients => "Gradient Collection",
         }
     }
 
@@ -31,7 +40,7 @@ impl NewKind {
             NewKind::Pbr3d => Some(MaterialKind::Pbr3d(PbrSettings::default())),
             NewKind::Unlit3d => Some(MaterialKind::Unlit3d(UnlitSettings::default())),
             NewKind::Sprite2d => Some(MaterialKind::Sprite2d(SpriteSettings::default())),
-            NewKind::Function | NewKind::Curve | NewKind::Consts => None,
+            NewKind::Function | NewKind::Curve | NewKind::Consts | NewKind::Gradients => None,
         }
     }
 
@@ -41,6 +50,7 @@ impl NewKind {
             NewKind::Function => "new_function",
             NewKind::Curve => "new_curve",
             NewKind::Consts => "new_consts",
+            NewKind::Gradients => "new_gradients",
             _ => "new_material",
         }
     }
@@ -79,8 +89,11 @@ pub enum PropTarget {
     /// Hue of a comment frame (`Frame::hue`, design §4.6): a `Float` in degrees, a `Str` when unset (any non-float
     /// value clears it: "Default colour").
     FrameHue(String),
-    /// `(t, value)` of a point of the active curve, as a `Float2`.
+    /// `(t, value)` of a point of the active curve, as a `Float2`: `t` normalized, the value in real units (the
+    /// curve's output range).
     CurvePoint(usize),
+    /// Output range `(min, max)` of the active curve, as a `Float2` (decision 0038).
+    CurveRange,
     /// Interpolation the active curve view draws (editor-only).
     CurvePreview,
     /// Value of a constant of the active table (decision 0017).
@@ -95,6 +108,14 @@ pub enum PropTarget {
     Texture(TextureField),
     /// The active image or Texture tab's preview repeats the image 3x3 (editor-only, design §6.2).
     PreviewTiled,
+    /// A field of stop `.0` of the active gradients tab's selected slot: component `.1` = 0 is its `t` (a `Float`).
+    GradientStop(usize, u8),
+    /// Midpoint of segment `.0` (stop `.0` → `.0 + 1`) of the active gradients tab's selected slot (a `Float`).
+    GradientMid(usize),
+    /// Name of the active gradients tab's selected slot (a `Str`).
+    GradientName,
+    /// Linear RGBA color of stop `.0` of the active gradients tab's selected slot (a `Color`).
+    GradientColor(usize),
 }
 
 /// Which text a dialog's input submits to.
@@ -165,6 +186,41 @@ pub enum CurveAction {
     },
     /// Moves the selected points by `(dt, dvalue)` (arrow keys).
     Nudge((f32, f32)),
+}
+
+/// Edits of the active gradients tab (gradient design §8), one per [`crate::gradients_doc::GradientsDoc`] method.
+/// Edits with a key (`Some("drag")`) merge with the previous one of the same key into one undo step until
+/// [`Action::CommitInline`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum GradientsAction {
+    /// Selects the slot at this position.
+    SelectSlot(usize),
+    /// Selects a stop or a midpoint of the selected slot.
+    Select(Option<GradientSel>),
+    /// Replaces the selected slot's stops and the selection.
+    SetStops(Vec<Stop>, Option<GradientSel>, Option<String>),
+    /// Adds a stop at this `t` (refused with a log message past `MAX_STOPS`).
+    AddStop(f32),
+    /// Deletes the selected stop.
+    DeleteSelected,
+    /// Midpoint of a segment.
+    SetMid(usize, f32, Option<String>),
+    /// `t` of a stop (it stays selected through the re-sort).
+    SetStopT(usize, f32, Option<String>),
+    /// Linear RGBA color of a stop.
+    SetStopColor(usize, [f32; 4], Option<String>),
+    /// Name of the selected slot.
+    SetName(String, Option<String>),
+    /// Moves a slot from one position to another.
+    MoveSlot(usize, usize),
+    /// Empties the selected slot (its id stays).
+    ClearSlot,
+    /// Copies the selected slot into the next empty one (refused with a log message when none is).
+    DuplicateSlot,
+    /// Copies the selected slot (stops + name) to the gradient clipboard.
+    CopySlot,
+    /// Pastes the gradient clipboard into the selected slot (it keeps its id).
+    PasteSlot,
 }
 
 /// Edits of the active global constant table (decision 0017).
@@ -376,6 +432,7 @@ pub enum Action {
     Curve(CurveAction),
     Consts(ConstsAction),
     Texture(TextureAction),
+    Gradients(GradientsAction),
     AutoLayout,
     /// A comment frame around the selection, or with none a default-size one at this graph position snapped to
     /// the grid (design §6.1). `None` (the editor topbar's Comment button, hold C with the cursor off the canvas):
@@ -462,6 +519,8 @@ pub struct Editor {
     pub clipboard: Option<ClipboardData>,
     /// Copied curve points.
     pub curve_clipboard: Option<Vec<(f32, f32)>>,
+    /// A copied gradient (stops + name; its id is never pasted).
+    pub gradient_clipboard: Option<Slot>,
     pub(super) paste_count: u32,
     /// Declared function signatures (disk, overridden by open documents).
     pub functions: BTreeMap<String, FunctionSig>,
@@ -508,6 +567,7 @@ impl Default for Editor {
             active: None,
             clipboard: None,
             curve_clipboard: None,
+            gradient_clipboard: None,
             paste_count: 0,
             functions: BTreeMap::new(),
             diags: BTreeMap::new(),

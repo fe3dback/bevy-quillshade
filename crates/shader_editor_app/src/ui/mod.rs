@@ -28,6 +28,9 @@ pub mod consts_view;
 pub mod curve_preview;
 pub mod curve_view;
 pub mod dialog;
+pub mod gradient_preview;
+pub mod gradient_strip;
+pub mod gradient_view;
 pub mod icons;
 pub mod image_preview;
 pub mod image_view;
@@ -130,6 +133,8 @@ impl Plugin for UiPlugin {
             image_preview::ImagePreviewPlugin,
             image_view::ImageViewPlugin,
             texture_view::TextureViewPlugin,
+            gradient_strip::GradientStripPlugin,
+            gradient_view::GradientViewPlugin,
             crate::game_image::GameImagePlugin,
             crate::editors::main_input::InputContextsPlugin,
         ))
@@ -579,6 +584,8 @@ fn spawn_layout(mut commands: Commands) {
                         @image_view::image_view()
                         --
                         @texture_view::texture_view()
+                        --
+                        @gradient_view::gradient_view()
                         --
                         EmptyHint
                         // `right` bounds the width: the hint wraps instead of running past the editor content.

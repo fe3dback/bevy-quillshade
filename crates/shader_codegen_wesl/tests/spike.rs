@@ -7,7 +7,7 @@ use shader_codegen_wesl::{GenCtx, paths};
 use shader_graph_core::consts::NoConsts;
 use shader_graph_core::ir::build_ir;
 use shader_graph_core::model::{Asset, AssetKind, MaterialKind, Node, PbrSettings};
-use shader_graph_core::registry::{NoCurves, NoTextures};
+use shader_graph_core::registry::{NoCurves, NoGradients, NoTextures};
 use shader_graph_core::{BlendMode, FunctionSig, Value};
 
 struct G {
@@ -84,7 +84,7 @@ fn rock_wet_compiles_against_bevy() {
     g.link((&remap, "out"), (&out, "ambient_occlusion"));
 
     let fns: BTreeMap<String, FunctionSig> = BTreeMap::new();
-    let res = build_ir(&g.a, "env/rock_wet", &registry, &fns, &NoCurves, &NoConsts, &NoTextures);
+    let res = build_ir(&g.a, "env/rock_wet", &registry, &fns, &NoCurves, &NoConsts, &NoTextures, &NoGradients);
     for d in &res.diagnostics {
         eprintln!("{d}");
     }

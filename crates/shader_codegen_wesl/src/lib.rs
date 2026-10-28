@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use shader_graph_core::curve::{Curve, Interp, curve_fn_alias};
 use shader_graph_core::ident::{function_ident, input_ident, output_ident, to_pascal_case};
 use shader_graph_core::model::PreviewMode;
-use shader_graph_core::registry::{Builtin, FunctionSig, ParamType};
+use shader_graph_core::registry::{Builtin, FunctionSig, ParamType, gradient_ident};
 use shader_graph_core::{BlendMode, GENERATOR_VERSION, Ir, IrStage, MaterialKind, NodeId, PinType, TextureSource};
 
 /// Marker that identifies files owned by the editor (spec §5).
@@ -147,7 +147,8 @@ fn write_custom_fns(w: &mut Writer, ir: &Ir) {
 }
 
 /// Material uniform struct + texture bindings (100, then [`Ir::textures`]: 101/102, …). Field and parameter texture
-/// names are `inp_*` (decision 0020), fixed textures `ft_*` (design §1.3).
+/// names are `inp_*` (decision 0020), fixed textures `ft_*` (design §1.3), gradient collections `gc_*` (gradient
+/// design §7; one per collection, owned by no node).
 fn write_bindings(w: &mut Writer, ir: &Ir) {
     let struct_name = params_struct(&ir.name);
     if !ir.uniform.is_empty() {
@@ -163,7 +164,7 @@ fn write_bindings(w: &mut Writer, ir: &Ir) {
         let node = match &t.source {
             TextureSource::Param(name) => ir.params.iter().find(|p| &p.name == name).map(|p| p.node.as_str()),
             TextureSource::Fixed { node, origin: None } => Some(node.as_str()),
-            TextureSource::Fixed { origin: Some(_), .. } => None,
+            TextureSource::Fixed { origin: Some(_), .. } | TextureSource::Gradient(_) => None,
         };
         let (b, tex) = (t.binding, &t.ident);
         for l in [
@@ -581,7 +582,7 @@ fn vertex_3d(vs: &IrStage, pbr: bool, imports: &mut Imports, w: &mut Writer) {
     w.line("}");
 }
 
-/// Generates the WESL module of a project function: `fn fun_{name}(inp_*, b_*, ft_*)` returning the value or a
+/// Generates the WESL module of a project function: `fn fun_{name}(inp_*, b_*, ft_*, gc_*)` returning the value or a
 /// `{Name}Out { out_* }` struct (decision 0020).
 pub fn function(ir: &Ir, ctx: &GenCtx) -> Generated {
     let sig = ir.function_sig.as_ref().expect("function IR");
@@ -613,6 +614,12 @@ pub fn function(ir: &Ir, ctx: &GenCtx) -> Generated {
         let name = t.ident();
         args.push(format!("{name}: texture_2d<f32>, {name}_sampler: sampler"));
     }
+    // Hidden gradient collections (gradient design §7): `gc_{path}` + sampler, one per collection, after the fixed
+    // textures; the caller passes its own binding or hidden parameter of the same name.
+    for c in &sig.gradients {
+        let name = gradient_ident(c);
+        args.push(format!("{name}: texture_2d<f32>, {name}_sampler: sampler"));
+    }
     let ret = if sig.outputs.len() == 1 { sig.outputs[0].ty.wesl().to_string() } else { sig.out_struct() };
     if sig.outputs.len() > 1 {
         let fields: Vec<String> =
@@ -636,7 +643,8 @@ pub fn function(ir: &Ir, ctx: &GenCtx) -> Generated {
 }
 
 /// Generates the WESL module of a curve asset at `path` (decision 0015): the points as a const array of
-/// `(t, value, slope)` and one sampling function per [`Interp`].
+/// `(t, value, slope)` and one sampling function per [`Interp`]. Values and slopes are baked in real units (the
+/// output range `min..max`, decision 0038), so a curve at the default range `0..1` keeps its text.
 pub fn curve(c: &Curve, path: &str, source_file: &str) -> String {
     let this = paths::curve_module(path);
     let mut w = Writer::default();
@@ -651,7 +659,7 @@ pub fn curve(c: &Curve, path: &str, source_file: &str) -> String {
         w.line("// (t, value, slope) per point, sorted by t.");
         w.line(format!("const POINTS: array<vec3<f32>, {n}> = array<vec3<f32>, {n}>("));
         for ((t, v), s) in c.points.iter().zip(c.slopes()) {
-            w.line(format!("    vec3<f32>({}, {}, {}),", f(*t), f(*v), f(s)));
+            w.line(format!("    vec3<f32>({}, {}, {}),", f(*t), f(c.to_real(*v)), f(s * c.span())));
         }
         w.line(");");
         w.blank();
@@ -670,8 +678,8 @@ pub fn curve(c: &Curve, path: &str, source_file: &str) -> String {
         w.blank();
         w.line(format!("fn {}(t: f32) -> f32 {{", interp.wesl_fn()));
         match n {
-            0 => w.line("    return 0.0f;"),
-            1 => w.line(format!("    return {};", shader_graph_core::value::wesl_scalar(c.points[0].1))),
+            0 => w.line(format!("    return {};", shader_graph_core::value::wesl_scalar(c.min))),
+            1 => w.line(format!("    return {};", shader_graph_core::value::wesl_scalar(c.to_real(c.points[0].1)))),
             _ => {
                 let helper = if interp == Interp::Simple { "sg_curve_linear" } else { "sg_curve_hermite" };
                 w.line(format!("    let x = clamp(t, POINTS[0].x, POINTS[{}].x);", n - 1));

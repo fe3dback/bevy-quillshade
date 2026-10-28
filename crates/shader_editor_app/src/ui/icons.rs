@@ -84,10 +84,16 @@ pub enum IconId {
     Layers,
     /// The generated Rust crate ("Show generated Rust"); generated WESL keeps [`IconId::Code`].
     Rust,
+    /// A gradient collection (gradient design §8).
+    Gradients,
+    /// Empties something (the gradients editor topbar's Clear).
+    Clear,
+    ArrowUp,
+    ArrowDown,
 }
 
 impl IconId {
-    pub const ALL: [IconId; 39] = [
+    pub const ALL: [IconId; 43] = [
         IconId::File,
         IconId::Folder,
         IconId::FolderOpen,
@@ -127,6 +133,10 @@ impl IconId {
         IconId::ChevronUp,
         IconId::Layers,
         IconId::Rust,
+        IconId::Gradients,
+        IconId::Clear,
+        IconId::ArrowUp,
+        IconId::ArrowDown,
     ];
 
     fn source(self) -> Icon {
@@ -170,6 +180,10 @@ impl IconId {
             IconId::ChevronUp => icon_rs::CHEVRON_UP,
             IconId::Layers => icon_rs::LAYERS,
             IconId::Rust => RUST_RS,
+            IconId::Gradients => icon_rs::APPEARANCE,
+            IconId::Clear => icon_rs::REMOVE_CIRCLE,
+            IconId::ArrowUp => icon_rs::ARROW_UP,
+            IconId::ArrowDown => icon_rs::ARROW_DOWN,
         }
     }
 
@@ -188,6 +202,7 @@ impl IconId {
     pub fn for_id(id: &AssetId, kind: Option<AssetKind>) -> IconId {
         match id.ty {
             AssetType::Curve => IconId::Curve,
+            AssetType::Gradients => IconId::Gradients,
             AssetType::Consts => IconId::Consts,
             AssetType::Texture => IconId::Texture,
             AssetType::Material | AssetType::Function => IconId::for_asset(kind),
@@ -203,6 +218,7 @@ impl IconId {
             NewKind::Function => IconId::Function,
             NewKind::Curve => IconId::Curve,
             NewKind::Consts => IconId::Consts,
+            NewKind::Gradients => IconId::Gradients,
         }
     }
 

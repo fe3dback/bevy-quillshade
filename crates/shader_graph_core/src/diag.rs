@@ -59,6 +59,9 @@ pub enum Code {
     /// Texture node without a texture (no property, no connected pin, no parameter default): uses the internal
     /// default texture `@internal/default` (design §1.2).
     W110,
+    /// Sample Gradient node without a collection or a gradient (emits white, no binding), or on an empty slot (still
+    /// samples its row, which bakes white) (gradient design §6).
+    W111,
 }
 
 impl Code {

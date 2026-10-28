@@ -823,3 +823,78 @@ fn held_space_from_button_does_not_open_palette_after_focus_clears() {
     assert_eq!(app.world().resource::<PaletteKey>().0, 1, "pressed again, it does");
     assert_eq!(seen(&mut app), vec![]);
 }
+
+/// rock_wet, then a new gradient collection `common/ramps` (active), with stops at 0.2 and 0.6 in slot 0 and the
+/// one at 0.6 selected.
+fn graph_and_gradients(e: &mut Editor) {
+    use shader_editor_app::state::GradientsAction;
+    e.open_asset(&material());
+    let id = shader_project::ops::create_gradients(e.project.as_ref().unwrap(), "common/ramps").unwrap();
+    e.rescan();
+    e.open_asset(&id);
+    assert_eq!(e.tab().map(|t| t.doc().view()), Some(ViewKind::Gradients));
+    e.apply(Action::Gradients(GradientsAction::AddStop(0.2)));
+    e.apply(Action::Gradients(GradientsAction::AddStop(0.6)));
+}
+
+fn stop_ts(app: &App) -> Vec<f32> {
+    let g = app.world().resource::<Editor>().gradients_doc().expect("a gradients tab");
+    g.collection.slots[g.slot].stops.iter().map(|s| s.t).collect()
+}
+
+/// Gradient design §8: the gradients kind's context is active only while its tab is; Ctrl+C there copies once (no
+/// graph key with it), Delete deletes, Ctrl+D duplicates, and Left / Right nudge the selected stop (Shift: x10).
+#[test]
+fn gradients_context_follows_its_tab() {
+    use shader_editor_app::editors::GradientsEditor;
+
+    let (_dir, mut app) = app(graph_and_gradients);
+    assert_kind_context::<GradientsEditor>(&mut app);
+    assert_kind_context::<GraphEditor>(&mut app);
+    tap(&mut app, &[KeyCode::ControlLeft, KeyCode::KeyC]);
+    assert_eq!(seen(&mut app), vec![Action::Copy]);
+    tap(&mut app, &[KeyCode::ControlLeft, KeyCode::KeyD]);
+    assert_eq!(seen(&mut app), vec![Action::Duplicate]);
+    {
+        use shader_editor_app::gradients_doc::GradientSel;
+        use shader_editor_app::state::GradientsAction;
+        let mut e = app.world_mut().resource_mut::<Editor>();
+        e.apply(Action::Undo);
+        // The duplicate went to slot 1 and is selected: back to stop 1 of slot 0.
+        e.apply(Action::Gradients(GradientsAction::SelectSlot(0)));
+        e.apply(Action::Gradients(GradientsAction::Select(Some(GradientSel::Stop(1)))));
+    }
+
+    tap(&mut app, &[KeyCode::ArrowRight]);
+    let ts = stop_ts(&app);
+    assert!((ts[1] - 0.61).abs() < 1e-5, "{ts:?}");
+    tap(&mut app, &[KeyCode::ShiftLeft, KeyCode::ArrowLeft]);
+    let ts = stop_ts(&app);
+    assert!((ts[1] - 0.51).abs() < 1e-5, "{ts:?}");
+    seen(&mut app);
+    tap(&mut app, &[KeyCode::Delete]);
+    assert_eq!(seen(&mut app), vec![Action::DeleteSelection]);
+    assert_eq!(stop_ts(&app), [0.2]);
+
+    // Back on the graph: the gradients context is off.
+    tap(&mut app, &[KeyCode::ControlLeft, KeyCode::Tab]);
+    seen(&mut app);
+    assert_eq!(view(&app), Some(ViewKind::Graph));
+    assert_kind_context::<GradientsEditor>(&mut app);
+    assert_kind_context::<GraphEditor>(&mut app);
+}
+
+/// A focused Feathers list (the gradient slot list) takes its own keys (arrows, Home / End, Space / Enter): the
+/// arrows move its active row and do not nudge the selected stop.
+#[test]
+fn focused_list_keeps_its_arrows() {
+    let (_dir, mut app) = app(graph_and_gradients);
+    let list = app.world_mut().spawn(bevy::ui_widgets::ListBox).id();
+    app.world_mut().insert_resource(InputFocus::from_entity(list));
+    app.update();
+    let before = stop_ts(&app);
+    tap(&mut app, &[KeyCode::ArrowRight]);
+    assert_eq!(stop_ts(&app), before, "the list's key");
+    tap(&mut app, &[KeyCode::ControlLeft, KeyCode::KeyC]);
+    assert_eq!(seen(&mut app), vec![Action::Copy], "other hotkeys still work");
+}

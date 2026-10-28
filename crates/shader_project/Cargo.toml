@@ -15,11 +15,11 @@ ron = { workspace = true }
 thiserror = { workspace = true }
 notify = { workspace = true }
 toml = { workspace = true }
+png = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
 insta = { workspace = true }
-png = { workspace = true }
 ktx2 = { workspace = true }
 
 # `cargo test` runs the generator's unit tests too.

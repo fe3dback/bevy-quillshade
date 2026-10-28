@@ -2,6 +2,15 @@
 BakedManifest(
   version: 1,
   textures: {
+    "@gradients/common/terrain": (
+      path: "shaders/gradients/common/terrain.png",
+      settings: (
+        sampler: Some((
+          mag_filter: Linear,
+          min_filter: Linear,
+        )),
+      ),
+    ),
     "@internal/default": (
       path: "shaders/internal/default.png",
       settings: (
@@ -80,8 +89,13 @@ BakedManifest(
     ),
     "env/terrain_layers": (
       params: {},
-      textures: {},
-      layout: "SG_LAYOUT_7a07b390",
+      textures: {
+        "gc_common_terrain": "@gradients/common/terrain",
+      },
+      layout: "SG_LAYOUT_50ec9cbe",
+      bindings: [
+        "gc_common_terrain",
+      ],
     ),
     "env/tex_layers": (
       params: {},

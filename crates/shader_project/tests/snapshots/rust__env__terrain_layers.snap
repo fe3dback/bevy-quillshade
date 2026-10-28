@@ -18,11 +18,15 @@ pub const BAKED_ID: &str = "env/terrain_layers";
 
 /// WESL feature of this material's binding layout, enabled in `specialize`: a hot-reloaded shader whose
 /// bindings no longer match this code fails to compile instead of crashing the renderer (rebuild the game).
-pub const LAYOUT_FEATURE: &str = "SG_LAYOUT_7a07b390";
+pub const LAYOUT_FEATURE: &str = "SG_LAYOUT_50ec9cbe";
 
 /// Extension of `StandardMaterial`; use [`TerrainLayersMaterial`] as the asset type.
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone, Default)]
 pub struct TerrainLayersExt {
+    /// Gradient collection `common/terrain`; `new` sets `Handle::default()` (Bevy's white image).
+    #[texture(101)]
+    #[sampler(102)]
+    pub gc_common_terrain: Handle<Image>,
 }
 
 impl MaterialExtension for TerrainLayersExt {
@@ -59,13 +63,17 @@ impl TerrainLayersExt {
     /// All graph parameters are required, sorted by name:
     #[allow(dead_code)]
     pub(crate) fn new() -> Self {
-        Self {}
+        Self {
+            gc_common_terrain: Handle::default(),
+        }
     }
 
     /// Material from baked values: `v` from the manifest (a missing or mistyped value keeps the compiled
     /// default, with a warning), `tex` maps a Texture asset id to its image.
-    pub(crate) fn from_values(_v: &MaterialValues, _tex: &dyn Fn(&str) -> Handle<Image>) -> Self {
-        Self {}
+    pub(crate) fn from_values(v: &MaterialValues, tex: &dyn Fn(&str) -> Handle<Image>) -> Self {
+        Self {
+            gc_common_terrain: tex(v.texture(BAKED_ID, "gc_common_terrain")),
+        }
     }
 
     /// Full material: `StandardMaterial` defaults with blend/cull settings from the graph.

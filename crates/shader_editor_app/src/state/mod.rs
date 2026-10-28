@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use shader_codegen_wesl::check::BevySources;
 use shader_graph_core::consts::{ConstType, GlobalConst};
 use shader_graph_core::curve::Interp;
+use shader_graph_core::gradient::{GradientCollection, MAX_STOPS, Slot, Stop};
 use shader_graph_core::ident::check_ident;
 use shader_graph_core::ir::declared_function_sig;
 use shader_graph_core::model::{
@@ -29,6 +30,7 @@ use crate::curve_doc::CurveDoc;
 use crate::doc::{ClipboardData, Doc, bounds, connection_error, node_signature};
 use crate::doc_kind::PreviewDoc;
 use crate::game_image::Channel;
+use crate::gradients_doc::{GradientSel, GradientsDoc};
 use crate::search::{self, WireEnd};
 use crate::tab::{ImageDoc, Lang, Tab, TabKey, TextDoc, parse_config_key};
 use crate::texture_doc::{FilterPreset, TextureDoc, TextureField, fits_easy};
@@ -39,6 +41,7 @@ mod apply;
 mod asset_ops;
 mod consts_ops;
 mod curve_ops;
+mod gradient_ops;
 mod graph_ops;
 mod regen;
 mod tabs;
@@ -150,6 +153,30 @@ impl Editor {
 
     pub fn texture_doc_mut(&mut self) -> Option<&mut TextureDoc> {
         self.active.and_then(|i| self.tabs.get_mut(i)).and_then(Tab::texture_mut)
+    }
+
+    /// The active tab's gradient collection.
+    pub fn gradients_doc(&self) -> Option<&GradientsDoc> {
+        self.tab().and_then(Tab::gradients)
+    }
+
+    pub fn gradients_doc_mut(&mut self) -> Option<&mut GradientsDoc> {
+        self.active.and_then(|i| self.tabs.get_mut(i)).and_then(Tab::gradients_mut)
+    }
+
+    /// The project's loadable gradient collections as `(id, label)` choices (a `GradientCollection` parameter).
+    pub fn gradient_collections(&self) -> Vec<(String, String)> {
+        let ok = self.disk.gradients.iter().filter(|(_, c)| c.is_ok()).map(|(id, _)| id.path.clone());
+        ok.map(|p| (p.clone(), p)).collect()
+    }
+
+    /// Collection `id` (its path): an open tab's unsaved state first, then the file as last scanned.
+    pub fn gradient_collection(&self, id: &str) -> Option<&GradientCollection> {
+        let open = self.tabs.iter().filter_map(Tab::gradients).find(|g| g.id.path == id);
+        open.map(|g| &g.collection).or_else(|| {
+            let id = AssetId::new(AssetType::Gradients, id);
+            self.disk.gradients.get(&id).and_then(|c| c.as_ref().ok())
+        })
     }
 
     /// The active tab's preview view state, on a tab with the shared image preview (image, Texture; design §6.2).

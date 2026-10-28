@@ -276,11 +276,20 @@ fn node_title_in(editor: &Editor, asset: &Asset, id: &str, routes: &[(NodeId, St
         _ if n.kind.starts_with("stdlib::Constant") => params.get("value").map(short).unwrap_or(name),
         _ => {
             // Sample Curve: the curve's name (decision 0015); Global*: the constant's name (decision 0017); texture
-            // nodes: the Texture asset's name.
+            // nodes: the Texture asset's name; Sample Gradient: the collection's name (the gradient's name shows in
+            // its properties: the canvas rebuilds only on graph revisions, not on edits of the collection).
             let curve = def
                 .params()
                 .into_iter()
-                .find(|p| matches!(p.kind, ParamKind::Curve | ParamKind::GlobalConst(_) | ParamKind::Texture))
+                .find(|p| {
+                    matches!(
+                        p.kind,
+                        ParamKind::Curve
+                            | ParamKind::GlobalConst(_)
+                            | ParamKind::Texture
+                            | ParamKind::GradientCollection
+                    )
+                })
                 .map(|c| p(&c.id));
             match curve.filter(|c| !c.is_empty()) {
                 Some(path) => format!("{} ({name})", path.rsplit('/').next().unwrap_or(&path)),

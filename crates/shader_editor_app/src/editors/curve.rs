@@ -16,7 +16,7 @@ use crate::state::{Action, Actions, CurveAction, Editor, PropTarget};
 use crate::tab::ViewKind;
 use crate::ui::curve_view::CurveViewBar;
 use crate::ui::icons::IconId;
-use crate::ui::props::{hotkey_row, labeled, number};
+use crate::ui::props::{hotkey_row, labeled, number, number_ranged};
 use crate::ui::widgets::subpane_box;
 use crate::ui::{TEXT, TEXT_DIM, plural, text};
 
@@ -32,7 +32,7 @@ impl EditorAreas for CurveEditor {
         Some(bsn! { @super::bar_row() CurveViewBar })
     }
 
-    /// The selected point and the hotkeys.
+    /// The output range, the selected point and the hotkeys.
     fn sidebar() -> Option<impl Scene> {
         Some(bsn! { @super::sidebar_body() CurveSidebarBody })
     }
@@ -139,12 +139,21 @@ const CURVE_HOTKEYS: [(&str, &str); 12] = [
     ("Right-click", "Menu"),
 ];
 
-/// A curve tab: the curve, the selected point and the hotkeys (select all / delete, preview mode and generated WESL
-/// are in the editor topbar).
+/// Drag range of a Min / Max field: `-10..10`, widened to hold a typed value outside it (a drag never jumps).
+fn range_limit(v: f32) -> (f32, f32) {
+    (v.min(-10.0), v.max(10.0))
+}
+
+/// A curve tab: the curve with its output range, the selected point and the hotkeys (select all / delete, preview
+/// mode and generated WESL are in the editor topbar).
 fn curve_rows(c: &CurveDoc) -> Vec<Box<dyn Scene>> {
+    // The point count is in the editor statusbar.
+    let (min, max) = (c.curve.min, c.curve.max);
     let curve: Vec<Box<dyn Scene>> = vec![
         Box::new(text(c.id.source_rel(), TEXT, 15.0)),
-        Box::new(text(format!("Type: Curve, {}", plural(c.curve.points.len(), "point", "points")), TEXT_DIM, 12.0)),
+        Box::new(text("Type: Curve", TEXT_DIM, 12.0)),
+        Box::new(labeled("Min".into(), number_ranged(PropTarget::CurveRange, 0, min, Some(range_limit(min)), None))),
+        Box::new(labeled("Max".into(), number_ranged(PropTarget::CurveRange, 1, max, Some(range_limit(max)), None))),
     ];
     let mut out = vec![subpane_box("Curve", curve)];
     match c.selection.len() {
@@ -155,7 +164,7 @@ fn curve_rows(c: &CurveDoc) -> Vec<Box<dyn Scene>> {
                 let target = PropTarget::CurvePoint(i);
                 let rows: Vec<Box<dyn Scene>> = vec![
                     Box::new(labeled("T".into(), number(target.clone(), 0, *t, None))),
-                    Box::new(labeled("Value".into(), number(target, 1, *v, None))),
+                    Box::new(labeled("Value".into(), number(target, 1, c.curve.to_real(*v), None))),
                 ];
                 out.push(subpane_box(&format!("Point {}", i + 1), rows));
             }

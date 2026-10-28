@@ -1,6 +1,7 @@
 //! Editor kinds (design §2.1, decision 0014): one module per kind of tab content — graph, text, curve, consts,
-//! image, texture — holding every trait impl of that kind ([`crate::doc_kind::TabDoc`] today). The document types
-//! themselves stay in their own files (`doc.rs`, `curve_doc.rs`, …); what the editor asks of a kind lives here.
+//! image, texture, gradients — holding every trait impl of that kind ([`crate::doc_kind::TabDoc`] today). The
+//! document types themselves stay in their own files (`doc.rs`, `curve_doc.rs`, …); what the editor asks of a kind
+//! lives here.
 //!
 //! The window areas a kind owns (design §1, §2.1) are described by [`EditorAreas`], implemented by one zero-sized type
 //! per kind ([`graph::GraphEditor`], …): the editor topbar and the right sidebar (decision 0031). Each area is spawned
@@ -21,6 +22,7 @@ use crate::tab::ViewKind;
 
 pub mod consts;
 pub mod curve;
+pub mod gradients;
 pub mod graph;
 pub mod image;
 pub mod main_input;
@@ -29,6 +31,7 @@ pub mod texture;
 
 pub use consts::ConstsEditor;
 pub use curve::{CurveCtx, CurveEditor};
+pub use gradients::GradientsEditor;
 pub use graph::{GraphCtx, GraphEditor};
 pub use image::ImageEditor;
 pub use text::{TextCtx, TextEditor};
@@ -74,6 +77,7 @@ pub fn for_each_kind(v: &mut impl KindVisitor) {
     v.visit::<ConstsEditor>();
     v.visit::<ImageEditor>();
     v.visit::<TextureEditor>();
+    v.visit::<GradientsEditor>();
 }
 
 /// The row a kind's editor topbar is built on: a marker plus this, filled by the kind's redraw system. Items that

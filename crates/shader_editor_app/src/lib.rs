@@ -27,6 +27,7 @@ pub mod editors;
 mod external;
 mod fixes;
 pub mod game_image;
+pub mod gradients_doc;
 pub mod highlight;
 pub mod history;
 pub mod inline;
@@ -244,11 +245,13 @@ fn open_startup_project(mut editor: ResMut<Editor>, startup: Res<StartupProject>
 /// `SHADER_EDITOR_OPEN=env/rock_wet.material.ron` opens an asset at startup (`…ron#wesl` / `#rust`: its generated
 /// file in a text tab, after the asset's graph; `@game/textures/rock_albedo.ktx2`: a game image's tab;
 /// `@internal/default`: a built-in texture's read-only Texture tab); `SHADER_EDITOR_SELECT=stdlib::Lerp` selects the
-/// first node of that kind, or the comment frame of that id (`c01`).
-/// `SHADER_EDITOR_DEMO=palette|wire|dialog|about|quick_start[:N]|texture_channel:N|open_project|welcome|menu[:name]|tab_menu|game_file_menu[:2]`
+/// first node of that kind, or the comment frame of that id (`c01`); on a gradient collection the slot at a position,
+/// `0:s1` also its stop 1, `0:m1` its midpoint 1.
+/// `SHADER_EDITOR_DEMO=palette|wire|dialog|about|quick_start[:N]|texture_channel:N|open_project|welcome|menu[:name]|tab_menu|game_file_menu[:2]|gradient_color`
 /// additionally opens that popup before the shot (`menu`: the main menu's File, `menu:view`: its View, …;
 /// `game_file_menu`: the RMB menu of the first game image with a Texture asset — its item disabled —, `:2` of the
-/// first without one; `welcome`: closes the project).
+/// first without one; `welcome`: closes the project; `gradient_color`: selects the first stop of a gradients tab's
+/// selected slot and opens its color picker).
 fn debug_screenshot(
     mut frames: Local<u32>,
     mut editor: ResMut<Editor>,
@@ -290,6 +293,21 @@ fn debug_screenshot(
             }
             d.revision += 1;
             editor.ui.props += 1;
+        } else if let Ok(sel) = std::env::var("SHADER_EDITOR_SELECT")
+            && editor.gradients_doc().is_some()
+        {
+            // `<slot>`, `<slot>:s<stop>` or `<slot>:m<segment>`.
+            let (slot, item) = sel.split_once(':').map_or((sel.as_str(), None), |(s, i)| (s, Some(i)));
+            if let Ok(slot) = slot.parse() {
+                editor.apply(Action::Gradients(state::GradientsAction::SelectSlot(slot)));
+            }
+            let pick = |prefix| item.and_then(|i| i.strip_prefix(prefix)).and_then(|i| i.parse().ok());
+            let sel = match (pick('s'), pick('m')) {
+                (Some(i), _) => Some(gradients_doc::GradientSel::Stop(i)),
+                (_, Some(i)) => Some(gradients_doc::GradientSel::Mid(i)),
+                _ => None,
+            };
+            editor.apply(Action::Gradients(state::GradientsAction::Select(sel)));
         }
     }
     if *frames == 150 {
@@ -320,6 +338,12 @@ fn debug_screenshot(
                 }
             }
             Ok("tab_menu") => ui::dialog::open_icon_menu(&mut commands, Vec2::new(260.0, 60.0), ui::tabs::tab_menu(0)),
+            Ok("gradient_color") => {
+                // The first stop of the selected slot (`SHADER_EDITOR_SELECT=<slot>` picks one with stops).
+                let first = Some(gradients_doc::GradientSel::Stop(0));
+                editor.apply(Action::Gradients(state::GradientsAction::Select(first)));
+                ui::gradient_view::open_stop_color(&mut commands, 0);
+            }
             Ok(d) if d == "game_file_menu" || d == "game_file_menu:2" => {
                 // The RMB menu of the first game image with a Texture asset (disabled item) or, `:2`, without one.
                 let has = |f: &&String| shader_project::game_assets::texture_for_file(&editor.disk, f).is_some();

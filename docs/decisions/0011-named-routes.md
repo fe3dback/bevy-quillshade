@@ -18,7 +18,8 @@ pasted into another asset) reports E004.
 **Editor.** The canvas does not draw the implicit wire and hides the usage's input pin. The palette offers one entry
 "Named Route Usage: {name}" per declaration of the open asset (no generic usage entry); the properties panel switches
 a usage between declarations. Copy/paste: a usage pasted together with its declaration points at the copy, a usage
-pasted alone keeps pointing at the original.
+pasted alone keeps pointing at the original. A declaration pasted back into its own graph becomes a usage of the
+original instead (decision 0038).
 
 **Consequences.** No format change (`format_version` stays 1): both nodes are ordinary nodes with parameters. The
 per-node snapshot test skips both roles; `shader_project/tests/pipeline.rs` checks that a routed graph produces the

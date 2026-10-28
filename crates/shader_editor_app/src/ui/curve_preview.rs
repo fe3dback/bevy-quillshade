@@ -155,7 +155,7 @@ fn rasterize(p: &CurveKey, size: UVec2, scale: f32) -> tiny_skia::Pixmap {
     let mut pb = tiny_skia::PathBuilder::new();
     for k in 0..=steps {
         let t = k as f32 / steps as f32;
-        let (x, y) = at(t, p.curve.sample_with(t, p.interp, &slopes));
+        let (x, y) = at(t, p.curve.sample_normalized_with(t, p.interp, &slopes));
         if k == 0 { pb.move_to(x, y) } else { pb.line_to(x, y) }
     }
     if let Some(path) = pb.finish() {
@@ -164,7 +164,7 @@ fn rasterize(p: &CurveKey, size: UVec2, scale: f32) -> tiny_skia::Pixmap {
     }
 
     if let Some(t) = p.t {
-        let (x, y) = at(t.clamp(0.0, 1.0), p.curve.sample_with(t, p.interp, &slopes));
+        let (x, y) = at(t.clamp(0.0, 1.0), p.curve.sample_normalized_with(t, p.interp, &slopes));
         if let Some(dot) = tiny_skia::PathBuilder::from_circle(x, y, 2.5 * scale) {
             paint.set_color(skia_color(Color::WHITE, 1.0));
             pixmap.fill_path(&dot, &paint, tiny_skia::FillRule::Winding, id, None);

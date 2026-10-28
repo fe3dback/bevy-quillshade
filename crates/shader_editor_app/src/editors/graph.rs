@@ -1,11 +1,13 @@
 //! Graph editor kind: node graph of a material or function on the bevy_noodle canvas ([`Doc`]).
 
+use std::collections::BTreeMap;
+
 use bevy::feathers::containers::flex_spacer;
 use bevy::prelude::*;
 use bevy_enhanced_input::prelude::{Actions as InputActions, Complete, Fire, InputAction, Start};
 use bevy_noodle::prelude::{CanvasView, GraphQuery};
 use shader_graph_core::model::{Asset, AssetKind, BlendMode, MaterialKind, PbrOutputMode, PreviewMode, Shading};
-use shader_graph_core::registry::{NodeRole, ParamKind};
+use shader_graph_core::registry::{NodeRole, ParamDef, ParamKind};
 use shader_graph_core::{Hotkey, HotkeyKey, Value};
 use shader_project::{AssetId, AssetSet, AssetType, Project, assets, ops};
 
@@ -24,7 +26,9 @@ use crate::tab::{Lang, ViewKind};
 use crate::ui::icons::IconId;
 use crate::ui::input::CanvasCursor;
 use crate::ui::palette::Palette;
-use crate::ui::props::{Choices, checkbox_row, hue_input, labeled, pin_kind, select_w, text_w, value_row};
+use crate::ui::props::{
+    Choices, GradientSlots, SlotEntry, checkbox_row, hue_input, labeled, pin_kind, select_w, text_w, value_row,
+};
 use crate::ui::widgets::{Caption, GroupButton, button_group, subpane_box};
 use crate::ui::{TEXT, TEXT_DIM, button, icon_button, icon_tool_button, plural, text};
 
@@ -543,6 +547,21 @@ fn common_subpanes(d: &Doc, mut out: Vec<Box<dyn Scene>>) -> Vec<Box<dyn Scene>>
     out
 }
 
+/// The slots a node's `GradientSlot` param can pick (gradient design §6): the non-empty slots of the collection its
+/// `GradientCollection` param names (an open tab's unsaved state first), plus the picked slot when it is empty (so the
+/// list still shows the pick). Nothing without a loadable collection.
+fn gradient_slots(editor: &Editor, defs: &[ParamDef], params: &BTreeMap<String, Value>) -> GradientSlots {
+    let value = |kind: ParamKind| defs.iter().find(|p| p.kind == kind).and_then(|p| params.get(&p.id));
+    let collection = value(ParamKind::GradientCollection).map(Value::as_str).unwrap_or_default();
+    let picked = value(ParamKind::GradientSlot).map_or(0, Value::as_i32);
+    let Some(c) = editor.gradient_collection(collection) else { return GradientSlots::default() };
+    let slots = c.slots.iter().enumerate().filter(|(_, s)| !s.is_empty() || i64::from(s.id) == i64::from(picked));
+    GradientSlots {
+        collection: collection.to_string(),
+        slots: slots.map(|(pos, s)| SlotEntry { pos, id: s.id, name: s.name.clone() }).collect(),
+    }
+}
+
 /// One selected node: what it is (title, kind, label, the asset it refers to), its parameters, input defaults and
 /// problems.
 fn node_subpanes(editor: &Editor, id: &str) -> Vec<Box<dyn Scene>> {
@@ -573,6 +592,7 @@ fn node_subpanes(editor: &Editor, id: &str) -> Vec<Box<dyn Scene>> {
             AssetType::Consts => "Open constant table",
             AssetType::Material => "Open material",
             AssetType::Texture => "Open texture",
+            AssetType::Gradients => "Open gradients",
         };
         node.push(Box::new(button(label, Action::OpenAsset(target), false)));
     }
@@ -583,6 +603,8 @@ fn node_subpanes(editor: &Editor, id: &str) -> Vec<Box<dyn Scene>> {
         curves: editor.curve_paths().into_iter().map(|p| (p.clone(), p)).collect(),
         consts: Vec::new(),
         textures: editor.texture_choices(),
+        gradients: editor.gradient_collections(),
+        slots: gradient_slots(editor, &def.params(), &params),
     };
     let global_consts = editor.global_consts();
     let inline = inline_for_param(&n.kind, &params);
@@ -606,6 +628,15 @@ fn node_subpanes(editor: &Editor, id: &str) -> Vec<Box<dyn Scene>> {
                 let why = global_consts.get(v.as_str()).map_or("missing".into(), |k| format!("is {}", k.1.ty.label()));
                 c.consts.push((v.as_str().to_string(), format!("{} ({why})", v.as_str())));
             }
+            choices_here = Some(c);
+        }
+        // A deleted or broken collection stays visible as the current choice (the node reports E006).
+        if p.kind == ParamKind::GradientCollection
+            && !v.as_str().is_empty()
+            && !choices.gradients.iter().any(|c| c.0 == v.as_str())
+        {
+            let mut c = choices.clone();
+            c.gradients.push((v.as_str().to_string(), format!("{} (missing)", v.as_str())));
             choices_here = Some(c);
         }
         // A deleted Texture asset stays visible as the current choice (the node reports E006).

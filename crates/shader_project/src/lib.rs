@@ -5,6 +5,7 @@
 pub mod assets;
 pub mod fixtures;
 pub mod game_assets;
+pub mod gradient_png;
 pub mod layout;
 pub mod ops;
 pub mod regen;

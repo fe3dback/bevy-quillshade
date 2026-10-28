@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use shader_graph_core::consts::NoConsts;
 use shader_graph_core::ir::{TextureBinding, TextureSource, build_ir};
 use shader_graph_core::model::{Asset, AssetKind, MaterialKind, Node, UnlitSettings};
-use shader_graph_core::registry::{FnPort, FunctionSig, HiddenTexture, NoCurves, NoFunctions, ParamKind};
+use shader_graph_core::registry::{FnPort, FunctionSig, HiddenTexture, NoCurves, NoFunctions, NoGradients, ParamKind};
 use shader_graph_core::{Code, Diagnostic, Ir, IrResult, PinType, Value};
 use shader_stdlib::internal::DEFAULT_TEXTURE;
 
@@ -28,13 +28,13 @@ fn unlit() -> Asset {
 fn build_raw(a: &Asset) -> IrResult {
     let reg = shader_stdlib::registry();
     let textures: BTreeSet<String> = ["textures/rock".to_string(), "textures/moss".to_string()].into();
-    build_ir(a, "test/mat", &reg, &NoFunctions, &NoCurves, &NoConsts, &textures)
+    build_ir(a, "test/mat", &reg, &NoFunctions, &NoCurves, &NoConsts, &textures, &NoGradients)
 }
 
 fn build_with(a: &Asset, functions: &BTreeMap<String, FunctionSig>) -> IrResult {
     let reg = shader_stdlib::registry();
     let textures: BTreeSet<String> = ["textures/rock".to_string()].into();
-    build_ir(a, "test/mat", &reg, functions, &NoCurves, &NoConsts, &textures)
+    build_ir(a, "test/mat", &reg, functions, &NoCurves, &NoConsts, &textures, &NoGradients)
 }
 
 fn build(a: &Asset) -> (Ir, Vec<Diagnostic>) {
@@ -266,6 +266,7 @@ fn layer_sig(path: &str, node: &str) -> FunctionSig {
         }],
         builtins: vec![],
         textures: vec![HiddenTexture { origin: path.into(), node: node.into(), texture: "textures/rock".into() }],
+        gradients: vec![],
     }
 }
 

@@ -3,9 +3,12 @@
 use shader_graph_core::Value;
 use shader_graph_core::consts::GlobalConsts;
 use shader_graph_core::curve::Curve;
+use shader_graph_core::gradient::GradientCollection;
 use shader_graph_core::ident::check_ident;
 use shader_graph_core::model::{Asset, AssetKind, MaterialKind, Node};
-use shader_graph_core::registry::{FUNCTION_PREFIX, Registry, const_refs, curve_refs, texture_refs};
+use shader_graph_core::registry::{
+    FUNCTION_PREFIX, ParamKind, Registry, const_refs, curve_refs, gradient_refs, texture_refs,
+};
 use shader_graph_core::texture::TextureAsset;
 
 use crate::assets::{self, AssetId, AssetType};
@@ -68,6 +71,11 @@ pub fn save_texture(project: &Project, id: &AssetId, texture: &TextureAsset) -> 
     write_source(project, id, &texture.to_ron())
 }
 
+/// Writes a gradient collection file (creating `shaders/` and parent directories).
+pub fn save_gradients(project: &Project, id: &AssetId, collection: &GradientCollection) -> Result<(), OpError> {
+    write_source(project, id, &collection.to_ron())
+}
+
 fn write_source(project: &Project, id: &AssetId, text: &str) -> Result<(), OpError> {
     project.ensure_shaders_dir()?;
     let file = id.file(project);
@@ -110,6 +118,17 @@ pub fn create_consts(project: &Project, path: &str) -> Result<AssetId, OpError> 
     Ok(id)
 }
 
+/// New gradient collection: 128 empty slots with fresh random ids (gradient design §3).
+pub fn create_gradients(project: &Project, path: &str) -> Result<AssetId, OpError> {
+    check_path(path)?;
+    let id = AssetId::new(AssetType::Gradients, path);
+    if id.file(project).exists() {
+        return Err(OpError::Exists(id.source_rel()));
+    }
+    save_gradients(project, &id, &GradientCollection::random())?;
+    Ok(id)
+}
+
 /// New Texture asset `id` for the game image `texture.path`. Refused when the image path is invalid (E012 rules) or
 /// another Texture asset already points at the same file (one game file — one Texture asset, design §1.1).
 pub fn create_texture(project: &Project, id: &AssetId, texture: &TextureAsset) -> Result<(), OpError> {
@@ -148,9 +167,9 @@ pub fn create_folder(project: &Project, path: &str) -> Result<(), OpError> {
     Ok(())
 }
 
-/// Renames/moves an asset; function, curve and Texture asset references in other assets are updated (constants are
-/// referenced by name, so moving their table changes nothing for its users). A Texture asset keeps its image path:
-/// the game file is never moved.
+/// Renames/moves an asset; function, curve, Texture asset and gradient collection references in other assets are
+/// updated (constants are referenced by name, so moving their table changes nothing for its users). A Texture asset
+/// keeps its image path: the game file is never moved.
 pub fn rename(project: &Project, id: &AssetId, new_path: &str) -> Result<AssetId, OpError> {
     check_path(new_path)?;
     let new_id = AssetId::new(id.ty, new_path);
@@ -175,6 +194,10 @@ pub fn rename(project: &Project, id: &AssetId, new_path: &str) -> Result<AssetId
             let texture = assets::load_texture(project, id).map_err(OpError::Invalid)?;
             save_texture(project, &new_id, &texture)?;
         }
+        AssetType::Gradients => {
+            let collection = assets::load_gradients(project, id).map_err(OpError::Invalid)?;
+            save_gradients(project, &new_id, &collection)?;
+        }
         AssetType::Material | AssetType::Function => {
             let mut asset = assets::load(project, id).map_err(OpError::Invalid)?;
             asset.name = new_id.name().to_string();
@@ -185,6 +208,7 @@ pub fn rename(project: &Project, id: &AssetId, new_path: &str) -> Result<AssetId
     match id.ty {
         AssetType::Curve => rewrite_graphs(project, |a, r| rename_curve_refs(a, r, &id.path, new_path))?,
         AssetType::Texture => rewrite_graphs(project, |a, r| rename_texture_refs(a, r, &id.path, new_path))?,
+        AssetType::Gradients => rewrite_graphs(project, |a, r| rename_gradient_refs(a, r, &id.path, new_path))?,
         _ => {}
     }
     if id.ty == AssetType::Function {
@@ -229,6 +253,27 @@ pub fn rename_texture_refs(asset: &mut Asset, registry: &Registry, old: &str, ne
     set_refs(asset, texture_refs(asset, registry), old, new)
 }
 
+/// Points every node of `asset` that samples gradient collection `old` to `new` (slot ids stay); returns whether
+/// anything changed.
+pub fn rename_gradient_refs(asset: &mut Asset, registry: &Registry, old: &str, new: &str) -> bool {
+    set_refs(asset, gradient_refs(asset, registry), old, new)
+}
+
+/// Clears every reference of `asset`'s nodes to gradient collection `id`: the collection parameter becomes `""` and
+/// the slot parameters ([`ParamKind::GradientSlot`]) of the same nodes `0`, so they output white (W111, gradient
+/// design §6); returns whether anything changed. Used when the collection is deleted.
+pub fn clear_gradient_refs(asset: &mut Asset, registry: &Registry, id: &str) -> bool {
+    let refs: Vec<_> = gradient_refs(asset, registry).into_iter().filter(|r| r.2 == id).collect();
+    for (node, _, _) in &refs {
+        let Some(n) = asset.nodes.get_mut(node) else { continue };
+        let Some(def) = registry.get(&n.kind) else { continue };
+        for p in def.params().into_iter().filter(|p| p.kind == ParamKind::GradientSlot) {
+            n.params.insert(p.id, Value::Int(0));
+        }
+    }
+    set_refs(asset, refs, id, "")
+}
+
 /// Clears every reference of `asset`'s nodes to Texture asset `id` (they then use the default texture, design
 /// §1.2); returns whether anything changed. Used when the Texture asset is deleted.
 pub fn clear_texture_refs(asset: &mut Asset, registry: &Registry, id: &str) -> bool {
@@ -261,11 +306,14 @@ pub fn move_to(project: &Project, id: &AssetId, dir: &str) -> Result<AssetId, Op
 }
 
 /// Deletes the asset source; autogen is removed by the following full regeneration. Deleting a Texture asset keeps
-/// its game image and clears the references to it in every graph (design §1.2).
+/// its game image and clears the references to it in every graph (design §1.2); deleting a gradient collection
+/// clears the references to it too (gradient design §6).
 pub fn delete(project: &Project, id: &AssetId) -> Result<(), OpError> {
     std::fs::remove_file(id.file(project))?;
-    if id.ty == AssetType::Texture {
-        rewrite_graphs(project, |a, r| clear_texture_refs(a, r, &id.path))?;
+    match id.ty {
+        AssetType::Texture => rewrite_graphs(project, |a, r| clear_texture_refs(a, r, &id.path))?,
+        AssetType::Gradients => rewrite_graphs(project, |a, r| clear_gradient_refs(a, r, &id.path))?,
+        _ => {}
     }
     Ok(())
 }

@@ -10,9 +10,9 @@ use crate::ident::{check_ident, input_ident};
 use crate::model::{Asset, AssetKind, Edge, MaterialKind, NodeId, PbrOutputMode, PreviewMode};
 use crate::preview::{PreviewSlot, PreviewSource, albedo_expr};
 use crate::registry::{
-    Builtin, CurveLookup, EmitCtx, EmitSink, Env, FnPort, FunctionLookup, FunctionSig, HiddenTexture, IrLine,
-    MaterialParam, NodeDef, NodeRole, Operand, ParamType, ROUTE_PARAM, Registry, SigCtx, Signature, Stage,
-    TextureLookup, fixed_texture_ident,
+    Builtin, CurveLookup, EmitCtx, EmitSink, Env, FnPort, FunctionLookup, FunctionSig, GradientLookup, HiddenTexture,
+    IrLine, MaterialParam, NodeDef, NodeRole, Operand, ParamType, ROUTE_PARAM, Registry, SigCtx, Signature, Stage,
+    TextureLookup, fixed_texture_ident, gradient_ident,
 };
 use crate::types::{PinType, conversion};
 use crate::value::Value;
@@ -148,16 +148,21 @@ pub enum TextureSource {
     /// Fixed texture of node `node`: of the material itself (`origin: None`) or of a function it calls (`origin`
     /// = the path of the function the node lives in).
     Fixed { node: NodeId, origin: Option<String> },
+    /// Baked texture of a gradient collection (its id, `common/terrain`; gradient design §7): one binding per
+    /// collection, shared by every node and called function sampling it.
+    Gradient(String),
 }
 
 /// One texture + sampler binding of a material. The IR owns the full list, like the uniform layout, so the WESL
 /// declarations and the Rust `#[texture]` / `#[sampler]` fields agree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TextureBinding {
-    /// WESL / Rust identifier of the texture (`inp_albedo`, `ft_n03`); the sampler is `{ident}_sampler`.
+    /// WESL / Rust identifier of the texture (`inp_albedo`, `ft_n03`, `gc_common_terrain`); the sampler is
+    /// `{ident}_sampler`.
     pub ident: String,
     pub source: TextureSource,
-    /// Texture asset id (or `@internal/*`): the fixed texture, or a parameter's default. Never empty.
+    /// Texture asset id (or `@internal/*`): the fixed texture, or a parameter's default; for a gradient collection its
+    /// baked texture id (`@gradients/common/terrain`, [`crate::gradient::texture_id`]). Never empty.
     pub texture: String,
     /// Texture binding; the sampler is at `binding + 1`.
     pub binding: u32,
@@ -188,7 +193,8 @@ pub struct Ir {
     pub params: Vec<MaterialParam>,
     pub uniform: UniformLayout,
     /// Texture bindings of a material: parameters first (by name), then fixed textures sorted by
-    /// `(origin, node)`; numbered `101/102`, `103/104`, … Empty for functions.
+    /// `(origin, node)`, then gradient collections sorted by id; numbered `101/102`, `103/104`, … Empty for
+    /// functions.
     pub textures: Vec<TextureBinding>,
     pub stdlib: BTreeSet<(String, String)>,
     /// Project functions called (paths).
@@ -300,6 +306,7 @@ pub fn declared_function_sig(asset: &Asset, path: &str, registry: &Registry) -> 
         outputs: outputs.into_iter().map(|x| x.2).collect(),
         builtins: Vec::new(),
         textures: Vec::new(),
+        gradients: Vec::new(),
     }
 }
 
@@ -332,7 +339,9 @@ pub fn with_routes<'a>(asset: &'a Asset, registry: &Registry) -> Cow<'a, Asset> 
     Cow::Owned(a)
 }
 
-/// Builds the IR of `asset` located at `path` (`{sub}/{name}` without suffix).
+/// Builds the IR of `asset` located at `path` (`{sub}/{name}` without suffix). One lookup per project asset kind
+/// nodes can refer to.
+#[allow(clippy::too_many_arguments)]
 pub fn build_ir(
     asset: &Asset,
     path: &str,
@@ -341,12 +350,13 @@ pub fn build_ir(
     curves: &dyn CurveLookup,
     consts: &dyn ConstLookup,
     textures: &dyn TextureLookup,
+    gradients: &dyn GradientLookup,
 ) -> IrResult {
     let original = asset;
     let routed = with_routes(asset, registry);
     let asset = routed.as_ref();
     let mut diags = Diagnostics::default();
-    let env = Env { asset_kind: asset.kind, asset_path: path, functions, curves, consts, textures };
+    let env = Env { asset_kind: asset.kind, asset_path: path, functions, curves, consts, textures, gradients };
 
     if let Err(e) = check_ident(&asset.name) {
         diags.push(Diagnostic::new(Code::E005, format!("asset name: {e}")));
@@ -700,8 +710,10 @@ pub fn build_ir(
     let mut custom_fns = BTreeMap::new();
     let mut params_by_node: BTreeMap<NodeId, MaterialParam> = BTreeMap::new();
     let mut fixed_textures: BTreeMap<(Option<String>, NodeId), String> = BTreeMap::new();
+    let mut gradients_used: BTreeSet<String> = BTreeSet::new();
     for sink in stages.values() {
         fixed_textures.extend(sink.fixed_textures.iter().map(|(k, v)| (k.clone(), v.clone())));
+        gradients_used.extend(sink.gradients.iter().cloned());
         stdlib.extend(sink.stdlib.iter().cloned());
         functions_used.extend(sink.functions.iter().cloned());
         curves_used.extend(sink.curves.iter().cloned());
@@ -733,25 +745,42 @@ pub fn build_ir(
         }
     }
     {
-        // `ft_{fn}_{node}` maps `/` to `_` (design §1.3): two origins may only collide as `a/b_c` vs `a_b/c`.
-        let mut idents: BTreeMap<String, String> = BTreeMap::new();
-        for (origin, node) in fixed_textures.keys() {
-            let ident = fixed_texture_ident(origin.as_deref(), node);
+        // `ft_{fn}_{node}` maps `/` to `_` (design §1.3): two origins may only collide as `a/b_c` vs `a_b/c`. So does
+        // `gc_{collection}` (gradient design §7), which may also meet another collection's `_sampler` name. The
+        // prefixes keep fixed textures and gradients apart; both are checked in one map all the same.
+        #[derive(Clone)]
+        enum Owner {
+            Fixed(String),
+            Gradient(String),
+        }
+        let fixed = fixed_textures.keys().map(|(origin, node)| {
             let what = match origin {
                 Some(o) => format!("node `{node}` of function `{o}`"),
                 None => format!("node `{node}`"),
             };
-            for name in [ident.clone(), format!("{ident}_sampler")] {
-                if let Some(other) = idents.insert(name.clone(), what.clone()) {
-                    diags.push(Diagnostic::new(
-                        Code::E006,
-                        format!(
-                            "the fixed textures of {other} and {what} get the same identifier `{name}`; \
-                             rename one of the functions"
-                        ),
-                    ));
-                    break;
-                }
+            (fixed_texture_ident(origin.as_deref(), node), Owner::Fixed(what))
+        });
+        let gradient = gradients_used.iter().map(|c| (gradient_ident(c), Owner::Gradient(c.clone())));
+        let mut idents: BTreeMap<String, Owner> = BTreeMap::new();
+        for (ident, owner) in fixed.chain(gradient) {
+            let names = [ident.clone(), format!("{ident}_sampler")];
+            if let Some((name, other)) = names.iter().find_map(|n| Some((n, idents.get(n)?))) {
+                let msg = match (other, &owner) {
+                    (Owner::Gradient(a), Owner::Gradient(b)) => {
+                        format!("collections `{a}` and `{b}` get the same identifier `{name}`; rename one of them")
+                    }
+                    (Owner::Fixed(a), Owner::Fixed(b)) => format!(
+                        "the fixed textures of {a} and {b} get the same identifier `{name}`; rename one of the functions"
+                    ),
+                    // Unreachable: the prefixes differ (`ft_` / `gc_`).
+                    (Owner::Fixed(a) | Owner::Gradient(a), Owner::Fixed(b) | Owner::Gradient(b)) => {
+                        format!("`{a}` and `{b}` get the same identifier `{name}`")
+                    }
+                };
+                diags.push(Diagnostic::new(Code::E006, msg));
+            }
+            for name in names {
+                idents.entry(name).or_insert_with(|| owner.clone());
             }
         }
     }
@@ -797,7 +826,7 @@ pub fn build_ir(
             // Not previewable after all: build the normal IR, so the extra upstream leaves no trace.
             let mut normal = original.clone();
             normal.preview.node = None;
-            let mut r = build_ir(&normal, path, registry, functions, curves, consts, textures);
+            let mut r = build_ir(&normal, path, registry, functions, curves, consts, textures, gradients);
             let msg = format!("preview ignored: `{}` has no output that converts to a color", n.def.info().name);
             r.diagnostics.push(Diagnostic::new(Code::W107, msg).at_node(p));
             return r;
@@ -861,6 +890,8 @@ pub fn build_ir(
                 Some(HiddenTexture { origin: origin.clone()?, node: node.clone(), texture: texture.clone() })
             })
             .collect();
+        // Own gradient collections and the callees' (gradient design §7), sorted.
+        sig.gradients = gradients_used.iter().cloned().collect();
         let mut seen = BTreeSet::new();
         for (id, n) in &nodes {
             if matches!(n.def.role(), NodeRole::FunctionInput | NodeRole::FunctionOutput) {
@@ -897,7 +928,8 @@ pub fn build_ir(
 
     let uses_normal = main.outputs.contains_key("normal");
     let uniform = UniformLayout::compute(&params);
-    let textures = if asset.kind.is_function() { Vec::new() } else { texture_bindings(&params, fixed_textures) };
+    let textures =
+        if asset.kind.is_function() { Vec::new() } else { texture_bindings(&params, fixed_textures, &gradients_used) };
     IrResult {
         ir: Some(Ir {
             path: path.to_string(),
@@ -920,10 +952,12 @@ pub fn build_ir(
     }
 }
 
-/// Texture bindings of a material: texture parameters by name, then fixed textures by `(origin, node)`.
+/// Texture bindings of a material: texture parameters by name, then fixed textures by `(origin, node)`, then gradient
+/// collections by id.
 fn texture_bindings(
     params: &[MaterialParam],
     fixed: BTreeMap<(Option<String>, NodeId), String>,
+    gradients: &BTreeSet<String>,
 ) -> Vec<TextureBinding> {
     let params = params
         .iter()
@@ -932,8 +966,12 @@ fn texture_bindings(
     let fixed = fixed.into_iter().map(|((origin, node), texture)| {
         (fixed_texture_ident(origin.as_deref(), &node), TextureSource::Fixed { node, origin }, texture)
     });
+    let gradients = gradients
+        .iter()
+        .map(|c| (gradient_ident(c), TextureSource::Gradient(c.clone()), crate::gradient::texture_id(c)));
     params
         .chain(fixed)
+        .chain(gradients)
         .enumerate()
         .map(|(i, (ident, source, texture))| TextureBinding {
             ident,

@@ -11,3 +11,9 @@ fn sg_normal_from_height(t: texture_2d<f32>, s: sampler, uv: vec2<f32>, scale: f
     let hy = textureSample(t, s, uv + vec2<f32>(0.0, texel.y)).r;
     return normalize(vec3<f32>((h - hx) * scale, (h - hy) * scale, 1.0));
 }
+
+// Row `v` of a baked gradient collection (gradient design §7) at `t`: `t` maps to texel centres (127/128, 0.5/128),
+// so 0 and 1 hit the first / last texel. Level 0 explicitly: no mipmaps, and it works in the vertex stage too.
+fn sg_sample_gradient(tex: texture_2d<f32>, samp: sampler, t: f32, v: f32) -> vec4<f32> {
+    return textureSampleLevel(tex, samp, vec2<f32>(saturate(t) * 0.9921875 + 0.00390625, v), 0.0);
+}

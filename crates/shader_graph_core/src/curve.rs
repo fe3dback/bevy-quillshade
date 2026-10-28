@@ -1,5 +1,6 @@
 //! Curve assets (`shaders/**/*.curve.ron`, decision 0015): points on the unit square sampled by the
-//! `Sample Curve` node. [`Curve::sample`] is the reference for the generated WESL and the editor preview.
+//! `Sample Curve` node, scaled to the curve's output range `min..max` (decision 0038). [`Curve::sample`] is the
+//! reference for the generated WESL; the editor draws the normalized shape ([`Curve::sample_normalized`]).
 
 use serde::{Deserialize, Serialize};
 
@@ -15,9 +16,41 @@ const MIN_SPAN: f32 = 1e-6;
 pub struct Curve {
     pub format_version: u32,
     pub name: String,
-    /// `(t, value)`, both in `0..1`, sorted by `t`.
+    /// Output of a point value of 0 (decision 0038); omitted from the file at its default.
+    #[serde(default, skip_serializing_if = "is_default_min")]
+    pub min: f32,
+    /// Output of a point value of 1, `> min`; omitted from the file at its default.
+    #[serde(default = "default_max", skip_serializing_if = "is_default_max")]
+    pub max: f32,
+    /// `(t, value)`, both in `0..1`, sorted by `t`; a value `v` outputs `min + v * (max - min)`.
     #[serde(default)]
     pub points: Vec<(f32, f32)>,
+}
+
+pub const DEFAULT_MIN: f32 = 0.0;
+pub const DEFAULT_MAX: f32 = 1.0;
+
+fn default_max() -> f32 {
+    DEFAULT_MAX
+}
+
+fn is_default_min(x: &f32) -> bool {
+    *x == DEFAULT_MIN
+}
+
+fn is_default_max(x: &f32) -> bool {
+    *x == DEFAULT_MAX
+}
+
+/// Why `min..max` is not a valid output range (`None`: it is).
+pub fn range_error(min: f32, max: f32) -> Option<String> {
+    if !min.is_finite() || !max.is_finite() {
+        Some(format!("curve range min {min} / max {max} must be finite"))
+    } else if min >= max {
+        Some(format!("curve range min {min} must be less than max {max}"))
+    } else {
+        None
+    }
 }
 
 /// How a curve is evaluated between its points.
@@ -76,7 +109,13 @@ struct VersionProbe {
 
 impl Curve {
     pub fn new(name: impl Into<String>, points: Vec<(f32, f32)>) -> Self {
-        let mut c = Curve { format_version: CURVE_FORMAT_VERSION, name: name.into(), points };
+        let mut c = Curve {
+            format_version: CURVE_FORMAT_VERSION,
+            name: name.into(),
+            min: DEFAULT_MIN,
+            max: DEFAULT_MAX,
+            points,
+        };
         c.normalize();
         c
     }
@@ -95,6 +134,9 @@ impl Curve {
             CURVE_FORMAT_VERSION => {
                 let mut c: Curve =
                     ron::Options::default().from_str(text).map_err(|e| LoadError::Parse(e.to_string()))?;
+                if let Some(e) = range_error(c.min, c.max) {
+                    return Err(LoadError::Parse(e));
+                }
                 c.normalize();
                 Ok(c)
             }
@@ -112,7 +154,8 @@ impl Curve {
         s
     }
 
-    /// Drops non-finite points, clamps to the unit square, sorts by `t` (stable: equal `t` keep their order).
+    /// Drops non-finite points, clamps to the unit square, sorts by `t` (stable: equal `t` keep their order). The
+    /// output range is left alone.
     pub fn normalize(&mut self) {
         self.points.retain(|(t, v)| t.is_finite() && v.is_finite());
         for p in &mut self.points {
@@ -121,7 +164,22 @@ impl Curve {
         self.points.sort_by(|a, b| a.0.total_cmp(&b.0));
     }
 
-    /// Catmull-Rom slope `dv/dt` at every point.
+    /// `max - min`: the scale from normalized values (and slopes) to real units.
+    pub fn span(&self) -> f32 {
+        self.max - self.min
+    }
+
+    /// A normalized value (`0..1` = `min..max`) in real units.
+    pub fn to_real(&self, v: f32) -> f32 {
+        self.min + v * self.span()
+    }
+
+    /// A real value as a normalized one (inverse of [`Curve::to_real`]).
+    pub fn to_normalized(&self, x: f32) -> f32 {
+        (x - self.min) / self.span()
+    }
+
+    /// Catmull-Rom slope `dv/dt` at every point, normalized (real units: times [`Curve::span`]).
     pub fn slopes(&self) -> Vec<f32> {
         let p = &self.points;
         let n = p.len();
@@ -139,13 +197,19 @@ impl Curve {
             .collect()
     }
 
-    /// Value at `t` (same math as the generated `sample_curve_*` functions).
+    /// Value at `t` in real units (same math as the generated `sample_curve_*` functions, whose constants hold the
+    /// points already scaled to `min..max`; Hermite and linear interpolation are linear in values and slopes).
     pub fn sample(&self, t: f32, interp: Interp) -> f32 {
-        self.sample_with(t, interp, &self.slopes())
+        self.to_real(self.sample_normalized(t, interp))
     }
 
-    /// [`Curve::sample`] with the [`Curve::slopes`] computed once (drawing samples many `t`).
-    pub fn sample_with(&self, t: f32, interp: Interp, slopes: &[f32]) -> f32 {
+    /// Value at `t` before the output range is applied (`0..1`, Catmull-Rom may overshoot): the drawn shape.
+    pub fn sample_normalized(&self, t: f32, interp: Interp) -> f32 {
+        self.sample_normalized_with(t, interp, &self.slopes())
+    }
+
+    /// [`Curve::sample_normalized`] with the [`Curve::slopes`] computed once (drawing samples many `t`).
+    pub fn sample_normalized_with(&self, t: f32, interp: Interp, slopes: &[f32]) -> f32 {
         let p = &self.points;
         match p.len() {
             0 => return 0.0,
@@ -218,6 +282,53 @@ mod tests {
         let step = Curve::new("s", vec![(0.0, 0.0), (0.5, 0.0), (0.5, 1.0), (1.0, 1.0)]);
         assert_eq!(step.sample(0.75, Interp::Simple), 1.0);
         assert!(step.sample(0.25, Interp::CatmullRom).is_finite());
+    }
+
+    #[test]
+    fn range_is_stored_only_when_set() {
+        let c = Curve::new("r", vec![(0.0, 0.25), (1.0, 1.0)]);
+        assert_eq!((c.min, c.max), (0.0, 1.0));
+        let text = c.to_ron();
+        assert!(!text.contains("min") && !text.contains("max"), "{text}");
+        let old =
+            "Curve(\n  format_version: 1,\n  name: \"r\",\n  points: [\n    (0.0, 0.25),\n    (1.0, 1.0),\n  ],\n)\n";
+        assert_eq!(text, old, "a file without a range re-saves byte-identically");
+        assert_eq!(Curve::from_ron(old).unwrap(), c);
+
+        let ranged = Curve { min: -2.0, max: 10.0, ..c.clone() };
+        let text = ranged.to_ron();
+        assert!(text.contains("min: -2.0") && text.contains("max: 10.0"), "{text}");
+        let back = Curve::from_ron(&text).unwrap();
+        assert_eq!(back, ranged);
+        assert_eq!(back.points, c.points, "points stay normalized");
+    }
+
+    #[test]
+    fn invalid_ranges_fail_to_load() {
+        let file = |range: &str| format!("Curve(format_version: 1, name: \"r\", {range} points: [(0.0, 0.5)])");
+        for range in ["min: 1.0,", "min: 2.0, max: 2.0,", "min: 3.0, max: -1.0,", "max: NaN,", "min: -inf,"] {
+            match Curve::from_ron(&file(range)) {
+                Err(LoadError::Parse(e)) => assert!(e.starts_with("curve range"), "{range}: {e}"),
+                other => panic!("{range}: {other:?}"),
+            }
+        }
+        assert!(Curve::from_ron(&file("min: -1.0, max: 0.0,")).is_ok());
+    }
+
+    #[test]
+    fn sampling_returns_real_units() {
+        let c = Curve { min: -2.0, max: 10.0, ..Curve::new("c", vec![(0.2, 0.0), (0.5, 1.0), (0.8, 0.25)]) };
+        for interp in Interp::ALL {
+            assert_eq!(c.sample(0.0, interp), -2.0);
+            assert_eq!(c.sample(0.5, interp), 10.0);
+            assert_eq!(c.sample(1.0, interp), 1.0);
+            let n = c.sample_normalized(0.4, interp);
+            assert!((c.sample(0.4, interp) - (-2.0 + 12.0 * n)).abs() < 1e-5, "{interp:?}");
+        }
+        assert!((c.sample(0.35, Interp::Simple) - 4.0).abs() < 1e-5);
+        assert_eq!((c.to_real(0.5), c.to_normalized(4.0)), (4.0, 0.5));
+        assert_eq!(Curve { min: 3.0, max: 5.0, ..Curve::new("e", vec![]) }.sample(0.5, Interp::Simple), 3.0);
+        assert_eq!(Curve { min: 3.0, max: 5.0, ..Curve::new("o", vec![(0.1, 0.5)]) }.sample(0.9, Interp::Simple), 4.0);
     }
 
     #[test]

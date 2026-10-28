@@ -343,6 +343,7 @@ mod tests {
             (ViewKind::Consts, "Constants"),
             (ViewKind::Image, "Image"),
             (ViewKind::Texture, "Texture"),
+            (ViewKind::Gradients, "Gradients"),
         ];
         for (view, title) in titles {
             assert_eq!(sidebar_title(Some(view)), title, "{view:?}");

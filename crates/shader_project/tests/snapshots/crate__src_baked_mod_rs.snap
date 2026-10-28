@@ -37,7 +37,7 @@ pub const DEFAULT_TEXTURE: &str = "@internal/default";
 #[derive(Asset, TypePath, Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct BakedManifest {
     pub version: u32,
-    /// Texture asset id (`textures/rock_albedo`, `@internal/default`) → image.
+    /// Texture asset id (`textures/rock_albedo`, `@internal/default`, `@gradients/common/terrain`) → image.
     #[serde(default)]
     pub textures: BTreeMap<String, TextureDef>,
     /// Material asset id (`env/rock_wet`) → values.
@@ -334,9 +334,9 @@ impl AssetLoader for ManifestLoader {
 }
 
 /// Texture load progress, written whenever a count changes (and once when loading starts). `total` is the number of
-/// textures in the compiled manifest (every Texture asset plus the internal ones; a manifest hot reload before
-/// [`BakedMaterialsReady`] may add the textures it newly references); loading is over when `loaded + failed ==
-/// total`. Textures a later hot reload loads are not reported.
+/// textures in the compiled manifest (every Texture asset, the internal ones and the baked gradient collections; a
+/// manifest hot reload before [`BakedMaterialsReady`] may add the textures it newly references); loading is over when
+/// `loaded + failed == total`. Textures a later hot reload loads are not reported.
 #[derive(Message, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BakedMaterialsProgress {
     pub loaded: u32,

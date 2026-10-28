@@ -34,7 +34,7 @@ use bevy::prelude::*;
 use bevy::text::{EditableText, TextEdit, TextReadWriteMode};
 use bevy::ui::InteractionDisabled;
 use bevy::ui_widgets::popover::Popover;
-use bevy::ui_widgets::{Button, Checkbox, MenuPopup};
+use bevy::ui_widgets::{Button, Checkbox, ListBox, MenuPopup};
 use bevy_enhanced_input::prelude::{
     Action, ActionSettings, ActionSources, Actions, Binding, Bindings, ContextActivity, ContextPriority,
     EnhancedInputPlugin, EnhancedInputSystems, Hold, InputAction, InputContextAppExt, InputModKeys, ModKeys, Start,
@@ -305,7 +305,8 @@ pub struct KeyboardGate {
 
 /// Whether the user is typing: a text field has the focus ([`typing_into`]), the palette, a dialog or a context menu
 /// ([`MenuRoot`]) is open, or the focus is in a popup ([`Popups`]: a main or context menu, a Feathers select's list,
-/// the color picker). Also while a focused button or checkbox takes a key it presses with ([`PRESS_KEYS`]).
+/// the color picker). Also while a focused button or checkbox takes a key it presses with ([`PRESS_KEYS`]), or a
+/// focused list one of its keys ([`LIST_KEYS`]).
 #[derive(SystemParam)]
 pub struct Typing<'w, 's> {
     focus: Option<Res<'w, InputFocus>>,
@@ -313,6 +314,7 @@ pub struct Typing<'w, 's> {
     mouse: Option<Res<'w, ButtonInput<MouseButton>>>,
     keys: Option<Res<'w, ButtonInput<KeyCode>>>,
     pressable: Query<'w, 's, (), (Or<(With<Button>, With<Checkbox>)>, Without<InteractionDisabled>)>,
+    lists: Query<'w, 's, (), With<ListBox>>,
     editor: Res<'w, Editor>,
     palette: Option<Res<'w, Palette>>,
     menus: Query<'w, 's, (), With<MenuRoot>>,
@@ -330,6 +332,8 @@ impl Typing<'_, '_> {
             || focus.and_then(|f| self.fields.get(f).ok()).is_some_and(|m| typing_into(m, held))
             || focus.is_some_and(|f| self.pressable.contains(f))
                 && self.keys.as_ref().is_some_and(|k| k.any_pressed(PRESS_KEYS))
+            || focus.is_some_and(|f| self.lists.contains(f))
+                && self.keys.as_ref().is_some_and(|k| k.any_pressed(LIST_KEYS))
     }
 }
 
@@ -339,6 +343,20 @@ impl Typing<'_, '_> {
 /// when it is released. Bevy has no "consumed by the focused widget" for input read outside its dispatch (the widget
 /// stops the event's propagation, bevy_enhanced_input reads `ButtonInput`), hence this one-line rule.
 pub const PRESS_KEYS: [KeyCode; 2] = [KeyCode::Space, KeyCode::Enter];
+
+/// The keys a focused list ([`ListBox`]: the gradient slot list) moves its active row and selects with
+/// (`bevy_ui_widgets`' `listbox_on_key_input`). As with [`PRESS_KEYS`], the widget wins: while one is held on a focused
+/// list the hotkeys do not see the keyboard (the arrows do not also nudge the selected gradient stop).
+pub const LIST_KEYS: [KeyCode; 8] = [
+    KeyCode::ArrowUp,
+    KeyCode::ArrowDown,
+    KeyCode::ArrowLeft,
+    KeyCode::ArrowRight,
+    KeyCode::Home,
+    KeyCode::End,
+    KeyCode::Space,
+    KeyCode::Enter,
+];
 
 /// Popups that hold the keyboard focus while open and close when it leaves them: a menu or select list
 /// ([`MenuPopup`]: also our main and context menus), the color picker and other popovers ([`Popover`]).

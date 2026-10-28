@@ -26,7 +26,9 @@ impl Editor {
         let tables = self.tabs.iter().filter_map(Tab::consts).map(|c| (c.id.clone(), c.revision));
         let textures = self.tabs.iter().filter_map(Tab::texture).filter(|t| !t.is_internal());
         let textures = textures.map(|t| (t.id.clone(), t.revision));
-        self.docs().map(|d| (d.id.clone(), d.revision)).chain(tables).chain(textures).collect()
+        // Open gradient collections: a cleared or refilled slot changes W111 of the graphs sampling it.
+        let gradients = self.tabs.iter().filter_map(Tab::gradients).map(|g| (g.id.clone(), g.revision));
+        self.docs().map(|d| (d.id.clone(), d.revision)).chain(tables).chain(textures).chain(gradients).collect()
     }
 
     /// Live validation (dry run of the whole pipeline on the unsaved state).

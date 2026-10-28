@@ -5,7 +5,9 @@ use std::collections::BTreeMap;
 use shader_graph_core::consts::NoConsts;
 use shader_graph_core::ir::declared_function_sig;
 use shader_graph_core::model::{Asset, AssetKind, MaterialKind, Node, PbrSettings};
-use shader_graph_core::registry::{Env, FunctionSig, NoCurves, NoFunctions, NoTextures, ParamKind, SigCtx, Signature};
+use shader_graph_core::registry::{
+    Env, FunctionSig, NoCurves, NoFunctions, NoGradients, NoTextures, ParamKind, SigCtx, Signature,
+};
 use shader_graph_core::{PinType, Value};
 
 fn signature(kind: &str) -> Signature {
@@ -20,6 +22,7 @@ fn signature(kind: &str) -> Signature {
         curves: &NoCurves,
         consts: &NoConsts,
         textures: &NoTextures,
+        gradients: &NoGradients,
     };
     def.signature(&SigCtx {
         node_id: "n",
@@ -74,6 +77,7 @@ fn call_signature(f: FunctionSig) -> Signature {
         curves: &NoCurves,
         consts: &NoConsts,
         textures: &NoTextures,
+        gradients: &NoGradients,
     };
     def.signature(&SigCtx {
         node_id: "n",

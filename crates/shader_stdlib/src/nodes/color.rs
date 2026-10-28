@@ -1,13 +1,23 @@
 //! Color category (decision 0036): Make / Break of HSV, HSL, OKLab, OKLCh, sRGB transfer, adjustments, filters,
-//! Blend, BlackBody. Colors are linear `Float3` in and out; the work is done in `wesl/color.wesl`.
+//! Blend, BlackBody. Colors are linear `Float3` in and out; the work is done in `wesl/color.wesl`. Sample Gradient
+//! (gradient design §6) reads a gradient collection's baked texture.
 
+use shader_graph_core::gradient::SLOTS;
 use shader_graph_core::registry::{Operand, ParamDef, ParamKind, PinDef, Registry};
-use shader_graph_core::{PinType, Value};
+use shader_graph_core::value::wesl_scalar;
+use shader_graph_core::{Code, EmitCtx, PinType, Value};
 
 use crate::def::{def, pin_in, pin_out, sig};
 
 const CAT: &str = "Color";
 const F3: PinType = PinType::Float3;
+
+/// Node sampling a gradient of a gradient collection (gradient design §6).
+pub const SAMPLE_GRADIENT_KIND: &str = "stdlib::SampleGradient";
+/// Property of [`SAMPLE_GRADIENT_KIND`]: the gradient collection id, `""` = none.
+pub const GRADIENT_COLLECTION_PARAM: &str = "collection";
+/// Property of [`SAMPLE_GRADIENT_KIND`]: the slot id of the gradient in the collection, `0` = none.
+pub const GRADIENT_SLOT_PARAM: &str = "gradient";
 
 /// Component of a color space: id, label, default of the Make node.
 type Comp = (&'static str, &'static str, f32);
@@ -291,6 +301,36 @@ pub fn register(r: &mut Registry) {
             ),
     );
 
+    r.register(
+        def(SAMPLE_GRADIENT_KIND, "Sample Gradient", CAT)
+            .kw(&["gradient", "ramp", "color curve", "palette", "lut", "atlas"])
+            .desc(
+                "Linear RGBA color of a gradient of a gradient collection at T (0..1). Without a gradient: white \
+                 (W111).",
+            )
+            .param(ParamDef::new(
+                GRADIENT_COLLECTION_PARAM,
+                "Collection",
+                ParamKind::GradientCollection,
+                Value::Str(String::new()),
+            ))
+            .param(ParamDef::new(GRADIENT_SLOT_PARAM, "Gradient", ParamKind::GradientSlot, Value::Int(0)))
+            .build(
+                |_| {
+                    // Output names and order of TextureSample (`sample_outputs`), minus the single channels.
+                    sig(
+                        vec![pin_in("t", "T", PinType::Float, 0.0).range(0.0, 1.0)],
+                        vec![
+                            pin_out("rgb", "RGB", F3),
+                            pin_out("a", "A", PinType::Float),
+                            pin_out("rgba", "RGBA", PinType::Float4),
+                        ],
+                    )
+                },
+                sample_gradient_emit,
+            ),
+    );
+
     r.register(def("stdlib::BlackBody", "BlackBody", CAT).kw(&["temperature", "kelvin", "fire"]).build(
         |_| sig(vec![pin_in("temp", "Temp", PinType::Float, 6500.0)], vec![pin_out("out", "", F3)]),
         |c| {
@@ -299,4 +339,43 @@ pub fn register(r: &mut Registry) {
             c.define("out", e);
         },
     ));
+}
+
+/// Sample Gradient (gradient design §6, §7). The row literal is the slot's current position, resolved from its id;
+/// whether the slot has stops never changes the code, so editing colors (even emptying a slot) only rebakes the
+/// collection's texture.
+fn sample_gradient_emit(c: &mut EmitCtx) {
+    let collection = c.param(GRADIENT_COLLECTION_PARAM).as_str().to_string();
+    let slot = c.param(GRADIENT_SLOT_PARAM).as_i32();
+    if collection.is_empty() || slot == 0 {
+        c.diag(Code::W111, "no gradient selected; outputs white");
+        define_gradient_outputs(c, "vec4<f32>(1.0)".to_string());
+        return;
+    }
+    let env = c.env;
+    let Some(coll) = env.gradients.collection(&collection) else {
+        c.diag(Code::E006, format!("gradient collection `{collection}` does not exist or cannot be loaded"));
+        return;
+    };
+    let Some(row) = u32::try_from(slot).ok().and_then(|id| coll.position(id)) else {
+        c.diag(Code::E006, format!("gradient #{slot} is not in collection `{collection}`"));
+        return;
+    };
+    if coll.slots[row].is_empty() {
+        c.diag(Code::W111, "gradient is empty; outputs white");
+    }
+    let (tex, sampler) = c.gradient(&collection);
+    let f = c.stdlib("texture", "sg_sample_gradient");
+    // Texel centre of the row: `(row + 0.5) / SLOTS`, exact in f32.
+    let v = wesl_scalar((row as f32 + 0.5) / SLOTS as f32);
+    let t = c.input("t");
+    define_gradient_outputs(c, format!("{f}({tex}, {sampler}, {t}, {v})"));
+}
+
+/// Defines `rgba` as `expr`; `rgb` / `a` are its swizzles, as in TextureSample.
+fn define_gradient_outputs(c: &mut EmitCtx, expr: String) {
+    c.define("rgba", expr);
+    let v = c.var("rgba");
+    c.alias("rgb", Operand::Value(format!("{v}.rgb")));
+    c.alias("a", Operand::Value(format!("{v}.a")));
 }

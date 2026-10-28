@@ -133,6 +133,16 @@ impl Editor {
             }
             return;
         }
+        if id.ty == AssetType::Gradients {
+            match assets::load_gradients(project, id) {
+                Ok(c) => {
+                    self.tabs.push(Tab::Gradients(GradientsDoc::new(id.clone(), c)));
+                    self.activate(self.tabs.len() - 1);
+                }
+                Err(e) => self.io_error(&format!("cannot open {}", id.source_rel()), e),
+            }
+            return;
+        }
         if id.ty == AssetType::Curve {
             match assets::load_curve(project, id) {
                 Ok(c) => {

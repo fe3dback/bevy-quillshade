@@ -1,10 +1,11 @@
-//! Editor asset discovery and loading (`shaders/**/*.{material,function,curve,consts,texture}.ron`).
+//! Editor asset discovery and loading (`shaders/**/*.{material,function,curve,consts,texture,gradients}.ron`).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use shader_graph_core::consts::GlobalConsts;
 use shader_graph_core::curve::Curve;
+use shader_graph_core::gradient::GradientCollection;
 use shader_graph_core::ident::check_ident;
 use shader_graph_core::model::{Asset, AssetKind};
 use shader_graph_core::texture::TextureAsset;
@@ -20,6 +21,9 @@ pub enum AssetType {
     /// Curve asset (decision 0015), not a node graph.
     Curve,
     Function,
+    /// Gradient collection (gradient design §3): 128 gradient slots baked into one texture, not a node graph; no WESL
+    /// module of its own.
+    Gradients,
     Material,
     /// Texture asset (design §1.1, decision 0024): a game image + loader settings, not a node graph; no file of its
     /// own, only its entry in the baked manifest.
@@ -34,6 +38,7 @@ impl AssetType {
             AssetType::Curve => "curve",
             AssetType::Consts => "consts",
             AssetType::Texture => "texture",
+            AssetType::Gradients => "gradients",
         }
     }
 
@@ -42,10 +47,10 @@ impl AssetType {
         matches!(self, AssetType::Material | AssetType::Function)
     }
 
-    /// Assets with a generated WESL module (constant tables have none: their values are inlined; Texture assets
-    /// have none either).
+    /// Assets with a generated WESL module (constant tables have none: their values are inlined; Texture assets and
+    /// gradient collections have none either).
     pub fn has_wesl(self) -> bool {
-        !matches!(self, AssetType::Consts | AssetType::Texture)
+        !matches!(self, AssetType::Consts | AssetType::Texture | AssetType::Gradients)
     }
 
     pub fn of(kind: &AssetKind) -> Self {
@@ -88,9 +93,16 @@ impl std::fmt::Display for AssetId {
 /// Parses `shaders/`-relative file path into an asset id.
 pub fn id_from_rel(rel: &str) -> Option<AssetId> {
     let rel = rel.replace('\\', "/");
-    [AssetType::Material, AssetType::Function, AssetType::Curve, AssetType::Consts, AssetType::Texture]
-        .into_iter()
-        .find_map(|ty| rel.strip_suffix(&format!(".{}.ron", ty.suffix())).map(|p| AssetId::new(ty, p)))
+    [
+        AssetType::Material,
+        AssetType::Function,
+        AssetType::Curve,
+        AssetType::Consts,
+        AssetType::Texture,
+        AssetType::Gradients,
+    ]
+    .into_iter()
+    .find_map(|ty| rel.strip_suffix(&format!(".{}.ron", ty.suffix())).map(|p| AssetId::new(ty, p)))
 }
 
 /// Inverse of [`AssetId::source_rel`]: `shaders/env/rock_wet.material.ron` (relative to the project root).
@@ -193,6 +205,16 @@ pub fn load_texture(project: &Project, id: &AssetId) -> Result<TextureAsset, Str
     TextureAsset::from_ron(&text)
 }
 
+/// Loads a gradient collection file (its name is the file name). Structural problems (slot count, ids, stop count)
+/// are load errors.
+pub fn load_gradients(project: &Project, id: &AssetId) -> Result<GradientCollection, String> {
+    if id.ty != AssetType::Gradients {
+        return Err(format!("{} is not a gradient collection", id.source_rel()));
+    }
+    let text = std::fs::read_to_string(id.file(project)).map_err(|e| e.to_string())?;
+    GradientCollection::from_ron(&text).map_err(|e| e.to_string())
+}
+
 /// Checks the asset path (spec §5): snake_case components. Generated modules are prefixed (`dir_`, `mat_`;
 /// decision 0020), so keywords, a material next to a directory of the same name and top-level `stdlib/`,
 /// `functions/`, `curves/` directories are fine.
@@ -236,6 +258,8 @@ pub struct AssetSet {
     pub consts: BTreeMap<AssetId, Result<GlobalConsts, String>>,
     /// Texture assets (design §1.1).
     pub textures: BTreeMap<AssetId, Result<TextureAsset, String>>,
+    /// Gradient collections (gradient design §3).
+    pub gradients: BTreeMap<AssetId, Result<GradientCollection, String>>,
 }
 
 impl AssetSet {
@@ -259,14 +283,23 @@ impl AssetSet {
                     let t = load_texture(project, &id);
                     set.textures.insert(id, t);
                 }
+                AssetType::Gradients => {
+                    let g = load_gradients(project, &id);
+                    set.gradients.insert(id, g);
+                }
             }
         }
         set
     }
 
-    /// Every asset: graphs, curves, constant tables, textures (sorted within each kind).
+    /// Every asset: graphs, curves, constant tables, textures, gradient collections (sorted within each kind).
     pub fn ids(&self) -> impl Iterator<Item = &AssetId> {
-        self.assets.keys().chain(self.curves.keys()).chain(self.consts.keys()).chain(self.textures.keys())
+        self.assets
+            .keys()
+            .chain(self.curves.keys())
+            .chain(self.consts.keys())
+            .chain(self.textures.keys())
+            .chain(self.gradients.keys())
     }
 
     pub fn contains(&self, id: &AssetId) -> bool {
@@ -274,10 +307,11 @@ impl AssetSet {
             || self.curves.contains_key(id)
             || self.consts.contains_key(id)
             || self.textures.contains_key(id)
+            || self.gradients.contains_key(id)
     }
 
     pub fn len(&self) -> usize {
-        self.assets.len() + self.curves.len() + self.consts.len() + self.textures.len()
+        self.assets.len() + self.curves.len() + self.consts.len() + self.textures.len() + self.gradients.len()
     }
 
     pub fn is_empty(&self) -> bool {

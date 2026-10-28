@@ -196,7 +196,7 @@ fn named_routes_teleport_wires() {
     use shader_graph_core::consts::NoConsts;
     use shader_graph_core::ir::build_ir;
     use shader_graph_core::model::{Asset, AssetKind, MaterialKind, Node, PbrSettings};
-    use shader_graph_core::registry::{NoCurves, NoFunctions, NoTextures};
+    use shader_graph_core::registry::{NoCurves, NoFunctions, NoGradients, NoTextures};
     use shader_graph_core::{Value, ir::Ir};
 
     let reg = shader_stdlib::registry();
@@ -209,7 +209,7 @@ fn named_routes_teleport_wires() {
         a
     };
     let ir = |a: &Asset| -> (Option<Ir>, Vec<Code>) {
-        let r = build_ir(a, "m", &reg, &NoFunctions, &NoCurves, &NoConsts, &NoTextures);
+        let r = build_ir(a, "m", &reg, &NoFunctions, &NoCurves, &NoConsts, &NoTextures, &NoGradients);
         (r.ir, r.diagnostics.iter().map(|d| d.code).collect())
     };
 
@@ -1012,6 +1012,132 @@ fn swap_fixed_texture_keeps_codegen() {
     }
 }
 
+/// Gradient design §7: a material sampling a gradient collection directly (fragment and World Position Offset) and
+/// through nested functions (`common/grad_outer` → `common/grad`, whose fixed texture comes first) gets one binding
+/// for the collection, and its WESL compiles against Bevy (forward / no-UV / deferred). The IRs are built directly:
+/// `regenerate` does not load gradient collections yet.
+#[test]
+fn gradient_binding_compiles_directly_and_through_functions() {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use shader_codegen_wesl::check::{self, Files};
+    use shader_codegen_wesl::{GenCtx, paths};
+    use shader_graph_core::consts::NoConsts;
+    use shader_graph_core::gradient::GradientCollection;
+    use shader_graph_core::ir::{WPO_PIN, build_ir};
+    use shader_graph_core::model::{Asset, AssetKind, MaterialKind, PbrSettings};
+    use shader_graph_core::registry::{FunctionSig, NoCurves};
+    use shader_graph_core::{Ir, PinType, Value};
+    use shader_project::fixtures::GraphBuilder;
+    use shader_stdlib::nodes::color::{GRADIENT_COLLECTION_PARAM, GRADIENT_SLOT_PARAM, SAMPLE_GRADIENT_KIND};
+
+    let bevy = BevySources::discover();
+    assert!(bevy.is_some(), "Bevy 0.20 sources are needed for the WESL compile check");
+    let bevy = bevy.unwrap();
+    let mut next = 0;
+    let mut terrain = GradientCollection::new(|| {
+        next += 1;
+        next
+    });
+    terrain.slots[0].id = 11;
+    terrain.slots[5].id = 22;
+    let collections = BTreeMap::from([("common/terrain".to_string(), terrain)]);
+    let registry = shader_stdlib::registry();
+    let build = |a: &Asset, path: &str, fns: &BTreeMap<String, FunctionSig>| -> Ir {
+        let r = build_ir(a, path, &registry, fns, &NoCurves, &NoConsts, &BTreeSet::<String>::new(), &collections);
+        assert!(!r.has_errors(), "{path}: {:?}", r.diagnostics);
+        r.ir.expect("ir")
+    };
+    let s = |v: &str| Value::Str(v.into());
+    let gradient = |g: &mut GraphBuilder, slot: i32| {
+        g.node_p(
+            SAMPLE_GRADIENT_KIND,
+            (0.0, 0.0),
+            &[(GRADIENT_COLLECTION_PARAM, s("common/terrain")), (GRADIENT_SLOT_PARAM, Value::Int(slot))],
+        )
+    };
+    let fn_out = |g: &mut GraphBuilder| {
+        g.node_p("output::FunctionOutput", (600.0, 0.0), &[("name", s("rgb")), ("type", Value::Type(PinType::Float3))])
+    };
+
+    // `common/grad`: fixed texture × gradient.
+    let mut g = GraphBuilder::new("grad", AssetKind::Function);
+    let tex = g.node_p("stdlib::TextureSample", (0.0, 0.0), &[("texture", s("@internal/default"))]);
+    let grad = gradient(&mut g, 11);
+    let mul = g.node("stdlib::Multiply", (300.0, 0.0));
+    let out = fn_out(&mut g);
+    g.link((&tex, "rgb"), (&mul, "a"));
+    g.link((&grad, "rgb"), (&mul, "b"));
+    g.link((&mul, "out"), (&out, "value"));
+    let mut fns = BTreeMap::new();
+    let inner = build(&g.finish(), "common/grad", &fns);
+    fns.insert("common/grad".to_string(), inner.function_sig.clone().unwrap());
+
+    // `common/grad_outer`: only calls `common/grad`; the collection is forwarded as its own hidden parameter.
+    let mut g = GraphBuilder::new("grad_outer", AssetKind::Function);
+    let call = g.node("function::common/grad", (0.0, 0.0));
+    let out = fn_out(&mut g);
+    g.link((&call, "rgb"), (&out, "value"));
+    let outer = build(&g.finish(), "common/grad_outer", &fns);
+    assert_eq!(outer.function_sig.as_ref().unwrap().gradients, ["common/terrain"]);
+    fns.insert("common/grad_outer".to_string(), outer.function_sig.clone().unwrap());
+
+    // Material: the gradient directly (base color and World Position Offset) and through `common/grad_outer`.
+    let mut g = GraphBuilder::new("grad_mat", AssetKind::Material(MaterialKind::Pbr3d(PbrSettings::default())));
+    let out = g.node("output::Pbr3d", (900.0, 0.0));
+    let direct = gradient(&mut g, 11);
+    let call = g.node("function::common/grad_outer", (0.0, 200.0));
+    let mul = g.node("stdlib::Multiply", (300.0, 0.0));
+    let wpo = gradient(&mut g, 22);
+    g.link((&direct, "rgb"), (&mul, "a"));
+    g.link((&call, "rgb"), (&mul, "b"));
+    g.link((&mul, "out"), (&out, "base_color"));
+    g.link((&wpo, "rgb"), (&out, WPO_PIN));
+    let mat = build(&g.finish(), "env/grad_mat", &fns);
+    let idents: Vec<&str> = mat.textures.iter().map(|t| t.ident.as_str()).collect();
+    assert_eq!(idents, ["ft_common_grad_n01", "gc_common_terrain"]);
+    assert!(mat.vertex.is_some(), "World Position Offset samples the gradient in the vertex stage");
+
+    let gen_fn =
+        |ir: &Ir, file: &str| shader_codegen_wesl::function(ir, &GenCtx { functions: &fns, source_file: file });
+    let inner_wesl = gen_fn(&inner, "shaders/common/grad.function.ron").text;
+    let outer_wesl = gen_fn(&outer, "shaders/common/grad_outer.function.ron").text;
+    let mat_wesl = shader_codegen_wesl::material(
+        &mat,
+        &GenCtx { functions: &fns, source_file: "shaders/env/grad_mat.material.ron" },
+    )
+    .text;
+    let hidden = "ft_common_grad_n01: texture_2d<f32>, ft_common_grad_n01_sampler: sampler, gc_common_terrain: \
+                  texture_2d<f32>, gc_common_terrain_sampler: sampler) -> vec3<f32> {";
+    assert!(inner_wesl.contains(&format!("fn fun_grad(b_uv0: vec2<f32>, {hidden}")), "{inner_wesl}");
+    assert!(outer_wesl.contains(&format!("fn fun_grad_outer(b_uv0: vec2<f32>, {hidden}")), "{outer_wesl}");
+    let args = "ft_common_grad_n01, ft_common_grad_n01_sampler, gc_common_terrain, gc_common_terrain_sampler)";
+    assert!(outer_wesl.contains(&format!("fun_grad(b_uv0, {args}")), "{outer_wesl}");
+    assert!(mat_wesl.contains(&format!("fun_grad_outer(b_uv0, {args}")), "{mat_wesl}");
+    for l in [
+        "@binding(103) var gc_common_terrain: texture_2d<f32>;",
+        "@binding(104) var gc_common_terrain_sampler: sampler;",
+    ] {
+        assert_eq!(mat_wesl.matches(l).count(), 1, "{l}\n{mat_wesl}");
+    }
+
+    let mut files = Files::default();
+    for (name, src) in shader_stdlib::MODULES {
+        files.add(&paths::stdlib_module(name), shader_codegen_wesl::stdlib_module(name, src));
+    }
+    files.add(&paths::function_module("common/grad"), inner_wesl);
+    files.add(&paths::function_module("common/grad_outer"), outer_wesl);
+    let main = paths::material_module("env/grad_mat");
+    files.add(&main, mat_wesl);
+    files.enable(mat.layout_feature());
+    let kind = *mat.kind.material().unwrap();
+    for v in check::variants_for(&kind) {
+        if let Err(e) = check::compile(&bevy, &files, &main, *v) {
+            panic!("{v:?}: {e}");
+        }
+    }
+}
+
 fn internal_dir(p: &Project) -> std::path::PathBuf {
     p.root.join("assets/shaders/internal")
 }
@@ -1189,8 +1315,11 @@ fn regen_writes_manifest() {
     let (textures, materials) = manifest(&p);
 
     let ids: Vec<&str> = textures.iter().map(|t| t.id.as_str()).collect();
+    let gradients: Vec<String> =
+        fixtures::gradients().iter().map(|(id, _)| shader_graph_core::gradient::texture_id(id)).collect();
     let mut expected: Vec<&str> = fixtures::textures().iter().map(|(id, _)| *id).collect();
     expected.push("@internal/default");
+    expected.extend(gradients.iter().map(String::as_str));
     expected.sort();
     assert_eq!(ids, expected);
     let tex = |id: &str| textures.iter().find(|t| t.id == id).unwrap();
@@ -1311,4 +1440,383 @@ fn e011_textures_not_in_manifest() {
     let texs = read(&p.root.join("crates/shaders/src/baked/textures.rs"));
     assert!(!texs.contains("broken") && !texs.contains("Bad") && !texs.contains("bad"), "{texs}");
     assert!(texs.contains("pub rock_copy: Handle<Image>"), "{texs}");
+}
+
+/// The fixture project without its gradient collections, so these tests start from a project with none: deleting
+/// one clears the references of the fixture materials (`env/terrain_layers` then only warns, W111).
+fn gradient_project() -> (tempfile::TempDir, Project) {
+    let (d, p) = temp_project();
+    for (path, _) in fixtures::gradients() {
+        ops::delete(&p, &AssetId::new(AssetType::Gradients, path)).unwrap();
+    }
+    (d, p)
+}
+
+struct GradientUsers {
+    collection: AssetId,
+    material: AssetId,
+    function: AssetId,
+    /// Slot id the users sample (slot at position 3, one stop).
+    slot: i32,
+}
+
+/// Collection `common/terrain` (ids 1..=128 in order, slot 4 at position 3 filled) and a material and a function
+/// sampling its slot 4 (gradient design §6).
+fn gradient_users(p: &Project) -> GradientUsers {
+    use shader_graph_core::gradient::{GradientCollection, Stop};
+    use shader_graph_core::model::{AssetKind, MaterialKind, UnlitSettings};
+    use shader_graph_core::{PinType, Value};
+    use shader_project::fixtures::GraphBuilder;
+    use shader_stdlib::nodes::color::{GRADIENT_COLLECTION_PARAM, GRADIENT_SLOT_PARAM, SAMPLE_GRADIENT_KIND};
+
+    let mut next = 0;
+    let mut terrain = GradientCollection::new(|| {
+        next += 1;
+        next
+    });
+    terrain.slots[3].stops.push(Stop { t: 0.0, color: [0.2, 0.4, 0.6, 1.0], mid: 0.5 });
+    let slot = terrain.slots[3].id as i32;
+    let collection = AssetId::new(AssetType::Gradients, "common/terrain");
+    ops::save_gradients(p, &collection, &terrain).unwrap();
+
+    let s = |v: &str| Value::Str(v.into());
+    let params = [(GRADIENT_COLLECTION_PARAM, s("common/terrain")), (GRADIENT_SLOT_PARAM, Value::Int(slot))];
+    let unlit = AssetKind::Material(MaterialKind::Unlit3d(UnlitSettings::default()));
+    let mut g = GraphBuilder::new("terrain_mat", unlit);
+    let out = g.node("output::Unlit3d", (400.0, 0.0));
+    let grad = g.node_p(SAMPLE_GRADIENT_KIND, (0.0, 0.0), &params);
+    g.link((&grad, "rgb"), (&out, "color"));
+    let material = AssetId::new(AssetType::Material, "m/terrain_mat");
+    ops::save(p, &material, &g.finish()).unwrap();
+
+    let mut g = GraphBuilder::new("terrain_fn", AssetKind::Function);
+    let grad = g.node_p(SAMPLE_GRADIENT_KIND, (0.0, 0.0), &params);
+    let out =
+        g.node_p("output::FunctionOutput", (400.0, 0.0), &[("name", s("rgb")), ("type", Value::Type(PinType::Float3))]);
+    g.link((&grad, "rgb"), (&out, "value"));
+    let function = AssetId::new(AssetType::Function, "lib/terrain_fn");
+    ops::save(p, &function, &g.finish()).unwrap();
+    GradientUsers { collection, material, function, slot }
+}
+
+/// `(collection, slot)` parameters of the Sample Gradient nodes of asset `id`.
+fn gradient_params(p: &Project, id: &AssetId) -> Vec<(shader_graph_core::Value, shader_graph_core::Value)> {
+    use shader_stdlib::nodes::color::{GRADIENT_COLLECTION_PARAM, GRADIENT_SLOT_PARAM, SAMPLE_GRADIENT_KIND};
+    let a = shader_project::assets::load(p, id).unwrap();
+    a.nodes
+        .values()
+        .filter(|n| n.kind == SAMPLE_GRADIENT_KIND)
+        .map(|n| (n.params[GRADIENT_COLLECTION_PARAM].clone(), n.params[GRADIENT_SLOT_PARAM].clone()))
+        .collect()
+}
+
+#[test]
+fn gradients_asset_loads_and_validates() {
+    let (_d, p) = gradient_project();
+    let u = gradient_users(&p);
+    assert_eq!(shader_project::assets::id_from_rel("common/terrain.gradients.ron"), Some(u.collection.clone()));
+    assert!(!AssetType::Gradients.is_graph() && !AssetType::Gradients.has_wesl());
+    assert_eq!(shader_project::regen::module_of(&u.collection), None);
+    assert_eq!(shader_project::regen::wesl_file(&p, &u.collection), None);
+    let set = shader_project::AssetSet::load_all(&p);
+    assert!(set.contains(&u.collection) && set.ids().any(|id| *id == u.collection));
+    assert!(matches!(set.gradients.get(&u.collection), Some(Ok(_))));
+    let collections = shader_project::regen::gradient_collections(&set);
+    assert_eq!(collections.keys().collect::<Vec<_>>(), ["common/terrain"]);
+
+    let r = regenerate(&p, &RegenOptions::default()).unwrap();
+    for id in [&u.collection, &u.material, &u.function] {
+        assert!(r.assets[id].ok, "{id}: {:?}", r.assets[id].diagnostics);
+        assert!(r.assets[id].diagnostics.is_empty(), "{id}: {:?}", r.assets[id].diagnostics);
+    }
+
+    // An unloadable collection: E009 at the collection, E006 at its users.
+    std::fs::write(u.collection.file(&p), "GradientCollection(format_version: 1, slots: [])").unwrap();
+    let r = regenerate(&p, &RegenOptions::default()).unwrap();
+    assert_eq!(codes_of(&r, &u.collection), [Code::E009]);
+    assert!(r.assets[&u.collection].diagnostics[0].message.starts_with("cannot load: "));
+    assert!(!r.assets[&u.collection].ok);
+    for id in [&u.material, &u.function] {
+        assert!(codes_of(&r, id).contains(&Code::E006), "{id}: {:?}", r.assets[id].diagnostics);
+    }
+}
+
+#[test]
+fn gradients_bad_path_is_e005() {
+    let (_d, p) = gradient_project();
+    let id = AssetId::new(AssetType::Gradients, "common/Bad");
+    std::fs::create_dir_all(id.file(&p).parent().unwrap()).unwrap();
+    std::fs::write(id.file(&p), shader_graph_core::gradient::GradientCollection::random().to_ron()).unwrap();
+    let set = shader_project::AssetSet::load_all(&p);
+    assert!(shader_project::regen::gradient_collections(&set).is_empty(), "invalid path: not usable");
+    let r = regenerate(&p, &RegenOptions::default()).unwrap();
+    assert!(codes_of(&r, &id).contains(&Code::E005), "{:?}", r.assets[&id].diagnostics);
+    assert!(!r.assets[&id].ok);
+}
+
+#[test]
+fn gradients_create_refuses_existing() {
+    let (_d, p) = gradient_project();
+    let id = ops::create_gradients(&p, "common/sky").unwrap();
+    assert_eq!(id, AssetId::new(AssetType::Gradients, "common/sky"));
+    let c = shader_project::assets::load_gradients(&p, &id).unwrap();
+    assert_eq!(c.slots.len(), shader_graph_core::gradient::SLOTS);
+    assert!(c.slots.iter().all(|s| s.is_empty()));
+    assert!(matches!(ops::create_gradients(&p, "common/sky"), Err(ops::OpError::Exists(_))));
+    let r = regenerate(&p, &RegenOptions::default()).unwrap();
+    assert!(r.assets[&id].ok && r.assets[&id].diagnostics.is_empty(), "{:?}", r.assets[&id].diagnostics);
+}
+
+#[test]
+fn gradients_rename_rewrites_graphs() {
+    use shader_graph_core::Value;
+    let (_d, p) = gradient_project();
+    let u = gradient_users(&p);
+    let before = shader_project::assets::load_gradients(&p, &u.collection).unwrap();
+    let moved = ops::rename(&p, &u.collection, "common/ground").unwrap();
+    assert_eq!(moved, AssetId::new(AssetType::Gradients, "common/ground"));
+    assert!(!u.collection.file(&p).exists());
+    assert_eq!(shader_project::assets::load_gradients(&p, &moved).unwrap(), before);
+    for id in [&u.material, &u.function] {
+        assert_eq!(gradient_params(&p, id), [(Value::Str("common/ground".into()), Value::Int(u.slot))], "{id}");
+    }
+    let r = regenerate(&p, &RegenOptions::default()).unwrap();
+    assert!(r.assets[&u.material].ok && r.assets[&u.material].diagnostics.is_empty());
+}
+
+#[test]
+fn gradients_delete_clears_refs() {
+    use shader_graph_core::Value;
+    let (_d, p) = gradient_project();
+    let u = gradient_users(&p);
+    ops::delete(&p, &u.collection).unwrap();
+    assert!(!u.collection.file(&p).exists());
+    for id in [&u.material, &u.function] {
+        assert_eq!(gradient_params(&p, id), [(Value::Str(String::new()), Value::Int(0))], "{id}");
+    }
+    let r = regenerate(&p, &RegenOptions::default()).unwrap();
+    for id in [&u.material, &u.function] {
+        assert!(r.assets[id].ok, "{id}: {:?}", r.assets[id].diagnostics);
+        assert_eq!(codes_of(&r, id), [Code::W111], "{id}");
+    }
+}
+
+#[test]
+fn gradients_dependents_regenerate() {
+    let (_d, p) = gradient_project();
+    let u = gradient_users(&p);
+    let (registry, _) = shader_project::regen::project_registry(&p);
+    let deps = shader_project::regen::DepGraph::build(&shader_project::AssetSet::load_all(&p), &registry);
+    assert!(deps.used_by[&u.collection].contains(&u.material));
+    assert!(deps.used_by[&u.collection].contains(&u.function));
+    let affected = deps.affected(&[u.collection.clone()].into());
+    assert!(affected.contains(&u.material) && affected.contains(&u.function), "{affected:?}");
+
+    regenerate(&p, &RegenOptions::default()).unwrap();
+    let wesl = shader_project::regen::wesl_file(&p, &u.material).unwrap();
+    let old = read(&wesl);
+    // Moving the slot to another position changes only its row literal; the scoped regeneration of the collection
+    // rewrites its users.
+    let mut c = shader_project::assets::load_gradients(&p, &u.collection).unwrap();
+    c.slots.swap(3, 10);
+    ops::save_gradients(&p, &u.collection, &c).unwrap();
+    let scope = shader_project::Scope::Affected([u.collection.clone()].into());
+    let r = regenerate(&p, &RegenOptions { scope, ..Default::default() }).unwrap();
+    assert!(r.assets[&u.material].ok, "{:?}", r.assets[&u.material].diagnostics);
+    assert!(r.changes.iter().any(|c| c.path() == wesl), "{:?}", r.changes);
+    assert_ne!(read(&wesl), old);
+}
+
+fn gradients_dir(p: &Project) -> std::path::PathBuf {
+    p.root.join("assets/shaders/gradients")
+}
+
+/// Baked PNG of collection `id` (gradient design §5).
+fn gradient_png(p: &Project, id: &AssetId) -> std::path::PathBuf {
+    gradients_dir(p).join(format!("{}.png", id.path))
+}
+
+/// Gradient design §5: every collection is baked into a PNG in the owned `gradients/` directory and listed in the
+/// manifest under its `@gradients/` id; the material's binding points at it, and `BakedTextures` has a field for it.
+#[test]
+fn gradients_png_and_manifest_written() {
+    use shader_graph_core::texture::{AddressMode, FilterMode};
+    let (_d, p) = gradient_project();
+    let u = gradient_users(&p);
+    let r = regenerate(&p, &RegenOptions::default()).unwrap();
+    assert!(!r.has_errors(), "{:?}", r.diagnostics().collect::<Vec<_>>());
+    let png = gradient_png(&p, &u.collection);
+    assert_eq!(png, p.root.join("assets/shaders/gradients/common/terrain.png"));
+    let c = shader_project::assets::load_gradients(&p, &u.collection).unwrap();
+    assert_eq!(std::fs::read(&png).unwrap(), shader_project::gradient_png::encode(&c));
+    assert!(r.changes.contains(&shader_project::writer::Change::Create(png.clone())), "{:?}", r.changes);
+    assert!(shader_project::regen::has_marker(&read(&gradients_dir(&p).join(".autogen"))));
+
+    let (textures, materials) = manifest(&p);
+    let t = textures.iter().find(|t| t.id == "@gradients/common/terrain").expect("collection in the manifest");
+    assert_eq!(t.path, "shaders/gradients/common/terrain.png");
+    assert!(t.settings.is_srgb);
+    let s = t.settings.sampler.expect("fixed sampler");
+    assert_eq!(
+        (s.mag_filter, s.min_filter, s.mipmap_filter),
+        (FilterMode::Linear, FilterMode::Linear, FilterMode::Nearest)
+    );
+    assert_eq!([s.address_mode_u, s.address_mode_v], [AddressMode::ClampToEdge; 2]);
+    let m = manifest_material(&materials, &u.material.path);
+    assert_eq!(m.textures["gc_common_terrain"], "@gradients/common/terrain");
+    assert_eq!(m.bindings, ["gc_common_terrain"]);
+
+    let texs = read(&p.root.join("crates/shaders/src/baked/textures.rs"));
+    assert!(texs.contains("\"@gradients/common/terrain\" => Some(&self.gradients.common.terrain)"), "{texs}");
+
+    // Unchanged project: nothing is rewritten, the PNG included.
+    let again = regenerate(&p, &RegenOptions::default()).unwrap();
+    assert!(again.changes.is_empty(), "{:?}", again.changes);
+}
+
+/// Generated files of the gradient users: material WESL, material Rust, function WESL.
+fn gradient_user_files(p: &Project, u: &GradientUsers) -> [std::path::PathBuf; 3] {
+    use shader_project::regen::{rust_file, wesl_file};
+    [wesl_file(p, &u.material).unwrap(), rust_file(p, &u.material).unwrap(), wesl_file(p, &u.function).unwrap()]
+}
+
+/// Gradient design §2, §7: a stop color edit, clearing the used slot and filling it again change only the
+/// collection's PNG — the WESL / Rust of its users, their bindings and the layout hash (decision 0029) stay as they
+/// are, so a color edit never recompiles a shader. Full and scoped regenerations both write the PNG.
+#[test]
+fn gradient_content_edits_touch_only_png() {
+    use shader_graph_core::gradient::Stop;
+    use shader_project::writer::Change;
+    let (_d, p) = gradient_project();
+    let u = gradient_users(&p);
+    let r = regenerate(&p, &RegenOptions::default()).unwrap();
+    assert!(!r.has_errors(), "{:?}", r.diagnostics().collect::<Vec<_>>());
+    let layout = r.assets[&u.material].ir.as_ref().unwrap().layout_feature();
+    let files = gradient_user_files(&p, &u);
+    let before: Vec<String> = files.iter().map(|f| read(f)).collect();
+    let png = gradient_png(&p, &u.collection);
+    let row = shader_project::assets::load_gradients(&p, &u.collection).unwrap().position(u.slot as u32).unwrap();
+
+    type Edit = fn(&mut Vec<Stop>);
+    let edits: [(&str, Edit, bool); 3] = [
+        ("stop color", |s| s[0].color = [0.9, 0.1, 0.3, 1.0], false),
+        ("clear the slot", |s| s.clear(), true),
+        ("fill the empty slot", |s| s.push(Stop { t: 0.5, color: [0.0, 1.0, 0.0, 1.0], mid: 0.5 }), true),
+    ];
+    for (what, edit, scoped) in edits {
+        let old_png = std::fs::read(&png).unwrap();
+        let mut c = shader_project::assets::load_gradients(&p, &u.collection).unwrap();
+        edit(&mut c.slots[row].stops);
+        ops::save_gradients(&p, &u.collection, &c).unwrap();
+        let scope = if scoped {
+            shader_project::Scope::Affected([u.collection.clone()].into())
+        } else {
+            shader_project::Scope::All
+        };
+        let r = regenerate(&p, &RegenOptions { scope, ..Default::default() }).unwrap();
+        assert!(!r.has_errors(), "{what}: {:?}", r.diagnostics().collect::<Vec<_>>());
+        assert_eq!(r.changes, [Change::Modify(png.clone())], "{what}: only the PNG changes");
+        assert_ne!(std::fs::read(&png).unwrap(), old_png, "{what}: PNG unchanged");
+        assert_eq!(std::fs::read(&png).unwrap(), shader_project::gradient_png::encode(&c), "{what}");
+        assert_eq!(r.assets[&u.material].ir.as_ref().unwrap().layout_feature(), layout, "{what}: layout hash");
+        for (f, b) in files.iter().zip(&before) {
+            assert_eq!(&read(f), b, "{what}: {} changed", f.display());
+        }
+    }
+}
+
+/// Gradient design §2, §7: moving the used slot to another position changes only the row literal in the users' WESL;
+/// no graph file is rewritten and the Rust stays as it is.
+#[test]
+fn gradient_reorder_changes_only_row() {
+    let (_d, p) = gradient_project();
+    let u = gradient_users(&p);
+    regenerate(&p, &RegenOptions::default()).unwrap();
+    let [mat_wesl, mat_rs, fn_wesl] = gradient_user_files(&p, &u);
+    let graphs = [u.material.file(&p), u.function.file(&p)];
+    let graph_bytes: Vec<Vec<u8>> = graphs.iter().map(|f| std::fs::read(f).unwrap()).collect();
+    let (mat_before, rs_before, fn_before) = (read(&mat_wesl), read(&mat_rs), read(&fn_wesl));
+    let old_png = std::fs::read(gradient_png(&p, &u.collection)).unwrap();
+
+    let mut c = shader_project::assets::load_gradients(&p, &u.collection).unwrap();
+    assert_eq!(c.position(u.slot as u32), Some(3));
+    c.slots.swap(0, 3);
+    ops::save_gradients(&p, &u.collection, &c).unwrap();
+    let r = regenerate(&p, &RegenOptions::default()).unwrap();
+    assert!(!r.has_errors(), "{:?}", r.diagnostics().collect::<Vec<_>>());
+
+    for (f, b) in graphs.iter().zip(&graph_bytes) {
+        assert_eq!(&std::fs::read(f).unwrap(), b, "{} rewritten", f.display());
+    }
+    assert_eq!(read(&mat_rs), rs_before, "Rust changed");
+    // Row 3 → row 0: `v = (row + 0.5) / 128`.
+    let (row3, row0) = ("0.02734375f", "0.00390625f");
+    for (f, before) in [(&mat_wesl, mat_before), (&fn_wesl, fn_before)] {
+        assert_eq!(before.matches(row3).count(), 1, "{}: {before}", f.display());
+        assert_eq!(read(f), before.replace(row3, row0), "{}", f.display());
+    }
+    assert_ne!(std::fs::read(gradient_png(&p, &u.collection)).unwrap(), old_png, "rows of the PNG swapped");
+}
+
+/// Gradient design §5: the PNG of a deleted collection is an orphan, removed by a full regeneration only.
+#[test]
+fn gradients_orphan_png_deleted() {
+    let (_d, p) = gradient_project();
+    // Without collections nothing is written there.
+    regenerate(&p, &RegenOptions::default()).unwrap();
+    assert!(!gradients_dir(&p).exists());
+    let u = gradient_users(&p);
+    regenerate(&p, &RegenOptions::default()).unwrap();
+    let png = gradient_png(&p, &u.collection);
+    assert!(png.is_file());
+    ops::delete(&p, &u.collection).unwrap();
+
+    let scope = shader_project::Scope::Affected([u.collection.clone(), u.material.clone()].into());
+    let r = regenerate(&p, &RegenOptions { scope, ..Default::default() }).unwrap();
+    assert!(!r.has_errors(), "{:?}", r.diagnostics().collect::<Vec<_>>());
+    assert!(png.is_file(), "a scoped regeneration never deletes");
+
+    let r = regenerate(&p, &RegenOptions::default()).unwrap();
+    assert!(r.changes.contains(&shader_project::writer::Change::Delete(png.clone())), "{:?}", r.changes);
+    assert!(!png.exists());
+    assert!(!png.parent().unwrap().exists(), "empty folder removed");
+    assert!(!gradients_dir(&p).join(".autogen").exists(), "the marker goes with the last collection");
+    let (textures, _) = manifest(&p);
+    assert!(textures.iter().all(|t| !t.id.starts_with("@gradients/")), "{textures:?}");
+}
+
+/// Gradient design §5: a `gradients/` directory without the marker file is not the editor's — E008 at the project,
+/// nothing written or deleted there, the collection is not in the manifest (its users get the default texture) and
+/// the rest of the project regenerates.
+#[test]
+fn foreign_gradients_dir_is_e008() {
+    let (_d, p) = gradient_project();
+    let dir = gradients_dir(&p);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("x.png"), [0x89u8, 0x50, 0xff, 0x00]).unwrap();
+    // Not an error while the project has no collections.
+    let r = regenerate(&p, &RegenOptions::default()).unwrap();
+    assert!(!r.has_errors(), "{:?}", r.diagnostics().collect::<Vec<_>>());
+    let u = gradient_users(&p);
+    let r = regenerate(&p, &RegenOptions::default()).unwrap();
+    let e008: Vec<_> = r.project.iter().filter(|d| d.code == Code::E008).collect();
+    assert_eq!(e008.len(), 1, "{:?}", r.project);
+    assert!(e008[0].message.contains("assets/shaders/gradients"), "{}", e008[0].message);
+    assert_eq!(std::fs::read(dir.join("x.png")).unwrap(), [0x89u8, 0x50, 0xff, 0x00]);
+    let names: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect();
+    assert_eq!(names, ["x.png"]);
+    assert!(r.assets.values().all(|a| a.diagnostics.iter().all(|d| d.code != Code::E008)));
+
+    // The rest regenerates: the users, the internal textures, the manifest (without the collection).
+    for id in [&u.material, &u.function] {
+        assert!(r.assets[id].ok, "{id}: {:?}", r.assets[id].diagnostics);
+        assert!(shader_project::regen::wesl_file(&p, id).unwrap().is_file());
+    }
+    assert!(internal_dir(&p).join("default.png").is_file());
+    let (textures, materials) = manifest(&p);
+    assert!(textures.iter().all(|t| !t.id.starts_with("@gradients/")), "{textures:?}");
+    assert_eq!(manifest_material(&materials, &u.material.path).textures["gc_common_terrain"], "@internal/default");
+    // Its `BakedTextures` field stays (the public shape of the crate does not depend on the directory).
+    let texs = read(&p.root.join("crates/shaders/src/baked/textures.rs"));
+    assert!(texs.contains("\"@gradients/common/terrain\" => Some(&self.gradients.common.terrain)"), "{texs}");
 }

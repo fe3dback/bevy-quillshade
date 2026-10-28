@@ -12,10 +12,10 @@ use shader_graph_core::{GENERATOR_VERSION, Ir, TextureSettings, Value};
 /// Format version of the manifest (`BakedManifest::version`).
 pub const MANIFEST_VERSION: u32 = 1;
 
-/// One Texture asset (or internal texture) the game loads.
+/// One Texture asset (or internal texture, or baked gradient collection) the game loads.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ManifestTexture {
-    /// Texture asset id (`textures/env/rock`) or `@internal/<name>`.
+    /// Texture asset id (`textures/env/rock`), `@internal/<name>` or `@gradients/<collection>`.
     pub id: String,
     /// Image path relative to the game's `assets/`.
     pub path: String,
