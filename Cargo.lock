@@ -444,7 +444,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "bevy-shader-vibe"
+name = "bevy-quillshade"
 version = "0.1.0"
 dependencies = [
  "clap",

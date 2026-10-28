@@ -34,6 +34,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check                                  # rustfmt.toml: max_width = 120
 
 cargo run -- examples/sample_game                        # GUI
+cargo run -- --width 1280 --height 720 examples/sample_game  # GUI at a fixed window size (logical px, not saved)
 cargo run -- check examples/sample_game --compile        # headless validation + wesl/naga compile
 cargo run -- regen examples/sample_game                  # regenerate; prints create/modify/delete lines
 cargo run -- diff  examples/sample_game

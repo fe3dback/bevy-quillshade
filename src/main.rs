@@ -15,6 +15,12 @@ struct Cli {
     command: Option<Command>,
     /// Project to open in the GUI.
     project: Option<PathBuf>,
+    /// GUI window width in logical pixels, for this run only (not saved to the user config).
+    #[arg(long, requires = "height", value_parser = clap::value_parser!(u32).range(320..))]
+    width: Option<u32>,
+    /// GUI window height in logical pixels, for this run only (not saved to the user config).
+    #[arg(long, requires = "width", value_parser = clap::value_parser!(u32).range(240..))]
+    height: Option<u32>,
 }
 
 #[derive(Subcommand)]
@@ -99,7 +105,7 @@ fn main() -> ExitCode {
     match cli.command {
         Some(cmd) => headless(cmd),
         None => {
-            shader_editor_app::run(cli.project);
+            shader_editor_app::run(cli.project, cli.width.zip(cli.height));
             ExitCode::SUCCESS
         }
     }

@@ -44,11 +44,11 @@ shader_project = { path = "crates/shader_project" }
 shader_editor_app = { path = "crates/shader_editor_app" }
 
 [package]
-name = "bevy-shader-vibe"
+name = "bevy-quillshade"
 version = { workspace = true }
 edition = { workspace = true }
 rust-version = { workspace = true }
-description = "Shader graph editor"
+description = "Bevy quillshade editor"
 license = "MIT"
 
 [[bin]]

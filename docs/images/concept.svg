@@ -1,0 +1,103 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1240" height="580" viewBox="0 0 1240 580">
+  <title>Runtime inspector vs Quillshade</title>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#151c2c"/>
+      <stop offset="1" stop-color="#0b1019"/>
+    </linearGradient>
+    <linearGradient id="brand" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ffb020"/>
+      <stop offset="0.35" stop-color="#ff5a3c"/>
+      <stop offset="0.65" stop-color="#b23cf0"/>
+      <stop offset="1" stop-color="#2f7cff"/>
+    </linearGradient>
+    <marker id="ah" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#7d8bab"/>
+    </marker>
+    <marker id="ah-accent" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#ff8a2a"/>
+    </marker>
+    <style>
+      text { font-family: -apple-system, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif; }
+      .lane { font-size: 14px; font-weight: 700; letter-spacing: 2px; fill: #e8ecf4; }
+      .lane-sub { font-size: 14px; font-weight: 400; letter-spacing: 0; fill: #8f9bb3; }
+      .box-label { font-size: 11px; font-weight: 700; letter-spacing: 1.5px; fill: #6f95e0; }
+      .t { font-size: 18px; font-weight: 650; fill: #e8ecf4; text-anchor: middle; }
+      .s { font-size: 13px; fill: #8f9bb3; text-anchor: middle; }
+      .edge { font-size: 13px; fill: #9aa6bf; text-anchor: middle; }
+      .edge-accent { font-size: 13px; font-weight: 600; fill: #ff9a3c; text-anchor: middle; }
+      .note { font-size: 13px; font-style: italic; fill: #8f9bb3; text-anchor: middle; }
+      .node { fill: #1a2234; stroke: #2e3b57; stroke-width: 1.5; }
+      .game { fill: #182440; stroke: #3b5b9c; stroke-width: 1.5; }
+      .process { fill: #3b82f6; fill-opacity: 0.05; stroke: #4f7fd9; stroke-opacity: 0.6; stroke-width: 1.5; stroke-dasharray: 7 6; }
+      .arrow { stroke: #7d8bab; stroke-width: 2; fill: none; }
+      .arrow-accent { stroke: #ff8a2a; stroke-width: 2.5; fill: none; }
+    </style>
+  </defs>
+
+  <rect x="1" y="1" width="1238" height="578" rx="24" fill="url(#bg)" stroke="#232c40" stroke-width="2"/>
+
+  <!-- Lane A: runtime inspector -->
+  <text x="46" y="52" class="lane">RUNTIME INSPECTOR<tspan class="lane-sub" dx="12">— edits the running world from inside the game</tspan></text>
+
+  <rect x="46" y="72" width="1148" height="168" rx="18" class="process"/>
+  <text x="66" y="96" class="box-label">GAME PROCESS</text>
+
+  <rect x="70" y="118" width="200" height="96" rx="14" class="node"/>
+  <text x="170" y="160" class="t">WorldInspector</text>
+  <text x="170" y="186" class="s">in-game inspector UI</text>
+
+  <line x1="278" y1="166" x2="682" y2="166" class="arrow" marker-start="url(#ah)" marker-end="url(#ah)"/>
+  <text x="480" y="154" class="edge">reads · writes live</text>
+
+  <rect x="690" y="118" width="200" height="96" rx="14" class="node"/>
+  <text x="790" y="160" class="t">Game data</text>
+  <text x="790" y="186" class="s">Resources · Values</text>
+
+  <line x1="898" y1="166" x2="962" y2="166" class="arrow" marker-start="url(#ah)" marker-end="url(#ah)"/>
+
+  <rect x="970" y="118" width="200" height="96" rx="14" class="game"/>
+  <text x="1070" y="160" class="t">Game</text>
+  <text x="1070" y="186" class="s">your Bevy app</text>
+
+  <line x1="46" y1="272" x2="1194" y2="272" stroke="#232c40" stroke-width="1.5"/>
+
+  <!-- Lane B: Quillshade -->
+  <text x="46" y="312" class="lane">QUILLSHADE<tspan class="lane-sub" dx="12">— edits files on disk, the game just loads them</tspan></text>
+
+  <rect x="666" y="332" width="528" height="168" rx="18" class="process"/>
+  <text x="686" y="356" class="box-label">GAME PROCESS</text>
+
+  <rect x="70" y="378" width="200" height="96" rx="14" fill="#1a2234" stroke="url(#brand)" stroke-width="2.5"/>
+  <text x="170" y="420" class="t" fill="url(#brand)" style="fill: url(#brand)">Quillshade</text>
+  <text x="170" y="446" class="s">standalone app</text>
+
+  <line x1="278" y1="426" x2="362" y2="426" class="arrow" marker-start="url(#ah)" marker-end="url(#ah)"/>
+
+  <rect x="382" y="366" width="200" height="96" rx="14" fill="#141b2a" stroke="#2a3550" stroke-width="1.5"/>
+  <rect x="376" y="372" width="200" height="96" rx="14" fill="#171f30" stroke="#2c3854" stroke-width="1.5"/>
+  <rect x="370" y="378" width="200" height="96" rx="14" class="node"/>
+  <text x="470" y="420" class="t">Generated assets</text>
+  <text x="470" y="446" class="s">Rust · WESL · RON · PNG</text>
+  <text x="470" y="500" class="note">on disk, committed to your repo</text>
+
+  <line x1="590" y1="426" x2="682" y2="426" class="arrow-accent" marker-end="url(#ah-accent)"/>
+  <text x="630" y="412" class="edge-accent">build</text>
+  <text x="630" y="450" class="edge-accent">hot reload</text>
+
+  <rect x="690" y="378" width="200" height="96" rx="14" class="node"/>
+  <text x="790" y="420" class="t">Resources / Values</text>
+  <text x="790" y="446" class="s">loaded by the game</text>
+
+  <line x1="898" y1="426" x2="962" y2="426" class="arrow" marker-start="url(#ah)" marker-end="url(#ah)"/>
+
+  <rect x="970" y="378" width="200" height="96" rx="14" class="game"/>
+  <text x="1070" y="420" class="t">Game</text>
+  <text x="1070" y="446" class="s">your Bevy app</text>
+
+  <!-- Legend -->
+  <rect x="46" y="532" width="28" height="18" rx="5" class="process"/>
+  <text x="84" y="546" class="lane-sub" style="font-size: 13px">game process boundary</text>
+  <line x1="270" y1="541" x2="306" y2="541" class="arrow-accent" marker-end="url(#ah-accent)"/>
+  <text x="318" y="546" class="lane-sub" style="font-size: 13px">one way: the game never talks back to the editor</text>
+</svg>

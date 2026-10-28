@@ -58,6 +58,10 @@ const VALIDATE_DELAY: f32 = 0.25;
 #[derive(Resource, Default)]
 struct StartupProject(Option<PathBuf>);
 
+/// Window size forced from the command line (`--width` / `--height`): the saved size in the user config is kept.
+#[derive(Resource)]
+struct FixedWindowSize;
+
 /// Editor logic without windowing: state, actions, canvas sync. Used by the app and UI tests.
 pub struct EditorCorePlugin;
 
@@ -213,11 +217,16 @@ fn copy_to_clipboard(mut editor: ResMut<Editor>, clipboard: Option<ResMut<bevy::
     }
 }
 
-fn quit(mut editor: ResMut<Editor>, windows: Query<&Window>, mut exit: MessageWriter<AppExit>) {
+fn quit(
+    mut editor: ResMut<Editor>,
+    windows: Query<&Window>,
+    fixed: Option<Res<FixedWindowSize>>,
+    mut exit: MessageWriter<AppExit>,
+) {
     if !editor.quit {
         return;
     }
-    if let Ok(w) = windows.single() {
+    if let (None, Ok(w)) = (fixed, windows.single()) {
         editor.config.window = (w.resolution.width() as u32, w.resolution.height() as u32);
     }
     editor.save_config();
@@ -377,44 +386,44 @@ fn debug_screenshot(
     }
 }
 
-/// Runs the editor window; `project` is opened at startup.
-pub fn run(project: Option<PathBuf>) {
+/// Runs the editor window; `project` is opened at startup. `window_size` (logical px) overrides the saved window size
+/// for this run without replacing it in the user config.
+pub fn run(project: Option<PathBuf>, window_size: Option<(u32, u32)>) {
     let config_path = UserConfig::default_path();
     if let Some(Err(e)) = config_path.as_deref().map(UserConfig::ensure_dir) {
         eprintln!("warning: cannot create the config directory: {e}");
     }
     let config = config_path.as_deref().map(UserConfig::load).unwrap_or_default();
-    let (w, h) = config.window;
-    let window = Window {
-        title: "Shader Editor".into(),
-        resolution: WindowResolution::new(w.max(800), h.max(500)),
-        ..default()
-    };
-    App::new()
-        .add_plugins(
-            DefaultPlugins
-                .set(WindowPlugin { primary_window: Some(window), close_when_requested: false, ..default() })
-                .set(bevy::log::LogPlugin { filter: "wgpu=error,naga=warn,bevy_render=warn".into(), ..default() }),
-        )
-        .add_plugins((FeathersPlugins, fixes::FeathersFixesPlugin))
-        .add_plugins((NoodlePlugins, NoodleDefaultStylePlugin))
-        .insert_resource(UiTheme(create_dark_theme()))
-        .insert_resource(ClearColor(Color::srgb_u8(24, 25, 29)))
-        .insert_resource(Editor::with_config(config, config_path))
-        .insert_resource(StartupProject(project))
-        .add_plugins((EditorCorePlugin, ui::UiPlugin))
-        .add_systems(Startup, open_startup_project)
-        .add_systems(
-            Update,
-            (
-                open_externally,
-                pick_folder,
-                copy_to_clipboard,
-                quit,
-                remember_window_size,
-                debug_screenshot,
-                demo::scripted_input,
-            ),
-        )
-        .run();
+    let (w, h) = window_size.unwrap_or((config.window.0.max(800), config.window.1.max(500)));
+    let window = Window { title: "Shader Editor".into(), resolution: WindowResolution::new(w, h), ..default() };
+    let mut app = App::new();
+    if window_size.is_some() {
+        app.insert_resource(FixedWindowSize);
+    }
+    app.add_plugins(
+        DefaultPlugins
+            .set(WindowPlugin { primary_window: Some(window), close_when_requested: false, ..default() })
+            .set(bevy::log::LogPlugin { filter: "wgpu=error,naga=warn,bevy_render=warn".into(), ..default() }),
+    )
+    .add_plugins((FeathersPlugins, fixes::FeathersFixesPlugin))
+    .add_plugins((NoodlePlugins, NoodleDefaultStylePlugin))
+    .insert_resource(UiTheme(create_dark_theme()))
+    .insert_resource(ClearColor(Color::srgb_u8(24, 25, 29)))
+    .insert_resource(Editor::with_config(config, config_path))
+    .insert_resource(StartupProject(project))
+    .add_plugins((EditorCorePlugin, ui::UiPlugin))
+    .add_systems(Startup, open_startup_project)
+    .add_systems(
+        Update,
+        (
+            open_externally,
+            pick_folder,
+            copy_to_clipboard,
+            quit,
+            remember_window_size.run_if(not(resource_exists::<FixedWindowSize>)),
+            debug_screenshot,
+            demo::scripted_input,
+        ),
+    )
+    .run();
 }

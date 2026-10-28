@@ -1,0 +1,115 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1240" height="554" viewBox="0 0 1240 554">
+  <title>Where Quillshade fits</title>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#151c2c"/>
+      <stop offset="1" stop-color="#0b1019"/>
+    </linearGradient>
+    <linearGradient id="brand" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ffb020"/>
+      <stop offset="0.35" stop-color="#ff5a3c"/>
+      <stop offset="0.65" stop-color="#b23cf0"/>
+      <stop offset="1" stop-color="#2f7cff"/>
+    </linearGradient>
+    <linearGradient id="brand-v" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffb020"/>
+      <stop offset="0.35" stop-color="#ff5a3c"/>
+      <stop offset="0.65" stop-color="#b23cf0"/>
+      <stop offset="1" stop-color="#2f7cff"/>
+    </linearGradient>
+    <marker id="ah" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#7d8bab"/>
+    </marker>
+    <marker id="ah-accent" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#ff8a2a"/>
+    </marker>
+    <marker id="ah-blue" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#4f8bf0"/>
+    </marker>
+    <style>
+      text { font-family: -apple-system, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif; }
+      .mono { font-family: ui-monospace, "SF Mono", "Cascadia Mono", "Noto Sans Mono", Menlo, Consolas, monospace; }
+      .box-label { font-size: 11px; font-weight: 700; letter-spacing: 1.5px; fill: #8f9bb3; }
+      .t { font-size: 18px; font-weight: 650; fill: #e8ecf4; text-anchor: middle; }
+      .s { font-size: 13px; fill: #8f9bb3; text-anchor: middle; }
+      .path { font-size: 14px; fill: #e8ecf4; }
+      .kind { font-size: 12px; fill: #8f9bb3; }
+      .note { font-size: 13px; font-style: italic; fill: #8f9bb3; text-anchor: middle; }
+      .node { fill: #1a2234; stroke: #2e3b57; stroke-width: 1.5; }
+      .chip { fill: #1a2234; stroke: #2a3550; stroke-width: 1.2; }
+      .game { fill: #182440; stroke: #3b5b9c; stroke-width: 1.5; }
+      .group { fill: #ffffff; fill-opacity: 0.025; stroke: #8f9bb3; stroke-opacity: 0.35; stroke-width: 1.5; stroke-dasharray: 7 6; }
+      .repo { fill: #10161f; stroke: #2e3b57; stroke-width: 1.5; }
+      .arrow { stroke: #7d8bab; stroke-width: 2; fill: none; }
+      .arrow-accent { stroke: #ff8a2a; stroke-width: 2.5; fill: none; }
+      .arrow-blue { stroke: #4f8bf0; stroke-width: 2; fill: none; }
+    </style>
+  </defs>
+
+  <rect x="1" y="1" width="1238" height="552" rx="24" fill="url(#bg)" stroke="#232c40" stroke-width="2"/>
+
+  <!-- Tools -->
+  <rect x="46" y="46" width="360" height="290" rx="18" class="group"/>
+  <text x="66" y="72" class="box-label">CONTENT TOOLS</text>
+
+  <rect x="76" y="94" width="300" height="96" rx="14" class="node"/>
+  <text x="226" y="136" class="t">Blender</text>
+  <text x="226" y="162" class="s">meshes · rigs · animations</text>
+
+  <rect x="76" y="212" width="300" height="96" rx="14" fill="#1a2234" stroke="url(#brand)" stroke-width="2.5"/>
+  <text x="226" y="254" class="t" style="fill: url(#brand)">Quillshade</text>
+  <text x="226" y="280" class="s">materials · textures · animations · …</text>
+
+  <rect x="46" y="362" width="360" height="146" rx="18" class="group"/>
+  <text x="66" y="388" class="box-label">SCENE EDITOR</text>
+
+  <rect x="76" y="404" width="300" height="88" rx="14" class="node"/>
+  <text x="226" y="442" class="t">Jackdaw / Bevy Editor</text>
+  <text x="226" y="468" class="s">levels · scenes · entities</text>
+
+  <!-- Repository -->
+  <rect x="520" y="46" width="340" height="462" rx="18" class="repo"/>
+  <text x="690" y="86" class="t">Your game repository</text>
+  <text x="690" y="110" class="s">plain files, committed like any other code</text>
+
+  <rect x="540" y="136" width="300" height="56" rx="10" class="chip"/>
+  <rect x="540" y="136" width="5" height="56" rx="2.5" fill="#9aa6bf"/>
+  <text x="560" y="160" class="path mono">assets/models/</text>
+  <text x="560" y="180" class="kind">.glb · .gltf</text>
+
+  <rect x="540" y="208" width="300" height="56" rx="10" class="chip"/>
+  <rect x="540" y="208" width="5" height="56" rx="2.5" fill="url(#brand-v)"/>
+  <text x="560" y="232" class="path mono">quillshade/</text>
+  <text x="560" y="252" class="kind">sources (.ron): material/, light/, …</text>
+
+  <rect x="540" y="280" width="300" height="56" rx="10" class="chip"/>
+  <rect x="540" y="280" width="5" height="56" rx="2.5" fill="#ff5a3c"/>
+  <text x="560" y="304" class="path mono">assets/quillshade/</text>
+  <text x="560" y="324" class="kind">generated: WESL, textures, baked.ron</text>
+
+  <rect x="540" y="352" width="300" height="56" rx="10" class="chip"/>
+  <rect x="540" y="352" width="5" height="56" rx="2.5" fill="#b23cf0"/>
+  <text x="560" y="376" class="path mono">crates/quillshade/</text>
+  <text x="560" y="396" class="kind">generated Rust crate · QuillshadePlugin</text>
+
+  <rect x="540" y="424" width="300" height="56" rx="10" class="chip"/>
+  <rect x="540" y="424" width="5" height="56" rx="2.5" fill="#4f8bf0"/>
+  <text x="560" y="448" class="path mono">assets/scenes/</text>
+  <text x="560" y="468" class="kind">scenes</text>
+
+  <!-- Tool → repository -->
+  <path d="M384,142 C460,142 460,164 532,164" class="arrow" marker-end="url(#ah)"/>
+  <path d="M392,260 C460,260 460,236 532,236" class="arrow" marker-start="url(#ah)" marker-end="url(#ah)"/>
+  <path d="M384,260 C460,260 460,308 532,308" class="arrow-accent" marker-end="url(#ah-accent)"/>
+  <path d="M384,260 C460,260 460,380 532,380" class="arrow-accent" marker-end="url(#ah-accent)"/>
+  <path d="M384,448 C460,448 460,452 532,452" class="arrow-blue" marker-end="url(#ah-blue)"/>
+
+  <!-- Repository → game -->
+  <line x1="868" y1="277" x2="942" y2="277" class="arrow" marker-end="url(#ah)"/>
+
+  <rect x="950" y="229" width="234" height="96" rx="14" class="game"/>
+  <text x="1067" y="271" class="t">Game</text>
+  <text x="1067" y="297" class="s">cargo build · AssetServer</text>
+  <text x="1067" y="355" class="note">depends only on the generated files —</text>
+  <text x="1067" y="375" class="note">knows nothing about the tools</text>
+</svg>
