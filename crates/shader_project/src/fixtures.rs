@@ -400,7 +400,11 @@ pub fn water() -> Asset {
     );
     g.link((&fres, "out"), (&custom, "f"));
     g.input(&custom, "k", f(1.5));
-    g.link((&custom, "out"), (&out, "opacity"));
+    // Shoreline: fades out where the water meets the ground (needs `DepthPrepass` on the camera).
+    let shore = g.node("stdlib::DepthFade", (800.0, 600.0));
+    g.link((&custom, "out"), (&shore, "opacity"));
+    g.input(&shore, "distance", f(0.3));
+    g.link((&shore, "out"), (&out, "opacity"));
     let r = g.node_p("stdlib::Constant", (800.0, 150.0), &[("value", f(0.05))]);
     g.link((&r, "out"), (&out, "roughness"));
     let sp = g.node_p("stdlib::Constant", (800.0, 220.0), &[("value", f(0.8))]);

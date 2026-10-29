@@ -267,6 +267,7 @@ fn layer_sig(path: &str, node: &str) -> FunctionSig {
         builtins: vec![],
         textures: vec![HiddenTexture { origin: path.into(), node: node.into(), texture: "textures/rock".into() }],
         gradients: vec![],
+        scene: vec![],
     }
 }
 
@@ -370,4 +371,31 @@ fn layout_feature_ignores_which_fixed_node_is_wired() {
     let (param, _) = build(&a);
     assert_eq!(param.textures.len(), 1);
     assert_ne!(param.layout_feature(), first.layout_feature());
+}
+
+#[test]
+fn layout_feature_follows_the_rust_side_settings() {
+    // Blend mode, two-sided and Pbr3d shading live in the compiled Rust (alpha mode, culling, `unlit`): a shader
+    // hot-reloaded after changing one must fail the guard instead of running with the old pipeline (decision 0029).
+    use shader_graph_core::model::{BlendMode, PbrSettings, Shading, SpriteSettings};
+    let feature = |kind: MaterialKind| {
+        let mut a = Asset::new("mat", AssetKind::Material(kind));
+        node(&mut a, "out", kind.output_node_kind(), &[]);
+        build(&a).0.layout_feature()
+    };
+    let unlit = |blend, two_sided| feature(MaterialKind::Unlit3d(UnlitSettings { blend, two_sided }));
+    let pbr = |blend, two_sided, shading| {
+        feature(MaterialKind::Pbr3d(PbrSettings { blend, two_sided, shading, ..Default::default() }))
+    };
+    let sprite = |blend| feature(MaterialKind::Sprite2d(SpriteSettings { blend }));
+
+    let base = unlit(BlendMode::Opaque, false);
+    assert_eq!(unlit(BlendMode::Opaque, false), base, "deterministic");
+    assert_ne!(unlit(BlendMode::Blend, false), base);
+    assert_ne!(unlit(BlendMode::Opaque, true), base);
+    let base = pbr(BlendMode::Opaque, false, Shading::Lit);
+    assert_ne!(pbr(BlendMode::Mask, false, Shading::Lit), base);
+    assert_ne!(pbr(BlendMode::Opaque, true, Shading::Lit), base);
+    assert_ne!(pbr(BlendMode::Opaque, false, Shading::Unlit), base);
+    assert_ne!(sprite(BlendMode::Opaque), sprite(BlendMode::Blend));
 }

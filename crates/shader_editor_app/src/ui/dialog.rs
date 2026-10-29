@@ -64,7 +64,7 @@ fn redraw(
         commands.entity(e).despawn();
     }
     let Some(d) = &editor.dialog else { return };
-    let (title, mut body, buttons): (String, Vec<Box<dyn Scene>>, Vec<Box<dyn Scene>>) = match d {
+    let (title, body, buttons): (String, Vec<Box<dyn Scene>>, Vec<Box<dyn Scene>>) = match d {
         Dialog::Message { title, message } => (
             title.clone(),
             vec![Box::new(text(message.clone(), TEXT, 14.0))],
@@ -81,23 +81,35 @@ fn redraw(
         }
         Dialog::Input { title, label, initial, submit } => {
             let init = InitText(initial.clone());
+            let max = match submit {
+                Submit::SetText(target) => target.max_chars(),
+                _ => None,
+            };
             let mut body: Vec<Box<dyn Scene>> = vec![Box::new(text(label.clone(), TEXT_DIM, 13.0))];
-            body.push(Box::new(bsn! {
+            let field = bsn! {
                 @FeathersTextInputContainer
-                Node { min_width: px(380), flex_grow: 0.0 }
-                Children [ @FeathersTextInput DialogInput init AutoFocus ]
-            }));
+                Node { min_width: px(0), flex_grow: 1.0 }
+                Children [ @FeathersTextInput EditableText { max_characters: {max} } DialogInput init AutoFocus ]
+            };
+            // A directory: Browse... (the native folder picker) next to its field.
+            if matches!(submit, Submit::OpenProject | Submit::NewProject) {
+                body.push(Box::new(bsn! {
+                    Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(8) }
+                    Children [ @{field} -- @button("Browse...", Action::BrowseFolder, false) ]
+                }));
+            } else {
+                body.push(Box::new(bsn! { Node { min_width: px(380) } Children [ @{field} ] }));
+            }
+            if let Submit::OpenProject = submit {
+                body.push(Box::new(recent_projects()));
+            }
+            let ok_label = if matches!(submit, Submit::OpenProject) { "Open" } else { "OK" };
             let ok = bsn! {
-                @FeathersButton { @variant: ButtonVariant::Primary, @caption: bsn! { @caption("OK") } }
+                @FeathersButton { @variant: ButtonVariant::Primary, @caption: bsn! { @caption(ok_label) } }
                 SubmitButton
             };
-            let mut buttons: Vec<Box<dyn Scene>> = Vec::new();
-            if matches!(submit, Submit::OpenProject | Submit::NewProject) {
-                buttons.push(Box::new(button("Browse...", Action::BrowseFolder, false)));
-                buttons.push(Box::new(bsn! { Node { flex_grow: 1.0 } }));
-            }
-            buttons.push(Box::new(button("Cancel", Action::CloseDialog, false)));
-            buttons.push(Box::new(ok));
+            let buttons: Vec<Box<dyn Scene>> =
+                vec![Box::new(button("Cancel", Action::CloseDialog, false)), Box::new(ok)];
             (title.clone(), body, buttons)
         }
         Dialog::About => {
@@ -119,15 +131,10 @@ fn redraw(
             ("Quick Start".into(), vec![Box::new(super::welcome::quick_start(*step))], b)
         }
     };
-    if let Dialog::Input { submit: Submit::OpenProject, .. } = d {
-        for p in editor.config.recent_projects.iter().take(6) {
-            let path = p.display().to_string();
-            body.push(Box::new(button(format!("Recent: {path}"), Action::OpenProject(p.clone()), false)));
-        }
-    }
     let width = px(match d {
         Dialog::About => 540,
         Dialog::QuickStart(_) => 820,
+        Dialog::Input { submit: Submit::OpenProject | Submit::NewProject, .. } => 540,
         _ => 460,
     });
     commands.spawn_scene(bsn! {
@@ -143,6 +150,30 @@ fn redraw(
         }
         DialogRoot
     });
+}
+
+/// How many recent projects the Open project dialog lists.
+const DIALOG_RECENT: usize = 5;
+
+/// The Open project dialog's recent projects, apart from the field above them: a separator line, a heading and
+/// the [`RecentList`](super::welcome::RecentList) of the last [`DIALOG_RECENT`], by name.
+fn recent_projects() -> impl Scene {
+    bsn! {
+        Node {
+            flex_direction: FlexDirection::Column,
+            row_gap: px(4),
+            margin: UiRect::top(px(10)),
+            padding: UiRect::top(px(12)),
+            border: UiRect::top(px(1)),
+        }
+        BorderColor::all(super::BORDER)
+        Children [
+            @text("Recent projects", TEXT, 14.0)
+            --
+            super::welcome::RecentList { limit: DIALOG_RECENT, compact: true }
+            Node { flex_direction: FlexDirection::Column, row_gap: px(1) }
+        ]
+    }
 }
 
 /// Help → About: the logo, then name, version, link, author and license.

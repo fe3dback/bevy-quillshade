@@ -17,9 +17,10 @@ struct RockWetParams { inp_tint: vec4<f32>, inp_speed: f32, inp_wetness: f32, _p
 @group(constants::MATERIAL_BIND_GROUP) @binding(102) var inp_albedo_sampler: sampler;
 @group(constants::MATERIAL_BIND_GROUP) @binding(103) var inp_normal_map: texture_2d<f32>;
 @group(constants::MATERIAL_BIND_GROUP) @binding(104) var inp_normal_map_sampler: sampler;
-// The game's compiled material enables this feature; after a change of parameters, texture bindings or
-// World Position Offset the shader stops compiling here until the game is rebuilt.
-@if(!SG_LAYOUT_a35f4158)
+// The game's compiled material enables this feature; after a change of parameters, texture bindings,
+// World Position Offset, blend mode, two-sided or shading the shader stops compiling here until the game
+// is rebuilt.
+@if(!SG_LAYOUT_499c7a94)
 const_assert material_layout_changed__rebuild_the_game;
 @if(PREPASS_PIPELINE) @group(0) @binding(1) var<uniform> sg_prepass_globals: Globals;
 

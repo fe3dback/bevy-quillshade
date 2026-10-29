@@ -13,7 +13,7 @@ use super::icons::{IconId, icon};
 use super::logo::logo;
 use super::text_view::style_color;
 use super::widgets::{Caption, GroupButton, button_group};
-use super::{OnActivate, TEXT, TEXT_DIM, VIEW_BG, button, text};
+use super::{OnActivate, TEXT, TEXT_DIM, VIEW_BG, button, icon_button, text};
 use crate::highlight::highlight;
 use crate::state::{Action, Editor};
 use crate::tab::Lang;
@@ -21,9 +21,14 @@ use crate::tab::Lang;
 #[derive(Component, Default, Clone)]
 pub struct Welcome;
 
-/// The list [`redraw_recent`] fills.
+/// A list of recent projects that [`redraw_recent`] fills: on the welcome screen and in the Open project dialog.
 #[derive(Component, Default, Clone)]
-pub struct RecentList;
+pub struct RecentList {
+    /// How many of the most recent projects it shows.
+    pub limit: usize,
+    /// Rows show only the project name (the full path is the tooltip), not a second line with the path.
+    pub compact: bool,
+}
 
 pub struct WelcomePlugin;
 
@@ -70,7 +75,7 @@ pub fn welcome() -> impl Scene {
                 Children [
                     @text("Recent projects", TEXT, 16.0)
                     --
-                    RecentList
+                    RecentList { limit: {crate::config::RECENT_LIMIT}, compact: false }
                     Node { flex_direction: FlexDirection::Column, row_gap: px(2) }
                 ]
                 --
@@ -338,29 +343,44 @@ fn code(s: &'static str, lang: CodeLang) -> impl Scene {
     }
 }
 
-fn recent_row(path: PathBuf) -> impl Scene {
+/// One recent project: a click on the name opens it, the "x" on the right forgets it (the files stay).
+fn recent_row(path: PathBuf, compact: bool) -> impl Scene {
     let name = path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
     let (full, tip) = (path.display().to_string(), super::tooltip::Tooltip(format!("Open {}", path.display())));
+    let lines: Vec<Box<dyn Scene>> = if compact {
+        vec![Box::new(text(name, TEXT, 13.0))]
+    } else {
+        vec![Box::new(text(name, TEXT, 14.0)), Box::new(text(full, TEXT_DIM, 12.0))]
+    };
+    let forget = icon_button(IconId::Close, Action::ForgetRecent(path.clone()), "Remove from recent projects");
     let act = OnActivate(Action::OpenProject(path));
-    // A plain Feathers button of two lines: as tall as its text, left-aligned.
+    let pad = if compact { px(4) } else { px(5) };
+    // A plain Feathers button of one or two lines: as tall as its text, left-aligned.
     bsn! {
-        @FeathersButton {
-            @variant: ButtonVariant::Plain,
-            @caption: bsn_list! {
-                @icon(IconId::Folder, 16.0, TEXT)
-                --
-                Node { flex_direction: FlexDirection::Column, min_width: px(0) }
-                Children [ @text(name, TEXT, 14.0) -- @text(full, TEXT_DIM, 12.0) ]
-            },
-        }
-        Node {
-            height: Val::Auto,
-            justify_content: JustifyContent::Start,
-            column_gap: px(10),
-            padding: UiRect::axes(px(8), px(5)),
-        }
-        act
-        tip
+        Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(2) }
+        Children [
+            @FeathersButton {
+                @variant: ButtonVariant::Plain,
+                @caption: bsn_list! {
+                    @icon(IconId::Folder, 16.0, TEXT)
+                    --
+                    Node { flex_direction: FlexDirection::Column, min_width: px(0) }
+                    Children [ {lines} ]
+                },
+            }
+            Node {
+                height: Val::Auto,
+                flex_grow: 1.0,
+                min_width: px(0),
+                justify_content: JustifyContent::Start,
+                column_gap: px(10),
+                padding: UiRect::axes(px(8), pad),
+            }
+            act
+            tip
+            --
+            @{forget}
+        ]
     }
 }
 
@@ -371,24 +391,28 @@ fn show_welcome(editor: Res<Editor>, mut q: Query<&mut Visibility, With<Welcome>
     }
 }
 
+/// Refills every [`RecentList`] when the recent projects change, and a new one (the dialog's) at once.
 fn redraw_recent(
     editor: Res<Editor>,
-    list: Query<Entity, With<RecentList>>,
+    lists: Query<(Entity, &RecentList)>,
+    added: Query<(), Added<RecentList>>,
     mut last: Local<Option<Vec<PathBuf>>>,
     mut commands: Commands,
 ) {
     let recent = &editor.config.recent_projects;
-    if last.as_ref() == Some(recent) {
+    if last.as_ref() == Some(recent) && added.is_empty() {
         return;
     }
-    let Ok(list) = list.single() else { return };
     *last = Some(recent.clone());
-    commands.entity(list).despawn_children();
-    if recent.is_empty() {
-        commands.spawn_scene(bsn! { @text("No recent projects yet.", TEXT_DIM, 13.0) ChildOf(list) });
-    }
-    for p in recent.clone() {
-        commands.spawn_scene(bsn! { @recent_row(p) ChildOf(list) });
+    for (list, RecentList { limit, compact }) in &lists {
+        commands.entity(list).despawn_children();
+        if recent.is_empty() {
+            commands.spawn_scene(bsn! { @text("No recent projects yet.", TEXT_DIM, 13.0) ChildOf(list) });
+        }
+        for p in recent.iter().take(*limit).cloned() {
+            let compact = *compact;
+            commands.spawn_scene(bsn! { @recent_row(p, compact) ChildOf(list) });
+        }
     }
 }
 

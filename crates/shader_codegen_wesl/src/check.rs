@@ -78,6 +78,9 @@ pub enum Variant {
     Forward3d,
     /// 3D forward pass, mesh without UVs/tangents/colors.
     Forward3dBare,
+    /// 3D forward main pass of a camera with depth / normal / motion vector prepasses and MSAA: the view textures
+    /// (Scene category) are bound, multisampled.
+    Forward3dPrepass,
     /// 3D deferred (prepass pipeline).
     Deferred3d,
     /// 2D sprite / mesh2d.
@@ -97,6 +100,16 @@ impl Variant {
         match self {
             Variant::Forward3d => f.extend(["VERTEX_UVS", "VERTEX_UVS_A", "VERTEX_TANGENTS", "VERTEX_COLORS"]),
             Variant::Forward3dBare => {}
+            Variant::Forward3dPrepass => f.extend([
+                "VERTEX_UVS",
+                "VERTEX_UVS_A",
+                "VERTEX_TANGENTS",
+                "VERTEX_COLORS",
+                "DEPTH_PREPASS",
+                "NORMAL_PREPASS",
+                "MOTION_VECTOR_PREPASS",
+                "MULTISAMPLED",
+            ]),
             Variant::Deferred3d => f.extend([
                 "VERTEX_UVS",
                 "VERTEX_UVS_A",
@@ -223,8 +236,12 @@ pub fn compile_with(
 /// Variants a material of the given kind is compiled with by Bevy.
 pub fn variants_for(kind: &shader_graph_core::MaterialKind) -> &'static [Variant] {
     match kind {
-        shader_graph_core::MaterialKind::Pbr3d(_) => &[Variant::Forward3d, Variant::Forward3dBare, Variant::Deferred3d],
-        shader_graph_core::MaterialKind::Unlit3d(_) => &[Variant::Forward3d, Variant::Forward3dBare],
+        shader_graph_core::MaterialKind::Pbr3d(_) => {
+            &[Variant::Forward3d, Variant::Forward3dBare, Variant::Forward3dPrepass, Variant::Deferred3d]
+        }
+        shader_graph_core::MaterialKind::Unlit3d(_) => {
+            &[Variant::Forward3d, Variant::Forward3dBare, Variant::Forward3dPrepass]
+        }
         shader_graph_core::MaterialKind::Sprite2d(_) => &[Variant::Sprite2d],
     }
 }

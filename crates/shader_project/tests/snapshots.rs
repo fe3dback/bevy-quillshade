@@ -1,7 +1,7 @@
 //! Snapshot suite (spec §15): one material per stdlib node plus the composite reference graphs.
 //! Every generated `.wesl` is compiled with wesl + naga against the real Bevy 0.20 sources
-//! (forward, forward without UV/tangents, deferred = `PREPASS_PIPELINE`), and the WESL/Rust
-//! output is compared byte for byte with `tests/snapshots/`.
+//! (forward, forward without UV/tangents, forward with prepasses + MSAA, deferred = `PREPASS_PIPELINE`), and the
+//! WESL/Rust output is compared byte for byte with `tests/snapshots/`.
 //!
 //! Update snapshots after an intended codegen change: `INSTA_UPDATE=always cargo test -p shader_project --test snapshots`.
 

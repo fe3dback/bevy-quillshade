@@ -6,9 +6,10 @@ import super::super::stdlib::noise::sg_perlin_noise3;
 
 struct DissolveParams { inp_edge_color: vec4<f32>, inp_amount: f32, inp_edge_width: f32, _pad0: f32, _pad1: f32 }
 @group(constants::MATERIAL_BIND_GROUP) @binding(100) var<uniform> params: DissolveParams;
-// The game's compiled material enables this feature; after a change of parameters, texture bindings or
-// World Position Offset the shader stops compiling here until the game is rebuilt.
-@if(!SG_LAYOUT_d951469e)
+// The game's compiled material enables this feature; after a change of parameters, texture bindings,
+// World Position Offset, blend mode, two-sided or shading the shader stops compiling here until the game
+// is rebuilt.
+@if(!SG_LAYOUT_450076b7)
 const_assert material_layout_changed__rebuild_the_game;
 
 @fragment

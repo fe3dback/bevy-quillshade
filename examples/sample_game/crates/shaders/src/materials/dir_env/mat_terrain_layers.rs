@@ -15,7 +15,7 @@ pub const BAKED_ID: &str = "env/terrain_layers";
 
 /// WESL feature of this material's binding layout, enabled in `specialize`: a hot-reloaded shader whose
 /// bindings no longer match this code fails to compile instead of crashing the renderer (rebuild the game).
-pub const LAYOUT_FEATURE: &str = "SG_LAYOUT_50ec9cbe";
+pub const LAYOUT_FEATURE: &str = "SG_LAYOUT_7fbb96d1";
 
 /// Extension of `StandardMaterial`; use [`TerrainLayersMaterial`] as the asset type.
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone, Default)]

@@ -96,6 +96,7 @@ impl Editor {
                 } else {
                     self.info(msg);
                 }
+                self.note_rust_changes(&report);
                 self.note_wesl_lines(&report, false);
                 self.validate();
                 self.reload_read_only_tabs();
@@ -141,6 +142,7 @@ impl Editor {
                 let errors = diags.iter().filter(|d| d.is_error()).count();
                 let regen_only = diags.iter().filter(|d| matches!(d.code, Code::E008 | Code::E010)).cloned().collect();
                 self.regen_only.insert(id.clone(), regen_only);
+                self.note_rust_changes(&report);
                 self.note_wesl_lines(&report, true);
                 if errors > 0 {
                     let errors = plural(errors, "error", "errors");
@@ -164,6 +166,38 @@ impl Editor {
     /// Remembers the line count of each `.wesl` the report generated without errors (the editor statusbar); an asset
     /// with errors keeps its previous file and count. `written_only`: count only files the run created or modified
     /// (a scoped run also generates assets it does not write).
+    /// Warns when a regeneration rewrote the generated Rust crate: only a rebuild of the game applies it. Until then
+    /// a running game keeps its compiled materials, and a changed one whose hot-reloaded shader fails the layout guard
+    /// (decision 0029) is not drawn — reported only in the game's log otherwise.
+    fn note_rust_changes(&mut self, report: &RegenReport) {
+        let Some(project) = &self.project else { return };
+        let crate_dir = project.crate_dir();
+        let changed: BTreeSet<&Path> = report
+            .changes
+            .iter()
+            .map(Change::path)
+            .filter(|p| p.starts_with(&crate_dir) && p.extension().is_some_and(|e| e == "rs"))
+            .collect();
+        if changed.is_empty() {
+            return;
+        }
+        let materials: Vec<String> = report
+            .assets
+            .keys()
+            .filter(|id| rust_file(project, id).is_some_and(|f| changed.contains(f.as_path())))
+            .map(|id| id.path.clone())
+            .collect();
+        let what = if materials.is_empty() {
+            "The generated Rust crate changed".to_string()
+        } else {
+            format!("The generated Rust of {} changed", materials.join(", "))
+        };
+        self.push_msg(
+            Level::Warning,
+            format!("{what}: rebuild the game to apply it (a running game may not draw the changed materials)"),
+        );
+    }
+
     fn note_wesl_lines(&mut self, report: &RegenReport, written_only: bool) {
         let Some(project) = &self.project else { return };
         let written: BTreeSet<&Path> =

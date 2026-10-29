@@ -15,3 +15,9 @@ fn sg_world_aligned_blend(n: vec3<f32>, up: vec3<f32>, sharpness: f32, bias: f32
 fn sg_slope_angle(n: vec3<f32>, up: vec3<f32>) -> f32 {
     return degrees(acos(clamp(dot(normalize(n), normalize(up)), -1.0, 1.0)));
 }
+
+// Scales the strength of a tangent-space normal: X and Y times `strength`, Z kept, renormalized (0 = flat, 1 = as
+// is, above 1 = stronger).
+fn sg_normal_strength(n: vec3<f32>, strength: f32) -> vec3<f32> {
+    return normalize(vec3<f32>(n.xy * strength, n.z));
+}

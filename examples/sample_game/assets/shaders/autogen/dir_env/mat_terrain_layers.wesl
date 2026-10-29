@@ -15,9 +15,10 @@ import super::super::stdlib::transform::sg_tbn;
 
 @group(constants::MATERIAL_BIND_GROUP) @binding(101) var gc_common_terrain: texture_2d<f32>;
 @group(constants::MATERIAL_BIND_GROUP) @binding(102) var gc_common_terrain_sampler: sampler;
-// The game's compiled material enables this feature; after a change of parameters, texture bindings or
-// World Position Offset the shader stops compiling here until the game is rebuilt.
-@if(!SG_LAYOUT_50ec9cbe)
+// The game's compiled material enables this feature; after a change of parameters, texture bindings,
+// World Position Offset, blend mode, two-sided or shading the shader stops compiling here until the game
+// is rebuilt.
+@if(!SG_LAYOUT_7fbb96d1)
 const_assert material_layout_changed__rebuild_the_game;
 
 @fragment

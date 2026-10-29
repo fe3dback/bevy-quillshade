@@ -314,6 +314,7 @@ mod tests {
             curves: Default::default(),
             custom_fns: Default::default(),
             function_sig: None,
+            scene: Default::default(),
             uses_normal: false,
             preview: None,
         };

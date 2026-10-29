@@ -10,10 +10,10 @@
 //! a node, `pin_rmb` right-clicks the first input pin of `SHADER_EDITOR_INPUT_NODE`, `node_rmb` right-clicks the
 //! middle of an unselected node (or of `SHADER_EDITOR_INPUT_NODE`) to open its menu, `node_dblclick` double-clicks
 //! the middle of that node (opens the file it refers to) or, with `SHADER_EDITOR_INPUT_AT=header`, its header (the
-//! rename dialog, design §5.5; the active tab and the dialog are logged), `frame_dblclick` double-clicks the title
-//! strip of the first comment frame (or `SHADER_EDITOR_INPUT_FRAME`; the dialog is logged), `hover` rests on the
-//! menu_bar's Back button (its tooltip), on the widget whose tooltip starts with `SHADER_EDITOR_INPUT_TIP` or, with
-//! `SHADER_EDITOR_INPUT_PIN=<node>.<pin>`, on that pin (its hover look, design §4.8; hovered pins are logged),
+//! rename / comment dialog, design §5.5; the active tab and the dialog are logged), `frame_dblclick` double-clicks
+//! the title strip of the first comment frame (or `SHADER_EDITOR_INPUT_FRAME`; the dialog is logged), `hover` rests
+//! on the menu_bar's Back button (its tooltip), on the widget whose tooltip starts with `SHADER_EDITOR_INPUT_TIP`
+//! or, with `SHADER_EDITOR_INPUT_PIN=<node>.<pin>`, on that pin (its hover look, design §4.8; hovered pins are logged),
 //! `curve_drag` drags the second point of an open curve, `curve_add` double-clicks below it, `texture_zoom` turns
 //! the wheel 10 notches over the preview of an open image or Texture tab (left of its centre),
 //! `drop_game_file` drags the Game Assets row of `SHADER_EDITOR_INPUT_FILE` (a path under `assets/`, or a Project

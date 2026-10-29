@@ -218,11 +218,25 @@ pub struct Node {
     /// Editor-only title of a constant node; codegen never reads it (decision 0021).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub label: String,
+    /// Editor-only note shown above the node (any node, at most [`Node::COMMENT_MAX`] characters); codegen never
+    /// reads it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub comment: String,
 }
 
 impl Node {
+    /// Longest [`Node::comment`], in characters.
+    pub const COMMENT_MAX: usize = 512;
+
     pub fn new(kind: impl Into<String>, pos: (f32, f32)) -> Self {
-        Node { kind: kind.into(), pos, params: BTreeMap::new(), inputs: BTreeMap::new(), label: String::new() }
+        Node {
+            kind: kind.into(),
+            pos,
+            params: BTreeMap::new(),
+            inputs: BTreeMap::new(),
+            label: String::new(),
+            comment: String::new(),
+        }
     }
 
     pub fn with_param(mut self, id: &str, v: Value) -> Self {
@@ -465,6 +479,20 @@ mod tests {
         let mut b = a.clone();
         b.nodes.values_mut().for_each(|n| n.label.clear());
         assert!(!b.to_ron().contains("label:"));
+    }
+
+    #[test]
+    fn node_comment_roundtrip() {
+        let mut a = Asset::new("rock", AssetKind::Material(MaterialKind::Pbr3d(PbrSettings::default())));
+        let mut n = Node::new("stdlib::Add", (0.0, 0.0));
+        n.comment = "wet\nlayer".into();
+        a.add_node(n);
+        let text = a.to_ron();
+        assert!(text.contains("comment: \"wet\\nlayer\""), "{text}");
+        assert_eq!(Asset::from_ron(&text).unwrap(), a);
+        let mut b = a.clone();
+        b.nodes.values_mut().for_each(|n| n.comment.clear());
+        assert!(!b.to_ron().contains("comment:"), "an empty comment is not written");
     }
 
     #[test]

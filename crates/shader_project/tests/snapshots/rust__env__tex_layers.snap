@@ -18,7 +18,7 @@ pub const BAKED_ID: &str = "env/tex_layers";
 
 /// WESL feature of this material's binding layout, enabled in `specialize`: a hot-reloaded shader whose
 /// bindings no longer match this code fails to compile instead of crashing the renderer (rebuild the game).
-pub const LAYOUT_FEATURE: &str = "SG_LAYOUT_5b1e1829";
+pub const LAYOUT_FEATURE: &str = "SG_LAYOUT_1bf1dc98";
 
 /// Extension of `StandardMaterial`; use [`TexLayersMaterial`] as the asset type.
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone, Default)]

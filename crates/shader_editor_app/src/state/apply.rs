@@ -42,15 +42,15 @@ impl Editor {
                     initial,
                     submit: Submit::OpenProject,
                 });
-                self.pick_folder = true;
             }
-            Action::OpenProject(p) => {
-                if self.is_dirty() {
-                    self.save_all();
-                }
-                if let Err(e) = self.open_project(&p) {
-                    self.io_error("Cannot open project", e);
-                }
+            Action::ForgetRecent(p) => {
+                self.config.forget_recent(&p);
+                self.save_config();
+            }
+            Action::OpenProject(p) => self.switch_project(&p, Unsaved::Ask),
+            Action::SwitchProject(p, unsaved) => {
+                self.dialog = None;
+                self.switch_project(&p, unsaved);
             }
             Action::NewProjectDialog => {
                 self.dialog = Some(Dialog::Input {
@@ -333,6 +333,7 @@ impl Editor {
             Action::TextDialog(target) => {
                 let (title, label) = match target {
                     PropTarget::FrameTitle(_) => ("Comment", "Title"),
+                    PropTarget::NodeComment(_) => ("Node comment", "Comment (shown above the node, editor only)"),
                     _ => ("Rename node", "Name"),
                 };
                 let initial = self.current_value(&target).map(|v| v.as_str().to_string()).unwrap_or_default();

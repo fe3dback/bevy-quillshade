@@ -31,7 +31,7 @@ pub use preview::{PreviewSlot, PreviewSource, ShaderOutputDto, albedo_expr, conv
 pub use registry::{
     Builtin, CurveLookup, EmitCtx, Env, FnPort, FunctionLookup, FunctionSig, GradientLookup, HiddenTexture, Hotkey,
     HotkeyKey, MaterialParam, NoGradients, NodeAction, NodeDef, NodeInfo, NodeOp, NodeRole, Operand, ParamDef,
-    ParamKind, ParamType, PinDef, Registry, SigCtx, Signature, Stage, TextureLookup,
+    ParamKind, ParamType, PinDef, Registry, SceneTexture, SigCtx, Signature, Stage, TextureLookup,
 };
 pub use texture::{TextureAsset, TextureSettings};
 pub use types::{Conversion, PinType, conversion};

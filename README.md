@@ -151,6 +151,8 @@ regenerates WESL shaders and a typed Rust crate that the game hot-reloads.
 - **Gradients**: collections of up to 128 gradients each (OKLab interpolation), baked into one texture per collection.
 - **Textures**: Texture assets for the game's `.png` / `.ktx2` images, with loader and sampler settings and a preview.
 - **Global constants**: named tables of values, inlined into every material that reads them.
+- **Scene depth**: SceneDepth and DepthFade (soft particles, shorelines) read the camera's depth prepass in
+  translucent 3D materials; add `DepthPrepass` to the camera.
 - **Comfortable canvas**: comments, named routes, auto-layout, minimap, node preview, copy / paste,
   undo / redo, Back / Forward navigation.
 - **Live validation**: errors and warnings are pinned to their node and pin, and an error blocks only its own asset.

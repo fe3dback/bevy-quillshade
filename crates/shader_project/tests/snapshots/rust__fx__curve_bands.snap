@@ -18,7 +18,7 @@ pub const BAKED_ID: &str = "fx/curve_bands";
 
 /// WESL feature of this material's binding layout, enabled in `specialize`: a hot-reloaded shader whose
 /// bindings no longer match this code fails to compile instead of crashing the renderer (rebuild the game).
-pub const LAYOUT_FEATURE: &str = "SG_LAYOUT_740e364b";
+pub const LAYOUT_FEATURE: &str = "SG_LAYOUT_3e0d4723";
 
 /// Unlit 3D material (`MeshMaterial3d`).
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone, Default)]

@@ -16,7 +16,7 @@ pub const BAKED_ID: &str = "env/water";
 
 /// WESL feature of this material's binding layout, enabled in `specialize`: a hot-reloaded shader whose
 /// bindings no longer match this code fails to compile instead of crashing the renderer (rebuild the game).
-pub const LAYOUT_FEATURE: &str = "SG_LAYOUT_06c508b1";
+pub const LAYOUT_FEATURE: &str = "SG_LAYOUT_31a65546";
 
 /// Uniform block at `@binding(100)`; layout matches `WaterParams` in WESL (16 bytes).
 #[derive(ShaderType, Reflect, Debug, Clone, Copy, PartialEq)]
@@ -34,6 +34,8 @@ impl Default for WaterParams {
 }
 
 /// Extension of `StandardMaterial`; use [`WaterMaterial`] as the asset type.
+///
+/// Reads scene textures: add `DepthPrepass` to the cameras that render it (without, they read as empty).
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone)]
 pub struct WaterExt {
     #[uniform(100)]

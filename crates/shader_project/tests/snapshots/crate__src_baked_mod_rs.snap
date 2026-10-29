@@ -798,8 +798,8 @@ fn overlay(
         if !base.layout.is_empty() && !new.layout.is_empty() && !same_layout {
             warn_once(warned, format!("layout {id} {}", new.layout), || {
                 format!(
-                    "material `{id}` changed its parameters, texture bindings or World Position Offset; its shader \
-                     does not compile until the game is rebuilt"
+                    "material `{id}` changed its parameters, texture bindings, World Position Offset, blend mode, \
+                     two-sided or shading; its shader does not compile until the game is rebuilt"
                 )
             });
         }

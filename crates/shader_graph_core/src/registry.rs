@@ -7,7 +7,7 @@ use crate::consts::{ConstLookup, ConstType, GlobalConst};
 use crate::curve::{Interp, curve_fn_alias};
 use crate::diag::{Code, Diagnostic};
 use crate::gradient::GradientCollection;
-use crate::model::{AssetKind, NodeId};
+use crate::model::{AssetKind, BlendMode, MaterialKind, NodeId};
 use crate::preview::ShaderOutputDto;
 use crate::types::PinType;
 use crate::value::Value;
@@ -381,6 +381,24 @@ impl Builtin {
     }
 }
 
+/// View texture of the camera read by a node (Scene category): bound by Bevy in the 3D main pass only while the camera
+/// has its prepass component, so a read falls back to a neutral value without it (stdlib `scene.wesl`). Unlike
+/// builtins and textures these are no function arguments: the view bindings are global.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum SceneTexture {
+    /// `depth_prepass_texture` (camera component `DepthPrepass`).
+    Depth,
+}
+
+impl SceneTexture {
+    /// Camera component that makes Bevy bind the texture.
+    pub fn camera_component(self) -> &'static str {
+        match self {
+            SceneTexture::Depth => "DepthPrepass",
+        }
+    }
+}
+
 /// Port of a project function as seen by callers.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FnPort {
@@ -410,6 +428,9 @@ pub struct FunctionSig {
     /// used by the function or, transitively, by the functions it calls; sorted. Each is a texture + sampler
     /// argument [`gradient_ident`] / `{ident}_sampler`.
     pub gradients: Vec<String>,
+    /// View textures read by the function or, transitively, by the functions it calls; sorted. No arguments: callers
+    /// only inherit the requirement ([`EmitCtx::scene_texture`]).
+    pub scene: Vec<SceneTexture>,
 }
 
 /// Fixed texture of a node inside a function (design §1.3), passed to the function as a hidden trailing texture +
@@ -696,6 +717,8 @@ pub struct EmitSink {
     /// Gradient collections sampled, directly or through called functions (gradient design §7): one binding / hidden
     /// argument per collection ([`EmitCtx::gradient`]).
     pub gradients: BTreeSet<String>,
+    /// View textures read, directly or through called functions ([`EmitCtx::scene_texture`]).
+    pub scene: BTreeSet<SceneTexture>,
     /// Sink-node values: material output pins / function outputs, keyed by pin or output name.
     pub outputs: BTreeMap<String, String>,
     pub diagnostics: Vec<Diagnostic>,
@@ -844,6 +867,35 @@ impl EmitCtx<'_> {
         self.sink.gradients.insert(collection.into());
         let tex = gradient_ident(collection);
         (tex.clone(), format!("{tex}_sampler"))
+    }
+
+    /// Reads view texture `t` (directly, or through a called function). Reported here, at the node: E009 in the
+    /// vertex stage and in 2D materials (no view textures there), W112 in an opaque / masked 3D material (it is in the
+    /// depth prepass itself, so it reads its own surface).
+    pub fn scene_texture(&mut self, t: SceneTexture) {
+        self.sink.scene.insert(t);
+        if self.stage == Stage::Vertex {
+            self.diag(Code::E009, "scene textures are only available in the fragment stage");
+        }
+        let blend = match self.env.asset_kind.material() {
+            Some(MaterialKind::Sprite2d(_)) => {
+                self.diag(Code::E009, "scene textures are only available in 3D materials");
+                return;
+            }
+            Some(MaterialKind::Pbr3d(s)) => s.blend,
+            Some(MaterialKind::Unlit3d(s)) => s.blend,
+            None => return,
+        };
+        if matches!(blend, BlendMode::Opaque | BlendMode::Mask) {
+            self.diag(
+                Code::W112,
+                format!(
+                    "reads a scene texture with blend mode {}, which draws the material into the prepass itself: it \
+                     sees its own surface (use a translucent blend mode)",
+                    blend.label()
+                ),
+            );
+        }
     }
 
     pub fn declare_param(&mut self, p: MaterialParam) {

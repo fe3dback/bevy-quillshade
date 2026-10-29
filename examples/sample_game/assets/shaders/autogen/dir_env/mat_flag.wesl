@@ -11,9 +11,10 @@ import bevy_pbr::render::mesh_view_bindings::globals;
 
 struct FlagParams { inp_color: vec4<f32>, inp_strength: f32, _pad0: f32, _pad1: f32, _pad2: f32 }
 @group(constants::MATERIAL_BIND_GROUP) @binding(100) var<uniform> params: FlagParams;
-// The game's compiled material enables this feature; after a change of parameters, texture bindings or
-// World Position Offset the shader stops compiling here until the game is rebuilt.
-@if(!SG_LAYOUT_1cccef50)
+// The game's compiled material enables this feature; after a change of parameters, texture bindings,
+// World Position Offset, blend mode, two-sided or shading the shader stops compiling here until the game
+// is rebuilt.
+@if(!SG_LAYOUT_e28d0ea2)
 const_assert material_layout_changed__rebuild_the_game;
 
 @fragment

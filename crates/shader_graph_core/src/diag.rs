@@ -62,6 +62,9 @@ pub enum Code {
     /// Sample Gradient node without a collection or a gradient (emits white, no binding), or on an empty slot (still
     /// samples its row, which bakes white) (gradient design §6).
     W111,
+    /// Scene texture (SceneDepth, DepthFade) read in an opaque or masked 3D material, which is drawn into the prepass
+    /// itself: it reads its own surface.
+    W112,
 }
 
 impl Code {

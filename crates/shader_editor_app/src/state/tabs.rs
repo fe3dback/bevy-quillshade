@@ -430,6 +430,50 @@ impl Editor {
 
     /// Closes the project (its open tabs are remembered for the next time it opens). Asks first when tabs have
     /// unsaved changes.
+    /// Opens the project at `path` in place of the open one. With unsaved tabs `Ask` asks Cancel / Discard / Save
+    /// first, as closing tabs does; a path that is no project shows its error without asking. The Open project
+    /// dialog it came from (a recent project, the field) has done its job and closes.
+    pub fn switch_project(&mut self, path: &Path, unsaved: Unsaved) {
+        if let Some(Dialog::Input { submit: Submit::OpenProject, .. }) = self.dialog {
+            self.dialog = None;
+        }
+        if let Err(e) = Project::open(path) {
+            self.io_error("Cannot open project", e.to_string());
+            return;
+        }
+        if self.is_dirty() {
+            match unsaved {
+                Unsaved::Ask => {
+                    let action = |unsaved| Action::SwitchProject(path.to_path_buf(), unsaved);
+                    self.dialog = Some(Dialog::Confirm {
+                        title: "Unsaved changes".into(),
+                        message: "Some tabs have unsaved changes. Save them before opening the project?".into(),
+                        buttons: vec![
+                            ("Cancel".into(), Action::CloseDialog),
+                            ("Discard".into(), action(Unsaved::Discard)),
+                            ("Save".into(), action(Unsaved::Save)),
+                        ],
+                    });
+                    return;
+                }
+                Unsaved::Discard => {
+                    for id in self.memory_regenerated(|_| true) {
+                        self.regenerate_from_disk(&id);
+                    }
+                }
+                Unsaved::Save => {
+                    if !self.save_all() {
+                        return;
+                    }
+                    self.regenerate();
+                }
+            }
+        }
+        if let Err(e) = self.open_project(path) {
+            self.io_error("Cannot open project", e);
+        }
+    }
+
     pub fn close_project(&mut self, unsaved: Unsaved) {
         if self.project.is_none() {
             return;

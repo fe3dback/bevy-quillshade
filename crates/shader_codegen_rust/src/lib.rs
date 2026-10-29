@@ -223,6 +223,19 @@ pub fn material_module(ir: &Ir, source_file: &str) -> String {
         MaterialKind::Sprite2d(_) => "Sprite material: add `SpriteMaterial(handle)` next to `Sprite`.".to_string(),
     };
     line(&mut o, &format!("/// {doc}"));
+    if !ir.scene.is_empty() {
+        // View textures are bound only for cameras with their prepass (Scene category); without it the reads fall
+        // back silently, so the requirement is spelled out where the game picks the material up.
+        let components: Vec<String> = ir.scene.iter().map(|t| format!("`{}`", t.camera_component())).collect();
+        line(&mut o, "///");
+        line(
+            &mut o,
+            &format!(
+                "/// Reads scene textures: add {} to the cameras that render it (without, they read as empty).",
+                components.join(", ")
+            ),
+        );
+    }
     let no_fields = !has_uniform && ir.textures.is_empty();
     // Without parameters every field has a default (fixed textures: `Handle::default()`), and `new()` takes no
     // arguments: clippy's `new_without_default` wants `Default`.

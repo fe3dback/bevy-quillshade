@@ -16,7 +16,7 @@ pub const BAKED_ID: &str = "kw/loop/type";
 
 /// WESL feature of this material's binding layout, enabled in `specialize`: a hot-reloaded shader whose
 /// bindings no longer match this code fails to compile instead of crashing the renderer (rebuild the game).
-pub const LAYOUT_FEATURE: &str = "SG_LAYOUT_dfa2efb2";
+pub const LAYOUT_FEATURE: &str = "SG_LAYOUT_a799d73a";
 
 /// Uniform block at `@binding(100)`; layout matches `TypeParams` in WESL (32 bytes).
 #[derive(ShaderType, Reflect, Debug, Clone, Copy, PartialEq)]

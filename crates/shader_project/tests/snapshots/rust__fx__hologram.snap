@@ -19,7 +19,7 @@ pub const BAKED_ID: &str = "fx/hologram";
 
 /// WESL feature of this material's binding layout, enabled in `specialize`: a hot-reloaded shader whose
 /// bindings no longer match this code fails to compile instead of crashing the renderer (rebuild the game).
-pub const LAYOUT_FEATURE: &str = "SG_LAYOUT_758e8054";
+pub const LAYOUT_FEATURE: &str = "SG_LAYOUT_7c5d798f";
 
 /// Uniform block at `@binding(100)`; layout matches `HologramParams` in WESL (32 bytes).
 #[derive(ShaderType, Reflect, Debug, Clone, Copy, PartialEq)]

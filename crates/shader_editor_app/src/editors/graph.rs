@@ -27,7 +27,8 @@ use crate::ui::icons::IconId;
 use crate::ui::input::CanvasCursor;
 use crate::ui::palette::Palette;
 use crate::ui::props::{
-    Choices, GradientSlots, SlotEntry, checkbox_row, hue_input, labeled, pin_kind, select_w, text_w, value_row,
+    Choices, GradientSlots, SlotEntry, checkbox_row, hue_input, labeled, pin_kind, select_w, text_area, text_w,
+    value_row,
 };
 use crate::ui::widgets::{Caption, GroupButton, button_group, subpane_box};
 use crate::ui::{TEXT, TEXT_DIM, button, icon_button, icon_tool_button, plural, text};
@@ -584,6 +585,10 @@ fn node_subpanes(editor: &Editor, id: &str) -> Vec<Box<dyn Scene>> {
         let target = PropTarget::NodeLabel(id.to_string());
         node.push(Box::new(labeled("Label".to_string(), text_w(target, n.label.clone(), false))));
     }
+    // Editor-only, shown above the node on the canvas.
+    node.push(Box::new(text("Comment", TEXT, 13.0)));
+    let comment = PropTarget::NodeComment(id.to_string());
+    node.push(text_area(comment, n.comment.clone(), shader_graph_core::model::Node::COMMENT_MAX));
     // The file the node refers to; double-clicking the node opens it too (decision 0023).
     if let Some(target) = editor.referenced_asset(id) {
         let label = match target.ty {

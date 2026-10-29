@@ -18,6 +18,7 @@ pub const MODULES: &[(&str, &str)] = &[
     ("math", include_str!("../wesl/math.wesl")),
     ("noise", include_str!("../wesl/noise.wesl")),
     ("pattern", include_str!("../wesl/pattern.wesl")),
+    ("scene", include_str!("../wesl/scene.wesl")),
     ("shading", include_str!("../wesl/shading.wesl")),
     ("texture", include_str!("../wesl/texture.wesl")),
     ("transform", include_str!("../wesl/transform.wesl")),

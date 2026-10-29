@@ -226,8 +226,8 @@ fn pin_click(
 
 /// Right click (not a pan) on a node body opens the node menu (decision 0021); an unselected node is selected
 /// first, so the generic rows (copy, duplicate, delete) act on it. A double click on the body opens the file the
-/// node refers to (function, curve, constant table; decision 0023); on the header it renames a node with a name or
-/// label first ([`Editor::header_action`], design §5.5).
+/// node refers to (function, curve, constant table; decision 0023); on the header it does that too, else renames a
+/// node with a name or label, else edits its comment ([`Editor::header_action`], design §5.5).
 #[allow(clippy::too_many_arguments)]
 fn node_click(
     click: On<PointerClick>,
@@ -256,11 +256,8 @@ fn node_click(
         if path().any(|e| fields.contains(e)) {
             return;
         }
-        let action = if path().any(|e| headers.contains(e)) {
-            editor.header_action(node)
-        } else {
-            editor.referenced_asset(node).map(Action::OpenAsset)
-        };
+        let action =
+            if path().any(|e| headers.contains(e)) { editor.header_action(node) } else { editor.open_action(node) };
         if let Some(a) = action {
             actions.push(a);
         }

@@ -259,6 +259,24 @@ pub(crate) fn text_w(target: PropTarget, v: String, multiline: bool) -> Box<dyn 
     }
 }
 
+/// A short multiline [`text_w`] (a few lines, word-wrapped, Enter breaks the line) taking at most `max` characters.
+pub(crate) fn text_area(target: PropTarget, v: String, max: usize) -> Box<dyn Scene> {
+    let sync = FieldText { ready: v.is_empty(), last: v.clone() };
+    let (field, init) = (PropField { target, ..Default::default() }, InitText(v));
+    Box::new(bsn! {
+        @FeathersTextInputContainer
+        Node { height: auto(), min_height: px(64), flex_grow: 0.0, width: percent(100), align_items: AlignItems::FlexStart, padding: UiRect::all(px(4)) }
+        Children [
+            @FeathersTextInput
+            EditableText { cursor_width: 0.3, allow_newlines: true, visible_lines: {Some(6.0)}, max_characters: {Some(max)} }
+            TextLayout { linebreak: LineBreak::WordOrCharacter }
+            field
+            init
+            sync
+        ]
+    })
+}
+
 /// A one-line [`text_w`] showing `hint` while it is empty.
 pub(crate) fn text_hint(target: PropTarget, v: String, hint: &str) -> Box<dyn Scene> {
     let sync = FieldText { ready: v.is_empty(), last: v.clone() };

@@ -340,6 +340,7 @@ impl Editor {
             PropTarget::Description => Some(Value::Str(d.asset.meta.description.clone())),
             PropTarget::PreviewMode => Some(Value::Str(preview_mode_label(d.asset.preview.mode).into())),
             PropTarget::NodeLabel(id) => d.asset.nodes.get(id).map(|n| Value::Str(n.label.clone())),
+            PropTarget::NodeComment(id) => d.asset.nodes.get(id).map(|n| Value::Str(n.comment.clone())),
             PropTarget::FrameTitle(id) => {
                 d.asset.comments.iter().find(|f| f.id == *id).map(|f| Value::Str(f.title.clone()))
             }
@@ -464,6 +465,12 @@ impl Editor {
                 Some(why) => ("Exclusive preview (not available)".into(), Action::Notify(why)),
             });
         }
+        if let Some(open) = self.open_action(node) {
+            items.push(("Open in tab".into(), open));
+        }
+        let has_comment = d.asset.nodes.get(node).is_some_and(|n| !n.comment.is_empty());
+        let comment = if has_comment { "Edit comment" } else { "Add comment" };
+        items.push((comment.into(), Action::TextDialog(PropTarget::NodeComment(node.into()))));
         items.extend([
             ("Copy\tCtrl+C".into(), Action::Copy),
             ("Duplicate\tCtrl+D".into(), Action::Duplicate),
@@ -610,13 +617,21 @@ impl Editor {
         }
     }
 
-    /// What a double click on the header of `node` does (design §5.5): renames it ([`Self::rename_target`]), else
-    /// opens the file it refers to ([`Self::referenced_asset`]), else nothing.
+    /// What a double click on the header of `node` does (design §5.5), first that applies: opens the file it refers
+    /// to ([`Self::open_action`]), renames it ([`Self::rename_target`]), edits its comment.
     pub fn header_action(&self, node: &str) -> Option<Action> {
-        match self.rename_target(node) {
-            Some(target) => Some(Action::TextDialog(target)),
-            None => self.referenced_asset(node).map(Action::OpenAsset),
+        self.doc()?.asset.nodes.get(node)?;
+        if let Some(open) = self.open_action(node) {
+            return Some(open);
         }
+        let target = self.rename_target(node).unwrap_or_else(|| PropTarget::NodeComment(node.to_string()));
+        Some(Action::TextDialog(target))
+    }
+
+    /// Opens the file `node` refers to in a tab ([`Self::referenced_asset`]): a double click on the node's body and
+    /// its menu's "Open in tab". `None` when it refers to nothing.
+    pub fn open_action(&self, node: &str) -> Option<Action> {
+        self.referenced_asset(node).map(Action::OpenAsset)
     }
 
     /// The editor asset node `node` of the active graph refers to (decision 0023): a function call's function, a
@@ -903,6 +918,16 @@ impl Editor {
                 d.edit_merge(key, |a| {
                     if let Some(n) = a.nodes.get_mut(id) {
                         n.label = value.as_str().to_string();
+                    }
+                });
+                refresh = false;
+            }
+            PropTarget::NodeComment(id) => {
+                let comment: String =
+                    value.as_str().chars().take(shader_graph_core::model::Node::COMMENT_MAX).collect();
+                d.edit_merge(key, |a| {
+                    if let Some(n) = a.nodes.get_mut(id) {
+                        n.comment = comment;
                     }
                 });
                 refresh = false;

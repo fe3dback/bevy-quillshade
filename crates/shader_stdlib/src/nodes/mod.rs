@@ -6,6 +6,7 @@ pub mod constants;
 pub mod coords;
 pub mod math;
 pub mod output;
+pub mod scene;
 pub mod texture;
 pub mod utility;
 pub mod vector;
@@ -18,6 +19,7 @@ pub fn register_all(r: &mut Registry) {
     vector::register(r);
     coords::register(r);
     texture::register(r);
+    scene::register(r);
     utility::register(r);
     color::register(r);
     output::register(r);

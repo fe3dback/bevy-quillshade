@@ -140,6 +140,7 @@ fn category_color(cat: &str) -> Color {
         "Vector" => Color::srgb_u8(82, 78, 52),
         "Coordinates" => Color::srgb_u8(110, 58, 58),
         "Texture" => Color::srgb_u8(50, 74, 120),
+        "Scene" => Color::srgb_u8(40, 92, 104),
         "Utility" => Color::srgb_u8(74, 74, 80),
         "Color" => Color::srgb_u8(104, 62, 96),
         "Output" => Color::srgb_u8(90, 64, 34),
@@ -413,6 +414,8 @@ fn node_scene(
                 @pin_port(Port::input(PortType::ANY), c, kin)
                 --
                 @pin_port(Port::output(PortType::ANY), c, kout)
+                --
+                {node_comment(&n.comment)}
             ]
         }));
     }
@@ -510,8 +513,61 @@ fn node_scene(
         SelectedBorderColor { selected: SELECTED }
         key
         ChildOf(canvas)
-        Children [ @{title} -- {rows} ]
+        Children [ @{title} -- {rows} -- {node_comment(&n.comment)} ]
     }))
+}
+
+/// Background of a [`node_comment`] and its arrow.
+const COMMENT_BG: Color = Color::srgba(0.0, 0.0, 0.0, 0.6);
+/// Height (graph px) of a [`node_comment`]'s arrow; the gap between the comment and the node is one px more.
+const COMMENT_ARROW: f32 = 5.0;
+/// The node's border (`kit::node`): the comment spans the node's outer width.
+const NODE_BORDER: f32 = 1.5;
+
+/// A node's comment (`Node::comment`), nothing when it has none: a rounded translucent black box of small white
+/// word-wrapped text right above the node, as wide as the node and as tall as its text, with a small arrow down to
+/// the node. Absolute, so the node's layout and size ignore it; picking passes through it.
+fn node_comment(comment: &str) -> Vec<Box<dyn Scene>> {
+    if comment.is_empty() {
+        return Vec::new();
+    }
+    let comment = comment.to_string();
+    let edge = px(-NODE_BORDER);
+    vec![Box::new(bsn! {
+        Node {
+            position_type: PositionType::Absolute,
+            left: edge,
+            right: edge,
+            // From the top of the node's padding box: over its top border, then the gap.
+            bottom: percent(100),
+            padding: UiRect::bottom(px(NODE_BORDER + 1.0)),
+            flex_direction: FlexDirection::Column,
+            align_items: AlignItems::Center,
+        }
+        Pickable::IGNORE
+        Children [
+            Node {
+                align_self: AlignSelf::Stretch,
+                padding: UiRect::axes(px(6), px(4)),
+                border_radius: BorderRadius::all(px(5)),
+            }
+            BackgroundColor(COMMENT_BG)
+            Pickable::IGNORE
+            Children [
+                Text(comment)
+                TextFont { font_size: FontSize::Px(10.0) }
+                TextColor(Color::WHITE)
+                TextLayout { linebreak: LineBreak::WordOrCharacter }
+                Pickable::IGNORE
+            ]
+            --
+            // A triangle: a zero-size box whose top border is the only coloured side (Bevy joins the sides
+            // diagonally).
+            Node { width: px(0), height: px(0), border: UiRect::new(px(COMMENT_ARROW), px(COMMENT_ARROW), px(COMMENT_ARROW), px(0)) }
+            BorderColor { top: COMMENT_BG, left: Color::NONE, right: Color::NONE, bottom: Color::NONE }
+            Pickable::IGNORE
+        ]
+    })]
 }
 
 /// Colour of a comment frame: its hue at the editor's saturation / lightness (design §4.6), else its stored colour or

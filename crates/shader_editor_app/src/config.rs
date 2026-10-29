@@ -62,7 +62,8 @@ impl Default for UserConfig {
     }
 }
 
-const RECENT_LIMIT: usize = 10;
+/// How many recent projects are remembered (all of them show on the welcome screen).
+pub const RECENT_LIMIT: usize = 50;
 
 impl UserConfig {
     /// `<OS config dir>/fe3dback/bevy-shader-editor/config.ron`, see [`os_config_dir`].
@@ -111,6 +112,11 @@ impl UserConfig {
         self.recent_projects.insert(0, project.to_path_buf());
         self.recent_projects.truncate(RECENT_LIMIT);
     }
+
+    /// Drops `project` from the recent projects (its "x" button); the project itself is untouched.
+    pub fn forget_recent(&mut self, project: &Path) {
+        self.recent_projects.retain(|p| p != project);
+    }
 }
 
 /// The OS config directory: environment variables first, then the platform's usual place under `home`:
@@ -139,6 +145,12 @@ mod tests {
         c.touch_recent(Path::new("/b"));
         c.touch_recent(Path::new("/a"));
         assert_eq!(c.recent_projects, vec![PathBuf::from("/a"), PathBuf::from("/b")]);
+        c.forget_recent(Path::new("/a"));
+        assert_eq!(c.recent_projects, vec![PathBuf::from("/b")]);
+        for i in 0..RECENT_LIMIT + 5 {
+            c.touch_recent(&PathBuf::from(format!("/p{i}")));
+        }
+        assert_eq!(c.recent_projects.len(), RECENT_LIMIT);
         c.tabs.insert("/a".into(), ProjectTabs { open: vec!["shaders/env/rock.material.ron".into()], active: Some(0) });
         c.save(&path).unwrap();
         assert_eq!(UserConfig::load(&path), c);

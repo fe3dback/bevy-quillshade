@@ -56,6 +56,30 @@ fn open_edit_save_regenerates() {
     assert!(dir.path().join("crates/shaders/src/materials/dir_env/mat_rock_wet.rs").is_file());
 }
 
+/// A changed blend mode only takes effect after a rebuild of the game (the alpha mode is compiled Rust, decision 0029):
+/// saving warns about it; a parameter-free graph edit that keeps the Rust says nothing.
+#[test]
+fn rust_changes_warn_to_rebuild_the_game() {
+    let (_dir, mut e) = project();
+    e.apply(Action::RegenAll);
+    let rebuild = |e: &Editor| e.messages.iter().filter(|m| m.text.contains("rebuild the game")).count();
+    let before = rebuild(&e);
+    e.apply(Action::RegenAll);
+    assert_eq!(rebuild(&e), before, "nothing changed");
+
+    e.apply(Action::OpenAsset(AssetId::new(AssetType::Material, "env/rock_wet")));
+    e.apply(Action::AddNode { kind: "stdlib::Time".into(), pos: (0.0, 0.0), link: None, params: Vec::new() });
+    e.apply(Action::Save);
+    assert_eq!(rebuild(&e), before, "the Rust is unchanged");
+
+    e.apply(Action::SetValue { target: PropTarget::Blend, value: Value::Str("Blend".into()), merge: false });
+    e.apply(Action::Save);
+    let last = e.messages.iter().rev().find(|m| m.text.contains("rebuild the game")).unwrap();
+    assert_eq!(rebuild(&e), before + 1);
+    assert_eq!(last.level, Level::Warning);
+    assert!(last.text.contains("env/rock_wet"), "{}", last.text);
+}
+
 #[test]
 fn add_node_from_wire_connects() {
     let (_dir, mut e) = project();
@@ -344,8 +368,12 @@ fn rename_target_kinds() {
     assert_eq!(e.rename_target(&lerp), None);
     let call = node_of(&e, "function::common/wet_mask");
     assert_eq!(e.rename_target(&call), None, "a function call opens its function instead");
-    assert_eq!(e.header_action(&call), Some(Action::OpenAsset(AssetId::new(AssetType::Function, "common/wet_mask"))));
-    assert_eq!(e.header_action(&lerp), None);
+    let wet_mask = Action::OpenAsset(AssetId::new(AssetType::Function, "common/wet_mask"));
+    assert_eq!(e.open_action(&call), Some(wet_mask.clone()), "its body and its menu's Open in tab do");
+    assert_eq!(e.header_action(&call), Some(wet_mask), "a reference first");
+    let comment = |n: &str| Some(Action::TextDialog(PropTarget::NodeComment(n.to_string())));
+    assert_eq!(e.header_action(&lerp), comment(&lerp), "no reference, no name: the comment");
+    assert_eq!(e.open_action(&lerp), None);
     // A Named Route declaration has a name; its usages refer to it by node id, so a rename keeps them.
     let route = add(&mut e, "stdlib::NamedRoute");
     let route_name = PropTarget::Param { node: route.clone(), key: "name".into() };
@@ -457,7 +485,37 @@ fn node_menu_lists_convert_with_hotkeys_and_generic_rows() {
     // The preview row follows the separator after the node's own actions (decision 0022).
     let at = |l: &str| labels.iter().position(|x| x == l).unwrap();
     assert_eq!(at("Exclusive preview\tV"), at("") + 1);
-    assert_eq!(at("Copy\tCtrl+C"), at("") + 2);
+    assert_eq!(at("Add comment"), at("") + 2);
+    assert_eq!(at("Copy\tCtrl+C"), at("") + 3);
+    assert!(!labels.iter().any(|l| l == "Open in tab"), "Multiply refers to nothing");
+}
+
+/// Any node takes an editor-only comment (at most `Node::COMMENT_MAX` characters): from the props field, the
+/// header's double click or the menu's Add / Edit comment; a node referring to a file has Open in tab.
+#[test]
+fn node_comment_and_open_in_tab() {
+    use shader_graph_core::model::Node;
+
+    let (_dir, mut e) = project();
+    e.apply(Action::OpenAsset(AssetId::new(AssetType::Material, "env/rock_wet")));
+    let call = node_of(&e, "function::common/wet_mask");
+    let menu = |e: &Editor| e.node_menu(&call);
+    let wet_mask = Action::OpenAsset(AssetId::new(AssetType::Function, "common/wet_mask"));
+    assert!(menu(&e).contains(&("Open in tab".into(), wet_mask)));
+    let target = PropTarget::NodeComment(call.clone());
+    let dialog = Action::TextDialog(target.clone());
+    assert!(menu(&e).contains(&("Add comment".into(), dialog.clone())));
+    e.apply(dialog.clone());
+    let Some(Dialog::Input { submit: Submit::SetText(t), initial, .. }) = e.dialog.clone() else { panic!() };
+    assert_eq!((t, initial.as_str()), (target.clone(), ""));
+    e.apply(Action::Submit("x".repeat(Node::COMMENT_MAX + 10)));
+    let stored = |e: &Editor| e.doc().unwrap().asset.nodes[&call].comment.clone();
+    assert_eq!(stored(&e).chars().count(), Node::COMMENT_MAX, "cut to the limit");
+    assert!(menu(&e).contains(&("Edit comment".into(), dialog)));
+    e.apply(Action::SetValue { target, value: Value::Str("wet\nlayer".into()), merge: false });
+    assert_eq!(stored(&e), "wet\nlayer");
+    e.apply(Action::Undo);
+    assert_eq!(stored(&e).len(), Node::COMMENT_MAX, "one undo step per edit");
 }
 
 fn press_v(e: &mut Editor) {
@@ -666,7 +724,10 @@ fn preview_rows_in_node_menu_and_hotkey() {
     let (_dir, mut e) = project();
     let lerp = add_lerp(&mut e);
     let labels = |e: &Editor, n: &str| e.node_menu(n).into_iter().map(|r| r.0).collect::<Vec<_>>();
-    assert_eq!(labels(&e, &lerp), ["Exclusive preview\tV", "Copy\tCtrl+C", "Duplicate\tCtrl+D", "Delete\tDel"]);
+    assert_eq!(
+        labels(&e, &lerp),
+        ["Exclusive preview\tV", "Add comment", "Copy\tCtrl+C", "Duplicate\tCtrl+D", "Delete\tDel"]
+    );
     let row = e.node_menu(&lerp).into_iter().next().unwrap();
     assert_eq!(row.1, Action::TogglePreview(lerp.clone()));
     e.apply(row.1);
@@ -864,6 +925,46 @@ fn closing_the_project_remembers_its_tabs() {
     assert!(!e.is_dirty(), "discarded");
 }
 
+/// Opening another project with unsaved tabs asks Cancel / Discard / Save, as closing tabs does.
+#[test]
+fn switching_projects_asks_about_unsaved_tabs() {
+    let (dir, mut e) = project();
+    let (other, _) = project();
+    let coords = AssetId::new(AssetType::Material, "fx/coords");
+    let has_time = |dir: &Path| {
+        std::fs::read_to_string(dir.join("shaders/fx/coords.material.ron")).unwrap().contains("stdlib::Time")
+    };
+    four_tabs(&mut e, &[3]);
+    let ask = |e: &mut Editor| {
+        e.apply(Action::OpenProject(other.path().into()));
+        let Some(Dialog::Confirm { buttons, .. }) = e.dialog.clone() else { panic!("asks: {:?}", e.dialog) };
+        let labels: Vec<&str> = buttons.iter().map(|(l, _)| l.as_str()).collect();
+        assert_eq!(labels, ["Cancel", "Discard", "Save"]);
+        buttons
+    };
+    let root = e.project.as_ref().unwrap().root.clone();
+    let buttons = ask(&mut e);
+    e.apply(buttons[0].1.clone());
+    assert!(e.dialog.is_none() && e.is_dirty(), "Cancel keeps everything");
+    assert_eq!(e.project.as_ref().unwrap().root, root);
+
+    e.apply(Action::OpenProject(other.path().join("missing")));
+    assert!(matches!(e.dialog, Some(Dialog::Message { .. })), "no project: the error, no question");
+    e.apply(Action::CloseDialog);
+
+    let buttons = ask(&mut e);
+    e.apply(buttons[2].1.clone());
+    assert!(has_time(dir.path()), "Save saved {coords:?}");
+    assert_ne!(e.project.as_ref().unwrap().root, root, "and switched");
+
+    four_tabs(&mut e, &[3]);
+    e.apply(Action::OpenProject(dir.path().into()));
+    let Some(Dialog::Confirm { buttons, .. }) = e.dialog.clone() else { panic!("asks") };
+    e.apply(buttons[1].1.clone());
+    assert!(!has_time(other.path()), "Discard saved nothing");
+    assert_eq!(e.project.as_ref().unwrap().root, root, "and switched");
+}
+
 #[test]
 fn ctrl_click_disconnects_every_wire_of_a_pin() {
     let (_dir, mut e) = project();
@@ -889,15 +990,35 @@ fn picked_folder_submits_the_project_dialog() {
     let (dir, _) = project();
     let mut e = Editor::default();
     e.apply(Action::OpenProjectDialog);
-    assert!(e.pick_folder, "the native picker opens with the dialog");
+    assert!(!e.pick_folder, "only our dialog opens: the native picker waits for Browse");
     e.apply(Action::CloseDialog);
-    assert!(!e.pick_folder);
     e.apply(Action::FolderPicked(dir.path().into()));
     assert!(e.project.is_none(), "dialog closed meanwhile: ignored");
     e.apply(Action::OpenProjectDialog);
     e.apply(Action::BrowseFolder);
     e.apply(Action::FolderPicked(dir.path().into()));
     assert!(e.project.is_some() && e.dialog.is_none() && !e.pick_folder);
+}
+
+#[test]
+fn recent_project_closes_the_open_dialog() {
+    let (dir, mut e) = project();
+    e.apply(Action::OpenProjectDialog);
+    e.apply(Action::OpenProject(dir.path().into()));
+    assert!(e.project.is_some() && e.dialog.is_none(), "{:?}", e.dialog);
+    e.apply(Action::OpenProjectDialog);
+    e.apply(Action::OpenProject(dir.path().join("missing")));
+    assert!(matches!(e.dialog, Some(Dialog::Message { .. })), "the error replaces it: {:?}", e.dialog);
+}
+
+#[test]
+fn forget_recent_keeps_the_project_open() {
+    let (_dir, mut e) = project();
+    let root = e.project.as_ref().unwrap().root.clone();
+    assert_eq!(e.config.recent_projects, std::slice::from_ref(&root));
+    e.apply(Action::ForgetRecent(root));
+    assert!(e.config.recent_projects.is_empty());
+    assert!(e.project.is_some(), "only the list entry goes");
 }
 
 #[test]

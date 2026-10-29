@@ -183,8 +183,9 @@ fn write_bindings(w: &mut Writer, ir: &Ir) {
 /// ([`Ir::layout_feature`]), so a hot-reloaded shader with other bindings fails to compile instead of crashing the
 /// renderer. The unresolved identifier names the fix in Bevy's shader error.
 fn write_layout_guard(w: &mut Writer, ir: &Ir) {
-    w.line("// The game's compiled material enables this feature; after a change of parameters, texture bindings or");
-    w.line("// World Position Offset the shader stops compiling here until the game is rebuilt.");
+    w.line("// The game's compiled material enables this feature; after a change of parameters, texture bindings,");
+    w.line("// World Position Offset, blend mode, two-sided or shading the shader stops compiling here until the game");
+    w.line("// is rebuilt.");
     w.line(format!("@if(!{})", ir.layout_feature()));
     w.line("const_assert material_layout_changed__rebuild_the_game;");
 }

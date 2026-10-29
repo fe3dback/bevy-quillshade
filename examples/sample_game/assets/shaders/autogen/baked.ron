@@ -61,7 +61,7 @@ BakedManifest(
     "env/exp42": (
       params: {},
       textures: {},
-      layout: "SG_LAYOUT_2198dbcb",
+      layout: "SG_LAYOUT_6e19c30e",
     ),
     "env/flag": (
       params: {
@@ -69,7 +69,7 @@ BakedManifest(
         "inp_strength": Float(0.2),
       },
       textures: {},
-      layout: "SG_LAYOUT_1cccef50",
+      layout: "SG_LAYOUT_e28d0ea2",
     ),
     "env/rock_wet": (
       params: {
@@ -81,7 +81,7 @@ BakedManifest(
         "inp_albedo": "textures/rock_albedo",
         "inp_normal_map": "textures/rock_normal",
       },
-      layout: "SG_LAYOUT_a35f4158",
+      layout: "SG_LAYOUT_499c7a94",
       bindings: [
         "inp_albedo",
         "inp_normal_map",
@@ -92,7 +92,7 @@ BakedManifest(
       textures: {
         "gc_common_terrain": "@gradients/common/terrain",
       },
-      layout: "SG_LAYOUT_50ec9cbe",
+      layout: "SG_LAYOUT_7fbb96d1",
       bindings: [
         "gc_common_terrain",
       ],
@@ -102,7 +102,7 @@ BakedManifest(
       textures: {
         "ft_common_tex_layer_n02": "textures/rock_albedo",
       },
-      layout: "SG_LAYOUT_5b1e1829",
+      layout: "SG_LAYOUT_1bf1dc98",
       bindings: [
         "ft_common_tex_layer_n02",
       ],
@@ -114,7 +114,7 @@ BakedManifest(
       textures: {
         "inp_normals": "textures/water_normal",
       },
-      layout: "SG_LAYOUT_06c508b1",
+      layout: "SG_LAYOUT_31a65546",
       bindings: [
         "inp_normals",
       ],
@@ -124,7 +124,7 @@ BakedManifest(
       textures: {
         "inp_atlas": "textures/atlas",
       },
-      layout: "SG_LAYOUT_535442a9",
+      layout: "SG_LAYOUT_ab11b341",
       bindings: [
         "inp_atlas",
       ],
@@ -132,12 +132,12 @@ BakedManifest(
     "fx/curve_bands": (
       params: {},
       textures: {},
-      layout: "SG_LAYOUT_740e364b",
+      layout: "SG_LAYOUT_3e0d4723",
     ),
     "fx/global_tint": (
       params: {},
       textures: {},
-      layout: "SG_LAYOUT_740e364b",
+      layout: "SG_LAYOUT_3e0d4723",
     ),
     "fx/hologram": (
       params: {
@@ -145,7 +145,7 @@ BakedManifest(
         "inp_scan_speed": Float(0.5),
       },
       textures: {},
-      layout: "SG_LAYOUT_758e8054",
+      layout: "SG_LAYOUT_7c5d798f",
     ),
     "kw/loop/type": (
       params: {
@@ -153,7 +153,7 @@ BakedManifest(
         "inp_self": Float(0.5),
       },
       textures: {},
-      layout: "SG_LAYOUT_dfa2efb2",
+      layout: "SG_LAYOUT_a799d73a",
     ),
     "ui/dissolve": (
       params: {
@@ -162,7 +162,7 @@ BakedManifest(
         "inp_edge_width": Float(0.05),
       },
       textures: {},
-      layout: "SG_LAYOUT_d951469e",
+      layout: "SG_LAYOUT_450076b7",
     ),
   },
   instances: {},

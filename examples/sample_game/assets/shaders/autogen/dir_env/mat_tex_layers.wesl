@@ -10,9 +10,10 @@ import super::super::functions::dir_common::fun_tex_layer_outer::fun_tex_layer_o
 
 @group(constants::MATERIAL_BIND_GROUP) @binding(101) var ft_common_tex_layer_n02: texture_2d<f32>;
 @group(constants::MATERIAL_BIND_GROUP) @binding(102) var ft_common_tex_layer_n02_sampler: sampler;
-// The game's compiled material enables this feature; after a change of parameters, texture bindings or
-// World Position Offset the shader stops compiling here until the game is rebuilt.
-@if(!SG_LAYOUT_5b1e1829)
+// The game's compiled material enables this feature; after a change of parameters, texture bindings,
+// World Position Offset, blend mode, two-sided or shading the shader stops compiling here until the game
+// is rebuilt.
+@if(!SG_LAYOUT_1bf1dc98)
 const_assert material_layout_changed__rebuild_the_game;
 
 @fragment

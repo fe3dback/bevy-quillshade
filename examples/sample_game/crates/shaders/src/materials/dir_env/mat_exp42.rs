@@ -15,7 +15,7 @@ pub const BAKED_ID: &str = "env/exp42";
 
 /// WESL feature of this material's binding layout, enabled in `specialize`: a hot-reloaded shader whose
 /// bindings no longer match this code fails to compile instead of crashing the renderer (rebuild the game).
-pub const LAYOUT_FEATURE: &str = "SG_LAYOUT_2198dbcb";
+pub const LAYOUT_FEATURE: &str = "SG_LAYOUT_6e19c30e";
 
 /// Extension of `StandardMaterial`; use [`Exp42Material`] as the asset type.
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone, Default)]

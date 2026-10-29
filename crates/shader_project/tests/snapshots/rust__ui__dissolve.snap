@@ -19,7 +19,7 @@ pub const BAKED_ID: &str = "ui/dissolve";
 
 /// WESL feature of this material's binding layout, enabled in `specialize`: a hot-reloaded shader whose
 /// bindings no longer match this code fails to compile instead of crashing the renderer (rebuild the game).
-pub const LAYOUT_FEATURE: &str = "SG_LAYOUT_d951469e";
+pub const LAYOUT_FEATURE: &str = "SG_LAYOUT_450076b7";
 
 /// Uniform block at `@binding(100)`; layout matches `DissolveParams` in WESL (32 bytes).
 #[derive(ShaderType, Reflect, Debug, Clone, Copy, PartialEq)]

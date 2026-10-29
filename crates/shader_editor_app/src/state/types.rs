@@ -85,6 +85,8 @@ pub enum PropTarget {
     PreviewMode,
     /// Editor-only label of a constant node (decision 0021).
     NodeLabel(NodeId),
+    /// Editor-only comment above any node (`Node::comment`, at most `Node::COMMENT_MAX` characters).
+    NodeComment(NodeId),
     FrameTitle(String),
     /// Hue of a comment frame (`Frame::hue`, design §4.6): a `Float` in degrees, a `Str` when unset (any non-float
     /// value clears it: "Default colour").
@@ -116,6 +118,16 @@ pub enum PropTarget {
     GradientName,
     /// Linear RGBA color of stop `.0` of the active gradients tab's selected slot (a `Color`).
     GradientColor(usize),
+}
+
+impl PropTarget {
+    /// The most characters a text field editing this target takes (`None`: no limit).
+    pub fn max_chars(&self) -> Option<usize> {
+        match self {
+            PropTarget::NodeComment(_) => Some(shader_graph_core::model::Node::COMMENT_MAX),
+            _ => None,
+        }
+    }
 }
 
 /// Which text a dialog's input submits to.
@@ -300,7 +312,12 @@ pub enum Action {
     #[default]
     None,
     OpenProjectDialog,
+    /// Opens a project in place of the open one; asks first when tabs have unsaved changes.
     OpenProject(PathBuf),
+    /// [`Action::OpenProject`] with the answer about the unsaved changes (the buttons of its question).
+    SwitchProject(PathBuf, Unsaved),
+    /// Removes a project from the recent projects (the "x" of its row on the welcome screen / Open project dialog).
+    ForgetRecent(PathBuf),
     /// Sets up a game crate as a project (asks for its directory).
     NewProjectDialog,
     NewProject(PathBuf),

@@ -136,8 +136,19 @@ atomic write. Key facts that span several files:
   Generated `new` / `set_*` are `pub(crate)`; games use `BakedMaterials` / `BakedTextures` (nested fields, or `by_path`
   / `get` by asset id, decision 0030). **Layout guard** (decision 0029): every material WESL compiles only with its
   `Ir::layout_feature()` (`SG_LAYOUT_<hash>`), which the generated `specialize` enables, so a hot-reloaded shader with
-  other bindings fails to compile instead of crashing the game; `check::Files::enable` does the same for the compile
-  check. The manifest's `layout` / `bindings` let the runtime match texture bindings by position.
+  other bindings — or another blend mode / two-sided / Pbr3d shading, which live in the compiled Rust — fails to
+  compile instead of crashing the game or running with the old pipeline state (the material is then not drawn); the
+  editor logs a "rebuild the game" warning whenever a regen rewrites the generated crate's `.rs` files
+  (`Editor::note_rust_changes`). `check::Files::enable` does the same for the compile check. The manifest's `layout` / `bindings` let the runtime match texture bindings by position.
+- **Scene textures** (Scene category: `stdlib::SceneDepth`, `DepthFade`): reads of Bevy's view bind group
+  (`depth_prepass_texture`), not material bindings — no `Ir::textures` entry, no hidden function argument. The stdlib
+  module `scene.wesl` reads them under `@if(DEPTH_PREPASS && !PREPASS_PIPELINE)` with a fallback (far plane), by
+  `textureLoad` (multisampled under MSAA). Nodes call `EmitCtx::scene_texture`, which records `SceneTexture`
+  (→ `FunctionSig::scene` → callers, `Ir::scene` → the generated material's doc names the camera component) and
+  reports E009 (vertex stage, Sprite2d) / W112 (opaque or masked material: it reads its own depth). The compile
+  check's `Variant::Forward3dPrepass` (prepass defs + `MULTISAMPLED`) is the only one compiling the real branch. World
+  Position Offset materials have no prepass vertex shader yet, so a camera with `DepthPrepass` breaks them — the
+  sample camera has none.
 - **Node kinds** are string paths: `stdlib::*`, `param::*`, `output::*`, `function::<sub/name>`, `user::<id>`.
 - **Material Attributes** (decision 0023): `PinType::MaterialAttributesPbr` is the WESL struct of the stdlib module
   `material.wesl`; field ids / defaults / activity live in `shader_graph_core::attributes` (shared by Make/Break, the
@@ -314,7 +325,9 @@ and commit messages too:
   opened with `MenuEvent` `Open` (`open_stop_color`); `ValueChange<Color>` → linear `SetStopColor` merged until
   `is_final`; `dialog::menu_barrier` while its popup is open.
 - Graph editor topbar: static tools plus `GraphTopbarDynamic` (`redraw_graph_topbar`: Preview mode `button_group`,
-  generated WESL / Rust buttons). Rename by double click: `Editor::rename_target` / `header_action`, the
+  generated WESL / Rust buttons). Header double click: `Editor::header_action` — open the referenced file, else rename
+  (`Editor::rename_target`), else edit the editor-only `Node::comment` `PropTarget::NodeComment`, drawn above the node by
+  `canvas::node_comment`; the body's double click and the node menu's Open in tab share `Editor::open_action`), the
   `canvas::NodeHeader` / `FrameTitleStrip` markers, `Action::TextDialog` → `Submit::SetText` (the sidebar's
   `set_value`). After a wire drop from an output the palette sorts the Named Route declaration first
   (`palette::results_for`, a tie-break after the search score); a declaration added from the palette opens that rename
@@ -355,9 +368,10 @@ hand-drawn ones, rasterized at runtime with resvg (`crates/shader_editor_app/src
 
 - `crates/shader_project/tests/snapshots.rs` auto-generates one material per registered stdlib node plus the composite
   fixtures, compares WESL/Rust byte-for-byte with `tests/snapshots/`, and compiles every `.wesl` with wesl 0.6 + naga 30
-  against the **real Bevy 0.20 WESL sources from `~/.cargo/registry`** in forward, forward-without-UV/tangents and
-  deferred (`PREPASS_PIPELINE`) variants. Adding a stdlib node therefore adds a new snapshot. If Bevy sources are absent
-  from the registry the compile step is skipped with a warning — don't mistake that for a pass.
+  against the **real Bevy 0.20 WESL sources from `~/.cargo/registry`** in forward, forward-without-UV/tangents,
+  forward with prepasses + MSAA (3D only) and deferred (`PREPASS_PIPELINE`) variants. Adding a stdlib node therefore
+  adds a new snapshot. If Bevy sources are absent from the registry the compile step is skipped with a warning — don't
+  mistake that for a pass.
 - naga rejects abstract literals outside const context, so scalar defaults are emitted as typed literals `0.5f`
   (`value::wesl_scalar`, decision 0007). Log/Log2 default to 1.0 because naga const-folds `log(0.0)` into an error.
 - Codegen must be deterministic (byte-identical output for the same graph; node ids sorted in `BTreeMap`, emitted names
@@ -401,7 +415,8 @@ hand-drawn ones, rasterized at runtime with resvg (`crates/shader_editor_app/src
     canvas), `SHADER_EDITOR_INPUT_AT=to:<dx>,<dy>` that far from the target pin (its snap radius, design §6.3).
     `alt_click` Alt+clicks the `SHADER_EDITOR_INPUT_PIN` pin. All log the wires at both pins before and after.
   - `node_dblclick` double-clicks the middle of an unselected node (or `SHADER_EDITOR_INPUT_NODE`), with
-    `SHADER_EDITOR_INPUT_AT=header` its header (the rename dialog of a named / labelled node, design §5.5);
+    `SHADER_EDITOR_INPUT_AT=header` its header (opens the referenced file, else the rename dialog of a named /
+    labelled node, design §5.5, else the node comment dialog);
     `frame_dblclick` double-clicks the title strip of the first comment frame (or `SHADER_EDITOR_INPUT_FRAME=<id>`).
     Both log the active tab and the open dialog.
   - `type_field` clicks the right sidebar's Description field of the open graph, types `ab` and logs the focus and

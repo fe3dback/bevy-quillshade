@@ -11,8 +11,8 @@ use crate::model::{Asset, AssetKind, Edge, MaterialKind, NodeId, PbrOutputMode, 
 use crate::preview::{PreviewSlot, PreviewSource, albedo_expr};
 use crate::registry::{
     Builtin, CurveLookup, EmitCtx, EmitSink, Env, FnPort, FunctionLookup, FunctionSig, GradientLookup, HiddenTexture,
-    IrLine, MaterialParam, NodeDef, NodeRole, Operand, ParamType, ROUTE_PARAM, Registry, SigCtx, Signature, Stage,
-    TextureLookup, fixed_texture_ident, gradient_ident,
+    IrLine, MaterialParam, NodeDef, NodeRole, Operand, ParamType, ROUTE_PARAM, Registry, SceneTexture, SigCtx,
+    Signature, Stage, TextureLookup, fixed_texture_ident, gradient_ident,
 };
 use crate::types::{PinType, conversion};
 use crate::value::Value;
@@ -205,6 +205,9 @@ pub struct Ir {
     pub custom_fns: BTreeMap<String, String>,
     /// Function assets: callable signature (with hidden builtins).
     pub function_sig: Option<FunctionSig>,
+    /// View textures read by any stage, directly or through called functions: the camera needs their prepass
+    /// components ([`SceneTexture::camera_component`]).
+    pub scene: BTreeSet<SceneTexture>,
     pub uses_normal: bool,
     /// Previewed node: its outputs replace the material output's in [`Ir::main`] (decision 0022).
     pub preview: Option<IrPreview>,
@@ -226,17 +229,19 @@ impl Ir {
     }
 
     /// WESL feature naming the binding layout of a material (decision 0029): `SG_LAYOUT_` + an FNV-1a hash of its
-    /// kind, vertex stage, uniform fields (names, types, offsets) and texture binding numbers. The generated Rust
-    /// material enables it in `specialize`; the WESL refuses to compile without it, so a hot-reloaded shader whose
-    /// bindings no longer match the compiled game fails to compile instead of failing pipeline creation (which quits
-    /// the game). Texture identifiers are left out: the bindings are matched by number (the runtime overlay maps
-    /// them by position), so wiring another fixed texture node in keeps the layout.
+    /// kind, the settings compiled into the Rust side (blend mode, two-sided, Pbr3d shading: alpha mode, culling and
+    /// `StandardMaterial::unlit`), vertex stage, uniform fields (names, types, offsets) and texture binding numbers.
+    /// The generated Rust material enables it in `specialize`; the WESL refuses to compile without it, so a
+    /// hot-reloaded shader whose bindings no longer match the compiled game fails to compile instead of failing
+    /// pipeline creation (which quits the game), and one written for another blend mode fails instead of running
+    /// with the old pipeline's blending. Texture identifiers are left out: the bindings are matched by number (the
+    /// runtime overlay maps them by position), so wiring another fixed texture node in keeps the layout.
     pub fn layout_feature(&self) -> String {
         let kind = match self.kind.material() {
-            Some(MaterialKind::Pbr3d(_)) => "pbr3d",
-            Some(MaterialKind::Unlit3d(_)) => "unlit3d",
-            Some(MaterialKind::Sprite2d(_)) => "sprite2d",
-            None => "function",
+            Some(MaterialKind::Pbr3d(s)) => format!("pbr3d:{:?}:{}:{:?}", s.blend, s.two_sided, s.shading),
+            Some(MaterialKind::Unlit3d(s)) => format!("unlit3d:{:?}:{}", s.blend, s.two_sided),
+            Some(MaterialKind::Sprite2d(s)) => format!("sprite2d:{:?}", s.blend),
+            None => "function".to_string(),
         };
         let mut key = format!("{kind};vertex={};", self.vertex.is_some());
         for f in &self.uniform.fields {
@@ -307,6 +312,7 @@ pub fn declared_function_sig(asset: &Asset, path: &str, registry: &Registry) -> 
         builtins: Vec::new(),
         textures: Vec::new(),
         gradients: Vec::new(),
+        scene: Vec::new(),
     }
 }
 
@@ -711,7 +717,9 @@ pub fn build_ir(
     let mut params_by_node: BTreeMap<NodeId, MaterialParam> = BTreeMap::new();
     let mut fixed_textures: BTreeMap<(Option<String>, NodeId), String> = BTreeMap::new();
     let mut gradients_used: BTreeSet<String> = BTreeSet::new();
+    let mut scene: BTreeSet<SceneTexture> = BTreeSet::new();
     for sink in stages.values() {
+        scene.extend(sink.scene.iter().copied());
         fixed_textures.extend(sink.fixed_textures.iter().map(|(k, v)| (k.clone(), v.clone())));
         gradients_used.extend(sink.gradients.iter().cloned());
         stdlib.extend(sink.stdlib.iter().cloned());
@@ -892,6 +900,7 @@ pub fn build_ir(
             .collect();
         // Own gradient collections and the callees' (gradient design §7), sorted.
         sig.gradients = gradients_used.iter().cloned().collect();
+        sig.scene = scene.iter().copied().collect();
         let mut seen = BTreeSet::new();
         for (id, n) in &nodes {
             if matches!(n.def.role(), NodeRole::FunctionInput | NodeRole::FunctionOutput) {
@@ -945,6 +954,7 @@ pub fn build_ir(
             curves: curves_used,
             custom_fns,
             function_sig,
+            scene,
             uses_normal,
             preview: ir_preview,
         }),

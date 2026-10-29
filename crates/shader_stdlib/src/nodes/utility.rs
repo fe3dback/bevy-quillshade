@@ -673,6 +673,10 @@ fn function_call_emit(c: &mut EmitCtx) {
         let (tex, s) = c.gradient(g);
         args.push(format!("{tex}, {s}"));
     }
+    // View textures of the callee: no arguments (the view bindings are global), only the requirement and its checks.
+    for t in &f.scene {
+        c.scene_texture(*t);
+    }
     // Prefixed WESL names (decision 0020): `fun_{name}(..)`, result fields `.out_{port}`.
     let call = format!("{}({})", function_ident(&f.name), args.join(", "));
     if f.outputs.len() == 1 {

@@ -86,13 +86,21 @@ Asset(
       },
     ),
     "n12": Node(
+      kind: "stdlib::DepthFade",
+      pos: (1120.0, 810.0),
+      params: {},
+      inputs: {
+        "distance": Float(0.3),
+      },
+    ),
+    "n13": Node(
       kind: "stdlib::Constant",
       pos: (1120.0, 202.5),
       params: {
         "value": Float(0.05),
       },
     ),
-    "n13": Node(
+    "n14": Node(
       kind: "stdlib::Constant",
       pos: (1120.0, 297.0),
       params: {
@@ -110,15 +118,15 @@ Asset(
       to: ("n01", "normal"),
     ),
     Edge(
-      from: ("n11", "out"),
+      from: ("n12", "out"),
       to: ("n01", "opacity"),
     ),
     Edge(
-      from: ("n12", "out"),
+      from: ("n13", "out"),
       to: ("n01", "roughness"),
     ),
     Edge(
-      from: ("n13", "out"),
+      from: ("n14", "out"),
       to: ("n01", "specular"),
     ),
     Edge(
@@ -152,6 +160,10 @@ Asset(
     Edge(
       from: ("n10", "out"),
       to: ("n11", "f"),
+    ),
+    Edge(
+      from: ("n11", "out"),
+      to: ("n12", "opacity"),
     ),
   ],
   comments: [],

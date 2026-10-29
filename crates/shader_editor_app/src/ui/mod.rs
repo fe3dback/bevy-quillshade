@@ -304,8 +304,8 @@ impl MainMenu {
         let check = |on: bool| on.then_some(IconId::Check);
         match self {
             MainMenu::File => vec![
-                (Some(IconId::FolderOpen), "Open Project...\tCtrl+O".into(), Action::OpenProjectDialog),
                 (Some(IconId::FolderNew), "New Project...".into(), Action::NewProjectDialog),
+                (Some(IconId::FolderOpen), "Open Project...\tCtrl+O".into(), Action::OpenProjectDialog),
                 (Some(IconId::Close), "Close Project".into(), Action::CloseProject(Unsaved::Ask)),
                 menu_separator(),
                 (Some(IconId::Save), "Save\tCtrl+S".into(), Action::Save),

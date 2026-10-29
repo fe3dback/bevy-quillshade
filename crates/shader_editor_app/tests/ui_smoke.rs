@@ -888,8 +888,8 @@ fn active_tab(app: &App) -> Option<AssetId> {
     e.active.and_then(|i| e.tabs[i].owner().cloned())
 }
 
-/// Design §5.5: a double click on a node header renames the node if it has a name or label, else opens the file it
-/// refers to, else does nothing; on the body it opens the file as before.
+/// Design §5.5: a double click on a node header opens the file the node refers to, else renames it if it has a name
+/// or label, else edits its comment; on the body it only opens the file.
 #[test]
 fn header_dblclick_opens_rename_or_reference() {
     use shader_editor_app::state::{Dialog, Submit};
@@ -906,10 +906,14 @@ fn header_dblclick_opens_rename_or_reference() {
     assert!(matches!(&dialog, Some(Dialog::Input { submit: Submit::SetText(t), .. }) if renames(t)), "{dialog:?}");
     act(&mut app, Action::CloseDialog);
 
+    let comments = |t: &PropTarget| matches!(t, PropTarget::NodeComment(_));
     let (_, header) = node_and_header(&mut app, "stdlib::Lerp");
     dblclick(&mut app, header);
-    assert_eq!(app.world().resource::<Editor>().dialog, None, "Lerp: nothing");
+    let dialog = app.world().resource::<Editor>().dialog.clone();
+    let edits = matches!(&dialog, Some(Dialog::Input { submit: Submit::SetText(t), .. }) if comments(t));
+    assert!(edits, "Lerp: the comment dialog, {dialog:?}");
     assert_eq!(active_tab(&app), Some(material.clone()));
+    act(&mut app, Action::CloseDialog);
 
     let (_, header) = node_and_header(&mut app, "function::common/wet_mask");
     dblclick(&mut app, header);
@@ -3872,4 +3876,90 @@ fn back_set_lands_after_per_doc_restore() {
     act(&mut app, Action::NavBack);
     assert_eq!(app.world().resource::<Editor>().doc().map(|d| d.id.clone()), Some(hologram()));
     assert_view_near(Some(nav_view_now(&app)), want, "the entry's camera");
+}
+
+/// The Open project dialog opens alone (no native picker until Browse...) and lists the 5 most recent projects by
+/// name, each with an "x" that removes it from the list, which refills while the dialog stays open.
+#[test]
+fn open_project_dialog_lists_and_forgets_recent() {
+    use shader_editor_app::ui::OnActivate;
+    use shader_editor_app::ui::dialog::DialogRoot;
+    use shader_editor_app::ui::welcome::{RecentList, WelcomePlugin};
+
+    let (_dir, mut app) = app_with(|app| {
+        app.add_plugins((
+            shader_editor_app::ui::dialog::DialogPlugin,
+            bevy::ui_widgets::DialogPlugin,
+            bevy::ui_widgets::ModalDialogPlugin,
+            WelcomePlugin,
+        ));
+    });
+    let paths: Vec<std::path::PathBuf> = (0..8).map(|i| format!("/games/p{i}").into()).collect();
+    app.world_mut().resource_mut::<Editor>().config.recent_projects = paths.clone();
+    act(&mut app, Action::OpenProjectDialog);
+    assert!(!app.world().resource::<Editor>().pick_folder, "no native picker with the dialog");
+    let rows = |app: &mut App| {
+        // The rows are scenes spawned by `redraw_recent`: one more frame.
+        app.update();
+        let w = app.world_mut();
+        let list = w.query_filtered::<Entity, With<RecentList>>().single(w).unwrap();
+        assert!(w.query_filtered::<Entity, With<DialogRoot>>().single(w).is_ok());
+        let mut q = w.query::<(Entity, &OnActivate)>();
+        let under = |e: Entity| std::iter::successors(Some(e), |x| w.get::<ChildOf>(*x).map(ChildOf::parent));
+        let mut open = Vec::new();
+        let mut forget = Vec::new();
+        for (e, a) in q.iter(w) {
+            if !under(e).any(|x| x == list) {
+                continue;
+            }
+            match &a.0 {
+                Action::OpenProject(p) => open.push(p.clone()),
+                Action::ForgetRecent(p) => forget.push(p.clone()),
+                _ => {}
+            }
+        }
+        open.sort();
+        forget.sort();
+        (open, forget)
+    };
+    let (open, forget) = rows(&mut app);
+    assert_eq!(open, paths[..5], "the 5 most recent");
+    assert_eq!(forget, open, "each with its x");
+    act(&mut app, Action::ForgetRecent(paths[0].clone()));
+    let (open, _) = rows(&mut app);
+    assert_eq!(open, paths[1..6], "the list refills: the next one moves up");
+    assert!(app.world().resource::<Editor>().dialog.is_some(), "the dialog stays open");
+}
+
+/// A node's comment shows on the canvas inside the node (absolute, above its header) as a text, and goes with it.
+#[test]
+fn node_comment_is_drawn_above_the_node() {
+    let (_dir, mut app) = app();
+    act(&mut app, Action::OpenAsset(AssetId::new(AssetType::Material, "env/rock_wet")));
+    let lerp = {
+        let d = app.world().resource::<Editor>().doc().unwrap();
+        d.asset.nodes.iter().find(|(_, n)| n.kind == "stdlib::Lerp").unwrap().0.clone()
+    };
+    let comment_texts = |app: &mut App| {
+        let w = app.world_mut();
+        let node = w.query::<(Entity, &NodeKey)>().iter(w).find(|(_, k)| k.0 == lerp).unwrap().0;
+        let mut q = w.query::<(Entity, &Text)>();
+        let under = |e: Entity| std::iter::successors(Some(e), |x| w.get::<ChildOf>(*x).map(ChildOf::parent));
+        q.iter(w).filter(|(e, t)| t.0 == "mix by wetness" && under(*e).any(|x| x == node)).count()
+    };
+    assert_eq!(comment_texts(&mut app), 0);
+    let target = PropTarget::NodeComment(lerp.clone());
+    act(
+        &mut app,
+        Action::SetValue {
+            target: target.clone(),
+            value: shader_graph_core::Value::Str("mix by wetness".into()),
+            merge: false,
+        },
+    );
+    app.update();
+    assert_eq!(comment_texts(&mut app), 1, "the rebuilt node carries its comment");
+    act(&mut app, Action::SetValue { target, value: shader_graph_core::Value::Str(String::new()), merge: false });
+    app.update();
+    assert_eq!(comment_texts(&mut app), 0, "an empty comment draws nothing");
 }
