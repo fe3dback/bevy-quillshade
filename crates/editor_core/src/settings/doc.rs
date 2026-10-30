@@ -169,6 +169,7 @@ impl TabDoc for SettingsDoc {
     fn reload_from_disk(&mut self, ctx: &mut DocCtx) -> Result<(), String> {
         let project = ctx.project.ok_or("no project is open")?;
         self.replace(read_settings(&project.settings_path()).map_err(|e| e.to_string())?);
+        ctx.saved_settings = Some(self.settings.clone());
         Ok(())
     }
 

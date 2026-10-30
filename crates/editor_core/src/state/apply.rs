@@ -33,6 +33,9 @@ impl Editor {
             _ => None,
         };
         self.apply_action(action);
+        if std::mem::take(&mut self.settings_changed) {
+            self.sync_enabled_domains();
+        }
         if let Some(id) = reached {
             self.after_apply(id);
         }
@@ -75,7 +78,7 @@ impl Editor {
     /// ([`DomainState::after_save`] with its own tabs; Material regenerates). `every_domain`: the domains none of whose
     /// tabs were saved follow too, with no tabs (Save All regenerates even when nothing was dirty, as before).
     pub fn after_saves(&mut self, saved: &[usize], every_domain: bool) {
-        let ids: Vec<DomainId> = self.domains.ids().collect();
+        let ids: Vec<DomainId> = self.domains.ids().filter(|&id| self.domain_enabled(id)).collect();
         for id in ids {
             let tabs: Vec<usize> =
                 saved.iter().copied().filter(|i| self.tabs.get(*i).is_some_and(|t| t.domain == id)).collect();
@@ -117,9 +120,9 @@ impl Editor {
         }
     }
 
-    /// Errors of every domain (the mainbar's count).
+    /// Errors of every enabled domain (the mainbar's count).
     pub fn error_count(&self) -> usize {
-        let states = self.domains.ids().filter_map(|id| self.domains.get_dyn(id));
+        let states = self.domains.ids().filter(|&id| self.domain_enabled(id)).filter_map(|id| self.domains.get_dyn(id));
         states.map(|s| s.diagnostics().iter().filter(|d| d.is_error()).count()).sum()
     }
 
@@ -134,7 +137,7 @@ impl Editor {
     pub fn console_diagnostics(&self) -> Vec<Diagnostic> {
         let active = self.tab().and_then(|t| t.doc().asset());
         let only = self.console_domain();
-        let ids = self.domains.ids().filter(|id| only.is_none_or(|o| o == *id));
+        let ids = self.domains.ids().filter(|&id| self.domain_enabled(id) && only.is_none_or(|o| o == id));
         ids.filter_map(|id| self.domains.get_dyn(id)).flat_map(|s| s.console_diagnostics(active)).collect()
     }
 
@@ -142,7 +145,7 @@ impl Editor {
     /// of [`Editor::console_domain`] (all without a limit).
     pub fn console_messages(&self) -> impl Iterator<Item = &Message> {
         let only = self.console_domain();
-        let shown = move |d: DomainId| only.is_none_or(|o| d == o || d == DomainId::PROJECT);
+        let shown = move |d: DomainId| self.domain_enabled(d) && only.is_none_or(|o| d == o || d == DomainId::PROJECT);
         self.messages.iter().filter(move |m| m.domain.is_none_or(shown))
     }
 

@@ -27,9 +27,13 @@ impl Editor {
         let domain_dirs: Vec<PathBuf> = self.domain_list.real_ids().map(|id| project.domain_dir(id)).collect();
         let settings_path = project.settings_path();
         // Saves rewrite the umbrella crate from these settings (design §4.1), so they must follow the file; no regen.
-        let settings_changed = changed.contains(&settings_path);
-        if settings_changed && let Err(e) = project.reload_settings() {
-            self.push_msg(Level::Warning, format!("{e}; keeping the previous settings"));
+        let settings_on_disk = changed.contains(&settings_path);
+        let mut settings_reloaded = false;
+        if settings_on_disk {
+            match project.reload_settings() {
+                Ok(()) => settings_reloaded = true,
+                Err(e) => self.push_msg(Level::Warning, format!("{e}; keeping the previous settings")),
+            }
         }
         let (game, changed): (Vec<_>, Vec<_>) = changed.into_iter().partition(|p| p.starts_with(&assets_dir));
         let changed: Vec<_> = changed.into_iter().filter(|p| domain_dirs.iter().any(|d| p.starts_with(d))).collect();
@@ -38,17 +42,20 @@ impl Editor {
             // Image tabs show the new file.
             self.reload_read_only_tabs();
         }
-        if changed.is_empty() && !settings_changed {
+        if changed.is_empty() && !settings_on_disk {
             return;
         }
         if !changed.is_empty() {
             self.rescan();
-            let ids: Vec<DomainId> = self.domains.ids().collect();
+            let ids: Vec<DomainId> = self.domains.ids().filter(|&id| self.domain_enabled(id)).collect();
             for id in ids {
                 self.with_domain(id, |e, s| s.files_changed(e, &changed));
             }
         }
         self.follow_disk_changes();
+        if std::mem::take(&mut self.settings_changed) || settings_reloaded {
+            self.sync_enabled_domains();
+        }
         self.touch_all();
     }
 

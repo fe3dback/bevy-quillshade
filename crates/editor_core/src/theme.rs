@@ -49,5 +49,7 @@ pub const TAB_GREY: Color = Color::srgba(0.55, 0.57, 0.62, 0.55);
 pub const DOMAIN_TAB_ACTIVE_BG: Color = Color::srgb_u8(180, 88, 28);
 /// Name of an inactive domain tab in the mainbar (design §14.3): a neutral dim grey on a transparent fill.
 pub const DOMAIN_TAB_TEXT: Color = Color::srgb(0.60, 0.61, 0.64);
+/// Name of a disabled domain tab in the mainbar: [`DOMAIN_TAB_TEXT`] made translucent.
+pub const DOMAIN_TAB_DISABLED_TEXT: Color = Color::srgba(0.60, 0.61, 0.64, 0.35);
 /// Name of the active domain tab: near white on [`DOMAIN_TAB_ACTIVE_BG`], brighter than [`TEXT`].
 pub const DOMAIN_TAB_ACTIVE_TEXT: Color = Color::srgb(0.96, 0.96, 0.97);

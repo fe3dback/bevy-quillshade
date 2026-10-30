@@ -64,15 +64,16 @@ impl Editor {
         Ok(())
     }
 
-    /// Every real domain with a module in the umbrella crate whose `crates/quillshade/src/<id>/mod.rs` is missing
-    /// generates ([`DomainState::generate`](crate::domain::DomainState::generate)): saving another domain rewrites
-    /// the umbrella's `src/lib.rs`, which names every domain's module (design §6.5), so a module never generated would
-    /// leave the crate uncompilable.
-    fn generate_missing_modules(&mut self) {
+    /// Every enabled real domain with a module in the umbrella crate whose `crates/quillshade/src/<id>/mod.rs` is
+    /// missing generates ([`DomainState::generate`](crate::domain::DomainState::generate)): saving another domain
+    /// rewrites the umbrella's `src/lib.rs`, which names every enabled domain's module (design §6.5), so a module never
+    /// generated would leave the crate uncompilable.
+    pub(crate) fn generate_missing_modules(&mut self) {
         let Some(project) = self.project.clone() else { return };
         let list = self.domain_list.clone();
         let missing = list.real_ids().filter(|id| {
-            list.crate_contributions().iter().any(|c| c.domain == *id)
+            project.domain_enabled(*id)
+                && list.crate_contributions().iter().any(|c| c.domain == *id)
                 && !project.module_dir(*id).join("mod.rs").exists()
         });
         for id in missing.collect::<Vec<_>>() {
@@ -80,14 +81,14 @@ impl Editor {
         }
     }
 
-    /// Re-reads the project's files: each domain's Project tree folders and the files of its asset kinds
+    /// Re-reads the project's files: each enabled domain's Project tree folders and the files of its asset kinds
     /// ([`super::kinds::scan`]), then every domain's [`DomainState::rescan`](crate::domain::DomainState::rescan)
     /// (also without a project: the domains go back to their empty state).
     pub fn rescan(&mut self) {
         self.folders.clear();
         self.kind_files.clear();
         if let Some(p) = &self.project {
-            for id in self.domain_list.real_ids() {
+            for id in self.domain_list.real_ids().filter(|&id| p.domain_enabled(id)) {
                 self.folders.insert(id, scan_dirs(&p.domain_dir(id)));
                 self.kind_files.insert(id, super::kinds::scan(p, &self.domain_list, id));
             }
@@ -126,6 +127,9 @@ impl Editor {
     /// `tab_exists` says or, by core's default, an existing file of one of its asset kinds (design §14.4; an unknown
     /// domain: no).
     pub(crate) fn key_exists(&self, key: &TabKey) -> bool {
+        if !self.domain_enabled(key.domain) {
+            return false;
+        }
         if let Some(id) = key.key.strip_prefix(TOOL_KEY_PREFIX) {
             return self.domain_list.tool(key.domain, id).is_some();
         }
@@ -139,6 +143,9 @@ impl Editor {
     /// domain's `parse_tab`s, else (core's default, design §14.4) a kind's source path through [`Editor::open_ref`];
     /// nothing may open (a load error is logged by the domain).
     fn open_key(&mut self, key: &TabKey) {
+        if !self.domain_enabled(key.domain) {
+            return;
+        }
         if let Some(i) = self.key_index(key) {
             return self.activate(i);
         }
@@ -207,6 +214,9 @@ impl Editor {
 
     /// Opens (or activates) an asset's tab through its asset kind (`Action::OpenAsset`, design §6.1).
     pub fn open_ref(&mut self, r: &AssetRef) {
+        if !self.domain_enabled(r.domain) {
+            return;
+        }
         if let Some(i) = self.asset_tab(r) {
             return self.activate(i);
         }
@@ -219,8 +229,12 @@ impl Editor {
     }
 
     /// Opens tool `id` of `domain` (design §14.1), or activates its open tab: a tool is unique per `(domain, id)`.
-    /// Then `arg`, if any, goes to that tab's document as [`TabAction::Doc`]. An unknown tool does nothing.
+    /// Then `arg`, if any, goes to that tab's document as [`TabAction::Doc`]. An unknown or disabled domain's tool
+    /// does nothing.
     pub fn open_tool(&mut self, domain: DomainId, id: ToolId, arg: Option<Payload>) {
+        if !self.domain_enabled(domain) {
+            return;
+        }
         let Some(open) = self.domain_list.tool(domain, id).map(|t| t.open) else {
             return bevy::log::debug!("cannot open tool `{id}` of domain `{domain}`: not registered");
         };

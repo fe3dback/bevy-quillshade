@@ -137,6 +137,9 @@ impl MaterialApply for Editor {
     }
 
     fn material_before_close(&mut self, i: usize) {
+        if self.project.as_ref().is_some_and(|p| !p.domain_enabled(MATERIAL)) {
+            return;
+        }
         self.domains.material_mut().tabs_closed = true;
         for id in self.memory_regenerated(|j| j == i) {
             self.regenerate_from_disk(&id);
@@ -144,6 +147,12 @@ impl MaterialApply for Editor {
     }
 
     fn material_rescan(&mut self) {
+        if self.project.as_ref().is_some_and(|p| !p.domain_enabled(MATERIAL)) {
+            let m = self.domains.material_mut();
+            let bevy = m.bevy.take();
+            *m = MaterialState { bevy, ..MaterialState::default() };
+            return;
+        }
         if self.domains.material().loaded != self.project_generation {
             let (registry, project_diags) = match &self.project {
                 Some(p) => project_registry(p),

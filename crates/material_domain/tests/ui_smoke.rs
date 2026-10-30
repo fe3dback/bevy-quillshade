@@ -4362,9 +4362,9 @@ mod bars {
         assert_eq!(app.world().get::<BackgroundColor>(main).unwrap().0, MAINBAR_BG);
     }
 
-    /// Design §14.3: one domain tab per domain in the mainbar, the project domain's last; each is a full-height
-    /// rectangular button showing its name and no icon, the active one on [`DOMAIN_TAB_ACTIVE_BG`] in the brighter text
-    /// colour; activating one switches to its domain.
+    /// Design §14.3: one domain tab per real domain in the mainbar (the project domain button is hidden); each is a
+    /// full-height rectangular button showing its name and no icon, the active one on [`DOMAIN_TAB_ACTIVE_BG`] in the
+    /// brighter text colour; activating one switches to its domain.
     #[test]
     fn domain_tabs_in_mainbar_show_every_name() {
         let (_dir, mut app) = shell_app();
@@ -4372,7 +4372,7 @@ mod bars {
         let (main, second) = (single::<MainBar>(&mut app), single::<SecondBar>(&mut app));
         let tabs = domain_tabs(&mut app);
         let ids: Vec<DomainId> = tabs.iter().map(|(_, id)| *id).collect();
-        assert_eq!(ids, [shader_project::layout::MATERIAL, TOOLBOX, DomainId::PROJECT]);
+        assert_eq!(ids, [shader_project::layout::MATERIAL, TOOLBOX]);
         for (e, id) in &tabs {
             let w = app.world();
             assert!(is_under(w, *e, main) && !is_under(w, *e, second), "{id:?} is in the mainbar only");
@@ -4392,17 +4392,17 @@ mod bars {
         };
         let looks = shown(&mut app);
         let names: Vec<Vec<String>> = looks.iter().map(|(t, _)| t.iter().map(|(s, _)| s.clone()).collect()).collect();
-        assert_eq!(names, [vec!["Material"], vec!["Toolbox"], vec!["Project"]]);
+        assert_eq!(names, [vec!["Material"], vec!["Toolbox"]]);
         assert!(looks.iter().all(|(_, icons)| *icons == 0), "no icons");
         let colours: Vec<Color> = looks.iter().map(|(t, _)| t[0].1).collect();
-        assert_eq!(colours, [DOMAIN_TAB_ACTIVE_TEXT, DOMAIN_TAB_TEXT, DOMAIN_TAB_TEXT]);
-        assert_eq!(bgs(&mut app), [DOMAIN_TAB_ACTIVE_BG, Color::NONE, Color::NONE]);
+        assert_eq!(colours, [DOMAIN_TAB_ACTIVE_TEXT, DOMAIN_TAB_TEXT]);
+        assert_eq!(bgs(&mut app), [DOMAIN_TAB_ACTIVE_BG, Color::NONE]);
         assert_ne!(DOMAIN_TAB_ACTIVE_TEXT, DOMAIN_TAB_TEXT);
 
         act(&mut app, Action::SwitchDomain(TOOLBOX));
         let colours: Vec<Color> = shown(&mut app).iter().map(|(t, _)| t[0].1).collect();
-        assert_eq!(colours, [DOMAIN_TAB_TEXT, DOMAIN_TAB_ACTIVE_TEXT, DOMAIN_TAB_TEXT], "follows the active domain");
-        assert_eq!(bgs(&mut app), [Color::NONE, DOMAIN_TAB_ACTIVE_BG, Color::NONE]);
+        assert_eq!(colours, [DOMAIN_TAB_TEXT, DOMAIN_TAB_ACTIVE_TEXT], "follows the active domain");
+        assert_eq!(bgs(&mut app), [Color::NONE, DOMAIN_TAB_ACTIVE_BG]);
     }
 
     /// Design §14.3: switching the domain restyles the domain tabs in place: the same entities, the new active one
@@ -4412,6 +4412,7 @@ mod bars {
         use bevy::input_focus::{FocusCause, InputFocus};
         let (_dir, mut app) = shell_app();
         let before = domain_tabs(&mut app);
+        assert_eq!(before.len(), 2);
         let toolbox = before[1].0;
         app.world_mut().resource_mut::<InputFocus>().set(toolbox, FocusCause::Navigated);
         act(&mut app, Action::SwitchDomain(TOOLBOX));
@@ -4426,7 +4427,7 @@ mod bars {
             .collect();
         assert_eq!(
             fills,
-            [(Color::NONE, Color::NONE), (DOMAIN_TAB_ACTIVE_BG, DOMAIN_TAB_ACTIVE_BG), (Color::NONE, Color::NONE),],
+            [(Color::NONE, Color::NONE), (DOMAIN_TAB_ACTIVE_BG, DOMAIN_TAB_ACTIVE_BG)],
             "only the active domain's tab has the active fill"
         );
     }
@@ -4577,5 +4578,63 @@ mod bars {
         assert!(app.world().resource::<Editor>().tabs.is_empty());
         assert_eq!(text_vis(&mut app), Visibility::Hidden, "closing all tabs hides TEXT_VIEW");
         assert_eq!(hint_vis(&mut app), Visibility::Inherited, "empty hint is shown when no tabs remain");
+    }
+
+    /// Disabling a domain via Project Settings marks its [`DomainTab`] with [`InteractionDisabled`],
+    /// [`Tooltip`](editor_core::tooltip::Tooltip)`(`[`DISABLED_DOMAIN_TIP`](editor_core::ui::DISABLED_DOMAIN_TIP)`)` and
+    /// [`DOMAIN_TAB_DISABLED_TEXT`](editor_core::theme::DOMAIN_TAB_DISABLED_TEXT), deletes
+    /// `crates/quillshade/src/<domain>/`, and keeps `quillshade/<domain>/` on disk.
+    #[test]
+    fn disabling_domain_in_settings_disables_domain_tab_and_deletes_module() {
+        use bevy::ui::InteractionDisabled;
+        use editor_core::action::TabAction;
+        use editor_core::dynval::{PropKey, PropValue};
+        use editor_core::settings::{SETTINGS_TOOL, SettingsProp};
+        use editor_core::theme::DOMAIN_TAB_DISABLED_TEXT;
+        use editor_core::tooltip::Tooltip;
+        use editor_core::ui::DISABLED_DOMAIN_TIP;
+        use shader_project::layout::MATERIAL;
+
+        let (dir, mut app) = shell_app();
+        let mat_mod = dir.path().join("crates/quillshade/src/material/mod.rs");
+        let mat_src = dir.path().join("quillshade/material/env/rock_wet.material.ron");
+        assert!(mat_mod.is_file(), "generated on open");
+        assert!(mat_src.is_file());
+
+        act(&mut app, Action::OpenAsset(AssetId::new(AssetType::Material, "env/rock_wet").to_ref()));
+        act(&mut app, Action::OpenTool { domain: DomainId::PROJECT, id: SETTINGS_TOOL, arg: None });
+        act(
+            &mut app,
+            Action::Tab(TabAction::SetValue {
+                key: PropKey::new(SettingsProp::Enabled(MATERIAL)),
+                value: PropValue::Bool(false),
+                merge: false,
+            }),
+        );
+        act(&mut app, Action::Save);
+
+        let tabs = domain_tabs(&mut app);
+        let mat_tab = tabs.iter().find(|(_, id)| *id == MATERIAL).unwrap().0;
+        let w = app.world();
+        assert!(w.get::<InteractionDisabled>(mat_tab).is_some(), "Material DomainTab has InteractionDisabled");
+        assert_eq!(
+            w.get::<Tooltip>(mat_tab).map(|t| t.0.as_str()),
+            Some(DISABLED_DOMAIN_TIP),
+            "Material DomainTab has DISABLED_DOMAIN_TIP"
+        );
+        assert_eq!(w.get::<BackgroundColor>(mat_tab).unwrap().0, Color::NONE);
+        assert_eq!(texts(&mut app, mat_tab), [("Material".into(), DOMAIN_TAB_DISABLED_TEXT)]);
+        assert!(!dir.path().join("crates/quillshade/src/material").exists(), "generated module deleted");
+        assert!(mat_src.is_file(), "source files kept on disk");
+        assert_eq!(app.world().resource::<Editor>().active_domain, Some(TOOLBOX));
+
+        // Re-enabling Material restores the tab and regenerates its module.
+        act(&mut app, Action::Tab(TabAction::Undo));
+        act(&mut app, Action::Save);
+        let w = app.world();
+        assert!(w.get::<InteractionDisabled>(mat_tab).is_none());
+        assert!(w.get::<Tooltip>(mat_tab).is_none());
+        assert_eq!(texts(&mut app, mat_tab), [("Material".into(), DOMAIN_TAB_TEXT)]);
+        assert!(mat_mod.is_file(), "generated module restored");
     }
 }

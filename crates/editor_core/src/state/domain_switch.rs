@@ -32,9 +32,14 @@ impl Editor {
 
     /// `Action::SwitchDomain` (design §14.3): makes `id` the active domain and activates its last active tab if that
     /// is open; else the project domain opens Project Settings (design §14.2), and any other leaves no tab active (the
-    /// editor content shows the empty hint). The active domain, an unknown one or no project: nothing happens.
+    /// editor content shows the empty hint). The active domain, an unknown or disabled one, or no project: nothing
+    /// happens.
     pub fn switch_domain(&mut self, id: DomainId) {
-        if self.project.is_none() || self.active_domain == Some(id) || self.domain_list.get(id).is_none() {
+        if self.project.is_none()
+            || self.active_domain == Some(id)
+            || self.domain_list.get(id).is_none()
+            || !self.domain_enabled(id)
+        {
             return;
         }
         self.active_domain = Some(id);
@@ -46,6 +51,24 @@ impl Editor {
             None => self.active = None,
         }
         self.touch_all();
+    }
+
+    /// Synchronizes open tabs, `last_tabs`, `active_domain`, scanned files, and generated crate modules after
+    /// `project.settings` changed.
+    pub(crate) fn sync_enabled_domains(&mut self) {
+        let close: Vec<bool> = self.tabs.iter().map(|t| !self.domain_enabled(t.domain)).collect();
+        if close.iter().any(|&c| c) {
+            self.remove_tabs(&close);
+        }
+        let project = self.project.as_ref();
+        self.last_tabs.retain(|d, _| *d == DomainId::PROJECT || project.is_none_or(|p| p.domain_enabled(*d)));
+        if self.active_domain.is_none_or(|d| !self.domain_enabled(d)) {
+            self.active_domain = self.domain_list.real_ids().find(|&d| self.domain_enabled(d));
+        }
+        self.rescan();
+        self.generate_missing_modules();
+        self.touch_all();
+        self.save_config();
     }
 
     /// The tab to activate when the active tab `a` closes (`close` marks the closing tabs), as an index among the
@@ -61,19 +84,22 @@ impl Editor {
     }
 
     /// Reads the active domain and the last tabs of a project being opened from its user config entry, after its tabs
-    /// were restored: the saved domain if it is still registered, else the first real domain; saved last tabs of
-    /// registered real domains replace the ones restoring recorded (tool keys are skipped). A restored active tab
-    /// that would be greyed gives way to the active domain's last tab, or to none (design §14.4).
+    /// were restored: the saved domain if it is still registered and enabled, else the first enabled real domain;
+    /// saved last tabs of registered enabled real domains replace the ones restoring recorded (tool keys are skipped).
+    /// A restored active tab that would be greyed gives way to the active domain's last tab, or to none (design §14.4).
     pub(crate) fn restore_domain(&mut self, saved: &ProjectTabs) {
         let list = self.domain_list.clone();
-        let real = |id: &str| list.real_ids().find(|d| d.as_str() == id);
         for (id, key) in &saved.last_tabs {
-            if let Some(domain) = real(id).filter(|_| !key.starts_with(TOOL_KEY_PREFIX)) {
+            let domain = list.real_ids().find(|d| d.as_str() == id && self.domain_enabled(*d));
+            if let Some(domain) = domain.filter(|_| !key.starts_with(TOOL_KEY_PREFIX)) {
                 self.last_tabs.insert(domain, TabKey::new(domain, key.clone()));
             }
         }
-        let saved_domain = saved.active_domain.as_deref().and_then(|id| list.ids().find(|d| d.as_str() == id));
-        self.active_domain = saved_domain.or_else(|| list.real_ids().next());
+        let saved_domain = saved
+            .active_domain
+            .as_deref()
+            .and_then(|id| list.ids().find(|d| d.as_str() == id && self.domain_enabled(*d)));
+        self.active_domain = saved_domain.or_else(|| list.real_ids().find(|&d| self.domain_enabled(d)));
         match self.active {
             Some(a) if self.is_greyed(a) => {
                 self.active = self.active_domain.and_then(|d| self.last_tabs.get(&d)).and_then(|k| self.key_index(k));

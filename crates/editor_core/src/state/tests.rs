@@ -125,7 +125,7 @@ impl<const N: usize> DomainState for DummyState<N> {
     }
 
     fn rescan(editor: &mut Editor) {
-        let Some(p) = &editor.project else {
+        let Some(p) = editor.project.as_ref().filter(|p| p.domain_enabled(IDS[N])) else {
             editor.domains.get_mut::<Self>().unwrap().notes.clear();
             return;
         };
@@ -146,6 +146,11 @@ impl<const N: usize> DomainState for DummyState<N> {
     }
 
     fn generate(editor: &mut Editor) {
+        if let Some(p) = &editor.project {
+            let mod_rs = p.module_dir(IDS[N]).join("mod.rs");
+            std::fs::create_dir_all(mod_rs.parent().unwrap()).unwrap();
+            std::fs::write(mod_rs, format!("{}\n", project_core::marker::header("//", None))).unwrap();
+        }
         editor.info("generated");
     }
 
@@ -1307,15 +1312,20 @@ fn shown(e: &Editor, prop: SettingsProp) -> Option<PropValue> {
     e.current_value(&PropKey::new(prop))
 }
 
-/// Toggling "Used in game" off and saving writes `project.ron` and the umbrella crate (the module stays, the plugin
-/// goes); Undo and Save bring both back.
+/// Toggling "Used in game" off and saving writes `project.ron` and the umbrella crate (the module and plugin go,
+/// `crates/quillshade/src/<domain>/` is deleted, open tabs of the domain close, and its files are hidden in the editor
+/// while `quillshade/<domain>/` stays on disk); Undo and Save bring them back and regenerate the module.
 #[test]
 fn settings_tool_saves_and_regenerates_umbrella() {
-    let dir = game(&[]);
-    let mut e = open(list(vec![Box::new(Backed)]), dir.path());
+    let dir = game(&["quillshade/dummy/a.note.ron", "quillshade/other/b.note.ron"]);
+    let mut e = open(list(vec![Box::new(Backed) as Box<dyn EditorDomain>, Box::new(Dummy::<1>)]), dir.path());
     let p = e.project.clone().unwrap();
     let lib = || std::fs::read_to_string(p.crate_dir().join("src/lib.rs")).unwrap();
     let ron = || std::fs::read_to_string(p.settings_path()).unwrap();
+    assert!(p.module_dir(IDS[0]).join("mod.rs").is_file(), "generated on open");
+    assert_eq!(e.kind_files.get(&IDS[0]), Some(&vec![note(0, "a")]));
+    e.apply(Action::OpenAsset(note(0, "a")));
+    assert!(e.asset_tab(&note(0, "a")).is_some());
     e.apply(open_settings());
     assert_eq!(e.active_key(), Some(TabKey::tool(DomainId::PROJECT, SETTINGS_TOOL)));
     let doc = e.active_doc::<SettingsDoc>().expect("the settings tab");
@@ -1329,7 +1339,14 @@ fn settings_tool_saves_and_regenerates_umbrella() {
     assert!(!e.is_dirty() && e.dialog.is_none(), "{:?}", e.dialog);
     assert!(ron().contains("enabled: false"), "{}", ron());
     assert!(!e.project.as_ref().unwrap().domain_enabled(IDS[0]), "the editor's project follows");
-    assert!(lib().contains("pub mod dummy;") && !lib().contains("dummy::DummyPlugin"), "{}", lib());
+    assert!(!e.domain_enabled(IDS[0]));
+    assert!(!lib().contains("pub mod dummy;") && !lib().contains("dummy::DummyPlugin"), "{}", lib());
+    assert!(!p.module_dir(IDS[0]).exists(), "the disabled domain's module directory is deleted");
+    assert!(e.asset_tab(&note(0, "a")).is_none(), "open tabs of the disabled domain close");
+    assert!(!e.kind_files.contains_key(&IDS[0]), "files of the disabled domain are hidden in kind_files");
+    assert!(e.domains.get::<DummyState<0>>().unwrap().notes.is_empty());
+    assert!(dir.path().join("quillshade/dummy/a.note.ron").is_file(), "source files stay on disk");
+    assert_eq!(e.active_domain, Some(IDS[1]), "switches to the enabled real domain");
 
     e.apply(TabAction::Undo);
     assert!(e.is_dirty());
@@ -1339,6 +1356,9 @@ fn settings_tool_saves_and_regenerates_umbrella() {
     assert!(!ron().contains("enabled"), "{}", ron());
     assert!(lib().contains("pub mod dummy;") && lib().contains("dummy::DummyPlugin"), "{}", lib());
     assert!(e.project.as_ref().unwrap().domain_enabled(IDS[0]));
+    assert!(p.module_dir(IDS[0]).join("mod.rs").is_file(), "module directory regenerated on re-enable");
+    assert_eq!(e.kind_files.get(&IDS[0]), Some(&vec![note(0, "a")]), "files restored in kind_files");
+    assert_eq!(e.domains.get::<DummyState<0>>().unwrap().notes, vec![note(0, "a")]);
 }
 
 /// Review Focus 3: an outside edit of `project.ron` reloads a clean Settings tab, asks Keep mine / Reload for a dirty

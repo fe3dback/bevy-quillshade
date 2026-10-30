@@ -62,7 +62,8 @@ impl MaterialRegen for Editor {
     }
 
     fn needs_validation(&self) -> bool {
-        self.project.is_some() && self.domains.material().validated.as_ref() != Some(&self.revisions())
+        self.project.as_ref().is_some_and(|p| p.domain_enabled(MATERIAL))
+            && self.domains.material().validated.as_ref() != Some(&self.revisions())
     }
 
     fn revisions(&self) -> Vec<(AssetId, u64)> {
@@ -77,7 +78,7 @@ impl MaterialRegen for Editor {
     }
 
     fn validate(&mut self) {
-        let Some(project) = self.project.clone() else { return };
+        let Some(project) = self.project.clone().filter(|p| p.domain_enabled(MATERIAL)) else { return };
         self.refresh_functions();
         let set = self.overridden_set();
         let list = self.domain_list.clone();
@@ -99,7 +100,7 @@ impl MaterialRegen for Editor {
     }
 
     fn regenerate(&mut self) -> bool {
-        let Some(project) = self.project.clone() else { return false };
+        let Some(project) = self.project.clone().filter(|p| p.domain_enabled(MATERIAL)) else { return false };
         self.rescan();
         // Unsaved documents already written from memory (a preview, decision 0022) keep that output.
         let mut set = self.domains.material().disk.clone();
@@ -176,7 +177,7 @@ impl MaterialRegen for Editor {
     }
 
     fn regenerate_one(&mut self, id: &AssetId, set: &AssetSet) -> bool {
-        let Some(project) = self.project.clone() else { return false };
+        let Some(project) = self.project.clone().filter(|p| p.domain_enabled(MATERIAL)) else { return false };
         let list = self.domain_list.clone();
         let opts = RegenOptions {
             scope: Scope::Affected([id.clone()].into()),

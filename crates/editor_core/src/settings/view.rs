@@ -39,7 +39,9 @@ impl EditorAreas for SettingsEditor {
         let saving = [
             "Saving writes quillshade/project.ron and rewrites the umbrella crate files crates/quillshade/Cargo.toml \
              and src/lib.rs.",
-            "A domain not used in game keeps its module in the crate; QuillshadePlugin just does not add its plugin.",
+            "A domain not used in game removes its plugin from QuillshadePlugin, deletes \
+             crates/quillshade/src/<domain>/, and disables the domain in the editor while keeping \
+             quillshade/<domain>/.",
             "Header date reaches every other generated file on its domain's next generation.",
         ]
         .map(|line| -> Box<dyn Scene> { Box::new(text(line, TEXT_DIM, 12.0)) });
@@ -138,7 +140,10 @@ fn sections(editor: &Editor, project: &Project, doc: &SettingsDoc) -> Vec<Box<dy
         let Some(d) = editor.domain_list.get(id) else { continue };
         let rows = vec![
             checkbox_row("Used in game", SettingsProp::Enabled(d.id), doc.enabled(d.id)),
-            hint("Off: QuillshadePlugin does not add the domain's plugin; its module is still generated."),
+            hint(
+                "Off: removes the domain's plugin from QuillshadePlugin, deletes crates/quillshade/src/<domain>/, and \
+                 disables the domain in the editor (quillshade/<domain>/ is kept).",
+            ),
         ];
         out.push(section(d.info.title, rows));
     }

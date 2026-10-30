@@ -141,10 +141,13 @@ impl Editor {
     // ---- folders (design §6.3) ----
 
     /// `Action::NewFolderDialog`: the path of a new folder of `domain`'s Project tree (`None`: the active real
-    /// domain's, else the first real domain's), proposed in its selected folder.
+    /// domain's, else the first enabled real domain's), proposed in its selected folder.
     pub fn new_folder_dialog(&mut self, domain: Option<DomainId>) {
-        let real = |d: &DomainId| *d != DomainId::PROJECT;
-        let Some(domain) = domain.or(self.active_domain.filter(real)).or_else(|| self.domain_list.real_ids().next())
+        let real = |d: &DomainId| *d != DomainId::PROJECT && self.domain_enabled(*d);
+        let Some(domain) = domain
+            .or_else(|| self.active_domain.filter(real))
+            .or_else(|| self.domain_list.real_ids().find(real))
+            .filter(real)
         else {
             return;
         };
@@ -174,21 +177,24 @@ impl Editor {
     // ---- diagnostics, Generate ----
 
     /// Opens the asset of a diagnostic (a console/logs row, the editor statusbar's count) through its domain
-    /// ([`DomainState::focus_diagnostic`]); a diagnostic of no domain goes to every domain.
+    /// ([`DomainState::focus_diagnostic`]); a diagnostic of no domain goes to every enabled domain.
     pub fn focus_diagnostic(&mut self, diag: &Diagnostic) {
+        if diag.domain.is_some_and(|id| !self.domain_enabled(id)) {
+            return;
+        }
         let ids: Vec<DomainId> = match diag.domain {
             Some(id) => vec![id],
-            None => self.domains.ids().collect(),
+            None => self.domains.ids().filter(|&id| self.domain_enabled(id)).collect(),
         };
         for id in ids {
             self.with_domain(id, |e, s| s.focus_diagnostic(e, diag));
         }
     }
 
-    /// Generate (Assets menu, design §6.5): every domain regenerates from what is saved
+    /// Generate (Assets menu, design §6.5): every enabled domain regenerates from what is saved
     /// ([`DomainState::generate`]).
     pub fn generate(&mut self) {
-        let ids: Vec<DomainId> = self.domains.ids().collect();
+        let ids: Vec<DomainId> = self.domains.ids().filter(|&id| self.domain_enabled(id)).collect();
         for id in ids {
             self.with_domain(id, |e, s| s.generate(e));
         }

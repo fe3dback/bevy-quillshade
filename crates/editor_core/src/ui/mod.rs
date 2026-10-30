@@ -24,6 +24,9 @@ use crate::ui::icons::{IconRef, icon};
 use bevy::feathers::controls::{ButtonVariant, FeathersButton, FeathersToolButton};
 use bevy::feathers::display::caption;
 use bevy::prelude::*;
+use bevy::ui::InteractionDisabled;
+
+pub use tabs::{DISABLED_DOMAIN_TIP, DomainTab, DomainTabs};
 
 /// Pushes its action when the widget is activated (buttons, menu items).
 #[derive(Component, Default, Clone)]
@@ -35,7 +38,10 @@ pub struct HoverRow {
     pub base: Color,
 }
 
-pub fn row_hover_on(ev: On<PointerOver>, mut q: Query<(&HoverRow, &mut BackgroundColor)>) {
+pub fn row_hover_on(
+    ev: On<PointerOver>,
+    mut q: Query<(&HoverRow, &mut BackgroundColor), Without<InteractionDisabled>>,
+) {
     if let Ok((r, mut bg)) = q.get_mut(ev.event_target())
         && r.base.alpha() < 0.2
     {

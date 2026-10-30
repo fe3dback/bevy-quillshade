@@ -88,10 +88,12 @@ Sources live in `quillshade/<domain>/` (`material`, `light`); `quillshade/projec
 (`domains: { "material": (enabled: false) }`, a missing entry means enabled). Without the file every default applies;
 a `project.ron` that does not parse is an error — the CLI exits with code 2 and the editor refuses to open the project,
 naming the file — rather than being replaced by defaults. The editor re-reads the file when it changes on disk.
-In the editor, File → Project Settings... (or the Project domain tab at the top, next to the main menu) edits it: the
-header date and each domain's "Used in game". Saving writes the file and rewrites `crates/quillshade/Cargo.toml` and
-`src/lib.rs`; an outside edit reloads a clean Project Settings tab and asks Keep mine / Reload for one with unsaved
-changes.
+In the editor, File → Project Settings... edits it: the
+header date and each domain's "Used in game" (enabled by default). Saving writes the file and rewrites
+`crates/quillshade/Cargo.toml` and `src/lib.rs` (unchecking a domain deletes its generated `crates/quillshade/src/<domain>/`
+module, removes its plugin from `QuillshadePlugin`, and disables the domain in the editor while keeping its
+`quillshade/<domain>/` source files); an outside edit reloads a clean Project Settings tab and asks Keep mine / Reload
+for one with unsaved changes.
 
 ### 2. Cargo.toml
 

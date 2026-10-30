@@ -30,7 +30,11 @@ pub struct LightState {
 impl LightState {
     /// Re-reads the assets from disk, then [`LightState::revalidate`].
     fn reload(editor: &mut Editor) {
-        let assets = editor.project.as_ref().map(LightAssets::load).unwrap_or_default();
+        let Some(project) = editor.project.as_ref().filter(|p| p.domain_enabled(LIGHT)) else {
+            *editor.domains.get_mut::<Self>().expect("Light domain not registered") = Self::default();
+            return;
+        };
+        let assets = LightAssets::load(project);
         editor.domains.get_mut::<Self>().expect("Light domain not registered").assets = assets;
         Self::revalidate(editor);
     }
@@ -38,7 +42,7 @@ impl LightState {
     /// The diagnostics of the assets as the open tabs show them; the console/logs, the trees' error colours and the
     /// Texture tabs' problems redraw when they changed.
     fn revalidate(editor: &mut Editor) {
-        let diagnostics = match &editor.project {
+        let diagnostics = match editor.project.as_ref().filter(|p| p.domain_enabled(LIGHT)) {
             Some(project) => {
                 let assets = &editor.domains.get::<Self>().expect("Light domain not registered").assets;
                 validate(project, &shown(assets, &editor.tabs))
@@ -58,7 +62,7 @@ impl LightState {
     /// domain's contribution, so the umbrella keeps every domain's module. Logs what was written and blocked files
     /// (E008); a changed Rust file needs a rebuild of the game.
     fn regenerate(editor: &mut Editor) {
-        let Some(project) = editor.project.clone() else { return };
+        let Some(project) = editor.project.clone().filter(|p| p.domain_enabled(LIGHT)) else { return };
         let list = editor.domain_list.clone();
         let assets = &editor.domains.get::<Self>().expect("Light domain not registered").assets;
         let plan = plan_assets(&project, assets);

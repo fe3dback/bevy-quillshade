@@ -84,6 +84,9 @@ pub struct Editor {
     /// The native folder picker is requested (Open / New project dialogs); the app runs it and sends
     /// [`crate::action::Action::FolderPicked`].
     pub pick_folder: bool,
+    /// Set when [`DocCtx::saved_settings`] updated [`Project::settings`], so [`Editor::apply`] or
+    /// [`Editor::files_changed`] synchronizes enabled domains.
+    pub(crate) settings_changed: bool,
 }
 
 /// An editor without domains (core tests).
@@ -125,7 +128,13 @@ impl Editor {
             copy_text: None,
             clipboards: Clipboards::default(),
             pick_folder: false,
+            settings_changed: false,
         }
+    }
+
+    /// Whether `domain` is enabled in the open project (always `true` for [`DomainId::PROJECT`] or without a project).
+    pub fn domain_enabled(&self, domain: DomainId) -> bool {
+        domain == DomainId::PROJECT || self.project.as_ref().is_none_or(|p| p.domain_enabled(domain))
     }
 
     /// The user config (and the file it is saved to).
@@ -231,6 +240,7 @@ impl Editor {
         let saved_settings = ctx.saved_settings.take();
         if let (Some(settings), Some(project)) = (saved_settings, self.project.as_mut()) {
             project.settings = settings;
+            self.settings_changed = true;
         }
         for m in messages {
             self.domain_msg(m.domain.or(Some(id)), m.level, m.text);

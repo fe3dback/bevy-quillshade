@@ -182,8 +182,8 @@ fn empty_project_has_no_dead_reexports() {
     assert!(read(&p.root.join("crates/quillshade/src/material/mod.rs")).contains("pub use materials::*;\n"));
 }
 
-/// `enabled: false` in `quillshade/project.ron` keeps the Material module compiled but leaves its plugin out of
-/// `QuillshadePlugin` (design §4.1, §4.2).
+/// `enabled: false` in `quillshade/project.ron` omits the Material module and its plugin from `QuillshadePlugin`
+/// (design §4.1, §4.2).
 #[test]
 fn project_ron_disables_material_plugin() {
     let (_d, p) = temp_project();
@@ -196,8 +196,9 @@ fn project_ron_disables_material_plugin() {
     let r = regenerate(&p, &RegenOptions::default()).unwrap();
     assert!(!r.has_errors(), "{:?}", r.diagnostics().collect::<Vec<_>>());
     let lib = read(&p.root.join("crates/quillshade/src/lib.rs"));
-    assert!(lib.contains("pub mod material;"), "{lib}");
+    assert!(!lib.contains("pub mod material;"), "{lib}");
     assert!(!lib.contains("add_plugins(material::"), "{lib}");
+    assert!(!p.root.join("crates/quillshade/src/material").exists());
 }
 
 #[test]

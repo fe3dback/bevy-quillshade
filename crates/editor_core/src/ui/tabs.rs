@@ -13,8 +13,8 @@
 use crate::action::{Action, Actions, CloseTabs, Unsaved};
 use crate::tab::labels;
 use crate::theme::{
-    BORDER, DOMAIN_TAB_ACTIVE_BG, DOMAIN_TAB_ACTIVE_TEXT, DOMAIN_TAB_TEXT, ROW_HOVER, TAB_BG, TAB_GREY, TEXT, TEXT_DIM,
-    TOOL_TAB_ACTIVE_BG, TOOL_TAB_BG, TOPBAR_BG, text,
+    BORDER, DOMAIN_TAB_ACTIVE_BG, DOMAIN_TAB_ACTIVE_TEXT, DOMAIN_TAB_DISABLED_TEXT, DOMAIN_TAB_TEXT, ROW_HOVER, TAB_BG,
+    TAB_GREY, TEXT, TEXT_DIM, TOOL_TAB_ACTIVE_BG, TOOL_TAB_BG, TOPBAR_BG, text,
 };
 use crate::tooltip::Tooltip;
 use crate::ui::HoverRow;
@@ -27,6 +27,7 @@ use bevy::picking::cursor::EntityCursor;
 use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
 use bevy::text::FontSourceTemplate;
+use bevy::ui::InteractionDisabled;
 use bevy::ui_widgets::Button;
 use bevy::window::SystemCursorIcon;
 use project_core::DomainId;
@@ -141,6 +142,9 @@ pub fn second_bar() -> impl Scene {
     }
 }
 
+/// Tooltip on a disabled domain tab in the mainbar.
+pub const DISABLED_DOMAIN_TIP: &str = "Module is disabled, enable it in Project Settings first";
+
 /// The domain tabs' container in the mainbar, filled by [`spawn_domain_tabs`].
 pub fn domain_tabs() -> impl Scene {
     bsn! {
@@ -154,16 +158,23 @@ pub fn domain_tabs() -> impl Scene {
     }
 }
 
-/// The look of a domain tab: the active one has [`DOMAIN_TAB_ACTIVE_BG`] with [`DOMAIN_TAB_ACTIVE_TEXT`], the others
-/// a transparent fill with [`DOMAIN_TAB_TEXT`].
-fn domain_tab_look(active: bool) -> (Color, Color) {
-    if active { (DOMAIN_TAB_ACTIVE_BG, DOMAIN_TAB_ACTIVE_TEXT) } else { (Color::NONE, DOMAIN_TAB_TEXT) }
+/// The look of a domain tab: a disabled one has a transparent fill with [`DOMAIN_TAB_DISABLED_TEXT`]; the active one
+/// has [`DOMAIN_TAB_ACTIVE_BG`] with [`DOMAIN_TAB_ACTIVE_TEXT`], the others a transparent fill with
+/// [`DOMAIN_TAB_TEXT`].
+fn domain_tab_look(active: bool, enabled: bool) -> (Color, Color) {
+    if !enabled {
+        (Color::NONE, DOMAIN_TAB_DISABLED_TEXT)
+    } else if active {
+        (DOMAIN_TAB_ACTIVE_BG, DOMAIN_TAB_ACTIVE_TEXT)
+    } else {
+        (Color::NONE, DOMAIN_TAB_TEXT)
+    }
 }
 
 /// One domain tab: a full-height rectangular button with the domain's name and no icon, in [`domain_tab_look`].
-fn domain_tab(id: DomainId, title: &'static str, active: bool) -> impl Scene {
+fn domain_tab(id: DomainId, title: &'static str, active: bool, enabled: bool) -> impl Scene {
     let (tab, act, name) = (DomainTab(id), OnActivate(Action::SwitchDomain(id)), DomainTabName(id));
-    let (bg, ink) = domain_tab_look(active);
+    let (bg, ink) = domain_tab_look(active, enabled);
     let hover = HoverRow { base: bg };
     bsn! {
         Node {
@@ -201,37 +212,66 @@ fn domain_tab_name(title: &'static str, ink: Color) -> impl Scene {
     }
 }
 
-/// Fills the domain tabs once, when spawned: one per domain of the (fixed) domain list, the project domain last.
+/// Fills the domain tabs once, when spawned: one per real domain of the (fixed) domain list.
 fn spawn_domain_tabs(editor: Res<Editor>, bars: Query<Entity, Added<DomainTabs>>, mut commands: Commands) {
     for bar in &bars {
-        for def in editor.domain_list.domains() {
-            let scene = domain_tab(def.id, def.info.title, editor.active_domain == Some(def.id));
-            commands.spawn_scene(bsn! { @{scene} ChildOf(bar) });
+        for def in editor.domain_list.domains().iter().filter(|d| d.id != DomainId::PROJECT) {
+            let enabled = editor.domain_enabled(def.id);
+            let active = enabled && editor.active_domain == Some(def.id);
+            let scene = domain_tab(def.id, def.info.title, active, enabled);
+            let e = commands.spawn_scene(bsn! { @{scene} ChildOf(bar) }).id();
+            if !enabled {
+                commands.entity(e).insert((
+                    InteractionDisabled,
+                    Tooltip(DISABLED_DOMAIN_TIP.into()),
+                    EntityCursor::System(SystemCursorIcon::Default),
+                ));
+            }
         }
     }
 }
 
-/// Restyles the domain tabs in place when the active domain changed (or a tab appeared): the same entities, so a
-/// domain tab activated from the keyboard keeps the focus.
+/// Restyles the domain tabs in place when the active domain or enabled domains changed (or a tab appeared): the same
+/// entities, so a domain tab activated from the keyboard keeps the focus.
 fn restyle_domain_tabs(
     editor: Res<Editor>,
     added: Query<(), Or<(Added<DomainTab>, Added<DomainTabName>)>>,
-    mut tabs: Query<(&DomainTab, &mut BackgroundColor, &mut HoverRow, Option<&Hovered>)>,
+    mut tabs: Query<(Entity, &DomainTab, &mut BackgroundColor, &mut HoverRow, Option<&Hovered>)>,
     mut names: Query<(&DomainTabName, &mut TextColor)>,
-    mut last: Local<Option<Option<DomainId>>>,
+    mut last: Local<Option<(Option<DomainId>, Vec<(DomainId, bool)>)>>,
+    mut commands: Commands,
 ) {
-    if *last == Some(editor.active_domain) && added.is_empty() {
+    let enabled_vec: Vec<(DomainId, bool)> =
+        editor.domain_list.real_ids().map(|id| (id, editor.domain_enabled(id))).collect();
+    let state = (editor.active_domain, enabled_vec);
+    if last.as_ref() == Some(&state) && added.is_empty() {
         return;
     }
-    *last = Some(editor.active_domain);
-    for (DomainTab(id), mut bg, mut hover, hovered) in &mut tabs {
-        let (base, _) = domain_tab_look(editor.active_domain == Some(*id));
+    *last = Some(state);
+    for (entity, DomainTab(id), mut bg, mut hover, hovered) in &mut tabs {
+        let enabled = editor.domain_enabled(*id);
+        let active = enabled && editor.active_domain == Some(*id);
+        let (base, _) = domain_tab_look(active, enabled);
         hover.base = base;
-        let fill = if hovered.is_some_and(|h| h.0) && base.alpha() < 0.2 { ROW_HOVER } else { base };
+        let fill = if enabled && hovered.is_some_and(|h| h.0) && base.alpha() < 0.2 { ROW_HOVER } else { base };
         bg.set_if_neq(BackgroundColor(fill));
+        if enabled {
+            commands
+                .entity(entity)
+                .remove::<(InteractionDisabled, Tooltip)>()
+                .insert(EntityCursor::System(SystemCursorIcon::Pointer));
+        } else {
+            commands.entity(entity).insert((
+                InteractionDisabled,
+                Tooltip(DISABLED_DOMAIN_TIP.into()),
+                EntityCursor::System(SystemCursorIcon::Default),
+            ));
+        }
     }
     for (DomainTabName(id), mut color) in &mut names {
-        color.set_if_neq(TextColor(domain_tab_look(editor.active_domain == Some(*id)).1));
+        let enabled = editor.domain_enabled(*id);
+        let active = enabled && editor.active_domain == Some(*id);
+        color.set_if_neq(TextColor(domain_tab_look(active, enabled).1));
     }
 }
 
@@ -421,7 +461,10 @@ mod tests {
     /// the other editor surfaces.
     #[test]
     fn domain_tabs_are_neutral_and_the_active_brighter() {
-        use crate::theme::{DOMAIN_TAB_ACTIVE_BG, DOMAIN_TAB_ACTIVE_TEXT, DOMAIN_TAB_TEXT, MAINBAR_BG, PANEL_BG};
+        use crate::theme::{
+            DOMAIN_TAB_ACTIVE_BG, DOMAIN_TAB_ACTIVE_TEXT, DOMAIN_TAB_DISABLED_TEXT, DOMAIN_TAB_TEXT, MAINBAR_BG,
+            PANEL_BG,
+        };
         use crate::ui::shell::VIEW_BG;
         for c in [DOMAIN_TAB_TEXT, DOMAIN_TAB_ACTIVE_TEXT] {
             assert!(c != ACCENT && c != TOOL_TAB_BG && c != TOOL_TAB_ACTIVE_BG);
@@ -430,8 +473,10 @@ mod tests {
             assert!(spread < 0.08, "neutral: {c:?}");
         }
         assert!(DOMAIN_TAB_ACTIVE_TEXT.luminance() > DOMAIN_TAB_TEXT.luminance() * 1.5);
-        assert_eq!(domain_tab_look(true), (DOMAIN_TAB_ACTIVE_BG, DOMAIN_TAB_ACTIVE_TEXT));
-        assert_eq!(domain_tab_look(false), (Color::NONE, DOMAIN_TAB_TEXT));
+        assert_eq!(domain_tab_look(true, true), (DOMAIN_TAB_ACTIVE_BG, DOMAIN_TAB_ACTIVE_TEXT));
+        assert_eq!(domain_tab_look(false, true), (Color::NONE, DOMAIN_TAB_TEXT));
+        assert_eq!(domain_tab_look(false, false), (Color::NONE, DOMAIN_TAB_DISABLED_TEXT));
+        assert_eq!(domain_tab_look(true, false), (Color::NONE, DOMAIN_TAB_DISABLED_TEXT));
         let active_bg = DOMAIN_TAB_ACTIVE_BG.to_srgba();
         assert!(active_bg.red > active_bg.green && active_bg.green > active_bg.blue, "orange: {active_bg:?}");
         assert!(DOMAIN_TAB_ACTIVE_TEXT.luminance() > DOMAIN_TAB_ACTIVE_BG.luminance() * 3.0);
