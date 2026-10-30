@@ -47,7 +47,7 @@ fn material_ir(collection: &str) -> Ir {
 
 #[test]
 fn gradient_field_and_new() {
-    let rs = shader_codegen_rust::material_module(&material_ir(TERRAIN), "shaders/test/mat.material.ron");
+    let rs = shader_codegen_rust::material_module(&material_ir(TERRAIN), "quillshade/material/test/mat.material.ron");
     for l in [
         "    /// Gradient collection `common/terrain`; `new` sets `Handle::default()` (Bevy's white image).\n    \
          #[texture(101)]\n    #[sampler(102)]\n    pub gc_common_terrain: Handle<Image>,",

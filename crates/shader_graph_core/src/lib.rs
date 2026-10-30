@@ -38,4 +38,4 @@ pub use types::{Conversion, PinType, conversion};
 pub use value::Value;
 
 /// Version of the generator written into autogen headers.
-pub const GENERATOR_VERSION: u32 = 1;
+pub use project_core::GENERATOR_VERSION;

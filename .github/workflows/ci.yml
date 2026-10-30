@@ -43,10 +43,22 @@ jobs:
         run: cargo fmt --all --check
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+      # The kits' model halves and the Light backend, as generator backends use them: without their default `editor`
+      # feature. The workspace build above unifies features and so always builds them with it.
+      - name: Kits without the editor feature
+        run: cargo clippy -p curve_kit -p texture_kit -p light_domain --no-default-features -- -D warnings
       # The committed generated crate; that it matches a fresh regen is checked by the `test` job on every OS.
       - name: Generated crate builds and is clippy-clean
         working-directory: examples/sample_game
         run: cargo clippy --workspace --all-targets -- -D warnings
+      # The sample enables bevy/dynamic_linking: doctests need the toolchain's libstd on the loader path (see `test`).
+      - name: Generated crate tests
+        working-directory: examples/sample_game
+        shell: bash
+        run: |
+          lib="$(rustc --print target-libdir)"
+          export LD_LIBRARY_PATH="$lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          cargo test --workspace
 
   test:
     strategy:

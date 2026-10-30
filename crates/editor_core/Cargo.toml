@@ -1,0 +1,23 @@
+[package]
+name = "editor_core"
+version = { workspace = true }
+edition = { workspace = true }
+rust-version = { workspace = true }
+license = { workspace = true }
+
+[features]
+default = ["dynamic_linking"]
+dynamic_linking = ["bevy/dynamic_linking"]
+
+[dependencies]
+bevy = { workspace = true }
+bevy_enhanced_input = { workspace = true }
+serde = { workspace = true }
+ron = { workspace = true }
+resvg = { workspace = true }
+icon-rs = { workspace = true }
+rfd = { workspace = true }
+project_core = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

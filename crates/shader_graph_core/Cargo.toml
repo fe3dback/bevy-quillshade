@@ -6,6 +6,10 @@ rust-version = { workspace = true }
 license = { workspace = true }
 
 [dependencies]
+project_core = { workspace = true }
+# The models only (constraints: backends depend on kits without `editor`).
+curve_kit = { workspace = true, default-features = false }
+texture_kit = { workspace = true, default-features = false }
 serde = { workspace = true }
 ron = { workspace = true }
 thiserror = { workspace = true }

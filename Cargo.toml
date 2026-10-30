@@ -36,13 +36,21 @@ rfd = "0.17"
 png = "0.18"
 ktx2 = "0.5"
 
+project_core = { path = "crates/project_core" }
+editor_core = { path = "crates/editor_core", default-features = false }
+# Without their default `editor` feature: a crate that needs the editor half asks for it.
+curve_kit = { path = "crates/curve_kit", default-features = false }
+texture_kit = { path = "crates/texture_kit", default-features = false }
 shader_graph_core = { path = "crates/shader_graph_core" }
 shader_stdlib = { path = "crates/shader_stdlib" }
 shader_codegen_wesl = { path = "crates/shader_codegen_wesl" }
 shader_codegen_rust = { path = "crates/shader_codegen_rust" }
 shader_project = { path = "crates/shader_project" }
-# Without its default dynamic_linking: the root package's feature of that name decides.
-shader_editor_app = { path = "crates/shader_editor_app", default-features = false }
+# Without their default dynamic_linking: the root package's feature of that name decides.
+node_graph_base = { path = "crates/node_graph_base", default-features = false }
+material_domain = { path = "crates/material_domain", default-features = false }
+# Without its default `editor` feature (the CLI backend is Bevy-free); the root package asks for it.
+light_domain = { path = "crates/light_domain", default-features = false }
 
 [package]
 name = "bevy-quillshade"
@@ -60,13 +68,29 @@ path = "src/main.rs"
 # Fast incremental builds while developing (bevy/dynamic_linking). Release binaries are built with
 # `--no-default-features`: a dynamically linked one needs libbevy_dylib and Rust's libstd next to it.
 default = ["dynamic_linking"]
-dynamic_linking = ["shader_editor_app/dynamic_linking"]
+dynamic_linking = [
+    "editor_core/dynamic_linking",
+    "node_graph_base/dynamic_linking",
+    "material_domain/dynamic_linking",
+    "curve_kit/dynamic_linking",
+    "texture_kit/dynamic_linking",
+    "light_domain/dynamic_linking",
+]
 
 [dependencies]
 clap = { workspace = true }
+project_core = { workspace = true }
 shader_project = { workspace = true }
-shader_codegen_wesl = { workspace = true }
-shader_editor_app = { workspace = true }
+editor_core = { workspace = true }
+node_graph_base = { workspace = true }
+material_domain = { workspace = true }
+light_domain = { workspace = true, features = ["editor"] }
+# Only to name their `dynamic_linking` features.
+curve_kit = { workspace = true }
+texture_kit = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
 
 [profile.dev]
 debug = "line-tables-only"

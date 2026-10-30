@@ -1,0 +1,36 @@
+[package]
+name = "light_domain"
+version = { workspace = true }
+edition = { workspace = true }
+rust-version = { workspace = true }
+license = { workspace = true }
+
+[features]
+# The editor half (design §9.2): `LightDomain`. The CLI backend (`light_domain::backend`) is Bevy-free and depends on
+# the crate without it.
+default = ["editor"]
+editor = ["dep:bevy", "dep:editor_core", "dep:icon-rs", "texture_kit/editor"]
+# Not a default (constraints: like the kits, it leaves it to the root package's `dynamic_linking`).
+dynamic_linking = ["bevy?/dynamic_linking"]
+
+[dependencies]
+project_core = { workspace = true }
+texture_kit = { workspace = true }
+serde = { workspace = true }
+ron = { workspace = true }
+bevy = { workspace = true, optional = true }
+editor_core = { workspace = true, optional = true }
+icon-rs = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+# `cargo test -p light_domain` links Bevy dynamically, as the workspace build does (dev-dependencies only: the crate's
+# own feature set stays without it).
+bevy = { workspace = true, features = ["dynamic_linking"] }
+# The sample's cube map is checked against the `ktx2` crate Bevy loads `.ktx2` with.
+ktx2 = { workspace = true }
+
+# `cargo test` runs the sample generator's unit tests too.
+[[example]]
+name = "make_sample"
+test = true

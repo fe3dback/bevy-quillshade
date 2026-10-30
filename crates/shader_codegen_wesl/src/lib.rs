@@ -5,7 +5,7 @@ pub mod paths;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use shader_graph_core::curve::{Curve, Interp, curve_fn_alias};
+use shader_graph_core::curve::{Curve, Interp, InterpWesl, curve_fn_alias};
 use shader_graph_core::ident::{function_ident, input_ident, output_ident, to_pascal_case};
 use shader_graph_core::model::PreviewMode;
 use shader_graph_core::registry::{Builtin, FunctionSig, ParamType, gradient_ident};
@@ -31,7 +31,7 @@ impl Generated {
 /// Context needed besides the IR: signatures of called functions and the source file name.
 pub struct GenCtx<'a> {
     pub functions: &'a BTreeMap<String, FunctionSig>,
-    /// Project-relative source file (`shaders/env/rock_wet.material.ron`).
+    /// Project-relative source file (`quillshade/material/env/rock_wet.material.ron`).
     pub source_file: &'a str,
 }
 
@@ -706,4 +706,14 @@ pub fn binding_of(ir: &Ir, param: &str) -> Option<u32> {
         return Some(100);
     }
     ir.param_texture(param).map(|t| t.binding)
+}
+
+#[cfg(test)]
+mod marker_tests {
+    use super::*;
+
+    #[test]
+    fn marker_matches_project_core() {
+        assert_eq!(MARKER, format!("// {}", project_core::marker::MARKER_TEXT));
+    }
 }

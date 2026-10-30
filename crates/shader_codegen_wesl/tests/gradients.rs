@@ -73,7 +73,10 @@ fn material_gradient_binding_has_no_owning_node() {
     a.connect((&g, "rgb"), ("out", "color"));
     let ir = build(&a, "test/mat", &BTreeMap::new());
     let fns = BTreeMap::new();
-    let wesl = shader_codegen_wesl::material(&ir, &GenCtx { functions: &fns, source_file: "shaders/test/mat.ron" });
+    let wesl = shader_codegen_wesl::material(
+        &ir,
+        &GenCtx { functions: &fns, source_file: "quillshade/material/test/mat.ron" },
+    );
     let lines: Vec<&str> = wesl.text.lines().collect();
     for (suffix, binding) in [
         ("@binding(101) var gc_common_terrain: texture_2d<f32>;", 101),
@@ -93,7 +96,10 @@ fn function_gradient_params_follow_fixed_textures() {
     let sig = ir.function_sig.as_ref().unwrap();
     assert_eq!(sig.gradients, [TERRAIN]);
     let fns = BTreeMap::new();
-    let wesl = shader_codegen_wesl::function(&ir, &GenCtx { functions: &fns, source_file: "shaders/common/g.ron" });
+    let wesl = shader_codegen_wesl::function(
+        &ir,
+        &GenCtx { functions: &fns, source_file: "quillshade/material/common/g.ron" },
+    );
     let want = "fn fun_g(b_uv0: vec2<f32>, ft_common_g_n2: texture_2d<f32>, ft_common_g_n2_sampler: sampler, \
                 gc_common_terrain: texture_2d<f32>, gc_common_terrain_sampler: sampler) -> vec3<f32> {";
     assert!(wesl.text.contains(want), "{want}\n{}", wesl.text);

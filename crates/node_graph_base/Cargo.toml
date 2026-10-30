@@ -1,0 +1,20 @@
+[package]
+name = "node_graph_base"
+version = { workspace = true }
+edition = { workspace = true }
+rust-version = { workspace = true }
+license = { workspace = true }
+
+[features]
+# Fast incremental builds (`cargo test -p node_graph_base`); see the root package's feature.
+default = ["dynamic_linking"]
+dynamic_linking = ["bevy/dynamic_linking"]
+
+[dependencies]
+bevy = { workspace = true }
+bevy_noodle = { workspace = true }
+bevy_enhanced_input = { workspace = true }
+editor_core = { workspace = true }
+
+[dev-dependencies]
+project_core = { workspace = true }

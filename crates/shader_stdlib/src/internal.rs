@@ -1,20 +1,11 @@
 //! Internal textures shipped with the editor (design §2): referenced by `@internal/<name>` ids
 //! ([`shader_graph_core::texture::INTERNAL_PREFIX`]) like Texture assets, but not part of any project.
 
+pub use shader_graph_core::texture::InternalTexture;
 use shader_graph_core::texture::{AddressMode, FilterMode, SamplerSettings, TextureSettings};
 
 /// The texture of texture nodes without a texture (design §1.2, W110).
 pub const DEFAULT_TEXTURE: &str = "@internal/default";
-
-/// A built-in texture: embedded image bytes plus loader settings.
-pub struct InternalTexture {
-    /// `@internal/<name>`.
-    pub id: &'static str,
-    /// File name inside the game's internal textures directory (`default.png`).
-    pub file: &'static str,
-    pub bytes: &'static [u8],
-    pub settings: fn() -> TextureSettings,
-}
 
 /// Every internal texture.
 pub const INTERNAL_TEXTURES: &[InternalTexture] = &[InternalTexture {
@@ -23,6 +14,11 @@ pub const INTERNAL_TEXTURES: &[InternalTexture] = &[InternalTexture {
     bytes: include_bytes!("../textures/default.png"),
     settings: default_settings,
 }];
+
+/// [`INTERNAL_TEXTURES`] as a `TexturePolicy::internal` provider (the editor's Material texture policy).
+pub fn internal_textures() -> &'static [InternalTexture] {
+    INTERNAL_TEXTURES
+}
 
 /// The internal texture with this id.
 pub fn internal_texture(id: &str) -> Option<&'static InternalTexture> {

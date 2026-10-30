@@ -37,8 +37,8 @@ fn eval(p: &[[f32; 3]], t: f32, interp: Interp) -> f32 {
 fn the_output_range_is_baked_into_the_points() {
     let unit = Curve::new("c", vec![(0.0, 0.0), (0.3, 1.0), (0.7, 0.25), (1.0, 0.5)]);
     let ranged = Curve { min: -2.0, max: 10.0, ..unit.clone() };
-    let plain = points(&shader_codegen_wesl::curve(&unit, "fx/c", "shaders/fx/c.curve.ron"));
-    let wesl = shader_codegen_wesl::curve(&ranged, "fx/c", "shaders/fx/c.curve.ron");
+    let plain = points(&shader_codegen_wesl::curve(&unit, "fx/c", "quillshade/material/fx/c.curve.ron"));
+    let wesl = shader_codegen_wesl::curve(&ranged, "fx/c", "quillshade/material/fx/c.curve.ron");
     let scaled = points(&wesl);
     assert_eq!(scaled.len(), 4, "{wesl}");
     for (u, r) in plain.iter().zip(&scaled) {
@@ -58,7 +58,7 @@ fn the_output_range_is_baked_into_the_points() {
 
 #[test]
 fn short_curves_return_real_units() {
-    let module = |c: &Curve| shader_codegen_wesl::curve(c, "c", "shaders/c.curve.ron");
+    let module = |c: &Curve| shader_codegen_wesl::curve(c, "c", "quillshade/material/c.curve.ron");
     let empty = Curve { min: 3.0, max: 5.0, ..Curve::new("c", vec![]) };
     assert!(module(&empty).contains("    return 3.0f;"), "{}", module(&empty));
     let one = Curve { min: 3.0, max: 5.0, ..Curve::new("c", vec![(0.4, 0.5)]) };

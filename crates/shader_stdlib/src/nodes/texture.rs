@@ -105,7 +105,7 @@ pub fn check_texture_refs(asset: &Asset, registry: &Registry) -> Result<(), Stri
             let kind = &asset.nodes[&node].kind;
             return Err(format!(
                 "node `{node}` ({kind}): `{param}` is the image path `{id}`, but a texture is now a Texture asset \
-                 reference; create a Texture asset for the image (`shaders/**/*.texture.ron`) and select it"
+                 reference; create a Texture asset for the image (`quillshade/material/**/*.texture.ron`) and select it"
             ));
         }
     }

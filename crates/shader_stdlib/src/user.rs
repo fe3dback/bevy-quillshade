@@ -1,4 +1,4 @@
-//! Data-driven user nodes from `shaders/.nodes/*.ron` (no editor rebuild needed).
+//! Data-driven user nodes from `quillshade/material/.nodes/*.ron` (no editor rebuild needed).
 //!
 //! ```ron
 //! UserNode(

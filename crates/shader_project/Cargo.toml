@@ -10,11 +10,8 @@ shader_graph_core = { workspace = true }
 shader_stdlib = { workspace = true }
 shader_codegen_wesl = { workspace = true }
 shader_codegen_rust = { workspace = true }
-serde = { workspace = true }
-ron = { workspace = true }
+project_core = { workspace = true }
 thiserror = { workspace = true }
-notify = { workspace = true }
-toml = { workspace = true }
 png = { workspace = true }
 
 [dev-dependencies]

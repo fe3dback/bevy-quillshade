@@ -12,4 +12,5 @@ wesl = { workspace = true }
 naga = { workspace = true }
 
 [dev-dependencies]
+project_core = { workspace = true }
 insta = { workspace = true }

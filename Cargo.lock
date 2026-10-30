@@ -448,9 +448,15 @@ name = "bevy-quillshade"
 version = "0.2.0"
 dependencies = [
  "clap",
- "shader_codegen_wesl",
- "shader_editor_app",
+ "curve_kit",
+ "editor_core",
+ "light_domain",
+ "material_domain",
+ "node_graph_base",
+ "project_core",
  "shader_project",
+ "tempfile",
+ "texture_kit",
 ]
 
 [[package]]
@@ -2525,6 +2531,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
 
 [[package]]
+name = "curve_kit"
+version = "0.2.0"
+dependencies = [
+ "bevy",
+ "bevy_enhanced_input",
+ "editor_core",
+ "icon-rs",
+ "project_core",
+ "resvg",
+ "ron",
+ "serde",
+ "tempfile",
+]
+
+[[package]]
 name = "dasp_sample"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2629,6 +2650,21 @@ name = "dpi"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
+
+[[package]]
+name = "editor_core"
+version = "0.2.0"
+dependencies = [
+ "bevy",
+ "bevy_enhanced_input",
+ "icon-rs",
+ "project_core",
+ "resvg",
+ "rfd",
+ "ron",
+ "serde",
+ "tempfile",
+]
 
 [[package]]
 name = "either"
@@ -3737,6 +3773,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "light_domain"
+version = "0.2.0"
+dependencies = [
+ "bevy",
+ "editor_core",
+ "icon-rs",
+ "ktx2",
+ "project_core",
+ "ron",
+ "serde",
+ "tempfile",
+ "texture_kit",
+]
+
+[[package]]
 name = "linebender_resource_handle"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3829,6 +3880,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d1525a2a28c7f4fa0fc98bb91ae755d1e2d1505079e05539e35bc876b5d65ae9"
 dependencies = [
  "regex-automata",
+]
+
+[[package]]
+name = "material_domain"
+version = "0.2.0"
+dependencies = [
+ "bevy",
+ "bevy_enhanced_input",
+ "bevy_noodle",
+ "curve_kit",
+ "editor_core",
+ "icon-rs",
+ "node_graph_base",
+ "project_core",
+ "resvg",
+ "ron",
+ "serde",
+ "shader_codegen_wesl",
+ "shader_graph_core",
+ "shader_project",
+ "shader_stdlib",
+ "tempfile",
+ "texture_kit",
 ]
 
 [[package]]
@@ -3973,6 +4047,17 @@ dependencies = [
  "cfg-if",
  "cfg_aliases",
  "libc",
+]
+
+[[package]]
+name = "node_graph_base"
+version = "0.2.0"
+dependencies = [
+ "bevy",
+ "bevy_enhanced_input",
+ "bevy_noodle",
+ "editor_core",
+ "project_core",
 ]
 
 [[package]]
@@ -4781,6 +4866,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3d595e54a326bc53c1c197b32d295e14b169e3cfeaa8dc82b529f947fba6bcf5"
 
 [[package]]
+name = "project_core"
+version = "0.2.0"
+dependencies = [
+ "notify",
+ "ron",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.21",
+ "toml",
+]
+
+[[package]]
 name = "pxfm"
 version = "0.1.30"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5226,6 +5323,7 @@ dependencies = [
 name = "shader_codegen_rust"
 version = "0.2.0"
 dependencies = [
+ "project_core",
  "ron",
  "serde",
  "shader_codegen_wesl",
@@ -5239,36 +5337,21 @@ version = "0.2.0"
 dependencies = [
  "insta",
  "naga",
+ "project_core",
  "shader_graph_core",
  "shader_stdlib",
  "wesl",
 ]
 
 [[package]]
-name = "shader_editor_app"
-version = "0.2.0"
-dependencies = [
- "bevy",
- "bevy_enhanced_input",
- "bevy_noodle",
- "icon-rs",
- "resvg",
- "rfd",
- "ron",
- "serde",
- "shader_codegen_wesl",
- "shader_graph_core",
- "shader_project",
- "shader_stdlib",
- "tempfile",
-]
-
-[[package]]
 name = "shader_graph_core"
 version = "0.2.0"
 dependencies = [
+ "curve_kit",
+ "project_core",
  "ron",
  "serde",
+ "texture_kit",
  "thiserror 2.0.21",
  "ulid",
 ]
@@ -5279,17 +5362,14 @@ version = "0.2.0"
 dependencies = [
  "insta",
  "ktx2",
- "notify",
  "png",
- "ron",
- "serde",
+ "project_core",
  "shader_codegen_rust",
  "shader_codegen_wesl",
  "shader_graph_core",
  "shader_stdlib",
  "tempfile",
  "thiserror 2.0.21",
- "toml",
 ]
 
 [[package]]
@@ -5584,6 +5664,19 @@ dependencies = [
  "once_cell",
  "rustix 1.1.5",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "texture_kit"
+version = "0.2.0"
+dependencies = [
+ "bevy",
+ "editor_core",
+ "icon-rs",
+ "project_core",
+ "ron",
+ "serde",
+ "tempfile",
 ]
 
 [[package]]

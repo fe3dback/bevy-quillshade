@@ -1,4 +1,4 @@
-//! Writes the reference graphs and curves into a project and regenerates it:
+//! Writes the reference graphs and curves into a project's `quillshade/material/` and regenerates it:
 //! `cargo run -p shader_project --example make_sample -- examples/sample_game`
 
 use shader_project::{Project, RegenOptions, fixtures, regenerate};

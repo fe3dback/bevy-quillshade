@@ -1,5 +1,5 @@
-//! Global constant tables (`shaders/**/*.consts.ron`, decision 0017): named values read by the `Global*` nodes and
-//! copied into the generated WESL as literals.
+//! Global constant tables (`quillshade/material/**/*.consts.ron`, decision 0017): named values read by the `Global*`
+//! nodes and copied into the generated WESL as literals.
 
 use std::collections::BTreeMap;
 

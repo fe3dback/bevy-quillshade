@@ -1,7 +1,7 @@
 //! Module paths of autogen files and relative WESL imports between them.
 //!
-//! Bevy maps `assets/shaders/autogen/dir_env/mat_rock.wesl` to module
-//! `package::shaders::autogen::dir_env::mat_rock`; `super::` drops the last component of the importing module
+//! Bevy maps `assets/quillshade/material/autogen/dir_env/mat_rock.wesl` to module
+//! `package::quillshade::material::autogen::dir_env::mat_rock`; `super::` drops the last component of the importing module
 //! (spec §10.2, verified in M0 spike). User path components are prefixed (`dir_`, `mat_`, `fun_`, `crv_`;
 //! decision 0020), so keywords are valid names and generated modules never clash with each other.
 
@@ -19,13 +19,14 @@ fn prefixed(path: &str, leaf: fn(&str) -> String) -> Vec<String> {
     dirs.iter().map(|d| dir_ident(d)).chain([leaf(name)]).collect()
 }
 
-/// Module components of a material below `autogen/` and `src/materials/`: `env/rock_wet` → `["dir_env",
+/// Module components of a material below `autogen/` and the Rust module's `materials/`: `env/rock_wet` → `["dir_env",
 /// "mat_rock_wet"]`. Shared by the WESL and Rust generators.
 pub fn material_components(path: &str) -> Vec<String> {
     prefixed(path, material_file_ident)
 }
 
-pub const AUTOGEN: [&str; 2] = ["shaders", "autogen"];
+/// Module of the Material autogen root (`assets/quillshade/material/autogen`).
+pub const AUTOGEN: [&str; 3] = ["quillshade", "material", "autogen"];
 
 pub fn material_module(path: &str) -> Vec<String> {
     let mut m: Vec<String> = AUTOGEN.iter().map(|s| s.to_string()).collect();
@@ -54,7 +55,7 @@ pub fn stdlib_module(name: &str) -> Vec<String> {
     m
 }
 
-/// Asset-relative file of a module (`shaders/autogen/dir_env/mat_rock.wesl`).
+/// Asset-relative file of a module (`quillshade/material/autogen/dir_env/mat_rock.wesl`).
 pub fn module_file(module: &[String]) -> String {
     format!("{}.wesl", module.join("/"))
 }
@@ -85,18 +86,18 @@ mod tests {
     #[test]
     fn prefixed_modules() {
         assert_eq!(material_components("env/rock_wet"), ["dir_env", "mat_rock_wet"]);
-        assert_eq!(material_module("loop/type"), v("shaders::autogen::dir_loop::mat_type"));
-        assert_eq!(function_module("common/fn"), v("shaders::autogen::functions::dir_common::fun_fn"));
-        assert_eq!(curve_module("pulse"), v("shaders::autogen::curves::crv_pulse"));
-        assert_eq!(curve_module("common/pulse"), v("shaders::autogen::curves::dir_common::crv_pulse"));
-        assert_eq!(stdlib_module("math"), v("shaders::autogen::stdlib::math"));
+        assert_eq!(material_module("loop/type"), v("quillshade::material::autogen::dir_loop::mat_type"));
+        assert_eq!(function_module("common/fn"), v("quillshade::material::autogen::functions::dir_common::fun_fn"));
+        assert_eq!(curve_module("pulse"), v("quillshade::material::autogen::curves::crv_pulse"));
+        assert_eq!(curve_module("common/pulse"), v("quillshade::material::autogen::curves::dir_common::crv_pulse"));
+        assert_eq!(stdlib_module("math"), v("quillshade::material::autogen::stdlib::math"));
     }
 
     #[test]
     fn relative_imports() {
         // The spec example (autogen/env/rock_wet.wesl → autogen/stdlib/math.wesl), with prefixed components.
         let rock = material_module("env/rock_wet");
-        assert_eq!(rock, v("shaders::autogen::dir_env::mat_rock_wet"));
+        assert_eq!(rock, v("quillshade::material::autogen::dir_env::mat_rock_wet"));
         assert_eq!(relative(&rock, &stdlib_module("math")), "super::super::stdlib::math");
         assert_eq!(
             relative(&rock, &function_module("common/wet_mask")),
@@ -110,6 +111,9 @@ mod tests {
             "super::super::super::curves::dir_kw::crv_pulse"
         );
         // Module named like an ancestor directory (cannot happen with prefixes, but `relative` handles it).
-        assert_eq!(relative(&v("shaders::autogen::env::rock"), &v("shaders::autogen::env")), "super::super::env");
+        assert_eq!(
+            relative(&v("quillshade::material::autogen::env::rock"), &v("quillshade::material::autogen::env")),
+            "super::super::env"
+        );
     }
 }

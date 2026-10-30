@@ -16,7 +16,7 @@ use shader_graph_core::registry::{
 use shader_graph_core::{Asset, Env, PinType, Value, conversion};
 use shader_project::fixtures::{self, GraphBuilder};
 use shader_project::regen::{rust_file, wesl_file};
-use shader_project::{AssetId, AssetType, Project, RegenOptions, ops, regenerate};
+use shader_project::{AssetId, AssetType, MaterialLayout, Project, RegenOptions, ops, regenerate};
 
 /// Material exercising one node: required textures fed, first output routed into the color.
 fn node_material(kind: &str) -> Option<(String, Asset)> {
@@ -99,7 +99,7 @@ fn node_material(kind: &str) -> Option<(String, Asset)> {
 
 fn project() -> (tempfile::TempDir, Project) {
     let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("Cargo.toml"), "[workspace]\nmembers = [\"crates/shaders\"]\n").unwrap();
+    std::fs::write(dir.path().join("Cargo.toml"), "[workspace]\nmembers = [\"crates/quillshade\"]\n").unwrap();
     std::fs::create_dir_all(dir.path().join("assets")).unwrap();
     let p = Project::open(dir.path()).unwrap();
     (dir, p)
@@ -163,10 +163,11 @@ fn composite_materials_generate_and_compile() {
     for f in [
         "Cargo.toml",
         "src/lib.rs",
-        "src/materials/mod.rs",
-        "src/baked/mod.rs",
-        "src/baked/materials.rs",
-        "src/baked/textures.rs",
+        "src/material/mod.rs",
+        "src/material/materials/mod.rs",
+        "src/material/baked/mod.rs",
+        "src/material/baked/materials.rs",
+        "src/material/baked/textures.rs",
     ] {
         let text = std::fs::read_to_string(p.crate_dir().join(f)).unwrap();
         snapshot(&format!("crate__{}", f.replace(['/', '.'], "_")), &text);

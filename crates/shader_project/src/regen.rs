@@ -13,14 +13,19 @@ use shader_graph_core::ident::check_ident;
 use shader_graph_core::ir::{Ir, IrResult, build_ir, declared_function_sig, find_cycle};
 use shader_graph_core::model::{Asset, Preview};
 use shader_graph_core::registry::{FUNCTION_PREFIX, const_refs, curve_refs, gradient_refs, texture_refs};
-use shader_graph_core::texture::{INTERNAL_PREFIX, KTX2_HEADER_LEN, TextureAsset, ktx2_not_2d};
+use shader_graph_core::texture::{self, INTERNAL_PREFIX, MATERIAL_TEXTURES, ProblemKind};
 use shader_graph_core::{Code, Diagnostic, FunctionSig, Registry};
 use shader_stdlib::internal::{DEFAULT_TEXTURE, INTERNAL_TEXTURES};
 
 use crate::assets::{self, AssetId, AssetSet, AssetType};
+use crate::backend::MATERIAL_CRATE;
 use crate::gradient_png;
-use crate::layout::{GRADIENTS_DIR, INTERNAL_DIR, INTERNAL_MARKER, Project};
-use crate::writer::{Change, WriteBatch};
+use crate::layout::{GRADIENTS_DIR, INTERNAL_DIR, INTERNAL_MARKER, MATERIAL, MaterialLayout, Project};
+use crate::writer::Change;
+use project_core::files::owned_binary_dir;
+use project_core::marker::{civil_today, has_marker, insert_date};
+use project_core::regen::{DomainOutput, OutFile, OutRoot, commit};
+use project_core::umbrella::CrateContribution;
 
 /// Which assets to regenerate.
 #[derive(Debug, Clone, Default)]
@@ -32,13 +37,21 @@ pub enum Scope {
     Affected(BTreeSet<AssetId>),
 }
 
-#[derive(Default)]
 pub struct RegenOptions<'a> {
     pub scope: Scope,
     /// Plan only, do not touch the disk (`check`, `diff`).
     pub dry_run: bool,
     /// Compile generated WESL against Bevy sources (wesl + naga) before writing.
     pub compile_check: Option<&'a BevySources>,
+    /// Domain modules of the umbrella crate `crates/quillshade` (its `Cargo.toml` and `src/lib.rs` are written by
+    /// every regeneration).
+    pub crates: &'a [CrateContribution],
+}
+
+impl Default for RegenOptions<'_> {
+    fn default() -> Self {
+        RegenOptions { scope: Scope::default(), dry_run: false, compile_check: None, crates: &[MATERIAL_CRATE] }
+    }
 }
 
 /// Result of one asset.
@@ -194,47 +207,25 @@ pub fn texture_diagnostics(project: &Project, set: &AssetSet) -> BTreeMap<AssetI
     for (id, t) in &set.textures {
         let mut d = assets::validate_path(id);
         let at = |code, message: String| Diagnostic::new(code, message).in_asset(id.source_rel());
-        if let Ok(Some(Err(e))) = t.as_ref().map(|t| t.settings.sampler.map(|s| s.check())) {
-            d.push(at(Code::E013, format!("invalid sampler settings: {e}")));
-        }
         match t {
             Err(e) => d.push(at(Code::E009, format!("cannot load: {e}"))),
-            Ok(t) => match TextureAsset::check_path(&t.path) {
-                Err(e) => d.push(at(Code::E012, format!("invalid texture path: {e}"))),
-                Ok(()) => {
-                    let others: Vec<String> =
-                        paths[&t.path].iter().filter(|o| *o != id).map(AssetId::source_rel).collect();
-                    if !others.is_empty() {
-                        let message = format!(
-                            "`{}` is also used by {}; a game file can have only one Texture asset",
-                            t.path,
-                            others.join(", ")
-                        );
-                        d.push(at(Code::E011, message));
-                    }
-                    let file = project.assets_dir().join(&t.path);
-                    if !file.is_file() {
-                        d.push(at(Code::W109, format!("`assets/{}` does not exist", t.path)));
-                    } else if let Some(e) = ktx2_header(&file).as_deref().and_then(ktx2_not_2d) {
-                        d.push(at(Code::E014, format!("`assets/{}`: {e}", t.path)));
-                    }
+            Ok(t) => {
+                let others: Vec<String> = paths[&t.path].iter().filter(|o| *o != id).map(AssetId::source_rel).collect();
+                for problem in texture::problems(t, &others, &project.assets_dir(), &MATERIAL_TEXTURES) {
+                    let code = match problem.kind {
+                        ProblemKind::Sampler => Code::E013,
+                        ProblemKind::Path => Code::E012,
+                        ProblemKind::SharedFile => Code::E011,
+                        ProblemKind::Missing => Code::W109,
+                        ProblemKind::Shape => Code::E014,
+                    };
+                    d.push(at(code, problem.message));
                 }
-            },
+            }
         }
         out.insert(id.clone(), d);
     }
     out
-}
-
-/// The first [`KTX2_HEADER_LEN`] bytes of a `.ktx2` file (`None` for another extension or a shorter file).
-fn ktx2_header(file: &std::path::Path) -> Option<Vec<u8>> {
-    use std::io::Read;
-    if !file.extension().is_some_and(|e| e.eq_ignore_ascii_case("ktx2")) {
-        return None;
-    }
-    let mut header = vec![0; KTX2_HEADER_LEN];
-    std::fs::File::open(file).ok()?.read_exact(&mut header).ok()?;
-    Some(header)
 }
 
 /// Gradient collections nodes can sample (gradient design §6): the loadable ones with a valid asset path, by id.
@@ -283,38 +274,24 @@ pub fn module_of(id: &AssetId) -> Option<Vec<String>> {
     })
 }
 
-/// Generated Rust module of a material (`src/materials/dir_env/mat_rock_wet.rs`, decision 0020).
+/// Generated Rust module of a material (`crates/quillshade/src/material/materials/dir_env/mat_rock_wet.rs`,
+/// decision 0020).
 pub fn rust_file(project: &Project, id: &AssetId) -> Option<PathBuf> {
     (id.ty == AssetType::Material).then(|| {
         let module = paths::material_components(&id.path).join("/");
-        project.crate_dir().join("src/materials").join(format!("{module}.rs"))
+        project.material_module_dir().join("materials").join(format!("{module}.rs"))
     })
 }
 
-/// Baked PNG of a gradient collection (`assets/shaders/gradients/common/terrain.png`, gradient design §5).
+/// Baked PNG of a gradient collection (`assets/quillshade/material/gradients/common/terrain.png`, gradient design
+/// §5).
 pub fn gradient_png_file(project: &Project, id: &AssetId) -> Option<PathBuf> {
     (id.ty == AssetType::Gradients).then(|| project.gradients_dir().join(format!("{}.png", id.path)))
 }
 
-/// Whether a file's first line carries the AUTOGENERATED marker (`//` or `#` comment).
-pub fn has_marker(text: &str) -> bool {
-    let first = text.lines().next().unwrap_or("");
-    let body = first.trim_start_matches("//").trim_start_matches('#').trim_start();
-    body.starts_with("AUTOGENERATED by shader-editor v") && first.contains("do not edit")
-}
-
-fn civil_today() -> String {
-    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    let z = (secs / 86400) as i64 + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = yoe + era * 400 + i64::from(m <= 2);
-    format!("{y:04}-{m:02}-{d:02}")
+/// W105: `crates/quillshade` missing from `[workspace.members]` of the root `Cargo.toml`.
+pub fn workspace_warning(project: &Project) -> Option<Diagnostic> {
+    project.workspace_problem().map(|text| Diagnostic::new(Code::W105, text).in_asset("Cargo.toml"))
 }
 
 /// Runs the pipeline. Errors only on I/O failure of the final write.
@@ -323,12 +300,34 @@ pub fn regenerate(project: &Project, opts: &RegenOptions) -> std::io::Result<Reg
     regenerate_set(project, &set, opts)
 }
 
+/// [`plan_set`], then [`commit`] of its output and the umbrella crate files; blocked files (E008) are reported at
+/// their asset (which is then not `ok`) or at the project.
 pub fn regenerate_set(project: &Project, set: &AssetSet, opts: &RegenOptions) -> std::io::Result<RegenReport> {
-    let (registry, user_diags) = project_registry(project);
-    let mut report = RegenReport { project: user_diags, ..Default::default() };
-    if let Some(w) = project.workspace_warning() {
+    let (mut report, output) = plan_set(project, set, opts);
+    let committed = commit(project, &[output], opts.crates, opts.dry_run)?;
+    for b in committed.blocked {
+        let d = Diagnostic::new(Code::E008, b.message);
+        let owner = b.owner.as_deref();
+        match report.assets.iter_mut().find(|(id, _)| owner == Some(id.source_rel().as_str())) {
+            Some((id, r)) => {
+                r.diagnostics.push(d.in_asset(id.source_rel()));
+                r.ok = false;
+            }
+            None => report.project.push(d),
+        }
+    }
+    if let Some(w) = workspace_warning(project) {
         report.project.push(w);
     }
+    report.changes = committed.changes;
+    Ok(report)
+}
+
+/// The Material pipeline up to the desired files (no W105, no write): the report (its `changes` empty) and the
+/// domain's output for [`commit`]. Every file of an asset names it (`source_rel`) as its owner.
+pub fn plan_set(project: &Project, set: &AssetSet, opts: &RegenOptions) -> (RegenReport, DomainOutput) {
+    let (registry, user_diags) = project_registry(project);
+    let mut report = RegenReport { project: user_diags, ..Default::default() };
     let date = project.settings.header_date.then(civil_today);
     let deps = DepGraph::build(set, &registry);
     let mut results: BTreeMap<AssetId, AssetResult> = BTreeMap::new();
@@ -573,8 +572,8 @@ pub fn regenerate_set(project: &Project, set: &AssetSet, opts: &RegenOptions) ->
     };
     let scoped = |id: &AssetId| in_scope.as_ref().is_none_or(|s| s.contains(id));
 
-    // Desired files, in write order: stdlib, curves, functions, materials, Rust crate, manifest, internal textures,
-    // gradient collections.
+    // Desired files, in write order: stdlib, curves, functions, materials, Rust module, manifest, internal
+    // textures, gradient collections (the umbrella crate files are added by `commit`).
     let mut desired: Vec<(PathBuf, Vec<u8>)> = Vec::new();
     let autogen = project.autogen_dir();
     for (name, src) in shader_stdlib::MODULES {
@@ -661,10 +660,10 @@ pub fn regenerate_set(project: &Project, set: &AssetSet, opts: &RegenOptions) ->
             *t = DEFAULT_TEXTURE.to_string();
         }
     }
-    let crate_dir = project.crate_dir();
+    let module_dir = project.material_module_dir();
     let texture_ids = texture_field_ids(set);
-    for (rel, text) in shader_codegen_rust::crate_files(&entries, &modules, project.bevy_dep(), &texture_ids) {
-        desired.push((crate_dir.join(rel), text.into_bytes()));
+    for (rel, text) in shader_codegen_rust::crate_files(&entries, &modules, &texture_ids) {
+        desired.push((module_dir.join(rel), text.into_bytes()));
     }
     let mut manifest = manifest_ron(&manifest_textures, &manifest_materials);
     if let Some(d) = &date {
@@ -711,76 +710,26 @@ pub fn regenerate_set(project: &Project, set: &AssetSet, opts: &RegenOptions) ->
         report.project.push(not_owned(&gradients_dir, "gradient collections"));
     }
 
-    // Compare with disk, refuse to overwrite foreign files (E008), binary ones included. Files in the binary
-    // directories are owned through the directory marker (only desired when it is present).
-    let mut batch = WriteBatch::default();
-    let binary_dirs = [internal, gradients_dir];
-    let desired_paths: BTreeSet<PathBuf> = desired.iter().map(|(p, _)| p.clone()).collect();
-    for (path, bytes) in desired {
-        let blocked = match std::fs::read(&path) {
-            Ok(old) if old == bytes => continue,
-            Ok(old)
-                if !binary_dirs.iter().any(|d| path.starts_with(d))
-                    && !std::str::from_utf8(&old).is_ok_and(has_marker) =>
-            {
-                format!("`{}` has no AUTOGENERATED marker; not overwriting", project.rel(&path))
-            }
-            Ok(_) => {
-                batch.writes.push((path, bytes));
-                continue;
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                batch.writes.push((path, bytes));
-                continue;
-            }
-            // Unreadable (permissions, a directory in the way, …): it may be a foreign file, never replace it.
-            Err(e) => format!("`{}` cannot be read ({e}); not overwriting", project.rel(&path)),
-        };
-        let d = Diagnostic::new(Code::E008, blocked);
-        match results.iter_mut().find(|(id, _)| {
-            [wesl_file(project, id), rust_file(project, id), gradient_png_file(project, id)]
-                .contains(&Some(path.clone()))
-        }) {
-            Some((id, r)) => {
-                r.diagnostics.push(d.in_asset(id.source_rel()));
-                r.ok = false;
-            }
-            None => report.project.push(d),
+    // Files of an asset are attributed to it (E008); the first asset in id order wins.
+    let mut owners: BTreeMap<PathBuf, String> = BTreeMap::new();
+    for id in results.keys() {
+        for f in [wesl_file(project, id), rust_file(project, id), gradient_png_file(project, id)].into_iter().flatten()
+        {
+            owners.entry(f).or_insert_with(|| id.source_rel());
         }
     }
-
-    // Orphans (full regen only): marker files that no source produces any more; in an owned binary directory every
-    // file regen does not produce.
-    let [internal, gradients_dir] = binary_dirs;
-    let owned_dirs: Vec<PathBuf> = [(internal, internal_owned), (gradients_dir, gradients_owned)]
-        .into_iter()
-        .filter(|(_, o)| *o)
-        .map(|(d, _)| d)
-        .collect();
-    let mut roots = vec![autogen, crate_dir];
-    roots.extend(owned_dirs.iter().cloned());
-    if in_scope.is_none() {
-        for root in &roots {
-            for f in walk_files(root) {
-                if desired_paths.contains(&f) || keep.contains(&f) {
-                    continue;
-                }
-                if f.file_name().is_some_and(|n| n.to_string_lossy().contains(".tmp-")) {
-                    continue;
-                }
-                if owned_dirs.contains(root) || std::fs::read_to_string(&f).is_ok_and(|t| has_marker(&t)) {
-                    batch.deletes.push(f);
-                }
-            }
+    let files =
+        desired.into_iter().map(|(path, bytes)| OutFile { owner: owners.get(&path).cloned(), path, bytes }).collect();
+    // Owned roots: orphans are deleted there (full regen only); binary directories only while regen owns them.
+    let mut roots = vec![OutRoot { dir: autogen, binary: false }, OutRoot { dir: module_dir, binary: false }];
+    for (dir, owned) in [(internal, internal_owned), (gradients_dir, gradients_owned)] {
+        if owned {
+            roots.push(OutRoot { dir, binary: true });
         }
     }
-
-    report.changes = batch.changes();
-    if !opts.dry_run && !batch.is_empty() {
-        batch.apply(&roots)?;
-    }
+    let orphan_scan = in_scope.is_none();
     report.assets = results;
-    Ok(report)
+    (report, DomainOutput { domain: MATERIAL, files, keep, roots, orphan_scan })
 }
 
 /// W108 (decision 0022): the preview IR `r` of `asset` generates a different Rust module than the asset without the
@@ -809,12 +758,6 @@ fn preview_changes_rust(
             )
         },
     )
-}
-
-fn insert_date(text: &mut String, date: &str) {
-    if let Some(pos) = text.find('\n') {
-        text.insert_str(pos + 1, &format!("// generated: {date}\n"));
-    }
 }
 
 /// Textures of the baked manifest (design §3.2.1): every Texture asset the game may load (no error: E011 / E012 /
@@ -873,48 +816,4 @@ fn entry_from_old(id: &AssetId, old: &str) -> MaterialEntry {
         material: format!("{base}Material"),
         params: old.contains(&format!("pub struct {params}")).then_some(params),
     }
-}
-
-/// Whether regen may write a directory of binary files (`internal/`, `gradients/`): it carries the marker file, or
-/// it is an empty directory, or it does not exist. Anything else (a regular file in the way, an unreadable directory)
-/// is not owned (E008).
-fn owned_binary_dir(dir: &std::path::Path) -> bool {
-    let not_found = |e: &std::io::Error| e.kind() == std::io::ErrorKind::NotFound;
-    match std::fs::read(dir.join(INTERNAL_MARKER)) {
-        Ok(b) => std::str::from_utf8(&b).is_ok_and(has_marker),
-        Err(e) if not_found(&e) => match std::fs::read_dir(dir) {
-            Ok(mut entries) => entries.next().is_none(),
-            Err(e) => not_found(&e),
-        },
-        Err(_) => false,
-    }
-}
-
-/// Regular files below `root` (the orphan scan). Symlinks are skipped entirely: regen only ever writes regular files,
-/// so a link is never its own orphan, and following a linked directory could loop forever or delete files outside
-/// the project (in an owned binary directory every unproduced file is deleted without a marker check).
-fn walk_files(root: &std::path::Path) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(d) = stack.pop() {
-        let Ok(rd) = std::fs::read_dir(&d) else { continue };
-        for e in rd.flatten() {
-            let Ok(ty) = e.file_type() else { continue };
-            if ty.is_symlink() {
-                continue;
-            }
-            let p = e.path();
-            if ty.is_dir() {
-                // Never descend into build output of the generated crate.
-                if p.file_name().is_some_and(|n| n == "target") {
-                    continue;
-                }
-                stack.push(p);
-            } else {
-                out.push(p);
-            }
-        }
-    }
-    out.sort();
-    out
 }

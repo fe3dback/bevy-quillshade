@@ -117,23 +117,6 @@ const RESERVED: &[&str] = &[
 /// Prefixes reserved for generated identifiers.
 const RESERVED_PREFIXES: &[&str] = &["n_", "b_", "sg_", "_"];
 
-/// Shape check only: `[a-z][a-z0-9_]*`, no `__`, no trailing `_`. Keywords are fine because generated code
-/// prefixes every user name (decision 0020). Returns a reason on failure.
-pub fn check_ident(name: &str) -> Result<(), String> {
-    let mut chars = name.chars();
-    match chars.next() {
-        Some(c) if c.is_ascii_lowercase() => {}
-        _ => return Err(format!("`{name}` must start with a lowercase latin letter")),
-    }
-    if !chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_') {
-        return Err(format!("`{name}` must match [a-z][a-z0-9_]* (snake_case)"));
-    }
-    if name.contains("__") || name.ends_with('_') {
-        return Err(format!("`{name}` must not contain `__` or end with `_`"));
-    }
-    Ok(())
-}
-
 /// `check_ident` plus keyword/reserved-name and reserved-prefix rules. For names embedded verbatim in user
 /// WGSL (custom-node inputs), which no prefix protects.
 pub fn check_code_ident(name: &str) -> Result<(), String> {
@@ -177,26 +160,7 @@ pub fn curve_file_ident(name: &str) -> String {
     format!("crv_{name}")
 }
 
-/// Converts a free-form display name ("Base Tint", "albedoMap") into snake_case.
-pub fn to_snake_case(name: &str) -> String {
-    let mut out = String::new();
-    let mut prev_lower = false;
-    for c in name.chars() {
-        if c.is_ascii_alphanumeric() {
-            if c.is_ascii_uppercase() && prev_lower && !out.ends_with('_') {
-                out.push('_');
-            }
-            out.push(c.to_ascii_lowercase());
-            prev_lower = c.is_ascii_lowercase() || c.is_ascii_digit();
-        } else {
-            if !out.is_empty() && !out.ends_with('_') {
-                out.push('_');
-            }
-            prev_lower = false;
-        }
-    }
-    out.trim_matches('_').to_string()
-}
+pub use project_core::ident::{check_ident, to_snake_case};
 
 /// `rock_wet` → `RockWet`.
 pub fn to_pascal_case(name: &str) -> String {

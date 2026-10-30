@@ -742,7 +742,7 @@ pub fn keyword_names() -> Asset {
     g.finish()
 }
 
-/// Global constant table fixtures: (`shaders/`-relative path, table).
+/// Global constant table fixtures: (`quillshade/material/`-relative path, table).
 pub fn const_tables() -> Vec<(&'static str, GlobalConsts)> {
     let c = GlobalConst::new;
     vec![(
@@ -761,7 +761,7 @@ pub fn const_tables() -> Vec<(&'static str, GlobalConsts)> {
     )]
 }
 
-/// Curve fixtures: (`shaders/`-relative path, curve).
+/// Curve fixtures: (`quillshade/material/`-relative path, curve).
 pub fn curves() -> Vec<(&'static str, Curve)> {
     vec![
         ("common/pulse", Curve::new("pulse", vec![(0.0, 0.0), (0.25, 1.0), (0.5, 0.3), (0.75, 0.1), (1.0, 0.0)])),
@@ -769,8 +769,8 @@ pub fn curves() -> Vec<(&'static str, Curve)> {
     ]
 }
 
-/// Gradient collection fixtures (decision 0037): (`shaders/`-relative path, collection). Slot ids come from a fixed
-/// sequence, so `make_sample` is reproducible. Colors are given as sRGB hex and stored linear.
+/// Gradient collection fixtures (decision 0037): (`quillshade/material/`-relative path, collection). Slot ids come
+/// from a fixed sequence, so `make_sample` is reproducible. Colors are given as sRGB hex and stored linear.
 pub fn gradients() -> Vec<(&'static str, GradientCollection)> {
     let rgb = |hex: u32| {
         let c = |shift: u32| srgb_to_linear(((hex >> shift) & 0xff) as f32 / 255.0);
@@ -792,7 +792,7 @@ pub fn gradients() -> Vec<(&'static str, GradientCollection)> {
     vec![("common/terrain", terrain)]
 }
 
-/// Texture asset fixtures (design §1.1): (`shaders/`-relative path, asset). The images are in
+/// Texture asset fixtures (design §1.1): (`quillshade/material/`-relative path, asset). The images are in
 /// `examples/sample_game/assets/textures/`; `rock_albedo` and `water_normal` are `.ktx2` (made from the `.png` next to
 /// them by the `png_to_ktx2` example, design §4.4), the rest `.png`, so the sample exercises both formats.
 pub fn textures() -> Vec<(&'static str, TextureAsset)> {
@@ -845,7 +845,7 @@ pub fn save_all(project: &Project) -> Result<(), OpError> {
     Ok(())
 }
 
-/// All fixture assets: (`shaders/`-relative path, is_function, asset).
+/// All fixture assets: (`quillshade/material/`-relative path, is_function, asset).
 pub fn all() -> Vec<(&'static str, bool, Asset)> {
     vec![
         ("common/wet_mask", true, wet_mask()),

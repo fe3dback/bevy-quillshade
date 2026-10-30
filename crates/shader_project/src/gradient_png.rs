@@ -1,6 +1,6 @@
 //! Baked texture of a gradient collection (gradient design §5): a [`SAMPLES`]×[`SLOTS`] RGBA8 PNG of
 //! [`GradientCollection::bake_rgba8`] (sRGB-encoded bytes, row = slot), written to
-//! `assets/shaders/gradients/<collection>.png`.
+//! `assets/quillshade/material/gradients/<collection>.png`.
 
 use shader_graph_core::gradient::{GradientCollection, SAMPLES, SLOTS};
 use shader_graph_core::texture::{FilterMode, SamplerSettings, TextureSettings};

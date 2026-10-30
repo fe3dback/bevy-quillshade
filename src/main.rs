@@ -4,12 +4,23 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use shader_codegen_wesl::check::BevySources;
+use editor_core::domain::EditorDomain;
+use project_core::DomainId;
+use project_core::regen::{DomainBackend, RunReport, run};
+use shader_project::Project;
 use shader_project::writer::Change;
-use shader_project::{Project, RegenOptions, RegenReport, regenerate};
+
+/// The domains, one line each (design §6.1): the GUI and the CLI share this list.
+fn domains() -> Vec<Box<dyn EditorDomain>> {
+    vec![Box::new(material_domain::MaterialDomain), Box::new(light_domain::LightDomain)]
+}
 
 #[derive(Parser)]
-#[command(name = "shader-editor", version = shader_editor_app::EDITOR_VERSION, about = "Node-based shader editor for Bevy 0.20")]
+#[command(
+    name = "shader-editor",
+    version = editor_core::EDITOR_VERSION,
+    about = "Node-based shader editor for Bevy 0.20"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
@@ -25,9 +36,12 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Regenerate all WESL and the `crates/shaders` crate.
+    /// Regenerate the domains' output and the `crates/quillshade` crate.
     Regen {
         project: PathBuf,
+        /// Only this domain (repeatable; default: all). The umbrella crate files are always written.
+        #[arg(long = "domain", value_name = "ID")]
+        domains: Vec<String>,
         /// Also compile generated WESL against Bevy sources from the cargo registry.
         #[arg(long)]
         compile: bool,
@@ -35,15 +49,23 @@ enum Command {
     /// Validate without writing.
     Check {
         project: PathBuf,
+        /// Only this domain (repeatable; default: all).
+        #[arg(long = "domain", value_name = "ID")]
+        domains: Vec<String>,
         #[arg(long)]
         compile: bool,
     },
     /// Show what `regen` would change.
-    Diff { project: PathBuf },
+    Diff {
+        project: PathBuf,
+        /// Only this domain (repeatable; default: all).
+        #[arg(long = "domain", value_name = "ID")]
+        domains: Vec<String>,
+    },
 }
 
-fn print_report(project: &Project, report: &RegenReport) {
-    for d in report.diagnostics() {
+fn print_report(project: &Project, report: &RunReport) {
+    for d in &report.diagnostics {
         eprintln!("{d}");
     }
     for c in &report.changes {
@@ -56,22 +78,38 @@ fn print_report(project: &Project, report: &RegenReport) {
     }
 }
 
-fn bevy_sources(compile: bool) -> Option<BevySources> {
-    if !compile {
-        return None;
-    }
-    let s = BevySources::discover();
-    if s.is_none() {
-        eprintln!("warning: Bevy 0.20 WESL sources not found in the cargo registry; skipping compile check");
-    }
-    s
+/// The selected domains (design §10); an unknown id is an error naming the known ones, sorted. The editor's project
+/// domain is not one of them (design §14.2).
+fn select_domains(backends: &[&dyn DomainBackend], names: &[String]) -> Result<Vec<DomainId>, String> {
+    let ids: Vec<DomainId> = backends.iter().map(|b| b.id()).filter(|id| *id != DomainId::PROJECT).collect();
+    names
+        .iter()
+        .map(|n| {
+            ids.iter().copied().find(|id| id.as_str() == n).ok_or_else(|| {
+                let mut known: Vec<&str> = ids.iter().map(|id| id.as_str()).collect();
+                known.sort_unstable();
+                let known = known.join(", ");
+                format!("unknown domain `{n}` (known: {known})")
+            })
+        })
+        .collect()
 }
 
 fn headless(cmd: Command) -> ExitCode {
-    let (path, dry_run, compile) = match &cmd {
-        Command::Regen { project, compile } => (project, false, *compile),
-        Command::Check { project, compile } => (project, true, *compile),
-        Command::Diff { project } => (project, true, false),
+    let (path, domains, dry_run, compile) = match &cmd {
+        Command::Regen { project, domains, compile } => (project, domains, false, *compile),
+        Command::Check { project, domains, compile } => (project, domains, true, *compile),
+        Command::Diff { project, domains } => (project, domains, true, false),
+    };
+    // Each domain's generator; a `--compile` plan finds the Bevy sources itself.
+    let owned: Vec<Box<dyn DomainBackend>> = self::domains().iter().filter_map(|d| d.backend()).collect();
+    let backends: Vec<&dyn DomainBackend> = owned.iter().map(|b| b.as_ref()).collect();
+    let only = match select_domains(&backends, domains) {
+        Ok(only) => only,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::from(2);
+        }
     };
     let project = match Project::open(path) {
         Ok(p) => p,
@@ -80,9 +118,7 @@ fn headless(cmd: Command) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let bevy = bevy_sources(compile);
-    let opts = RegenOptions { dry_run, compile_check: bevy.as_ref(), ..Default::default() };
-    let report = match regenerate(&project, &opts) {
+    let report = match run(&project, &backends, &only, compile, dry_run) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("error: write failed: {e}");
@@ -91,7 +127,7 @@ fn headless(cmd: Command) -> ExitCode {
     };
     match cmd {
         Command::Check { .. } => {
-            for d in report.diagnostics() {
+            for d in &report.diagnostics {
                 eprintln!("{d}");
             }
         }
@@ -105,7 +141,7 @@ fn main() -> ExitCode {
     match cli.command {
         Some(cmd) => headless(cmd),
         None => {
-            shader_editor_app::run(cli.project, cli.width.zip(cli.height));
+            editor_core::run(domains(), cli.project, cli.width.zip(cli.height));
             ExitCode::SUCCESS
         }
     }

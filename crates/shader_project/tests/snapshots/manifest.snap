@@ -6,7 +6,7 @@ BakedManifest(
   version: 1,
   textures: {
     "@gradients/common/terrain": (
-      path: "shaders/gradients/common/terrain.png",
+      path: "quillshade/material/gradients/common/terrain.png",
       settings: (
         sampler: Some((
           mag_filter: Linear,
@@ -15,7 +15,7 @@ BakedManifest(
       ),
     ),
     "@internal/default": (
-      path: "shaders/internal/default.png",
+      path: "quillshade/material/internal/default.png",
       settings: (
         sampler: Some((
           address_mode_u: Repeat,

@@ -11,10 +11,10 @@ use bevy::asset::io::{
 use bevy::asset::{AssetLoadFailedEvent, LoadState};
 use bevy::image::{CompressedImageFormats, ImageLoader, ImageSampler};
 use bevy::prelude::*;
-use shaders::baked::{
+use quillshade::material::baked::{
     AddressModeDef, BakedManifest, FilterModeDef, MANIFEST_PATH, MaterialValues, ParamValue, SamplerDef, TextureDef,
 };
-use shaders::{
+use quillshade::material::{
     BakedMaterials, BakedMaterialsLoader, BakedMaterialsProgress, BakedMaterialsReady, BakedTextures, CoordsMaterial,
     FlagMaterial, HologramMaterial, RockWetMaterial, TexLayersMaterial, WaterMaterial,
 };
@@ -121,7 +121,7 @@ fn app_with(start: Start) -> App {
         MinimalPlugins,
         AssetPlugin { file_path: "assets".into(), watch_for_changes_override: Some(false), ..default() },
         ImagePlugin::default(),
-        shaders::BakedPlugin,
+        quillshade::material::BakedPlugin,
     ));
     // Without the render plugin nobody registers the image loader (it only preregisters it).
     app.register_asset_loader(ImageLoader::new(CompressedImageFormats::NONE));
@@ -162,7 +162,7 @@ fn progress_reaches_ready() {
     let seen = world.resource::<Seen>();
     assert_eq!(seen.ready, 1, "BakedMaterialsReady once; progress: {:?}", seen.progress);
     let last = *seen.progress.last().expect("progress messages");
-    let compiled = BakedManifest::parse(shaders::COMPILED_MANIFEST).unwrap();
+    let compiled = BakedManifest::parse(quillshade::material::COMPILED_MANIFEST).unwrap();
     assert_eq!(last.total as usize, compiled.textures.len());
     assert_eq!(seen.load_count, Some(last.total), "load() returns the number of textures");
     assert_eq!(last, BakedMaterialsProgress { loaded: last.total, failed: 0, total: last.total });
@@ -198,7 +198,7 @@ fn load_fills_textures_immediately() {
     let mut app = app(None);
     app.update();
     let tex = app.world().resource::<Seen>().startup_textures.clone().expect("captured in Startup");
-    let compiled = BakedManifest::parse(shaders::COMPILED_MANIFEST).unwrap();
+    let compiled = BakedManifest::parse(quillshade::material::COMPILED_MANIFEST).unwrap();
     assert!(!compiled.textures.is_empty());
     for id in compiled.textures.keys() {
         let h = tex.get(id).unwrap_or_else(|| panic!("no BakedTextures field for `{id}`"));
@@ -212,8 +212,8 @@ fn load_fills_textures_immediately() {
 #[test]
 fn texture_without_manifest_entry_gets_default() {
     let entry = "    \"textures/sprite\": (\n      path: \"textures/sprite.png\",\n    ),\n";
-    let manifest = shaders::COMPILED_MANIFEST.replace(entry, "");
-    assert_ne!(manifest, shaders::COMPILED_MANIFEST);
+    let manifest = quillshade::material::COMPILED_MANIFEST.replace(entry, "");
+    assert_ne!(manifest, quillshade::material::COMPILED_MANIFEST);
     let total = BakedManifest::parse(&manifest).unwrap().textures.len() as u32;
     let mut app = app(Some(manifest));
     run(&mut app);
@@ -228,8 +228,9 @@ fn texture_without_manifest_entry_gets_default() {
 /// Review Focus 4: a texture that fails to load is counted, its materials use `@internal/default`, Ready still comes.
 #[test]
 fn missing_texture_counts_failed() {
-    let manifest = shaders::COMPILED_MANIFEST.replace("\"textures/atlas.png\"", "\"textures/missing.png\"");
-    assert_ne!(manifest, shaders::COMPILED_MANIFEST);
+    let manifest =
+        quillshade::material::COMPILED_MANIFEST.replace("\"textures/atlas.png\"", "\"textures/missing.png\"");
+    assert_ne!(manifest, quillshade::material::COMPILED_MANIFEST);
     let mut app = app(Some(manifest));
     run(&mut app);
     let world = app.world();
@@ -292,7 +293,7 @@ fn rock(world: &World) -> RockWetMaterial {
 }
 
 fn compiled() -> BakedManifest {
-    BakedManifest::parse(shaders::COMPILED_MANIFEST).unwrap()
+    BakedManifest::parse(quillshade::material::COMPILED_MANIFEST).unwrap()
 }
 
 fn param(m: &BakedManifest, material: &str, key: &str) -> ParamValue {
@@ -528,8 +529,8 @@ fn hot_reload_garbage_ron_keeps_state() {
     assert_eq!(rock(app.world()).extension.params.inp_wetness, 0.3, "compiled values");
 
     const WET_09: &str = "\"inp_wetness\": Float(0.9)";
-    let edited = shaders::COMPILED_MANIFEST.replace("\"inp_wetness\": Float(0.3)", WET_09);
-    assert_ne!(edited, shaders::COMPILED_MANIFEST);
+    let edited = quillshade::material::COMPILED_MANIFEST.replace("\"inp_wetness\": Float(0.3)", WET_09);
+    assert_ne!(edited, quillshade::material::COMPILED_MANIFEST);
     text.set(&edited);
     app.world().resource::<AssetServer>().reload(MANIFEST_PATH);
     let applied = run_until(&mut app, 600, |w| rock(w).extension.params.inp_wetness == 0.9);

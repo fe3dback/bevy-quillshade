@@ -1,0 +1,6 @@
+Environment(
+  format_version: 1,
+  cubemap: Some("sky"),
+  skybox_brightness: 1000.0,
+  env_intensity: 1.0,
+)

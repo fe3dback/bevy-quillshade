@@ -1,5 +1,5 @@
-//! Gradient collections (`shaders/**/*.gradients.ron`, gradient design §3–§5): a fixed array of [`SLOTS`] color
-//! gradients baked into one `SLOTS`×`SAMPLES` RGBA8 texture (row = slot position) and sampled by the
+//! Gradient collections (`quillshade/material/**/*.gradients.ron`, gradient design §3–§5): a fixed array of [`SLOTS`]
+//! color gradients baked into one `SLOTS`×`SAMPLES` RGBA8 texture (row = slot position) and sampled by the
 //! `Sample Gradient` node. Not a graph. Nodes reference a slot by its [`Slot::id`], never by its position, so slots
 //! can be reordered without touching graphs. [`Slot::sample`] is the reference math for baking and every editor
 //! preview.

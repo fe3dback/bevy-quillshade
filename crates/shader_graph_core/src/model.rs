@@ -327,15 +327,7 @@ impl Preview {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
-pub enum LoadError {
-    #[error("parse error: {0}")]
-    Parse(String),
-    #[error("format_version {found} is newer than supported {supported}; update the editor")]
-    TooNew { found: u32, supported: u32 },
-    #[error("unsupported format_version {0}")]
-    Unsupported(u32),
-}
+pub use project_core::LoadError;
 
 #[derive(Deserialize)]
 #[serde(rename = "Asset")]

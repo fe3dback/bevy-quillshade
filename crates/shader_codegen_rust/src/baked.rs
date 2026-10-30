@@ -1,4 +1,4 @@
-//! Generated `crates/shaders/src/baked/` (design §3.1): the `BakedMaterials` / `BakedTextures` structs
+//! Generated `crates/quillshade/src/material/baked/` (design §3.1): the `BakedMaterials` / `BakedTextures` structs
 //! (`materials.rs`, `textures.rs`) and the static runtime code (`mod.rs`, from `templates/baked_mod.rs`).
 //!
 //! Field names (design §3.1): the plain folder / material / texture name; a Rust keyword gets the decision-0020
@@ -272,7 +272,7 @@ pub fn materials_rs(entries: &[MaterialEntry]) -> String {
         .iter()
         .map(|e| {
             let module = paths::material_components(&e.path).join("::");
-            (e.path.as_str(), format!("crate::materials::{module}::{}", e.material))
+            (e.path.as_str(), crate::module_path(&format!("materials::{module}::{}", e.material)))
         })
         .collect();
     let tree = material_tree(entries.iter().map(|e| e.path.as_str()));
@@ -321,10 +321,10 @@ pub fn materials_rs(entries: &[MaterialEntry]) -> String {
     o.push_str("#[derive(Resource, Clone, Debug)]\n");
     o.push_str("pub struct BakedMaterials {\n");
     o.push_str(&generator.fields(&tree));
+    o.push_str("    /// Every material by asset id (`env/rock_wet`: its path under `quillshade/material/` without\n");
     o.push_str(
-        "    /// Every material by asset id (`env/rock_wet`: its path under `shaders/` without `.material.ron`), for\n",
+        "    /// `.material.ron`), for game data that names materials; [`BakedMaterials::get`] gives the typed handle.\n",
     );
-    o.push_str("    /// game data that names materials; [`BakedMaterials::get`] gives the typed handle.\n");
     o.push_str(&format!("    pub {BY_PATH_FIELD}: HashMap<String, UntypedHandle>,\n"));
     o.push_str("}\n");
     o.push('\n');
@@ -379,10 +379,10 @@ fn root_reserve(tree: &Group, entries: &[MaterialEntry]) -> String {
     o
 }
 
-/// Rust path of the material asset type of `id` (`crate::materials::dir_env::mat_rock_wet::RockWetMaterial`).
+/// Rust path of the material asset type of `id` (`crate::material::materials::dir_env::mat_rock_wet::RockWetMaterial`).
 fn material_type(entries: &[MaterialEntry], id: &str) -> String {
     let e = entries.iter().find(|e| e.path == id).expect("material entry");
-    format!("crate::materials::{}::{}", paths::material_components(&e.path).join("::"), e.material)
+    crate::module_path(&format!("materials::{}::{}", paths::material_components(&e.path).join("::"), e.material))
 }
 
 /// Per-material functions of `BakedMaterials` (design §3.3): `init_assets` (asset registration without render
@@ -391,7 +391,9 @@ fn dispatch(entries: &[MaterialEntry]) -> String {
     let paths = material_field_paths(entries.iter().map(|e| e.path.as_str()));
     let mut sorted: Vec<&MaterialEntry> = entries.iter().collect();
     sorted.sort_by(|a, b| a.path.cmp(&b.path));
-    let module = |e: &MaterialEntry| format!("crate::materials::{}", paths::material_components(&e.path).join("::"));
+    let module = |e: &MaterialEntry| {
+        crate::module_path(&format!("materials::{}", paths::material_components(&e.path).join("::")))
+    };
     let field = |e: &MaterialEntry| paths[&e.path].join(".");
     let empty = sorted.is_empty();
     let mut o = String::new();
@@ -512,12 +514,11 @@ pub fn textures_rs(ids: &[String]) -> String {
     o.push_str("#[derive(Resource, Clone, Debug, Default)]\n");
     o.push_str("pub struct BakedTextures {\n");
     o.push_str(&generator.fields(&tree));
-    o.push_str(
-        "    /// Every texture by id (`textures/rock_albedo`: its path under `shaders/` without `.texture.ron`;\n",
-    );
-    o.push_str("    /// `@internal/default`; `@gradients/common/terrain`: a baked gradient collection), for game data that names\n");
-    o.push_str("    /// textures. Filled by `BakedMaterialsLoader::load` and kept in sync with the fields on hot reload; also holds\n");
-    o.push_str("    /// a texture created in the editor after the build that a material uses (it has no field until a rebuild).\n");
+    o.push_str("    /// Every texture by id (`textures/rock_albedo`: its path under `quillshade/material/` without\n");
+    o.push_str("    /// `.texture.ron`; `@internal/default`; `@gradients/common/terrain`: a baked gradient collection), for game\n");
+    o.push_str("    /// data that names textures. Filled by `BakedMaterialsLoader::load` and kept in sync with the fields on hot\n");
+    o.push_str("    /// reload; also holds a texture created in the editor after the build that a material uses (it has no field\n");
+    o.push_str("    /// until a rebuild).\n");
     o.push_str(&format!("    pub {BY_PATH_FIELD}: HashMap<String, Handle<Image>>,\n"));
     o.push_str("}\n");
     o.push('\n');

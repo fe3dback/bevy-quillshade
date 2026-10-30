@@ -1,7 +1,8 @@
-//! Editor asset discovery and loading (`shaders/**/*.{material,function,curve,consts,texture,gradients}.ron`).
+//! Editor asset discovery and loading
+//! (`quillshade/material/**/*.{material,function,curve,consts,texture,gradients}.ron`).
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use shader_graph_core::consts::GlobalConsts;
 use shader_graph_core::curve::Curve;
@@ -12,7 +13,7 @@ use shader_graph_core::texture::TextureAsset;
 use shader_graph_core::{Code, Diagnostic, Registry};
 use shader_stdlib::user::UserNode;
 
-use crate::layout::{Project, USER_NODES_DIR};
+use crate::layout::{MATERIAL_DIR, MaterialLayout, Project, USER_NODES_DIR};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum AssetType {
@@ -58,6 +59,15 @@ impl AssetType {
     }
 }
 
+const ALL_TYPES: [AssetType; 6] = [
+    AssetType::Material,
+    AssetType::Function,
+    AssetType::Curve,
+    AssetType::Consts,
+    AssetType::Texture,
+    AssetType::Gradients,
+];
+
 /// Asset identity: type + path without suffix (`env/rock_wet`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct AssetId {
@@ -74,9 +84,23 @@ impl AssetId {
         self.path.rsplit('/').next().unwrap_or(&self.path)
     }
 
-    /// `shaders/{path}.{suffix}.ron` relative to the project root.
+    /// `quillshade/material/{path}.{suffix}.ron` relative to the project root.
     pub fn source_rel(&self) -> String {
-        format!("shaders/{}.{}.ron", self.path, self.ty.suffix())
+        format!("{MATERIAL_DIR}/{}.{}.ron", self.path, self.ty.suffix())
+    }
+
+    /// The domain-neutral identity of this asset.
+    pub fn to_ref(&self) -> project_core::AssetRef {
+        project_core::AssetRef { domain: crate::layout::MATERIAL, path: self.path.clone(), suffix: self.ty.suffix() }
+    }
+
+    /// `None` for a ref of another domain or of an unknown suffix.
+    pub fn from_ref(r: &project_core::AssetRef) -> Option<AssetId> {
+        if r.domain != crate::layout::MATERIAL {
+            return None;
+        }
+        let ty = ALL_TYPES.into_iter().find(|ty| ty.suffix() == r.suffix)?;
+        Some(AssetId::new(ty, r.path.clone()))
     }
 
     pub fn file(&self, project: &Project) -> PathBuf {
@@ -90,7 +114,7 @@ impl std::fmt::Display for AssetId {
     }
 }
 
-/// Parses `shaders/`-relative file path into an asset id.
+/// Parses a `quillshade/material/`-relative file path into an asset id.
 pub fn id_from_rel(rel: &str) -> Option<AssetId> {
     let rel = rel.replace('\\', "/");
     [
@@ -105,14 +129,15 @@ pub fn id_from_rel(rel: &str) -> Option<AssetId> {
     .find_map(|ty| rel.strip_suffix(&format!(".{}.ron", ty.suffix())).map(|p| AssetId::new(ty, p)))
 }
 
-/// Inverse of [`AssetId::source_rel`]: `shaders/env/rock_wet.material.ron` (relative to the project root).
+/// Inverse of [`AssetId::source_rel`]: `quillshade/material/env/rock_wet.material.ron` (relative to the project
+/// root).
 pub fn id_from_source_rel(rel: &str) -> Option<AssetId> {
-    id_from_rel(rel.replace('\\', "/").strip_prefix("shaders/")?)
+    id_from_rel(rel.replace('\\', "/").strip_prefix(MATERIAL_DIR)?.strip_prefix('/')?)
 }
 
-/// Lists all editor assets under `shaders/` (hidden directories skipped), sorted.
+/// Lists all editor assets under `quillshade/material/` (hidden directories skipped), sorted.
 pub fn scan(project: &Project) -> Vec<AssetId> {
-    let root = project.shaders_dir();
+    let root = project.material_dir();
     let mut out = Vec::new();
     let mut stack = vec![root.clone()];
     while let Some(dir) = stack.pop() {
@@ -129,27 +154,6 @@ pub fn scan(project: &Project) -> Vec<AssetId> {
                 && let Some(id) = id_from_rel(&rel.to_string_lossy())
             {
                 out.push(id);
-            }
-        }
-    }
-    out.sort();
-    out
-}
-
-/// Lists sub-directories of `shaders/` (relative, sorted), hidden ones skipped.
-pub fn scan_dirs(project: &Project) -> Vec<String> {
-    let root = project.shaders_dir();
-    let mut out = Vec::new();
-    let mut stack = vec![root.clone()];
-    while let Some(dir) = stack.pop() {
-        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
-        for e in rd.flatten() {
-            let p = e.path();
-            if p.is_dir() && !e.file_name().to_string_lossy().starts_with('.') {
-                if let Ok(rel) = p.strip_prefix(&root) {
-                    out.push(rel.to_string_lossy().replace('\\', "/"));
-                }
-                stack.push(p);
             }
         }
     }
@@ -201,8 +205,7 @@ pub fn load_texture(project: &Project, id: &AssetId) -> Result<TextureAsset, Str
     if id.ty != AssetType::Texture {
         return Err(format!("{} is not a texture", id.source_rel()));
     }
-    let text = std::fs::read_to_string(id.file(project)).map_err(|e| e.to_string())?;
-    TextureAsset::from_ron(&text)
+    shader_graph_core::texture::load(&id.file(project))
 }
 
 /// Loads a gradient collection file (its name is the file name). Structural problems (slot count, ids, stop count)
@@ -230,9 +233,9 @@ pub fn validate_path(id: &AssetId) -> Vec<Diagnostic> {
     out
 }
 
-/// Registers user nodes from `shaders/.nodes/*.ron`; returns load problems.
+/// Registers user nodes from `quillshade/material/.nodes/*.ron`; returns load problems.
 pub fn load_user_nodes(project: &Project, registry: &mut Registry) -> Vec<Diagnostic> {
-    let dir = project.shaders_dir().join(USER_NODES_DIR);
+    let dir = project.material_dir().join(USER_NODES_DIR);
     let mut diags = Vec::new();
     let Ok(rd) = std::fs::read_dir(&dir) else { return diags };
     let mut files: Vec<PathBuf> =
@@ -319,7 +322,30 @@ impl AssetSet {
     }
 }
 
-/// Relative path helper for `notify` events.
-pub fn rel_in_shaders(project: &Project, p: &Path) -> Option<String> {
-    p.strip_prefix(project.shaders_dir()).ok().map(|r| r.to_string_lossy().replace('\\', "/"))
+#[cfg(test)]
+mod ref_tests {
+    use super::*;
+
+    #[test]
+    fn asset_id_ref_round_trip() {
+        for ty in [
+            AssetType::Consts,
+            AssetType::Curve,
+            AssetType::Function,
+            AssetType::Gradients,
+            AssetType::Material,
+            AssetType::Texture,
+        ] {
+            let id = AssetId::new(ty, "a/b");
+            let r = id.to_ref();
+            assert_eq!(r.source_rel(), id.source_rel());
+            assert_eq!(AssetId::from_ref(&r), Some(id));
+        }
+        let other = project_core::AssetRef {
+            domain: project_core::DomainId::new("light"),
+            path: "a".into(),
+            suffix: "material",
+        };
+        assert_eq!(AssetId::from_ref(&other), None);
+    }
 }

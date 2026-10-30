@@ -75,11 +75,23 @@ cargo build --release --no-default-features
 ```text
 my_game/
   Cargo.toml                 # yours: the editor never edits it
-  shaders/                   # your graphs: *.material.ron, *.function.ron, *.texture.ron, ...
-  assets/shaders/autogen/    # generated WESL + baked.ron (do not edit)
-  assets/shaders/internal/   # built-in textures (generated)
-  crates/shaders/            # generated Rust crate (do not edit)
+  quillshade/
+    project.ron              # optional: which domains are enabled
+    material/                # your graphs: *.material.ron, *.function.ron, *.texture.ron, ...
+    light/                   # environments and cube maps: *.environment.ron, *.texture.ron
+  assets/quillshade/material/autogen/    # generated WESL + baked.ron (do not edit)
+  assets/quillshade/material/internal/   # built-in textures (generated)
+  crates/quillshade/         # generated Rust crate, one module per domain (do not edit)
 ```
+
+Sources live in `quillshade/<domain>/` (`material`, `light`); `quillshade/project.ron` can switch a domain off
+(`domains: { "material": (enabled: false) }`, a missing entry means enabled). Without the file every default applies;
+a `project.ron` that does not parse is an error — the CLI exits with code 2 and the editor refuses to open the project,
+naming the file — rather than being replaced by defaults. The editor re-reads the file when it changes on disk.
+In the editor, File → Project Settings... (or the Project domain tab at the top, next to the main menu) edits it: the
+header date and each domain's "Used in game". Saving writes the file and rewrites `crates/quillshade/Cargo.toml` and
+`src/lib.rs`; an outside edit reloads a clean Project Settings tab and asks Keep mine / Reload for one with unsaved
+changes.
 
 ### 2. Cargo.toml
 
@@ -87,23 +99,23 @@ Add the generated crate to the game:
 
 ```toml
 [workspace]
-members = ["crates/shaders"]
+members = ["crates/quillshade"]
 
 [dependencies]
 bevy = { version = "0.20", features = ["file_watcher"] }   # file_watcher: hot reload
-shaders = { path = "crates/shaders" }
+quillshade = { path = "crates/quillshade" }
 ```
 
 ### 3. Plugin
 
-Add `ShadersPlugin` after `DefaultPlugins`:
+Add `QuillshadePlugin` after `DefaultPlugins`:
 
 ```rust
 use bevy::prelude::*;
 
 fn main() {
     App::new()
-        .add_plugins((DefaultPlugins, shaders::ShadersPlugin))
+        .add_plugins((DefaultPlugins, quillshade::QuillshadePlugin))
         .add_systems(Startup, spawn)
         .run();
 }
@@ -111,10 +123,10 @@ fn main() {
 
 ### 4. Spawn
 
-Every material is a field of `BakedMaterials`, by its path under `shaders/`:
+Every material is a field of `BakedMaterials`, by its path under `quillshade/material/`:
 
 ```rust
-use shaders::BakedMaterials;
+use quillshade::material::BakedMaterials;
 
 fn spawn(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, baked: Res<BakedMaterials>) {
     // Pbr3d needs tangents for a Normal input.
@@ -158,7 +170,8 @@ regenerates WESL shaders and a typed Rust crate that the game hot-reloads.
 - **Live validation**: errors and warnings are pinned to their node and pin, and an error blocks only its own asset.
 - **Readable output**: view the generated WESL and Rust right in the editor. The game gets typed material structs and
   baked material and texture handles, and hot-reloads both the shaders and the baked values.
-- **Headless CLI**: `regen`, `check` and `diff` for CI.
+- **Headless CLI**: `regen`, `check` and `diff` for CI; `--domain <id>` (`material`, `light`; repeatable) limits a
+  run to those domains (default: all), e.g. `shader-editor check my_game --domain light`.
 
 <table>
   <tr>
@@ -188,7 +201,42 @@ Set up the whole lighting environment from one editor: HDR environment map, skyb
 the settings are stored as a single preset, and the game can switch between presets at runtime with a smooth
 transition.
 
+What is there already: `quillshade/light/` holds environments (`*.environment.ron`: a cube map, the skybox brightness
+and the environment light intensity) and their cube maps as Texture assets (`*.texture.ron`, KTX2 cube maps only).
+`regen` / `check` validate them with `L`-prefixed codes (`LE001` unknown cube map, `LW101` no cube map, `LE009`
+unreadable file, and the Texture asset rules: `LE011` one image shared by several assets, `LE012` bad path, `LE013` bad
+sampler, `LE014` not a cube map, `LW109` image missing) and generate `crates/quillshade/src/light/mod.rs`:
+`QuillshadeLightInternalPlugin` (empty for now) and `ENVIRONMENTS`, the paths of the environments without errors
+(`quillshade::light::ENVIRONMENTS`, e.g. `&["day"]`; `QuillshadePlugin` adds `light::QuillshadeLightInternalPlugin`
+while Light is enabled). In the editor (the Light domain tab in the mainbar) the Assets menu has New Environment... and
+New Texture...; an environment tab is a form (the cube map picked among the Light Texture assets, the two numbers, undo
+/ redo, Ctrl+S saves and regenerates), a Light Texture tab is the texture editor without presets, previewing the cube
+map's first face, and a `.ktx2` game file's menu has Create Texture Asset. Renaming a Light texture rewrites the
+environments showing it; deleting it clears them (a warning).
+
 ### Animation Graph
 
 > [!NOTE]
 > **Planned for a future release.**
+
+## Workspace crates
+
+- `project_core` — domain-neutral backend: project layout, `project.ron`, atomic writer, regen driver, the umbrella
+  `crates/quillshade`. `curve_kit` and `texture_kit` — models shared by domains (curves, texture assets), without
+  Bevy; their `editor` feature (default on, off for generator backends) adds the curve editor every domain with
+  curves registers (`CurveDomain`) and the Texture / game image tabs every domain with Texture assets registers
+  (`TextureDomain`, its `TexturePolicy` decides the image formats, the built-in textures and the Easy presets).
+- `shader_graph_core` → `shader_stdlib` → `shader_codegen_wesl` → `shader_codegen_rust` → `shader_project` — the
+  Material domain's backend (model, node library, WESL and Rust codegen, regeneration), without Bevy.
+- `editor_core` — the editor shell (Bevy UI + Feathers): window layout (the mainbar with the domain tabs, the
+  secondbar with Back / Forward and the tabs), menus, trees, the console filtered by the active domain, dialogs, user
+  config, undo history, property widgets, the generated-file viewer, tools (singleton tabs such as Project Settings,
+  in the built-in Project domain) and the domain API (`EditorDomain`, `DomainRegistrar`, `DomainState`). It knows no
+  domain.
+- `node_graph_base` — the node graph UI every graph domain shares: the canvas over the `vendor/bevy_noodle` fork,
+  its gestures, the palette, the minimap, in-node previews and the graph editor tools, behind `GraphDomain`.
+- `light_domain` — the Light domain: environments and cube-map Texture assets (through `texture_kit`); its backend is
+  Bevy-free, its `editor` feature (default on) adds `LightDomain`.
+- `material_domain` — the Material domain of the editor: material and function graphs, curves and Texture assets
+  (through the kits), constant tables, gradient collections and their editors. `src/main.rs` lists the domains (one
+  line each) for the GUI and the CLI. See decision 0044 (`docs/decisions/`).

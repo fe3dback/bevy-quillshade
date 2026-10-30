@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/shaders"]
+members = ["crates/quillshade"]
 
 [package]
 name = "sample_game"
@@ -10,7 +10,7 @@ publish = false
 
 [dependencies]
 bevy = { version = "0.20.0", features = ["file_watcher", "dynamic_linking"] }
-shaders = { path = "crates/shaders" }
+quillshade = { path = "crates/quillshade" }
 
 [profile.dev.package."*"]
 opt-level = 3

@@ -1,4 +1,4 @@
-//! IR → Rust crate `crates/shaders` generator (spec §11).
+//! IR → Rust generator of the Material module `crates/quillshade/src/material/` (spec §11, design §4.2).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -13,8 +13,13 @@ use shader_graph_core::{
     BlendMode, GENERATOR_VERSION, Ir, MaterialKind, MaterialParam, Shading, TextureSource, UniformTy, Value,
 };
 
-/// Name of the generated crate.
-pub const CRATE_NAME: &str = "shaders";
+/// Module of the Material domain inside the umbrella crate (`crate::material`, `crates/quillshade/src/material/`).
+pub const MODULE: &str = "material";
+
+/// Rust path of an item inside the Material module (`crate::material::baked::MaterialValues`).
+pub fn module_path(item: &str) -> String {
+    format!("crate::{MODULE}::{item}")
+}
 
 /// Rust type names generated for a material.
 pub struct TypeNames {
@@ -35,7 +40,7 @@ pub fn type_names(ir: &Ir) -> TypeNames {
     TypeNames { main, material, params: params_struct(&ir.name) }
 }
 
-/// Asset path of the generated WESL (`shaders/autogen/dir_env/mat_rock_wet.wesl`).
+/// Asset path of the generated WESL (`quillshade/material/autogen/dir_env/mat_rock_wet.wesl`).
 pub fn shader_asset_path(ir: &Ir) -> String {
     paths::module_file(&paths::material_module(&ir.path))
 }
@@ -162,7 +167,7 @@ pub fn material_module(ir: &Ir, source_file: &str) -> String {
     line(&mut o, &format!("use bevy::render::render_resource::{{{}}};", rr.join(", ")));
     line(&mut o, "use bevy::shader::ShaderRef;");
     line(&mut o, "");
-    line(&mut o, "use crate::baked::MaterialValues;");
+    line(&mut o, &format!("use {};", module_path("baked::MaterialValues")));
     line(&mut o, "");
     line(&mut o, "/// Asset path of the generated shader.");
     line(&mut o, &format!("pub const SHADER_PATH: &str = \"{}\";", shader_asset_path(ir)));
@@ -556,29 +561,18 @@ impl MaterialEntry {
     }
 }
 
-/// How the generated `Cargo.toml` depends on Bevy (decision 0019).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum BevyDep {
-    /// `bevy = { version = "0.20", default-features = false, features = [..] }`.
-    #[default]
-    Version,
-    /// `bevy = { workspace = true, features = [..] }`: the game declares Bevy in `[workspace.dependencies]`.
-    Workspace,
-}
-
-/// All crate files: relative path (inside `crates/shaders`) → content. Includes `Cargo.toml`,
-/// `src/lib.rs`, every `mod.rs`, the given material modules (keyed by asset path) and `src/baked/` (design §3.1:
-/// `BakedMaterials` over `entries`, `BakedTextures` over `texture_ids`: every Texture asset that parses, not only
-/// the manifest's valid ones, plus the internal textures). Modules are named by
-/// `paths::material_components` (`dir_env::mat_rock_wet`, decision 0020).
+/// All files of the Material module: path relative to the module directory (`crates/quillshade/src/material`) →
+/// content. Includes `mod.rs`, every `materials/**/mod.rs`, the given material modules (keyed by asset path) and
+/// `baked/` (design §3.1: `BakedMaterials` over `entries`, `BakedTextures` over `texture_ids`: every Texture asset
+/// that parses, not only the manifest's valid ones, plus the internal textures). Modules are named by
+/// `paths::material_components` (`dir_env::mat_rock_wet`, decision 0020). The umbrella crate's `Cargo.toml` and
+/// `src/lib.rs` come from `project_core::umbrella`.
 pub fn crate_files(
     entries: &[MaterialEntry],
     modules: &BTreeMap<String, String>,
-    bevy: BevyDep,
     texture_ids: &[String],
 ) -> BTreeMap<String, String> {
     let mut files = BTreeMap::new();
-    files.insert("Cargo.toml".to_string(), cargo_toml(bevy));
 
     // Directory tree: dir path ("" = materials root) → (child dirs, leaf modules).
     let mut dirs: BTreeMap<String, (BTreeSet<String>, BTreeSet<String>)> = BTreeMap::new();
@@ -648,51 +642,34 @@ pub fn crate_files(
                 }
             }
         }
-        let path =
-            if dir.is_empty() { "src/materials/mod.rs".to_string() } else { format!("src/materials/{dir}/mod.rs") };
+        let path = if dir.is_empty() { "materials/mod.rs".to_string() } else { format!("materials/{dir}/mod.rs") };
         files.insert(path, o);
     }
     for (path, text) in modules {
-        files.insert(format!("src/materials/{}.rs", paths::material_components(path).join("/")), text.clone());
+        files.insert(format!("materials/{}.rs", paths::material_components(path).join("/")), text.clone());
     }
-    files.insert("src/lib.rs".to_string(), lib_rs(root_reexports));
-    files.insert("src/baked/mod.rs".to_string(), baked::mod_rs());
-    files.insert("src/baked/materials.rs".to_string(), baked::materials_rs(entries));
-    files.insert("src/baked/textures.rs".to_string(), baked::textures_rs(texture_ids));
+    files.insert("mod.rs".to_string(), mod_rs(root_reexports));
+    files.insert("baked/mod.rs".to_string(), baked::mod_rs());
+    files.insert("baked/materials.rs".to_string(), baked::materials_rs(entries));
+    files.insert("baked/textures.rs".to_string(), baked::textures_rs(texture_ids));
     files
 }
 
-/// Bevy features the generated code needs; kept with `workspace = true` too (features are additive). `png` / `ktx2`
-/// / `zstd_rust`: the image formats of Texture assets (design §3.4); `bevy_log`: warnings of the baked loader.
-const BEVY_FEATURES: &str = r#"["std", "bevy_pbr", "bevy_sprite_render", "bevy_asset", "bevy_color", "bevy_mesh", "bevy_log", "png", "ktx2", "zstd_rust"]"#;
-
-fn cargo_toml(bevy: BevyDep) -> String {
-    let dep = match bevy {
-        BevyDep::Version => format!(r#"{{ version = "0.20", default-features = false, features = {BEVY_FEATURES} }}"#),
-        BevyDep::Workspace => format!("{{ workspace = true, features = {BEVY_FEATURES} }}"),
-    };
-    format!(
-        r#"# AUTOGENERATED by shader-editor v{GENERATOR_VERSION} — do not edit (rewritten on every regeneration)
-[package]
-name = "{CRATE_NAME}"
-version = "0.1.0"
-edition = "2024"
-publish = false
-
-[dependencies]
-bevy = {dep}
-serde = {{ version = "1", features = ["derive"] }}
-ron = "0.12"
-"#
-    )
+/// `include_str!` path of the baked manifest from the Material module's `mod.rs`: up through the module's
+/// directories, `src/` and the crate directory to the game root, then down to `assets/quillshade/material/autogen/`.
+fn compiled_manifest_path() -> String {
+    let up = project_core::layout::CRATE_DIR.split('/').count() + 1 + MODULE.split("::").count();
+    format!("{}assets/{}/baked.ron", "../".repeat(up), paths::AUTOGEN.join("/"))
 }
 
-fn lib_rs(materials_reexports: bool) -> String {
+fn mod_rs(materials_reexports: bool) -> String {
     let materials_glob = if materials_reexports { "pub use materials::*;\n" } else { "" };
+    let manifest = compiled_manifest_path();
     format!(
         r#"// AUTOGENERATED by shader-editor v{GENERATOR_VERSION} — do not edit
-//! Materials generated by shader-editor. Add [`ShadersPlugin`] to the app, call [`BakedMaterialsLoader::load`] and
-//! take the materials from [`BakedMaterials`] (`baked.env.rock_wet`), images of Texture assets from [`BakedTextures`].
+//! Materials generated by shader-editor. Add [`crate::QuillshadePlugin`] to the app, call
+//! [`BakedMaterialsLoader::load`] and take the materials from [`BakedMaterials`] (`baked.env.rock_wet`), images of
+//! Texture assets from [`BakedTextures`].
 
 use bevy::prelude::*;
 
@@ -703,16 +680,14 @@ pub use baked::{{
     BakedMaterials, BakedMaterialsLoader, BakedMaterialsProgress, BakedMaterialsReady, BakedPlugin, BakedTextures,
 }};
 {materials_glob}
-/// Version of the generator that produced this crate.
-pub const AUTOGEN_VERSION: u32 = {GENERATOR_VERSION};
-
 /// The baked manifest at build time (design §3.2): the compiled snapshot of every Texture asset and material value.
-pub const COMPILED_MANIFEST: &str = include_str!("../../../assets/shaders/autogen/baked.ron");
+pub const COMPILED_MANIFEST: &str = include_str!("{manifest}");
 
-/// Registers every generated material and the baked materials loader ([`BakedPlugin`]).
-pub struct ShadersPlugin;
+/// Registers every generated material and the baked materials loader ([`BakedPlugin`]); added by
+/// [`crate::QuillshadePlugin`] while the Material domain is enabled.
+pub struct QuillshadeMaterialInternalPlugin;
 
-impl Plugin for ShadersPlugin {{
+impl Plugin for QuillshadeMaterialInternalPlugin {{
     fn build(&self, app: &mut App) {{
         materials::register(app);
         app.add_plugins(BakedPlugin);

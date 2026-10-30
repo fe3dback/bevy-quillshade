@@ -96,7 +96,7 @@ fn rock_wet_compiles_against_bevy() {
     );
     let generated = shader_codegen_wesl::material(
         &ir,
-        &GenCtx { functions: &fns, source_file: "shaders/env/rock_wet.material.ron" },
+        &GenCtx { functions: &fns, source_file: "quillshade/material/env/rock_wet.material.ron" },
     );
     println!("{}", generated.text);
 

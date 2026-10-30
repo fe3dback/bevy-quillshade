@@ -1,7 +1,7 @@
-//! Baked materials manifest `assets/shaders/autogen/baked.ron` (design §3.2.1): every valid Texture asset (path +
-//! loader settings) and every material's parameter defaults and texture choices. The generated crate embeds it as
-//! its compiled snapshot (`COMPILED_MANIFEST`) and reloads it at runtime; its serde mirror types live in the template
-//! of `baked/mod.rs` ([`crate::baked`]), so the RON shape here and there must agree.
+//! Baked materials manifest `assets/quillshade/material/autogen/baked.ron` (design §3.2.1): every valid Texture
+//! asset (path + loader settings) and every material's parameter defaults and texture choices. The generated crate
+//! embeds it as its compiled snapshot (`COMPILED_MANIFEST`) and reloads it at runtime; its serde mirror types live in
+//! the template of `baked/mod.rs` ([`crate::baked`]), so the RON shape here and there must agree.
 
 use std::collections::BTreeMap;
 
@@ -198,7 +198,7 @@ mod tests {
         vec![
             ManifestTexture {
                 id: "@internal/default".into(),
-                path: "shaders/internal/default.png".into(),
+                path: "quillshade/material/internal/default.png".into(),
                 settings: TextureSettings { sampler: Some(SamplerSettings::default()), ..Default::default() },
             },
             ManifestTexture { id: "textures/env/rock".into(), path: "textures/rock.ktx2".into(), settings: custom },

@@ -154,7 +154,7 @@ impl Resolver for CheckResolver<'_> {
     }
 }
 
-/// Generated autogen files for the check, keyed by module components (`shaders/autogen/...`).
+/// Generated autogen files for the check, keyed by module components (`quillshade/material/autogen/...`).
 #[derive(Default)]
 pub struct Files {
     modules: HashMap<ModulePath, String>,

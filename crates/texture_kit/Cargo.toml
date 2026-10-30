@@ -1,0 +1,27 @@
+[package]
+name = "texture_kit"
+version = { workspace = true }
+edition = { workspace = true }
+rust-version = { workspace = true }
+license = { workspace = true }
+
+[features]
+# The editor half (design §7.2): `texture_kit::editor`. Generator backends depend on the kit without it.
+default = ["editor"]
+editor = ["dep:bevy", "dep:editor_core", "dep:icon-rs"]
+# Not a default (constraints: kits leave it to the root package's `dynamic_linking`).
+dynamic_linking = ["bevy?/dynamic_linking"]
+
+[dependencies]
+project_core = { workspace = true }
+serde = { workspace = true }
+ron = { workspace = true }
+bevy = { workspace = true, optional = true }
+editor_core = { workspace = true, optional = true }
+icon-rs = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+# `cargo test -p texture_kit` links Bevy dynamically, as the workspace build does (dev-dependencies only: the kit's own
+# feature set stays without it).
+bevy = { workspace = true, features = ["dynamic_linking"] }

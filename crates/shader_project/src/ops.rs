@@ -4,15 +4,14 @@ use shader_graph_core::Value;
 use shader_graph_core::consts::GlobalConsts;
 use shader_graph_core::curve::Curve;
 use shader_graph_core::gradient::GradientCollection;
-use shader_graph_core::ident::check_ident;
 use shader_graph_core::model::{Asset, AssetKind, MaterialKind, Node};
 use shader_graph_core::registry::{
     FUNCTION_PREFIX, ParamKind, Registry, const_refs, curve_refs, gradient_refs, texture_refs,
 };
-use shader_graph_core::texture::TextureAsset;
+use shader_graph_core::texture::{MATERIAL_TEXTURES, TextureAsset};
 
 use crate::assets::{self, AssetId, AssetType};
-use crate::layout::Project;
+use crate::layout::{MaterialLayout, Project};
 
 #[derive(Debug, thiserror::Error)]
 pub enum OpError {
@@ -41,43 +40,39 @@ pub fn template(name: &str, kind: AssetKind) -> Asset {
 }
 
 fn check_path(path: &str) -> Result<(), OpError> {
-    if path.is_empty() {
-        return Err(OpError::Invalid("empty name".into()));
-    }
-    for part in path.split('/') {
-        check_ident(part).map_err(OpError::Invalid)?;
-    }
-    Ok(())
+    project_core::ident::check_path(path).map_err(OpError::Invalid)
 }
 
-/// Writes a graph asset file (creating `shaders/` and parent directories).
+/// Writes a graph asset file (creating `quillshade/material/` and parent directories).
 pub fn save(project: &Project, id: &AssetId, asset: &Asset) -> Result<(), OpError> {
     write_source(project, id, &asset.to_ron())
 }
 
-/// Writes a curve file (creating `shaders/` and parent directories).
+/// Writes a curve file (creating `quillshade/material/` and parent directories).
 pub fn save_curve(project: &Project, id: &AssetId, curve: &Curve) -> Result<(), OpError> {
     write_source(project, id, &curve.to_ron())
 }
 
-/// Writes a global constant table (creating `shaders/` and parent directories).
+/// Writes a global constant table (creating `quillshade/material/` and parent directories).
 pub fn save_consts(project: &Project, id: &AssetId, table: &GlobalConsts) -> Result<(), OpError> {
     write_source(project, id, &table.to_ron())
 }
 
-/// Writes a Texture asset file (creating `shaders/` and parent directories). No checks: an invalid or shared image
-/// path is reported by validation (E012 / E011).
+/// Writes a Texture asset file (creating `quillshade/material/` and parent directories). No checks: an invalid or
+/// shared image path is reported by validation (E012 / E011).
 pub fn save_texture(project: &Project, id: &AssetId, texture: &TextureAsset) -> Result<(), OpError> {
-    write_source(project, id, &texture.to_ron())
+    project.ensure_material_dir()?;
+    shader_graph_core::texture::save(&id.file(project), texture)?;
+    Ok(())
 }
 
-/// Writes a gradient collection file (creating `shaders/` and parent directories).
+/// Writes a gradient collection file (creating `quillshade/material/` and parent directories).
 pub fn save_gradients(project: &Project, id: &AssetId, collection: &GradientCollection) -> Result<(), OpError> {
     write_source(project, id, &collection.to_ron())
 }
 
 fn write_source(project: &Project, id: &AssetId, text: &str) -> Result<(), OpError> {
-    project.ensure_shaders_dir()?;
+    project.ensure_material_dir()?;
     let file = id.file(project);
     if let Some(dir) = file.parent() {
         std::fs::create_dir_all(dir)?;
@@ -94,17 +89,6 @@ pub fn create_material(project: &Project, path: &str, kind: MaterialKind) -> Res
 
 pub fn create_function(project: &Project, path: &str) -> Result<AssetId, OpError> {
     create(project, path, AssetKind::Function)
-}
-
-/// New curve asset: a straight ramp from (0, 0) to (1, 1).
-pub fn create_curve(project: &Project, path: &str) -> Result<AssetId, OpError> {
-    check_path(path)?;
-    let id = AssetId::new(AssetType::Curve, path);
-    if id.file(project).exists() {
-        return Err(OpError::Exists(id.source_rel()));
-    }
-    save_curve(project, &id, &Curve::ramp(id.name()))?;
-    Ok(id)
 }
 
 /// New, empty global constant table.
@@ -139,7 +123,7 @@ pub fn create_texture(project: &Project, id: &AssetId, texture: &TextureAsset) -
     if id.file(project).exists() {
         return Err(OpError::Exists(id.source_rel()));
     }
-    TextureAsset::check_path(&texture.path).map_err(OpError::Invalid)?;
+    TextureAsset::check_path(&texture.path, &MATERIAL_TEXTURES).map_err(OpError::Invalid)?;
     if let Some(other) = assets::scan(project)
         .into_iter()
         .filter(|o| o.ty == AssetType::Texture)
@@ -158,13 +142,6 @@ fn create(project: &Project, path: &str, kind: AssetKind) -> Result<AssetId, OpE
     }
     save(project, &id, &template(id.name(), kind))?;
     Ok(id)
-}
-
-pub fn create_folder(project: &Project, path: &str) -> Result<(), OpError> {
-    check_path(path)?;
-    project.ensure_shaders_dir()?;
-    std::fs::create_dir_all(project.shaders_dir().join(path))?;
-    Ok(())
 }
 
 /// Renames/moves an asset; function, curve, Texture asset and gradient collection references in other assets are
@@ -299,7 +276,7 @@ pub fn clear_const_refs(asset: &mut Asset, registry: &Registry, name: &str) -> b
     set_refs(asset, const_refs(asset, registry), name, "")
 }
 
-/// Moves an asset into directory `dir` (`""` = shaders root).
+/// Moves an asset into directory `dir` (`""` = the Material source root).
 pub fn move_to(project: &Project, id: &AssetId, dir: &str) -> Result<AssetId, OpError> {
     let new_path = if dir.is_empty() { id.name().to_string() } else { format!("{dir}/{}", id.name()) };
     rename(project, id, &new_path)
@@ -315,13 +292,5 @@ pub fn delete(project: &Project, id: &AssetId) -> Result<(), OpError> {
         AssetType::Gradients => rewrite_graphs(project, |a, r| clear_gradient_refs(a, r, &id.path))?,
         _ => {}
     }
-    Ok(())
-}
-
-/// Deletes an empty folder (or one containing only empty folders).
-pub fn delete_folder(project: &Project, path: &str) -> Result<(), OpError> {
-    let dir = project.shaders_dir().join(path);
-    crate::writer::remove_empty_dirs(&dir);
-    std::fs::remove_dir(&dir)?;
     Ok(())
 }

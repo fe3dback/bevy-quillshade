@@ -2,6 +2,7 @@
 
 use std::fmt;
 
+use project_core::{DomainId, Level};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -46,7 +47,7 @@ pub enum Code {
     W103,
     /// Vector truncated by an implicit conversion.
     W104,
-    /// `crates/shaders` is not listed in `[workspace.members]`.
+    /// `crates/quillshade` is not listed in `[workspace.members]`.
     W105,
     /// Global constant node without a constant: outputs 1.0 / `true` (decision 0017).
     W106,
@@ -128,6 +129,23 @@ impl Diagnostic {
     pub fn is_error(&self) -> bool {
         self.code.is_error()
     }
+
+    /// Domain-neutral form; its `Display` is identical to this one.
+    pub fn to_generic(&self, domain: DomainId) -> project_core::Diagnostic {
+        let location = match (&self.node, &self.pin) {
+            (Some(n), Some(p)) => Some(format!("{n}.{p}")),
+            (Some(n), None) => Some(n.clone()),
+            _ => None,
+        };
+        project_core::Diagnostic {
+            domain: Some(domain),
+            code: self.code.to_string(),
+            level: if self.is_error() { Level::Error } else { Level::Warning },
+            message: self.message.clone(),
+            asset: self.asset.clone(),
+            location,
+        }
+    }
 }
 
 impl fmt::Display for Diagnostic {
@@ -169,5 +187,21 @@ impl Diagnostics {
 
     pub fn into_vec(self) -> Vec<Diagnostic> {
         self.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn to_generic_keeps_display() {
+        let full = Diagnostic::new(Code::E003, "bad").in_asset("env/a").at_node("n05").at_pin("color");
+        let bare = Diagnostic::new(Code::W104, "x");
+        for d in [full, bare] {
+            let g = d.to_generic(DomainId::new("material"));
+            assert_eq!(g.to_string(), d.to_string());
+            assert_eq!(g.is_error(), d.is_error());
+        }
     }
 }
