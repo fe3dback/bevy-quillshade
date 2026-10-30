@@ -624,7 +624,7 @@ pub fn terrain_layers() -> Asset {
 }
 
 /// Function with a fixed texture (design §1.3): `textures/rock_albedo` sampled at the mesh UV, times `tint`. The
-/// texture becomes a hidden trailing input of the function (`ft_common_tex_layer_n02`), after the builtin `b_uv0`.
+/// texture becomes a hidden trailing input of the function (`ft_common__tex_layer_n02`), after the builtin `b_uv0`.
 pub fn tex_layer() -> Asset {
     let mut g = GraphBuilder::new("tex_layer", AssetKind::Function);
     let tint = g.node_p(

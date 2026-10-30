@@ -73,13 +73,7 @@ pub fn save_gradients(project: &Project, id: &AssetId, collection: &GradientColl
 
 fn write_source(project: &Project, id: &AssetId, text: &str) -> Result<(), OpError> {
     project.ensure_material_dir()?;
-    let file = id.file(project);
-    if let Some(dir) = file.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    let tmp = file.with_extension("ron.tmp");
-    std::fs::write(&tmp, text)?;
-    std::fs::rename(&tmp, &file)?;
+    project_core::writer::write_atomic(&id.file(project), text)?;
     Ok(())
 }
 

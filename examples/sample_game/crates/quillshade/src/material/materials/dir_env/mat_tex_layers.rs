@@ -21,9 +21,10 @@ pub const LAYOUT_FEATURE: &str = "SG_LAYOUT_1bf1dc98";
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone, Default)]
 pub struct TexLayersExt {
     /// Fixed texture of node `n02` of function `common/tex_layer`; `new` sets `Handle::default()` (Bevy's white image).
+    #[allow(non_snake_case)]
     #[texture(101)]
     #[sampler(102)]
-    pub ft_common_tex_layer_n02: Handle<Image>,
+    pub ft_common__tex_layer_n02: Handle<Image>,
 }
 
 impl MaterialExtension for TexLayersExt {
@@ -57,7 +58,7 @@ impl TexLayersExt {
     #[allow(dead_code)]
     pub(crate) fn new() -> Self {
         Self {
-            ft_common_tex_layer_n02: Handle::default(),
+            ft_common__tex_layer_n02: Handle::default(),
         }
     }
 
@@ -65,7 +66,7 @@ impl TexLayersExt {
     /// default, with a warning), `tex` maps a Texture asset id to its image.
     pub(crate) fn from_values(v: &MaterialValues, tex: &dyn Fn(&str) -> Handle<Image>) -> Self {
         Self {
-            ft_common_tex_layer_n02: tex(v.texture(BAKED_ID, "ft_common_tex_layer_n02")),
+            ft_common__tex_layer_n02: tex(v.texture(BAKED_ID, "ft_common__tex_layer_n02")),
         }
     }
 

@@ -604,29 +604,29 @@ pub enum Stage {
 /// Identifier of the fixed texture of node `node` (design §1.3); the sampler is `{ident}_sampler`.
 ///
 /// - `origin: None` (a node of the material itself): `ft_{node}`, a material binding.
-/// - `origin: Some(fn)` (a node inside function `fn`): `ft_{fn}_{node}` with `/` → `_` in the path
-///   (`ft_common_tex_layer_n02`): a hidden argument of the function and of its callers, and the material binding.
+/// - `origin: Some(fn)` (a node inside function `fn`): `ft_{fn}_{node}` with `/` → `__` in the path
+///   (`ft_common__tex_layer_n02`): a hidden argument of the function and of its callers, and the material binding.
 ///
 /// Prefix `ft_` is not a user prefix of decision 0020 and not a generator name (`n_`, `b_`, `sg_`), so it never
 /// clashes with other identifiers. Node ids are `[a-z0-9]+`, so `ft_{node}` (no `_` after the prefix) never equals an
-/// origin identifier. Two origins can only collide when their paths differ by `/` vs `_` (`a/b_c` and `a_b/c`) and the
-/// node ids match; `build_ir` reports that as E006 rather than generating a duplicate.
+/// origin identifier, and replacing `/` with `__` (which `check_ident` forbids in user segments) makes the mapping
+/// injective.
 pub fn fixed_texture_ident(origin: Option<&str>, node: &str) -> String {
     match origin {
         None => format!("ft_{node}"),
-        Some(origin) => format!("ft_{}_{node}", origin.replace('/', "_")),
+        Some(origin) => format!("ft_{}_{node}", origin.replace('/', "__")),
     }
 }
 
-/// Identifier of the baked texture of gradient collection `collection` (gradient design §7): `gc_{path with / → _}`
-/// (`common/terrain` → `gc_common_terrain`); the sampler is `{ident}_sampler`. One material binding per collection,
+/// Identifier of the baked texture of gradient collection `collection` (gradient design §7): `gc_{path with / → __}`
+/// (`common/terrain` → `gc_common__terrain`); the sampler is `{ident}_sampler`. One material binding per collection,
 /// and the same name for the hidden argument of a function using it.
 ///
 /// Prefix `gc_` is not a user prefix of decision 0020 and not a generator name (`n_`, `b_`, `sg_`, `ft_`), so it
-/// never clashes with other identifiers. Two collections collide only as `a/b_c` vs `a_b/c`, or as `x` vs
-/// `x_sampler` (the latter's texture is the former's sampler); `build_ir` reports both as E006.
+/// never clashes with other identifiers. Because `/` maps to `__` (forbidden in user segments), two collections can
+/// only collide as `x` vs `x_sampler` (the latter's texture is the former's sampler); `build_ir` reports that as E006.
 pub fn gradient_ident(collection: &str) -> String {
-    format!("gc_{}", collection.replace('/', "_"))
+    format!("gc_{}", collection.replace('/', "__"))
 }
 
 /// Value flowing along an edge in generated code.

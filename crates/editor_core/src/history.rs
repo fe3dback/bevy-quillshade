@@ -1,6 +1,9 @@
 //! Model-level undo/redo shared by every editable document kind (decision 0008): snapshots of the whole model,
 //! consecutive edits with the same key merged into one step.
 
+use std::collections::VecDeque;
+use std::sync::Arc;
+
 use crate::dynval::PropKey;
 
 const HISTORY_LIMIT: usize = 200;
@@ -33,15 +36,15 @@ impl From<PropKey> for MergeKey {
 
 #[derive(Debug, Clone)]
 pub struct History<T> {
-    undo: Vec<T>,
-    redo: Vec<T>,
+    undo: VecDeque<Arc<T>>,
+    redo: Vec<Arc<T>>,
     /// Key of the last merged edit (number scrubbing, typing, a point drag): same key = same undo step.
     merge_key: Option<MergeKey>,
 }
 
 impl<T> Default for History<T> {
     fn default() -> Self {
-        History { undo: Vec::new(), redo: Vec::new(), merge_key: None }
+        History { undo: VecDeque::new(), redo: Vec::new(), merge_key: None }
     }
 }
 
@@ -53,10 +56,10 @@ impl<T> History<T> {
         let Some(before) = before else { return };
         let merged = key.is_some() && self.merge_key == key && !self.undo.is_empty();
         if !merged {
-            self.undo.push(before);
-            if self.undo.len() > HISTORY_LIMIT {
-                self.undo.remove(0);
+            if self.undo.len() >= HISTORY_LIMIT {
+                self.undo.pop_front();
             }
+            self.undo.push_back(Arc::new(before));
         }
         self.redo.clear();
         self.merge_key = key;
@@ -69,12 +72,12 @@ impl<T> History<T> {
 
     /// The state an undo would restore.
     pub fn peek_undo(&self) -> Option<&T> {
-        self.undo.last()
+        self.undo.back().map(Arc::as_ref)
     }
 
     /// The state a redo would restore.
     pub fn peek_redo(&self) -> Option<&T> {
-        self.redo.last()
+        self.redo.last().map(Arc::as_ref)
     }
 
     pub fn can_undo(&self) -> bool {
@@ -86,24 +89,37 @@ impl<T> History<T> {
     }
 
     /// Swaps `current` with the previous state; `false` when there is none.
-    pub fn undo(&mut self, current: &mut T) -> bool {
-        let Some(prev) = self.undo.pop() else { return false };
-        self.redo.push(std::mem::replace(current, prev));
+    pub fn undo(&mut self, current: &mut T) -> bool
+    where
+        T: Clone,
+    {
+        let Some(prev) = self.undo.pop_back() else { return false };
+        let prev = Arc::unwrap_or_clone(prev);
+        self.redo.push(Arc::new(std::mem::replace(current, prev)));
         self.merge_key = None;
         true
     }
 
-    pub fn redo(&mut self, current: &mut T) -> bool {
+    pub fn redo(&mut self, current: &mut T) -> bool
+    where
+        T: Clone,
+    {
         let Some(next) = self.redo.pop() else { return false };
-        self.undo.push(std::mem::replace(current, next));
+        let next = Arc::unwrap_or_clone(next);
+        self.undo.push_back(Arc::new(std::mem::replace(current, next)));
         self.merge_key = None;
         true
     }
 
     /// Runs `f` on every stored state, undo and redo alike (a reference the model follows, e.g. a renamed asset, must
     /// not come back with an undo).
-    pub fn for_each_snapshot(&mut self, f: impl FnMut(&mut T)) {
-        self.undo.iter_mut().chain(self.redo.iter_mut()).for_each(f);
+    pub fn for_each_snapshot(&mut self, mut f: impl FnMut(&mut T))
+    where
+        T: Clone,
+    {
+        for s in self.undo.iter_mut().chain(self.redo.iter_mut()) {
+            f(Arc::make_mut(s));
+        }
     }
 
     pub fn clear(&mut self) {

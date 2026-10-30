@@ -24,8 +24,8 @@ pub struct CurveDoc<D> {
     /// The asset; follows renames.
     pub aref: AssetRef,
     pub curve: Curve,
-    /// RON text of the last saved state (dirty check).
-    pub saved: String,
+    /// The curve last saved or loaded: dirty is `curve != saved`.
+    pub saved: Curve,
     history: History<Curve>,
     /// Indices into `curve.points`.
     pub selection: BTreeSet<usize>,
@@ -65,7 +65,7 @@ impl<D> fmt::Debug for CurveDoc<D> {
 
 impl<D> CurveDoc<D> {
     pub fn new(aref: AssetRef, curve: Curve) -> Self {
-        let saved = curve.to_ron();
+        let saved = curve.clone();
         CurveDoc {
             aref,
             curve,
@@ -79,11 +79,11 @@ impl<D> CurveDoc<D> {
     }
 
     pub fn is_dirty(&self) -> bool {
-        self.curve.to_ron() != self.saved
+        self.curve != self.saved
     }
 
     pub fn mark_saved(&mut self) {
-        self.saved = self.curve.to_ron();
+        self.saved = self.curve.clone();
     }
 
     /// Replaces the points (normalized) and the selection as one undoable step; consecutive edits with the same
@@ -294,7 +294,7 @@ impl<D: CurveDomain> TabDoc for CurveDoc<D> {
     }
 
     fn changed_on_disk(&self, project: &Project) -> bool {
-        load(project, &self.aref).is_ok_and(|c| Curve::from_ron(&self.saved).ok() != Some(c))
+        load(project, &self.aref).is_ok_and(|c| c != self.saved)
     }
 
     fn reload_from_disk(&mut self, ctx: &mut DocCtx) -> Result<(), String> {
@@ -305,7 +305,7 @@ impl<D: CurveDomain> TabDoc for CurveDoc<D> {
 
     fn keep_mine(&mut self, project: &Project) {
         if let Ok(on_disk) = load(project, &self.aref) {
-            self.saved = on_disk.to_ron();
+            self.saved = on_disk;
         }
     }
 

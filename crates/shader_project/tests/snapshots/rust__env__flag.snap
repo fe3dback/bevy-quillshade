@@ -64,6 +64,14 @@ impl MaterialExtension for FlagExt {
         SHADER_PATH.into()
     }
 
+    fn prepass_vertex_shader() -> ShaderRef {
+        SHADER_PATH.into()
+    }
+
+    fn deferred_vertex_shader() -> ShaderRef {
+        SHADER_PATH.into()
+    }
+
     fn specialize(
         _pipeline: &MaterialExtensionPipeline,
         descriptor: &mut RenderPipelineDescriptor,

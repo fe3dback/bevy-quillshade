@@ -205,18 +205,28 @@ pub fn preview_controls<D: TextureDomain>(p: &dyn PreviewDoc) -> Vec<Box<dyn Sce
     ]
 }
 
-/// What the preview shows: the decoded image (or the error), where and how.
+/// What the preview shows: the tab and preview state that determine the decoded image, plus the info line for any
+/// newly spawned [`PreviewInfoText`].
 #[derive(PartialEq)]
-struct Shown {
+struct ShownKey {
     kind: ViewKindId,
     root: std::path::PathBuf,
-    result: Result<bevy::asset::AssetId<Image>, String>,
+    image: String,
+    settings: TextureSettings,
     tiled: bool,
     channel: Option<usize>,
+    revision: u64,
+    formats: bevy::image::CompressedImageFormats,
+    clamp_to_border: bool,
 }
 
-/// Decodes the active tab's image (the cache re-checks the file each frame and keeps the decoded image) and rebuilds
-/// the preview when the result changed; drops the image once no preview tab is active.
+struct Shown {
+    key: ShownKey,
+    line: String,
+}
+
+/// Decodes the active tab's image when the tab or preview state changes and rebuilds the preview; drops the image once
+/// no preview tab is active.
 fn redraw<D: TextureDomain>(
     editor: Res<Editor>,
     (mut cache, mut images, checker): (ResMut<GameImageCache<D>>, ResMut<Assets<Image>>, Res<Checker<D>>),
@@ -247,14 +257,26 @@ fn redraw<D: TextureDomain>(
     if !cams.is(kind, image) {
         cams.switch(kind, image, &editor.tabs);
     }
-    let result = cache.get_channel(project, image, &settings, p.channel(), &mut images);
-    let shown = Shown {
+    let key = ShownKey {
         kind,
         root: project.root.clone(),
-        result: result.as_ref().map(|(h, _)| h.id()).map_err(Clone::clone),
+        image: image.to_string(),
+        settings,
         tiled: p.tiled(),
         channel: p.channel(),
+        revision: tab.doc().revision(),
+        formats: cache.formats,
+        clamp_to_border: cache.clamp_to_border,
     };
+    if let Some(shown) = last.as_ref().filter(|s| s.key == key) {
+        for mut text in &mut info {
+            if text.0 != shown.line {
+                text.0 = shown.line.clone();
+            }
+        }
+        return;
+    }
+    let result = cache.get_channel(project, &key.image, &key.settings, key.channel, &mut images);
     let line = match &result {
         Ok((h, _)) => images.get(h).map_or_else(|| "n/a".to_string(), describe),
         Err(_) => "n/a".to_string(),
@@ -264,10 +286,7 @@ fn redraw<D: TextureDomain>(
             text.0 = line.clone();
         }
     }
-    if last.as_ref() == Some(&shown) {
-        return;
-    }
-    *last = Some(shown);
+    *last = Some(Shown { key, line });
     clear(&mut commands);
     match result {
         Ok((handle, grey)) => {

@@ -269,6 +269,9 @@ pub fn material_module(ir: &Ir, source_file: &str) -> String {
         if let Some(of) = of {
             line(&mut o, &format!("    /// {of}; `new` sets `Handle::default()` (Bevy's white image)."));
         }
+        if t.ident.contains("__") {
+            line(&mut o, "    #[allow(non_snake_case)]");
+        }
         line(&mut o, &format!("    #[texture({})]", t.binding));
         line(&mut o, &format!("    #[sampler({})]", t.binding + 1));
         line(&mut o, &format!("    pub {}: Handle<Image>,", t.ident));
@@ -304,6 +307,14 @@ pub fn material_module(ir: &Ir, source_file: &str) -> String {
             if wpo {
                 line(&mut o, "");
                 line(&mut o, "    fn vertex_shader() -> ShaderRef {");
+                line(&mut o, "        SHADER_PATH.into()");
+                line(&mut o, "    }");
+                line(&mut o, "");
+                line(&mut o, "    fn prepass_vertex_shader() -> ShaderRef {");
+                line(&mut o, "        SHADER_PATH.into()");
+                line(&mut o, "    }");
+                line(&mut o, "");
+                line(&mut o, "    fn deferred_vertex_shader() -> ShaderRef {");
                 line(&mut o, "        SHADER_PATH.into()");
                 line(&mut o, "    }");
             }

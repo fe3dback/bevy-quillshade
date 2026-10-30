@@ -417,10 +417,10 @@ fn hot_reload_maps_bindings_by_position() {
     let layers = |app: &App| {
         let baked = app.world().resource::<BakedMaterials>().clone();
         let m = app.world().resource::<Assets<TexLayersMaterial>>().get(&baked.env.tex_layers).unwrap();
-        m.extension.ft_common_tex_layer_n02.clone()
+        m.extension.ft_common__tex_layer_n02.clone()
     };
     let tex = app.world().resource::<BakedTextures>().clone();
-    assert_eq!(compiled().materials["env/tex_layers"].bindings, ["ft_common_tex_layer_n02"]);
+    assert_eq!(compiled().materials["env/tex_layers"].bindings, ["ft_common__tex_layer_n02"]);
     assert_eq!(layers(&app), tex.textures.rock_albedo);
     let rewire = |layout: String| {
         move |m: &mut BakedManifest| {

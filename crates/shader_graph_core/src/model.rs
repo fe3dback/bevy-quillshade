@@ -328,12 +328,7 @@ impl Preview {
 }
 
 pub use project_core::LoadError;
-
-#[derive(Deserialize)]
-#[serde(rename = "Asset")]
-struct VersionProbe {
-    format_version: u32,
-}
+use project_core::probe_version;
 
 impl Asset {
     pub fn new(name: impl Into<String>, kind: AssetKind) -> Self {
@@ -351,9 +346,7 @@ impl Asset {
 
     /// Parses an asset file, migrating older format versions.
     pub fn from_ron(text: &str) -> Result<Asset, LoadError> {
-        let probe: VersionProbe =
-            ron::Options::default().from_str(text).map_err(|e| LoadError::Parse(e.to_string()))?;
-        match probe.format_version {
+        match probe_version(text)? {
             v if v > FORMAT_VERSION => Err(LoadError::TooNew { found: v, supported: FORMAT_VERSION }),
             FORMAT_VERSION => {
                 let mut asset: Asset =

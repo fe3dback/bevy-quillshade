@@ -15,6 +15,8 @@ use crate::message::{Level, Message};
 use project_core::{Diagnostic, DomainId, Project};
 
 use super::editor::Editor;
+use crate::domain::DomainHooks;
+#[cfg(doc)]
 use crate::domain::DomainState;
 use crate::nav::NavDir;
 
@@ -46,21 +48,13 @@ impl Editor {
 
     // ---- domain hooks ----
 
-    /// Runs `f` with domain `id`'s state taken out of `self.domains` and puts it back afterwards, so `f` has both
-    /// the editor and the state mutably. While `f` runs, `self.domains` does not hold that state, unless the domain
-    /// lends it back for the duration (Material's hooks do, `MaterialState::lent`: the state `f` was handed is then a
-    /// placeholder until the lend ends). A nested `with_domain` of the same id finds the lent state, or `None` when
-    /// it is taken. `None` (and `f` does not run) when the domain has no state: unknown, or taken. Console/logs lines
-    /// written meanwhile are tagged with the domain.
-    pub fn with_domain<R>(
-        &mut self,
-        id: DomainId,
-        f: impl FnOnce(&mut Editor, &mut dyn DomainState) -> R,
-    ) -> Option<R> {
-        let mut state = self.domains.take(id)?;
-        let out = self.as_domain(id, |e| f(e, state.as_mut()));
-        self.domains.put_back(state);
-        Some(out)
+    /// Runs `f` with the [`DomainHooks`] of domain `id` while its state stays inside `self.domains`, so hooks and
+    /// nested `with_domain` calls can access it directly via `self.domains.get::<T>()` / `self.domains.get_mut::<T>()`.
+    /// `None` (and `f` does not run) when the domain has no state. Console/logs lines written meanwhile are tagged with
+    /// the domain.
+    pub fn with_domain<R>(&mut self, id: DomainId, f: impl FnOnce(&mut Editor, DomainHooks) -> R) -> Option<R> {
+        let hooks = self.domains.get_dyn(id)?.hooks();
+        Some(self.as_domain(id, |e| f(e, hooks)))
     }
 
     /// Runs `f`, a callback domain `id` registered, with the console/logs lines it writes tagged with the domain

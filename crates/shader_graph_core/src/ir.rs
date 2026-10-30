@@ -738,6 +738,7 @@ pub fn build_ir(
     let mut params: Vec<MaterialParam> = params_by_node.into_values().collect();
     // By name, so the order needs no editor field and survives copy/paste (decision 0027); duplicates are E005.
     params.sort_by(|a, b| (&a.name, &a.node).cmp(&(&b.name, &b.node)));
+    let all_param_names: BTreeSet<&str> = params.iter().map(|p| p.name.as_str()).collect();
     let mut names = BTreeSet::new();
     for p in &params {
         if let Err(e) = check_ident(&p.name) {
@@ -745,51 +746,23 @@ pub fn build_ir(
         } else if !names.insert(p.name.clone()) {
             diags.push(Diagnostic::new(Code::E005, format!("duplicate parameter name `{}`", p.name)).at_node(&p.node));
         }
-        if p.ty == ParamType::Texture && names.contains(&format!("{}_sampler", p.name)) {
+        if p.ty == ParamType::Texture && all_param_names.contains(format!("{}_sampler", p.name).as_str()) {
             diags.push(
                 Diagnostic::new(Code::E005, format!("`{}_sampler` clashes with a texture sampler name", p.name))
                     .at_node(&p.node),
             );
         }
     }
-    {
-        // `ft_{fn}_{node}` maps `/` to `_` (design §1.3): two origins may only collide as `a/b_c` vs `a_b/c`. So does
-        // `gc_{collection}` (gradient design §7), which may also meet another collection's `_sampler` name. The
-        // prefixes keep fixed textures and gradients apart; both are checked in one map all the same.
-        #[derive(Clone)]
-        enum Owner {
-            Fixed(String),
-            Gradient(String),
-        }
-        let fixed = fixed_textures.keys().map(|(origin, node)| {
-            let what = match origin {
-                Some(o) => format!("node `{node}` of function `{o}`"),
-                None => format!("node `{node}`"),
-            };
-            (fixed_texture_ident(origin.as_deref(), node), Owner::Fixed(what))
-        });
-        let gradient = gradients_used.iter().map(|c| (gradient_ident(c), Owner::Gradient(c.clone())));
-        let mut idents: BTreeMap<String, Owner> = BTreeMap::new();
-        for (ident, owner) in fixed.chain(gradient) {
-            let names = [ident.clone(), format!("{ident}_sampler")];
-            if let Some((name, other)) = names.iter().find_map(|n| Some((n, idents.get(n)?))) {
-                let msg = match (other, &owner) {
-                    (Owner::Gradient(a), Owner::Gradient(b)) => {
-                        format!("collections `{a}` and `{b}` get the same identifier `{name}`; rename one of them")
-                    }
-                    (Owner::Fixed(a), Owner::Fixed(b)) => format!(
-                        "the fixed textures of {a} and {b} get the same identifier `{name}`; rename one of the functions"
-                    ),
-                    // Unreachable: the prefixes differ (`ft_` / `gc_`).
-                    (Owner::Fixed(a) | Owner::Gradient(a), Owner::Fixed(b) | Owner::Gradient(b)) => {
-                        format!("`{a}` and `{b}` get the same identifier `{name}`")
-                    }
-                };
-                diags.push(Diagnostic::new(Code::E006, msg));
-            }
-            for name in names {
-                idents.entry(name).or_insert_with(|| owner.clone());
-            }
+    for c in &gradients_used {
+        let other = format!("{c}_sampler");
+        if gradients_used.contains(&other) {
+            diags.push(Diagnostic::new(
+                Code::E006,
+                format!(
+                    "collections `{c}` and `{other}` get the same identifier `{}`; rename one of them",
+                    gradient_ident(&other)
+                ),
+            ));
         }
     }
     {
@@ -901,6 +874,7 @@ pub fn build_ir(
         // Own gradient collections and the callees' (gradient design §7), sorted.
         sig.gradients = gradients_used.iter().cloned().collect();
         sig.scene = scene.iter().copied().collect();
+        let input_names: BTreeSet<&str> = sig.inputs.iter().map(|i| i.name.as_str()).collect();
         let mut seen = BTreeSet::new();
         for (id, n) in &nodes {
             if matches!(n.def.role(), NodeRole::FunctionInput | NodeRole::FunctionOutput) {
@@ -911,6 +885,15 @@ pub fn build_ir(
                 } else if !seen.insert((dir, name.clone())) {
                     let code = if dir == "out" { Code::E001 } else { Code::E005 };
                     diags.push(Diagnostic::new(code, format!("duplicate function {dir}put `{name}`")).at_node(*id));
+                }
+                if n.def.role() == NodeRole::FunctionInput
+                    && n.params.get("type").and_then(Value::as_type) == Some(PinType::Texture2D)
+                    && input_names.contains(format!("{name}_sampler").as_str())
+                {
+                    diags.push(
+                        Diagnostic::new(Code::E005, format!("`{name}_sampler` clashes with a texture sampler name"))
+                            .at_node(*id),
+                    );
                 }
             }
         }
@@ -1079,4 +1062,200 @@ pub fn would_create_cycle(asset: &Asset, from_node: &str, to_node: &str) -> bool
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::consts::NoConsts;
+    use crate::model::{Node, UnlitSettings};
+    use crate::registry::{NoCurves, NoFunctions, NoGradients, NoTextures, NodeInfo, ParamDef, ParamKind, PinDef};
+
+    struct TestTexParam(NodeInfo);
+    impl NodeDef for TestTexParam {
+        fn info(&self) -> &NodeInfo {
+            &self.0
+        }
+        fn params(&self) -> Vec<ParamDef> {
+            vec![ParamDef::new("name", "Name", ParamKind::Str, Value::Str("tex".into()))]
+        }
+        fn signature(&self, _ctx: &SigCtx) -> Signature {
+            Signature { inputs: vec![], outputs: vec![PinDef::new("out", "Out", PinType::Float)] }
+        }
+        fn emit(&self, ctx: &mut EmitCtx) {
+            let name = ctx.params.get("name").map(|v| v.as_str().to_string()).unwrap_or_default();
+            ctx.declare_param(MaterialParam {
+                name,
+                ty: ParamType::Texture,
+                default: Value::Str(String::new()),
+                group: String::new(),
+                min: None,
+                max: None,
+                node: ctx.node_id.into(),
+            });
+            ctx.define("out", "1.0");
+        }
+    }
+
+    struct TestAdd(NodeInfo);
+    impl NodeDef for TestAdd {
+        fn info(&self) -> &NodeInfo {
+            &self.0
+        }
+        fn signature(&self, _ctx: &SigCtx) -> Signature {
+            Signature {
+                inputs: vec![
+                    PinDef::new("a", "A", PinType::Float).default(Value::Float(0.0)),
+                    PinDef::new("b", "B", PinType::Float).default(Value::Float(0.0)),
+                ],
+                outputs: vec![PinDef::new("out", "Out", PinType::Float)],
+            }
+        }
+        fn emit(&self, ctx: &mut EmitCtx) {
+            let a = ctx.input("a");
+            let b = ctx.input("b");
+            ctx.define("out", format!("({a} + {b})"));
+        }
+    }
+
+    struct TestMatOut(NodeInfo);
+    impl NodeDef for TestMatOut {
+        fn info(&self) -> &NodeInfo {
+            &self.0
+        }
+        fn role(&self) -> NodeRole {
+            NodeRole::MaterialOutput
+        }
+        fn signature(&self, _ctx: &SigCtx) -> Signature {
+            Signature {
+                inputs: vec![PinDef::new("color", "Color", PinType::Float).default(Value::Float(0.0))],
+                outputs: vec![],
+            }
+        }
+        fn emit(&self, ctx: &mut EmitCtx) {
+            let c = ctx.input("color");
+            ctx.set_output("color", c);
+        }
+    }
+
+    struct TestFnIn(NodeInfo);
+    impl NodeDef for TestFnIn {
+        fn info(&self) -> &NodeInfo {
+            &self.0
+        }
+        fn role(&self) -> NodeRole {
+            NodeRole::FunctionInput
+        }
+        fn params(&self) -> Vec<ParamDef> {
+            vec![
+                ParamDef::new("name", "Name", ParamKind::Str, Value::Str("in".into())),
+                ParamDef::new(
+                    "type",
+                    "Type",
+                    ParamKind::PinType(vec![PinType::Float, PinType::Texture2D]),
+                    Value::Type(PinType::Float),
+                ),
+            ]
+        }
+        fn signature(&self, ctx: &SigCtx) -> Signature {
+            let ty = ctx.params.get("type").and_then(Value::as_type).unwrap_or(PinType::Float);
+            Signature { inputs: vec![], outputs: vec![PinDef::new("out", "Out", ty)] }
+        }
+        fn emit(&self, ctx: &mut EmitCtx) {
+            let ty = ctx.params.get("type").and_then(Value::as_type).unwrap_or(PinType::Float);
+            if ty == PinType::Texture2D {
+                ctx.alias("out", Operand::Texture { tex: "t".into(), sampler: "s".into() });
+            } else {
+                ctx.define("out", "0.0");
+            }
+        }
+    }
+
+    struct TestFnOut(NodeInfo);
+    impl NodeDef for TestFnOut {
+        fn info(&self) -> &NodeInfo {
+            &self.0
+        }
+        fn role(&self) -> NodeRole {
+            NodeRole::FunctionOutput
+        }
+        fn params(&self) -> Vec<ParamDef> {
+            vec![
+                ParamDef::new("name", "Name", ParamKind::Str, Value::Str("out".into())),
+                ParamDef::new("type", "Type", ParamKind::PinType(vec![PinType::Float]), Value::Type(PinType::Float)),
+            ]
+        }
+        fn signature(&self, ctx: &SigCtx) -> Signature {
+            let ty = ctx.params.get("type").and_then(Value::as_type).unwrap_or(PinType::Float);
+            Signature { inputs: vec![PinDef::new("in", "In", ty).default(Value::Float(0.0))], outputs: vec![] }
+        }
+        fn emit(&self, ctx: &mut EmitCtx) {
+            let v = ctx.input("in");
+            ctx.set_output("out", v);
+        }
+    }
+
+    fn test_registry() -> Registry {
+        let mut reg = Registry::new();
+        reg.register(TestTexParam(NodeInfo::new("param::Tex", "Tex", "Params")));
+        reg.register(TestAdd(NodeInfo::new("test::Add", "Add", "Math")));
+        reg.register(TestMatOut(NodeInfo::new("output::Unlit3d", "Out", "Output")));
+        reg.register(TestFnIn(NodeInfo::new("output::FunctionInput", "In", "Function")));
+        reg.register(TestFnOut(NodeInfo::new("output::FunctionOutput", "Out", "Function")));
+        reg
+    }
+
+    #[test]
+    fn material_texture_param_sampler_collision_is_e005() {
+        let reg = test_registry();
+        let mut asset = Asset::new("mat", AssetKind::Material(MaterialKind::Unlit3d(UnlitSettings::default())));
+        let mut n1 = Node::new("param::Tex", (0.0, 0.0));
+        n1.params.insert("name".into(), Value::Str("foo".into()));
+        let mut n2 = Node::new("param::Tex", (0.0, 0.0));
+        n2.params.insert("name".into(), Value::Str("foo_sampler".into()));
+        asset.nodes.insert("t1".into(), n1);
+        asset.nodes.insert("t2".into(), n2);
+        asset.nodes.insert("add".into(), Node::new("test::Add", (0.0, 0.0)));
+        asset.nodes.insert("out".into(), Node::new("output::Unlit3d", (0.0, 0.0)));
+        asset.connect(("t1", "out"), ("add", "a"));
+        asset.connect(("t2", "out"), ("add", "b"));
+        asset.connect(("add", "out"), ("out", "color"));
+
+        let res = build_ir(&asset, "test/mat", &reg, &NoFunctions, &NoCurves, &NoConsts, &NoTextures, &NoGradients);
+        assert!(
+            res.diagnostics
+                .iter()
+                .any(|d| d.code == Code::E005 && d.message == "`foo_sampler` clashes with a texture sampler name"),
+            "{:?}",
+            res.diagnostics
+        );
+    }
+
+    #[test]
+    fn function_texture_input_sampler_collision_is_e005() {
+        let reg = test_registry();
+        let mut asset = Asset::new("fn", AssetKind::Function);
+        let mut in1 = Node::new("output::FunctionInput", (0.0, 0.0));
+        in1.params.insert("name".into(), Value::Str("foo".into()));
+        in1.params.insert("type".into(), Value::Type(PinType::Texture2D));
+        let mut in2 = Node::new("output::FunctionInput", (0.0, 0.0));
+        in2.params.insert("name".into(), Value::Str("foo_sampler".into()));
+        in2.params.insert("type".into(), Value::Type(PinType::Float));
+        let mut out = Node::new("output::FunctionOutput", (0.0, 0.0));
+        out.params.insert("name".into(), Value::Str("result".into()));
+        out.params.insert("type".into(), Value::Type(PinType::Float));
+        asset.nodes.insert("in1".into(), in1);
+        asset.nodes.insert("in2".into(), in2);
+        asset.nodes.insert("out".into(), out);
+        asset.connect(("in2", "out"), ("out", "in"));
+
+        let res = build_ir(&asset, "test/fn", &reg, &NoFunctions, &NoCurves, &NoConsts, &NoTextures, &NoGradients);
+        assert!(
+            res.diagnostics
+                .iter()
+                .any(|d| d.code == Code::E005 && d.message == "`foo_sampler` clashes with a texture sampler name"),
+            "{:?}",
+            res.diagnostics
+        );
+    }
 }

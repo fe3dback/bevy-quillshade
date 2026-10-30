@@ -12,7 +12,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use project_core::LoadError;
+use project_core::{LoadError, probe_version};
 
 #[cfg(feature = "editor")]
 pub mod editor;
@@ -241,12 +241,6 @@ fn is_default_anisotropy_clamp(v: &u16) -> bool {
     *v == default_anisotropy_clamp()
 }
 
-#[derive(Deserialize)]
-#[serde(rename = "TextureAsset")]
-struct VersionProbe {
-    format_version: u32,
-}
-
 impl TextureAsset {
     /// Texture asset for `path` with Bevy's default loader settings.
     pub fn new(path: &str) -> Self {
@@ -257,9 +251,7 @@ impl TextureAsset {
     /// is reported by validation, the asset still loads).
     pub fn from_ron(text: &str) -> Result<Self, String> {
         let parse = |e: ron::error::SpannedError| LoadError::Parse(e.to_string()).to_string();
-        // Own typed probe (not `project_core::ron_io::probe_version`): keeps the exact old error text.
-        let probe: VersionProbe = ron::Options::default().from_str(text).map_err(parse)?;
-        match probe.format_version {
+        match probe_version(text).map_err(|e| e.to_string())? {
             v if v > TEXTURE_FORMAT_VERSION => {
                 Err(LoadError::TooNew { found: v, supported: TEXTURE_FORMAT_VERSION }.to_string())
             }
@@ -371,12 +363,7 @@ pub fn load(file: &Path) -> Result<TextureAsset, String> {
 /// Writes a Texture asset file through a temporary file next to it, creating the parent directories. No checks: an
 /// invalid or shared image path is a [`problems`] entry.
 pub fn save(file: &Path, texture: &TextureAsset) -> io::Result<()> {
-    if let Some(dir) = file.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    let tmp = file.with_extension("ron.tmp");
-    std::fs::write(&tmp, texture.to_ron())?;
-    std::fs::rename(&tmp, file)
+    project_core::writer::write_atomic(file, texture.to_ron())
 }
 
 /// Which rule a [`TextureProblem`] breaks; each domain maps it to its own diagnostic code (Material: E013, E012,

@@ -254,7 +254,7 @@ pub fn scripted_input(
                 let Some((f, t, c, ..)) =
                     widgets.iter().filter(|w| if slider { w.3 } else { w.4 }).filter(reachable).min_by(|a, b| {
                         let (a, b) = (a.1.translation, b.1.translation);
-                        (a.y, a.x).partial_cmp(&(b.y, b.x)).unwrap()
+                        a.y.total_cmp(&b.y).then_with(|| a.x.total_cmp(&b.x))
                     })
                 else {
                     error!("demo {name}: no widget on screen (pan or zoom with SHADER_EDITOR_ZOOM)");
@@ -282,7 +282,7 @@ pub fn scripted_input(
                 let Some((_, t, c)) = ports
                     .iter()
                     .filter(|p| !p.0.output && wanted.as_ref().is_none_or(|w| *w == p.0.node))
-                    .min_by(|a, b| a.1.translation.y.partial_cmp(&b.1.translation.y).unwrap())
+                    .min_by(|a, b| a.1.translation.y.total_cmp(&b.1.translation.y))
                 else {
                     error!("demo {name}: no input pin");
                     return;
@@ -388,7 +388,7 @@ pub fn scripted_input(
                         Some((n, pin)) => p.0.node == *n && p.0.pin == *pin,
                         None => !p.0.output && connected(p.0),
                     })
-                    .min_by(|a, b| a.1.translation.y.partial_cmp(&b.1.translation.y).unwrap());
+                    .min_by(|a, b| a.1.translation.y.total_cmp(&b.1.translation.y));
                 let Some((from, ft, fc)) = from else {
                     error!("demo {name}: no pin {wanted:?}");
                     return;
@@ -408,7 +408,7 @@ pub fn scripted_input(
                         })
                         .min_by(|a, b| {
                             let d = |t: &UiGlobalTransform, c: &ComputedNode| logical(t, c).distance(at);
-                            d(a.1, a.2).partial_cmp(&d(b.1, b.2)).unwrap()
+                            d(a.1, a.2).total_cmp(&d(b.1, b.2))
                         });
                     let Some((to, tt, tc)) = to else {
                         error!("demo {name}: no target pin {wanted:?}");

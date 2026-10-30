@@ -1,6 +1,5 @@
 //! Everything the Material domain keeps inside [`crate::ops::Editor`] (design §6.3), and its hooks.
 
-use std::any::Any;
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
@@ -53,15 +52,8 @@ pub struct MaterialState {
 
 impl Default for MaterialState {
     fn default() -> Self {
-        MaterialState { registry: shader_stdlib::registry(), ..MaterialState::empty() }
-    }
-}
-
-impl MaterialState {
-    /// A state without node definitions (cheap): what stands in while the real one is lent ([`MaterialState::lent`]).
-    fn empty() -> Self {
         MaterialState {
-            registry: Registry::default(),
+            registry: shader_stdlib::registry(),
             disk: AssetSet::default(),
             clipboard: None,
             gradient_clipboard: None,
@@ -79,19 +71,6 @@ impl MaterialState {
             loaded: 0,
         }
     }
-
-    /// Runs `f` with this state back in `editor.domains`. A hook runs with the state taken out
-    /// ([`Editor::with_domain`]), while Material's `Editor` methods read it through `editor.domains`
-    /// ([`MaterialStates`]): the hook lends it back for the call, so they never find it missing.
-    fn lent<R>(&mut self, editor: &mut Editor, f: impl FnOnce(&mut Editor) -> R) -> R {
-        editor.domains.put_back(Box::new(std::mem::replace(self, MaterialState::empty())));
-        let out = f(editor);
-        let back = editor.domains.take(MATERIAL).and_then(|s| (s as Box<dyn Any>).downcast::<MaterialState>().ok());
-        // Nothing replaces or keeps a lent state; going on with the placeholder would silently drop the project.
-        let Some(state) = back else { panic!("the lent Material state was not given back") };
-        *self = *state;
-        out
-    }
 }
 
 impl DomainState for MaterialState {
@@ -99,28 +78,26 @@ impl DomainState for MaterialState {
         MATERIAL
     }
 
-    fn apply(&mut self, editor: &mut Editor, action: &Payload) {
-        self.lent(editor, |e| e.material_payload(action));
+    fn apply(editor: &mut Editor, action: &Payload) {
+        editor.material_payload(action);
     }
 
-    fn after_apply(&mut self, editor: &mut Editor) {
-        self.lent(editor, Editor::material_after_apply);
+    fn after_apply(editor: &mut Editor) {
+        editor.material_after_apply();
     }
 
     /// A save operation regenerates the project from disk once, whichever tabs it wrote (unsaved previews keep their
     /// output, decision 0022).
-    fn after_save(&mut self, editor: &mut Editor, _tabs: &[usize]) {
-        self.lent(editor, |e| {
-            e.regenerate();
-        });
+    fn after_save(editor: &mut Editor, _tabs: &[usize]) {
+        editor.regenerate();
     }
 
-    fn before_close(&mut self, editor: &mut Editor, tab: usize) {
-        self.lent(editor, |e| e.material_before_close(tab));
+    fn before_close(editor: &mut Editor, tab: usize) {
+        editor.material_before_close(tab);
     }
 
-    fn rescan(&mut self, editor: &mut Editor) {
-        self.lent(editor, Editor::material_rescan);
+    fn rescan(editor: &mut Editor) {
+        editor.material_rescan();
     }
 
     /// Live diagnostics of the project, then each asset's (by id): live ones, then the regeneration-only codes.
@@ -143,42 +120,40 @@ impl DomainState for MaterialState {
         Some(self.project_tree_items(editor))
     }
 
-    fn generate(&mut self, editor: &mut Editor) {
-        self.lent(editor, |e| {
-            e.regenerate();
-        });
+    fn generate(editor: &mut Editor) {
+        editor.regenerate();
     }
 
     fn delete_message(&self, editor: &Editor, r: &AssetRef) -> Option<String> {
         editor.material_delete_message(r)
     }
 
-    fn rename_file(&mut self, editor: &mut Editor, r: &AssetRef, new_path: &str) -> Result<AssetRef, String> {
-        self.lent(editor, |e| e.material_rename_file(r, new_path))
+    fn rename_file(editor: &mut Editor, r: &AssetRef, new_path: &str) -> Result<AssetRef, String> {
+        editor.material_rename_file(r, new_path)
     }
 
-    fn renamed(&mut self, editor: &mut Editor, from: &AssetRef, to: &AssetRef) {
-        self.lent(editor, |e| e.material_renamed(from, to));
+    fn renamed(editor: &mut Editor, from: &AssetRef, to: &AssetRef) {
+        editor.material_renamed(from, to);
     }
 
-    fn before_delete(&mut self, editor: &mut Editor, r: &AssetRef) {
-        self.lent(editor, |e| e.material_before_delete(r));
+    fn before_delete(editor: &mut Editor, r: &AssetRef) {
+        editor.material_before_delete(r);
     }
 
-    fn delete_file(&mut self, editor: &mut Editor, r: &AssetRef) -> Result<(), String> {
-        self.lent(editor, |e| e.material_delete_file(r))
+    fn delete_file(editor: &mut Editor, r: &AssetRef) -> Result<(), String> {
+        editor.material_delete_file(r)
     }
 
-    fn deleted(&mut self, editor: &mut Editor, r: &AssetRef) {
-        self.lent(editor, |e| e.material_deleted(r));
+    fn deleted(editor: &mut Editor, r: &AssetRef) {
+        editor.material_deleted(r);
     }
 
-    fn focus_diagnostic(&mut self, editor: &mut Editor, diag: &project_core::Diagnostic) {
-        self.lent(editor, |e| e.material_focus_diagnostic(diag));
+    fn focus_diagnostic(editor: &mut Editor, diag: &project_core::Diagnostic) {
+        editor.material_focus_diagnostic(diag);
     }
 
-    fn files_changed(&mut self, editor: &mut Editor, changed: &[PathBuf]) {
-        self.lent(editor, |e| e.material_files_changed(changed));
+    fn files_changed(editor: &mut Editor, changed: &[PathBuf]) {
+        editor.material_files_changed(changed);
     }
 }
 

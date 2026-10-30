@@ -41,6 +41,18 @@ impl TextureDomain for Mat {
     const IMAGE_VIEW: ViewKindId = ViewKindId("material.image");
     const POLICY: TexturePolicy =
         TexturePolicy { extensions: &["ktx2", "png"], shape: TextureShape::Plain2d, internal: None, presets: true };
+
+    fn disk_owners(editor: &Editor, file: &str) -> Vec<AssetRef> {
+        let Some(project) = &editor.project else { return Vec::new() };
+        editor
+            .kind_files
+            .get(&Self::DOMAIN)
+            .into_iter()
+            .flatten()
+            .filter(|r| r.suffix == Self::SUFFIX && texture_kit::editor::load(project, r).is_ok_and(|t| t.path == file))
+            .cloned()
+            .collect()
+    }
 }
 
 /// A domain whose only assets are [`Mat`]'s textures.
@@ -70,7 +82,7 @@ impl DomainState for MatState {
     fn id(&self) -> DomainId {
         Mat::DOMAIN
     }
-    fn after_save(&mut self, editor: &mut Editor, _tabs: &[usize]) {
+    fn after_save(editor: &mut Editor, _tabs: &[usize]) {
         let project = editor.project.clone().unwrap();
         project_core::regen::write_umbrella(&project, editor.domain_list.crate_contributions()).unwrap();
     }

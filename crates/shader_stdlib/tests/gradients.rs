@@ -148,7 +148,7 @@ fn samples_row_of_slot_id() {
     let (ir, diags) = build(&a);
     assert!(w111(&diags).is_empty(), "{diags:?}");
     let e = rgba_expr(&ir, "g");
-    assert!(e.contains("sg_sample_gradient(gc_common_terrain, gc_common_terrain_sampler, "), "{e}");
+    assert!(e.contains("sg_sample_gradient(gc_common__terrain, gc_common__terrain_sampler, "), "{e}");
     assert!(e.ends_with(", 0.00390625f)"), "row 0: {e}");
     assert!(ir.stdlib.contains(&("texture".to_string(), "sg_sample_gradient".to_string())), "{:?}", ir.stdlib);
     // `rgb` / `a` alias the rgba line, as TextureSample does.
@@ -164,7 +164,7 @@ fn empty_slot_warns_but_still_samples() {
     let (ir, diags) = build(&a);
     assert_eq!(w111(&diags), [("g", "gradient is empty; outputs white")]);
     let e = rgba_expr(&ir, "g");
-    assert!(e.starts_with("sg_sample_gradient(gc_common_terrain, gc_common_terrain_sampler, "), "{e}");
+    assert!(e.starts_with("sg_sample_gradient(gc_common__terrain, gc_common__terrain_sampler, "), "{e}");
     assert!(e.ends_with(", 0.04296875f)"), "row 5: {e}");
     assert_eq!(ir.textures.len(), 1);
 }
@@ -193,7 +193,7 @@ fn gradient_binding_after_params_and_fixed() {
         ]
     );
     let g = &ir.textures[2];
-    assert_eq!((g.ident.as_str(), g.texture.as_str()), ("gc_common_terrain", "@gradients/common/terrain"));
+    assert_eq!((g.ident.as_str(), g.texture.as_str()), ("gc_common__terrain", "@gradients/common/terrain"));
     let bindings: Vec<u32> = ir.textures.iter().map(|t| t.binding).collect();
     assert_eq!(bindings, [101, 103, 105]);
 }
@@ -209,7 +209,7 @@ fn gradient_function() -> FunctionSig {
     assert!(!r.has_errors(), "{:?}", r.diagnostics);
     let ir = r.ir.unwrap();
     assert!(ir.textures.is_empty(), "functions have no material bindings");
-    assert!(rgba_expr(&ir, "n1").starts_with("sg_sample_gradient(gc_common_terrain, gc_common_terrain_sampler, "));
+    assert!(rgba_expr(&ir, "n1").starts_with("sg_sample_gradient(gc_common__terrain, gc_common__terrain_sampler, "));
     ir.function_sig.unwrap()
 }
 
@@ -241,7 +241,7 @@ fn gradient_binding_once_per_collection() {
     assert_eq!(gradient_bindings.len(), 1, "{:?}", ir.textures);
     assert_eq!(ir.textures.len(), 1);
     let calls =
-        ir.main.lines.iter().filter(|l| l.expr == "fun_g(gc_common_terrain, gc_common_terrain_sampler)").count();
+        ir.main.lines.iter().filter(|l| l.expr == "fun_g(gc_common__terrain, gc_common__terrain_sampler)").count();
     assert_eq!(calls, 2, "{:?}", ir.main);
 }
 
@@ -260,12 +260,10 @@ fn two_collections(first: &str, second: &str) -> IrResult {
 #[test]
 fn gradient_ident_collision_is_e006() {
     let r = two_collections("a/b_c", "a_b/c");
-    assert!(
-        r.diagnostics.iter().any(|d| d.code == Code::E006
-            && d.message == "collections `a/b_c` and `a_b/c` get the same identifier `gc_a_b_c`; rename one of them"),
-        "{:?}",
-        r.diagnostics
-    );
+    assert!(!r.has_errors(), "{:?}", r.diagnostics);
+    let ir = r.ir.unwrap();
+    let idents: Vec<&str> = ir.textures.iter().map(|t| t.ident.as_str()).collect();
+    assert_eq!(idents, ["gc_a__b_c", "gc_a_b__c"]);
     // The texture of `x_sampler` is the sampler of `x`.
     let r = two_collections("x", "x_sampler");
     assert!(

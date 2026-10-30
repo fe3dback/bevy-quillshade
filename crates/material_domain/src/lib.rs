@@ -66,8 +66,10 @@ pub(crate) fn material_window(app: &mut App) {
         ui::props::PropsPlugin,
         ui::gradient_strip::GradientStripPlugin,
         ui::gradient_view::GradientViewPlugin,
-    ))
-    .add_systems(Update, (debug_screenshot, demo::scripted_input));
+    ));
+    if std::env::var_os("SHADER_EDITOR_SCREENSHOT").is_some() || std::env::var_os("SHADER_EDITOR_INPUT").is_some() {
+        app.add_systems(Update, (debug_screenshot, demo::scripted_input));
+    }
 }
 
 /// Seconds of quiet before live validation runs.

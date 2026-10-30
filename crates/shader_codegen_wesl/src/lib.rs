@@ -202,21 +202,24 @@ enum Ctx {
     Pbr,
     Unlit,
     Sprite,
-    Vertex3d,
+    Vertex3d { pbr: bool },
 }
 
 /// Statements defining each used builtin in a material entry point.
 fn builtin_prelude(ctx: Ctx, builtins: &BTreeSet<Builtin>, imports: &mut Imports, w: &mut Writer) {
     let is3d = ctx != Ctx::Sprite;
+    let is_vertex = matches!(ctx, Ctx::Vertex3d { .. });
+    let is_pbr = matches!(ctx, Ctx::Pbr | Ctx::Vertex3d { pbr: true });
     let view_mod =
         if is3d { "bevy_pbr::render::mesh_view_bindings" } else { "bevy_sprite_render::mesh2d::view_bindings" };
     let mesh_fns = if is3d { "bevy_pbr::render::mesh_functions" } else { "bevy_sprite_render::mesh2d::functions" };
     // Guard for fields that the prepass `VertexOutput` only has with a normal/deferred prepass.
-    let tangent_guard = match ctx {
-        Ctx::Pbr => "VERTEX_TANGENTS && (!PREPASS_PIPELINE || NORMAL_PREPASS_OR_DEFERRED_PREPASS)",
-        _ => "VERTEX_TANGENTS",
+    let tangent_guard = if is_pbr {
+        "VERTEX_TANGENTS && (!PREPASS_PIPELINE || NORMAL_PREPASS_OR_DEFERRED_PREPASS)"
+    } else {
+        "VERTEX_TANGENTS"
     };
-    let src = if ctx == Ctx::Vertex3d { "vertex" } else { "in" };
+    let src = if is_vertex { "vertex" } else { "in" };
     for b in builtins {
         let v = b.var();
         let ty = b.wesl_type();
@@ -233,20 +236,23 @@ fn builtin_prelude(ctx: Ctx, builtins: &BTreeSet<Builtin>, imports: &mut Imports
                 }
             }
             Builtin::WorldPosition => {
-                let e = if ctx == Ctx::Vertex3d { "out.world_position.xyz" } else { "in.world_position.xyz" };
+                let e = if is_vertex { "out.world_position.xyz" } else { "in.world_position.xyz" };
                 w.line(format!("    let {v}: {ty} = {e};"));
             }
-            Builtin::WorldNormal => {
-                let e = match ctx {
-                    Ctx::Pbr => "pbr_input.world_normal",
-                    Ctx::Vertex3d => "out.world_normal",
-                    _ => "normalize(in.world_normal)",
-                };
-                w.line(format!("    let {v}: {ty} = {e};"));
-            }
+            Builtin::WorldNormal => match ctx {
+                Ctx::Pbr => w.line(format!("    let {v}: {ty} = pbr_input.world_normal;")),
+                Ctx::Vertex3d { pbr: true } => {
+                    w.line(format!("    var {v}: {ty} = vec3<f32>(0.0, 0.0, 1.0);"));
+                    w.line(format!(
+                        "    @if(!PREPASS_PIPELINE || NORMAL_PREPASS_OR_DEFERRED_PREPASS) {v} = out.world_normal;"
+                    ));
+                }
+                Ctx::Vertex3d { pbr: false } => w.line(format!("    let {v}: {ty} = out.world_normal;")),
+                _ => w.line(format!("    let {v}: {ty} = normalize(in.world_normal);")),
+            },
             Builtin::WorldTangent => {
                 w.line(format!("    var {v}: {ty} = vec4<f32>(1.0, 0.0, 0.0, 1.0);"));
-                let e = if ctx == Ctx::Vertex3d { "out.world_tangent" } else { "in.world_tangent" };
+                let e = if is_vertex { "out.world_tangent" } else { "in.world_tangent" };
                 w.line(format!("    @if({tangent_guard}) {v} = {e};"));
             }
             Builtin::VertexColor => {
@@ -254,13 +260,13 @@ fn builtin_prelude(ctx: Ctx, builtins: &BTreeSet<Builtin>, imports: &mut Imports
                 w.line(format!("    @if(VERTEX_COLORS) {v} = {src}.color;"));
             }
             Builtin::FragCoord => {
-                let e = if ctx == Ctx::Vertex3d { "vec4<f32>(0.0)" } else { "in.position" };
+                let e = if is_vertex { "vec4<f32>(0.0)" } else { "in.position" };
                 w.line(format!("    let {v}: {ty} = {e};"));
             }
             Builtin::Time | Builtin::DeltaTime => {
                 let field = if *b == Builtin::Time { "time" } else { "delta_time" };
                 imports.add(view_mod, "globals");
-                if ctx == Ctx::Pbr {
+                if is_pbr {
                     // The prepass/deferred pipeline binds globals at binding 1 (main pass: 11).
                     imports.add("bevy_render::globals", "Globals");
                     w.line(format!("    var {v}: {ty} = 0.0;"));
@@ -280,7 +286,7 @@ fn builtin_prelude(ctx: Ctx, builtins: &BTreeSet<Builtin>, imports: &mut Imports
                 w.line(format!("    let {v}: {ty} = {e};"));
             }
             Builtin::WorldFromLocal => match ctx {
-                Ctx::Vertex3d => w.line(format!("    let {v}: {ty} = world_from_local;")),
+                Ctx::Vertex3d { .. } => w.line(format!("    let {v}: {ty} = world_from_local;")),
                 Ctx::Sprite => {
                     imports.add(mesh_fns, "get_world_from_local");
                     w.line(format!("    let {v}: {ty} = get_world_from_local(in.instance_index);"));
@@ -333,11 +339,17 @@ pub fn material(ir: &Ir, ctx: &GenCtx) -> Generated {
         MaterialKind::Pbr3d(_) => {
             w.line("import bevy_pbr::render::{pbr_fragment::pbr_input_from_standard_material, pbr_functions::alpha_discard};");
             w.line("@if(PREPASS_PIPELINE)");
-            w.line(
-                "import bevy_pbr::{prepass::io::{VertexOutput, FragmentOutput}, deferred::functions::deferred_output};",
-            );
-            w.line("@else");
-            w.line("import bevy_pbr::render::{forward_io::{VertexOutput, FragmentOutput}, pbr_functions::{apply_pbr_lighting, main_pass_post_lighting_processing}};");
+            if ir.vertex.is_some() {
+                w.line("import bevy_pbr::{prepass::io::{Vertex, UncompressedVertex, VertexOutput, FragmentOutput, decompress_vertex}, deferred::functions::deferred_output};");
+                w.line("@else");
+                w.line("import bevy_pbr::render::{forward_io::{Vertex, UncompressedVertex, VertexOutput, FragmentOutput, decompress_vertex}, pbr_functions::{apply_pbr_lighting, main_pass_post_lighting_processing}};");
+            } else {
+                w.line(
+                    "import bevy_pbr::{prepass::io::{VertexOutput, FragmentOutput}, deferred::functions::deferred_output};",
+                );
+                w.line("@else");
+                w.line("import bevy_pbr::render::{forward_io::{VertexOutput, FragmentOutput}, pbr_functions::{apply_pbr_lighting, main_pass_post_lighting_processing}};");
+            }
         }
         MaterialKind::Unlit3d(_) => {
             imports.add("bevy_pbr::render::forward_io", "VertexOutput");
@@ -349,17 +361,22 @@ pub fn material(ir: &Ir, ctx: &GenCtx) -> Generated {
         }
     }
     if ir.vertex.is_some() {
-        let guard = if matches!(kind, MaterialKind::Pbr3d(_)) { "@if(!PREPASS_PIPELINE)\n" } else { "" };
-        w.line(format!(
-            "{guard}import bevy_pbr::render::{{mesh_bindings::mesh, mesh_functions, skinning, morph, forward_io::{{Vertex, UncompressedVertex, decompress_vertex}}, view_transformations::position_world_to_clip}};"
-        ));
+        if matches!(kind, MaterialKind::Pbr3d(_)) {
+            w.line(
+                "import bevy_pbr::render::{mesh_bindings::mesh, mesh_functions, skinning, morph, view_transformations::position_world_to_clip};",
+            );
+        } else {
+            w.line(
+                "import bevy_pbr::render::{mesh_bindings::mesh, mesh_functions, skinning, morph, forward_io::{Vertex, UncompressedVertex, decompress_vertex}, view_transformations::position_world_to_clip};",
+            );
+        }
     }
     imports.write(&mut w);
     w.blank();
 
     write_bindings(&mut w, ir);
     write_layout_guard(&mut w, ir);
-    if matches!(kind, MaterialKind::Pbr3d(_)) && uses_time(&ir.main.builtins) {
+    if matches!(kind, MaterialKind::Pbr3d(_)) && uses_time(&ir.all_builtins()) {
         w.line("@if(PREPASS_PIPELINE) @group(0) @binding(1) var<uniform> sg_prepass_globals: Globals;");
     }
     write_custom_fns(&mut w, ir);
@@ -521,13 +538,21 @@ fn sprite_fragment(ir: &Ir, imports: &mut Imports, w: &mut Writer) {
     w.line("}");
 }
 
-/// Forward vertex shader: Bevy's `bevy_pbr::render::mesh::vertex` plus World Position Offset.
+/// Vertex shader (forward and prepass): Bevy's `bevy_pbr::render::mesh::vertex` / `prepass::prepass::vertex` plus
+/// World Position Offset.
 fn vertex_3d(vs: &IrStage, pbr: bool, imports: &mut Imports, w: &mut Writer) {
     let Some(wpo) = vs.outputs.get(shader_graph_core::ir::WPO_PIN) else { return };
+    let normal_guard = if pbr {
+        "VERTEX_NORMALS && (!PREPASS_PIPELINE || NORMAL_PREPASS_OR_DEFERRED_PREPASS)"
+    } else {
+        "VERTEX_NORMALS"
+    };
+    let tangent_guard = if pbr {
+        "VERTEX_TANGENTS && (!PREPASS_PIPELINE || NORMAL_PREPASS_OR_DEFERRED_PREPASS)"
+    } else {
+        "VERTEX_TANGENTS"
+    };
     w.blank();
-    if pbr {
-        w.line("@if(!PREPASS_PIPELINE)");
-    }
     w.line("fn sg_morph_vertex(vertex_in: UncompressedVertex, instance_index: u32) -> UncompressedVertex {");
     w.line("    var vertex = vertex_in;");
     w.line("    @if(MORPH_TARGETS) {");
@@ -541,16 +566,13 @@ fn vertex_3d(vs: &IrStage, pbr: bool, imports: &mut Imports, w: &mut Writer) {
     w.line("                continue;");
     w.line("            }");
     w.line("            vertex.position += weight * morph::morph_position(vertex_index, i, morph_descriptor_index);");
-    w.line("            @if(VERTEX_NORMALS) vertex.normal += weight * morph::morph_normal(vertex_index, i, morph_descriptor_index);");
-    w.line("            @if(VERTEX_TANGENTS) vertex.tangent += vec4<f32>(weight * morph::morph_tangent(vertex_index, i, morph_descriptor_index), 0.0);");
+    w.line(format!("            @if({normal_guard}) vertex.normal += weight * morph::morph_normal(vertex_index, i, morph_descriptor_index);"));
+    w.line(format!("            @if({tangent_guard}) vertex.tangent += vec4<f32>(weight * morph::morph_tangent(vertex_index, i, morph_descriptor_index), 0.0);"));
     w.line("        }");
     w.line("    }");
     w.line("    return vertex;");
     w.line("}");
     w.blank();
-    if pbr {
-        w.line("@if(!PREPASS_PIPELINE)");
-    }
     w.line("@vertex");
     w.line("fn vertex(vertex_no_morph: Vertex) -> VertexOutput {");
     w.line("    var out: VertexOutput;");
@@ -559,18 +581,29 @@ fn vertex_3d(vs: &IrStage, pbr: bool, imports: &mut Imports, w: &mut Writer) {
     w.line("    let mesh_world_from_local = mesh_functions::get_world_from_local(vertex_no_morph.instance_index);");
     w.line("    var world_from_local = mesh_world_from_local;");
     w.line("    @if(SKINNED) world_from_local = skinning::skin_model(vertex.joint_indices, vertex.joint_weights, vertex_no_morph.instance_index);");
-    w.line("    @if(VERTEX_NORMALS && SKINNED) out.world_normal = skinning::skin_normals(world_from_local, vertex.normal);");
-    w.line("    @if(VERTEX_NORMALS && !SKINNED) out.world_normal = mesh_functions::mesh_normal_local_to_world(vertex.normal, vertex_no_morph.instance_index);");
+    w.line(format!(
+        "    @if({normal_guard} && SKINNED) out.world_normal = skinning::skin_normals(world_from_local, vertex.normal);"
+    ));
+    w.line(format!("    @if({normal_guard} && !SKINNED) out.world_normal = mesh_functions::mesh_normal_local_to_world(vertex.normal, vertex_no_morph.instance_index);"));
     w.line("    @if(VERTEX_POSITIONS) out.world_position = mesh_functions::mesh_position_local_to_world(world_from_local, vec4<f32>(vertex.position, 1.0));");
+    if pbr {
+        w.line("    @if(PREPASS_PIPELINE && MOTION_VECTOR_PREPASS) {");
+        w.line(
+            "        var prev_model = mesh_functions::get_previous_world_from_local(vertex_no_morph.instance_index);",
+        );
+        w.line("        @if(SKINNED && HAS_PREVIOUS_SKIN) prev_model = skinning::skin_prev_model(vertex.joint_indices, vertex.joint_weights, vertex_no_morph.instance_index);");
+        w.line("        out.previous_world_position = mesh_functions::mesh_position_local_to_world(prev_model, vec4<f32>(vertex.position, 1.0));");
+        w.line("    }");
+    }
     w.line("    @if(VERTEX_UVS_A) out.uv = vertex.uv;");
     w.line("    @if(VERTEX_UVS_B) out.uv_b = vertex.uv_b;");
-    w.line("    @if(VERTEX_TANGENTS) out.world_tangent = mesh_functions::mesh_tangent_local_to_world(world_from_local, vertex.tangent, vertex_no_morph.instance_index);");
+    w.line(format!("    @if({tangent_guard}) out.world_tangent = mesh_functions::mesh_tangent_local_to_world(world_from_local, vertex.tangent, vertex_no_morph.instance_index);"));
     w.line("    @if(VERTEX_COLORS) out.color = vertex.color;");
     w.line("    @if(VERTEX_OUTPUT_INSTANCE_INDEX) out.instance_index = vertex_no_morph.instance_index;");
     w.line("    @if(VISIBILITY_RANGE_DITHER) out.visibility_range_dither = mesh_functions::get_visibility_range_dither_level(vertex_no_morph.instance_index, mesh_world_from_local[3]);");
     if !vs.builtins.is_empty() {
         w.line("    // --- builtins ---");
-        builtin_prelude(Ctx::Vertex3d, &vs.builtins, imports, w);
+        builtin_prelude(Ctx::Vertex3d { pbr }, &vs.builtins, imports, w);
     }
     if !vs.lines.is_empty() {
         w.line("    // --- graph ---");
@@ -579,6 +612,12 @@ fn vertex_3d(vs: &IrStage, pbr: bool, imports: &mut Imports, w: &mut Writer) {
     w.line("    // --- world position offset ---");
     w.line(format!("    out.world_position = vec4<f32>(out.world_position.xyz + {wpo}, 1.0);"));
     w.line("    out.position = position_world_to_clip(out.world_position.xyz);");
+    if pbr {
+        w.line("    @if(PREPASS_PIPELINE && UNCLIPPED_DEPTH_ORTHO_EMULATION) {");
+        w.line("        out.unclipped_depth = out.position.z;");
+        w.line("        out.position.z = min(out.position.z, 1.0);");
+        w.line("    }");
+    }
     w.line("    return out;");
     w.line("}");
 }

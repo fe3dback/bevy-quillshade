@@ -88,21 +88,21 @@ BakedManifest(
     "env/terrain_layers": (
       params: {},
       textures: {
-        "gc_common_terrain": "@gradients/common/terrain",
+        "gc_common__terrain": "@gradients/common/terrain",
       },
       layout: "SG_LAYOUT_7fbb96d1",
       bindings: [
-        "gc_common_terrain",
+        "gc_common__terrain",
       ],
     ),
     "env/tex_layers": (
       params: {},
       textures: {
-        "ft_common_tex_layer_n02": "textures/rock_albedo",
+        "ft_common__tex_layer_n02": "textures/rock_albedo",
       },
       layout: "SG_LAYOUT_1bf1dc98",
       bindings: [
-        "ft_common_tex_layer_n02",
+        "ft_common__tex_layer_n02",
       ],
     ),
     "env/water": (

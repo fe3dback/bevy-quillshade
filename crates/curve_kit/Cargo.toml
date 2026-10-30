@@ -27,3 +27,8 @@ tempfile = { workspace = true }
 # `cargo test -p curve_kit` links Bevy dynamically, as the workspace build does (dev-dependencies only: the kit's own
 # feature set stays without it).
 bevy = { workspace = true, features = ["dynamic_linking"] }
+
+[[test]]
+name = "two_domains"
+path = "tests/two_domains.rs"
+required-features = ["editor"]

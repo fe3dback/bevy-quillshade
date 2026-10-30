@@ -31,12 +31,28 @@ use texture_kit::{TextureAsset, TexturePolicy, TextureShape};
 struct Plain;
 struct Cube;
 
+fn scanned_owners<D: TextureDomain>(editor: &Editor, file: &str) -> Vec<AssetRef> {
+    let Some(project) = &editor.project else { return Vec::new() };
+    editor
+        .kind_files
+        .get(&D::DOMAIN)
+        .into_iter()
+        .flatten()
+        .filter(|r| r.suffix == D::SUFFIX && texture_kit::editor::load(project, r).is_ok_and(|t| t.path == file))
+        .cloned()
+        .collect()
+}
+
 impl TextureDomain for Plain {
     const DOMAIN: DomainId = DomainId::new("plain");
     const VIEW: ViewKindId = ViewKindId("plain.texture");
     const IMAGE_VIEW: ViewKindId = ViewKindId("plain.image");
     const POLICY: TexturePolicy =
         TexturePolicy { extensions: &["ktx2", "png"], shape: TextureShape::Plain2d, internal: None, presets: true };
+
+    fn disk_owners(editor: &Editor, file: &str) -> Vec<AssetRef> {
+        scanned_owners::<Self>(editor, file)
+    }
 }
 
 impl TextureDomain for Cube {
@@ -45,6 +61,10 @@ impl TextureDomain for Cube {
     const IMAGE_VIEW: ViewKindId = ViewKindId("cube.image");
     const POLICY: TexturePolicy =
         TexturePolicy { extensions: &["ktx2"], shape: TextureShape::CubeMap, internal: None, presets: false };
+
+    fn disk_owners(editor: &Editor, file: &str) -> Vec<AssetRef> {
+        scanned_owners::<Self>(editor, file)
+    }
 }
 
 /// A domain whose only assets are `T`'s textures.

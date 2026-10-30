@@ -84,12 +84,62 @@ pub struct GraphViews(pub Vec<ViewKindId>);
 #[derive(Component, Default, Clone)]
 pub struct EditorCanvasMarker;
 
+/// Box above a node showing its comment (`Display::None` when empty).
+#[derive(Component, Default, Clone, Debug)]
+struct NodeCommentBox(String);
+
+/// Text inside a [`NodeCommentBox`].
+#[derive(Component, Default, Clone, Debug)]
+struct NodeCommentText(String);
+
+/// Structural look of a node on the canvas (excluding its position and comment text, which update in place).
+#[derive(Clone, Debug, PartialEq)]
+struct NodeStructure {
+    title: String,
+    header: Color,
+    shape: NodeShape,
+    pins: Vec<PinLook>,
+    inline_pins: Vec<String>,
+    has_body: bool,
+    wide: bool,
+    note: Option<String>,
+    emphasis: crate::view::Emphasis,
+}
+
+impl NodeStructure {
+    fn from_look(look: &NodeLook) -> Self {
+        NodeStructure {
+            title: look.title.clone(),
+            header: look.header,
+            shape: look.shape,
+            pins: look.pins.clone(),
+            inline_pins: look.inline.iter().map(|(id, _)| id.clone()).collect(),
+            has_body: look.body.is_some(),
+            wide: look.wide,
+            note: look.note.clone(),
+            emphasis: look.emphasis,
+        }
+    }
+}
+
+/// Snapshot of the spawned canvas structure of `G`: when unchanged for the same document, [`rebuild_canvas`]
+/// updates positions, comments, frames and selection in place without despawning entities or replaying edges.
+#[derive(Clone, Debug, PartialEq)]
+struct CanvasStructure {
+    nodes: Vec<(String, NodeStructure)>,
+    edges: Vec<(PinKey, PinKey)>,
+    frames: Vec<String>,
+    props: Vec<(Entity, Option<PropValue>)>,
+}
+
 /// The canvas of `G` and what it shows.
 #[derive(Resource)]
 pub struct EditorCanvas<G: GraphDomain> {
     pub canvas: Entity,
     /// Document (its tab key) and revision currently on the canvas.
     pub shown: Option<(TabKey, u64)>,
+    /// Structural snapshot of the currently spawned canvas entities.
+    structure: Option<CanvasStructure>,
     /// Saved pan/zoom per document.
     views: HashMap<TabKey, (Vec2, f32)>,
     /// True while the canvas replays the model (connection checks are skipped).
@@ -99,7 +149,7 @@ pub struct EditorCanvas<G: GraphDomain> {
 
 impl<G: GraphDomain> EditorCanvas<G> {
     pub fn new(canvas: Entity) -> Self {
-        EditorCanvas { canvas, shown: None, views: HashMap::new(), syncing: false, graph: PhantomData }
+        EditorCanvas { canvas, shown: None, structure: None, views: HashMap::new(), syncing: false, graph: PhantomData }
     }
 }
 
@@ -357,7 +407,7 @@ fn node_scene(
                 --
                 @pin_port(Port::output(PortType::ANY), cout, kout, owner)
                 --
-                {node_comment(&comment)}
+                @{node_comment(id, &comment, owner)}
             ]
         });
     }
@@ -434,7 +484,7 @@ fn node_scene(
         key
         owner
         ChildOf(canvas)
-        Children [ @{title} -- {rows} -- {node_comment(&comment)} ]
+        Children [ @{title} -- {rows} -- @{node_comment(id, &comment, owner)} ]
     })
 }
 
@@ -445,17 +495,18 @@ const COMMENT_ARROW: f32 = 5.0;
 /// The node's border (`kit::node`): the comment spans the node's outer width.
 const NODE_BORDER: f32 = 1.5;
 
-/// A node's comment, nothing when it has none: a rounded translucent black box of small white word-wrapped text right
-/// above the node, as wide as the node and as tall as its text, with a small arrow down to the node. Absolute, so the
-/// node's layout and size ignore it; picking passes through it.
-fn node_comment(comment: &str) -> Vec<Box<dyn Scene>> {
-    if comment.is_empty() {
-        return Vec::new();
-    }
+/// A node's comment (`Display::None` when it has none): a rounded translucent black box of small white word-wrapped
+/// text right above the node, as wide as the node and as tall as its text, with a small arrow down to the node.
+/// Absolute, so the node's layout and size ignore it; picking passes through it.
+fn node_comment(id: &str, comment: &str, owner: GraphOf) -> Box<dyn Scene> {
+    let display = if comment.is_empty() { Display::None } else { Display::Flex };
     let comment = comment.to_string();
     let edge = px(-NODE_BORDER);
-    vec![Box::new(bsn! {
+    let box_key = NodeCommentBox(id.to_string());
+    let text_key = NodeCommentText(id.to_string());
+    Box::new(bsn! {
         Node {
+            display: display,
             position_type: PositionType::Absolute,
             left: edge,
             right: edge,
@@ -465,6 +516,8 @@ fn node_comment(comment: &str) -> Vec<Box<dyn Scene>> {
             flex_direction: FlexDirection::Column,
             align_items: AlignItems::Center,
         }
+        box_key
+        owner
         Pickable::IGNORE
         Children [
             Node {
@@ -479,6 +532,8 @@ fn node_comment(comment: &str) -> Vec<Box<dyn Scene>> {
                 TextFont { font_size: FontSize::Px(10.0) }
                 TextColor(Color::WHITE)
                 TextLayout { linebreak: LineBreak::WordOrCharacter }
+                text_key
+                owner
                 Pickable::IGNORE
             ]
             --
@@ -488,7 +543,7 @@ fn node_comment(comment: &str) -> Vec<Box<dyn Scene>> {
             BorderColor { top: COMMENT_BG, left: Color::NONE, right: Color::NONE, bottom: Color::NONE }
             Pickable::IGNORE
         ]
-    })]
+    })
 }
 
 /// Colour of a comment frame: its hue at the editor's saturation / lightness (design §4.6), else its stored colour or
@@ -626,7 +681,34 @@ fn inline_editing(world: &mut World) -> bool {
     popovers.into_iter().any(|e| in_node(world, e))
 }
 
+/// Current [`PropValue`] of every [`PropField`] inside a node of `own` on the canvas, sorted by entity.
+fn canvas_prop_values(world: &mut World, own: GraphOf) -> Vec<(Entity, Option<PropValue>)> {
+    let in_our_node = |world: &World, mut e: Entity| loop {
+        if world.get::<NodeKey>(e).is_some() {
+            return world.get::<GraphOf>(e) == Some(&own);
+        }
+        match world.get::<ChildOf>(e) {
+            Some(parent) => e = parent.parent(),
+            None => return false,
+        }
+    };
+    let fields: Vec<(Entity, editor_core::dynval::PropKey)> = world
+        .query::<(Entity, &PropField)>()
+        .iter(world)
+        .filter(|(e, _)| in_our_node(world, *e))
+        .map(|(e, f)| (e, f.target.clone()))
+        .collect();
+    let editor = world.resource::<Editor>();
+    let mut out: Vec<(Entity, Option<PropValue>)> =
+        fields.into_iter().map(|(e, k)| (e, editor.current_value(&k))).collect();
+    out.sort_by_key(|(e, _)| *e);
+    out
+}
+
 /// Rebuilds the canvas when the active document or its revision changed (and no gesture is running).
+/// When the active document and its structural node/edge/frame topology and inline property values are unchanged,
+/// updates node positions, node comments, comment frames and selection in place without despawning entities or
+/// replaying edges.
 pub fn rebuild_canvas<G: GraphDomain>(world: &mut World) {
     let Some(ec) = world.get_resource::<EditorCanvas<G>>() else { return };
     let (canvas, shown) = (ec.canvas, ec.shown.clone());
@@ -641,114 +723,204 @@ pub fn rebuild_canvas<G: GraphDomain>(world: &mut World) {
     }
 
     // Collect everything from the model first (observers below read `Editor`).
+    let own = GraphOf(G::VIEW);
     let editor = world.resource::<Editor>();
     let mut scenes: Vec<Box<dyn Scene>> = Vec::new();
+    let mut node_specs: Vec<(String, NodeStructure)> = Vec::new();
+    let mut node_positions: HashMap<String, Vec2> = HashMap::new();
+    let mut node_comments: HashMap<String, String> = HashMap::new();
+    let mut frames: Vec<FrameView> = Vec::new();
     let mut edges = Vec::new();
     let (mut selection, mut frame_sel, mut enclosed, mut previewed) = (BTreeSet::new(), None, BTreeSet::new(), None);
     if let Some(d) = active::<G>(editor) {
         let ctx = GraphCtxRef { editor };
         let view = G::view(d);
         for f in &view.frames {
-            scenes.push(Box::new(frame_scene(f, canvas, GraphOf(G::VIEW))));
+            scenes.push(Box::new(frame_scene(f, canvas, own)));
         }
         for n in &view.nodes {
             let look = G::node_look(&ctx, d, &n.id);
             if look.emphasis.pulse {
                 previewed = Some(n.id.clone());
             }
-            scenes.push(node_scene(n, look, G::previews(&ctx, d, &n.id), canvas, GraphOf(G::VIEW)));
+            node_specs.push((n.id.clone(), NodeStructure::from_look(&look)));
+            node_positions.insert(n.id.clone(), n.pos);
+            node_comments.insert(n.id.clone(), look.comment.clone().unwrap_or_default());
+            scenes.push(node_scene(n, look, G::previews(&ctx, d, &n.id), canvas, own));
         }
+        frames = view.frames;
         edges = view.edges;
         selection = view.selection.clone();
         frame_sel = view.selected_frame.map(str::to_string);
         enclosed = view.enclosed_frames.clone();
     }
 
-    // View per document.
-    if !same_doc {
-        let view = world.get::<CanvasView>(canvas).map(|v| (v.pan, v.zoom));
-        // The outgoing graph's last view goes into its history entry, so Back returns there (decision 0041); it may
-        // not have settled yet. A canvas that is not laid out has no centre.
-        let outgoing = world
-            .get::<CanvasView>(canvas)
-            .zip(world.get::<ComputedNode>(canvas))
-            .filter(|(_, c)| (c.size() * c.inverse_scale_factor()).min_element() > 1.0)
-            .map(nav_view);
-        if let (Some((old, _)), Some(v)) = (&shown, outgoing) {
-            world.resource_mut::<Editor>().bypass_change_detection().nav.amend_last_of(old, v);
+    let current_props = canvas_prop_values(world, own);
+    let frame_ids: Vec<String> = frames.iter().map(|f| f.id.clone()).collect();
+    let incremental = same_doc
+        && want.is_some()
+        && world.resource::<EditorCanvas<G>>().structure.as_ref().is_some_and(|s| {
+            s.nodes == node_specs && s.edges == edges && s.frames == frame_ids && s.props == current_props
+        });
+
+    if incremental {
+        for (_, k, _, mut pos) in world
+            .query::<(Entity, &NodeKey, &GraphOf, &mut NodePosition)>()
+            .iter_mut(world)
+            .filter(|(_, _, g, _)| **g == own)
+        {
+            if let Some(&want_pos) = node_positions.get(&k.0) {
+                pos.set_if_neq(NodePosition(want_pos));
+            }
         }
+        for (box_key, _, mut node) in
+            world.query::<(&NodeCommentBox, &GraphOf, &mut Node)>().iter_mut(world).filter(|(_, g, _)| **g == own)
+        {
+            let empty = node_comments.get(&box_key.0).is_none_or(String::is_empty);
+            let want_display = if empty { Display::None } else { Display::Flex };
+            if node.display != want_display {
+                node.display = want_display;
+            }
+        }
+        for (text_key, _, mut text) in
+            world.query::<(&NodeCommentText, &GraphOf, &mut Text)>().iter_mut(world).filter(|(_, g, _)| **g == own)
+        {
+            let want_text = node_comments.get(&text_key.0).cloned().unwrap_or_default();
+            text.set_if_neq(Text(want_text));
+        }
+        let frame_map: HashMap<&str, &FrameView> = frames.iter().map(|f| (f.id.as_str(), f)).collect();
+        let mut title_updates: Vec<(Entity, String, Color)> = Vec::new();
+        for (_, k, _, mut pos, mut node, mut border, mut bg, children) in world
+            .query::<(
+                Entity,
+                &FrameKey,
+                &GraphOf,
+                &mut NodePosition,
+                &mut Node,
+                &mut SelectedBorderColor,
+                &mut BackgroundColor,
+                &Children,
+            )>()
+            .iter_mut(world)
+            .filter(|(_, _, g, ..)| **g == own)
+        {
+            if let Some(f) = frame_map.get(k.0.as_str()) {
+                let (x, y, w, h) = f.rect;
+                pos.set_if_neq(NodePosition(Vec2::new(x, y)));
+                if node.width != px(w) {
+                    node.width = px(w);
+                }
+                if node.height != px(h) {
+                    node.height = px(h);
+                }
+                let c = frame_color(f);
+                let (want_border, want_bg) = frame_look(c);
+                border.set_if_neq(want_border);
+                bg.set_if_neq(want_bg);
+                for &child in children {
+                    title_updates.push((child, f.title.clone(), c));
+                }
+            }
+        }
+        for (child, want_title, want_color) in title_updates {
+            if world.get::<FrameTitleStrip>(child).is_some() {
+                if let Some(mut t) = world.get_mut::<Text>(child) {
+                    t.set_if_neq(Text(want_title));
+                }
+                if let Some(mut tc) = world.get_mut::<TextColor>(child) {
+                    tc.set_if_neq(TextColor(want_color));
+                }
+            }
+        }
+    } else {
+        // View per document.
+        if !same_doc {
+            let view = world.get::<CanvasView>(canvas).map(|v| (v.pan, v.zoom));
+            // The outgoing graph's last view goes into its history entry, so Back returns there (decision 0041); it may
+            // not have settled yet. A canvas that is not laid out has no centre.
+            let outgoing = world
+                .get::<CanvasView>(canvas)
+                .zip(world.get::<ComputedNode>(canvas))
+                .filter(|(_, c)| (c.size() * c.inverse_scale_factor()).min_element() > 1.0)
+                .map(nav_view);
+            if let (Some((old, _)), Some(v)) = (&shown, outgoing) {
+                world.resource_mut::<Editor>().bypass_change_detection().nav.amend_last_of(old, v);
+            }
+            let mut ec = world.resource_mut::<EditorCanvas<G>>();
+            if let (Some((old, _)), Some(v)) = (&shown, view) {
+                ec.views.insert(old.clone(), v);
+            }
+            let restore = want.as_ref().and_then(|(id, _)| ec.views.get(id).copied());
+            if let Some((pan, zoom)) = restore
+                && let Some(mut v) = world.get_mut::<CanvasView>(canvas)
+            {
+                v.pan = pan;
+                v.zoom = zoom;
+            }
+        }
+
+        // The pin under the pointer keeps its hover look: picking sees its new port only a frame later (after layout),
+        // and corrects `Hovered` then if the rebuild moved the pin away.
+        // This canvas's entities only ([`GraphOf`]).
+        let hovered: Vec<PinKey> = world
+            .query::<(&PinKey, &Hovered, &GraphOf)>()
+            .iter(world)
+            .filter(|(_, h, g)| h.0 && **g == own)
+            .map(|(k, ..)| k.clone())
+            .collect();
+        let old: Vec<Entity> = world
+            .query_filtered::<(Entity, &GraphOf), Or<(With<NodeKey>, With<FrameKey>)>>()
+            .iter(world)
+            .filter(|(_, g)| **g == own)
+            .map(|(e, _)| e)
+            .collect();
+        for e in old {
+            world.entity_mut(e).despawn();
+        }
+        for s in scenes {
+            if let Err(e) = world.spawn_scene(s) {
+                error!("spawning a node failed: {e}");
+            }
+        }
+        world.flush();
+
+        let mut ports: HashMap<(String, String, bool), Entity> = HashMap::new();
+        for (e, k, _) in world.query::<(Entity, &PinKey, &GraphOf)>().iter(world).filter(|(.., g)| **g == own) {
+            ports.insert((k.node.clone(), k.pin.clone(), k.output), e);
+        }
+        for k in hovered {
+            if let Some(&port) = ports.get(&(k.node, k.pin, k.output)) {
+                world.entity_mut(port).insert(Hovered(true));
+            }
+        }
+        let pulse: Vec<Entity> = world
+            .query::<(Entity, &NodeKey, &GraphOf)>()
+            .iter(world)
+            .filter(|(_, k, g)| **g == own && Some(&k.0) == previewed.as_ref())
+            .map(|(e, ..)| e)
+            .collect();
+        for e in pulse {
+            world.entity_mut(e).insert(PreviewPulse);
+        }
+        world.resource_mut::<EditorCanvas<G>>().syncing = true;
+        for (from, to) in &edges {
+            let a = ports.get(&(from.node.clone(), from.pin.clone(), true));
+            let b = ports.get(&(to.node.clone(), to.pin.clone(), false));
+            if let (Some(&a), Some(&b)) = (a, b)
+                && let Err(e) = world.graph_edit(canvas, NoodleEdit::Connect { from: a, to: b })
+            {
+                warn!(
+                    "cannot show edge {:?} -> {:?}: {e:?}",
+                    (from.node.as_str(), from.pin.as_str()),
+                    (to.node.as_str(), to.pin.as_str())
+                );
+            }
+        }
+        let props = canvas_prop_values(world, own);
         let mut ec = world.resource_mut::<EditorCanvas<G>>();
-        if let (Some((old, _)), Some(v)) = (&shown, view) {
-            ec.views.insert(old.clone(), v);
-        }
-        let restore = want.as_ref().and_then(|(id, _)| ec.views.get(id).copied());
-        if let Some((pan, zoom)) = restore
-            && let Some(mut v) = world.get_mut::<CanvasView>(canvas)
-        {
-            v.pan = pan;
-            v.zoom = zoom;
-        }
+        ec.syncing = false;
+        ec.structure = want.is_some().then_some(CanvasStructure { nodes: node_specs, edges, frames: frame_ids, props });
     }
-
-    // The pin under the pointer keeps its hover look: picking sees its new port only a frame later (after layout),
-    // and corrects `Hovered` then if the rebuild moved the pin away.
-    // This canvas's entities only ([`GraphOf`]).
-    let own = GraphOf(G::VIEW);
-    let hovered: Vec<PinKey> = world
-        .query::<(&PinKey, &Hovered, &GraphOf)>()
-        .iter(world)
-        .filter(|(_, h, g)| h.0 && **g == own)
-        .map(|(k, ..)| k.clone())
-        .collect();
-    let old: Vec<Entity> = world
-        .query_filtered::<(Entity, &GraphOf), Or<(With<NodeKey>, With<FrameKey>)>>()
-        .iter(world)
-        .filter(|(_, g)| **g == own)
-        .map(|(e, _)| e)
-        .collect();
-    for e in old {
-        world.entity_mut(e).despawn();
-    }
-    for s in scenes {
-        if let Err(e) = world.spawn_scene(s) {
-            error!("spawning a node failed: {e}");
-        }
-    }
-    world.flush();
-
-    let mut ports: HashMap<(String, String, bool), Entity> = HashMap::new();
-    for (e, k, _) in world.query::<(Entity, &PinKey, &GraphOf)>().iter(world).filter(|(.., g)| **g == own) {
-        ports.insert((k.node.clone(), k.pin.clone(), k.output), e);
-    }
-    for k in hovered {
-        if let Some(&port) = ports.get(&(k.node, k.pin, k.output)) {
-            world.entity_mut(port).insert(Hovered(true));
-        }
-    }
-    let pulse: Vec<Entity> = world
-        .query::<(Entity, &NodeKey, &GraphOf)>()
-        .iter(world)
-        .filter(|(_, k, g)| **g == own && Some(&k.0) == previewed.as_ref())
-        .map(|(e, ..)| e)
-        .collect();
-    for e in pulse {
-        world.entity_mut(e).insert(PreviewPulse);
-    }
-    world.resource_mut::<EditorCanvas<G>>().syncing = true;
-    for (from, to) in &edges {
-        let a = ports.get(&(from.node.clone(), from.pin.clone(), true));
-        let b = ports.get(&(to.node.clone(), to.pin.clone(), false));
-        if let (Some(&a), Some(&b)) = (a, b)
-            && let Err(e) = world.graph_edit(canvas, NoodleEdit::Connect { from: a, to: b })
-        {
-            warn!(
-                "cannot show edge {:?} -> {:?}: {e:?}",
-                (from.node.as_str(), from.pin.as_str()),
-                (to.node.as_str(), to.pin.as_str())
-            );
-        }
-    }
-    world.resource_mut::<EditorCanvas<G>>().syncing = false;
 
     let mut picked = Vec::new();
     for (e, k, _) in world.query::<(Entity, &NodeKey, &GraphOf)>().iter(world).filter(|(.., g)| **g == own) {

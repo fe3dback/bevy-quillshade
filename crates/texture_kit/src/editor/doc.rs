@@ -38,8 +38,8 @@ pub struct TextureDoc<D> {
     /// renames.
     pub aref: AssetRef,
     pub asset: TextureAsset,
-    /// RON text of the last saved state (dirty check).
-    pub saved: String,
+    /// The asset last saved or loaded: dirty is `asset != saved`.
+    pub saved: TextureAsset,
     history: History<TextureAsset>,
     /// A built-in texture: read-only, its image is the embedded bytes.
     internal: bool,
@@ -91,7 +91,7 @@ impl<D> fmt::Debug for TextureDoc<D> {
 
 impl<D: TextureDomain> TextureDoc<D> {
     pub fn new(aref: AssetRef, asset: TextureAsset) -> Self {
-        let saved = asset.to_ron();
+        let saved = asset.clone();
         TextureDoc {
             aref,
             easy: D::POLICY.presets && fits_easy(&asset.settings),
@@ -128,11 +128,11 @@ impl<D> TextureDoc<D> {
     }
 
     pub fn is_dirty(&self) -> bool {
-        !self.internal && self.asset.to_ron() != self.saved
+        !self.internal && self.asset != self.saved
     }
 
     pub fn mark_saved(&mut self) {
-        self.saved = self.asset.to_ron();
+        self.saved = self.asset.clone();
     }
 
     /// Applies `f` as one undoable step; consecutive edits with the same `key` share one step (a dragged number
@@ -301,8 +301,7 @@ impl<D: TextureDomain> TabDoc for TextureDoc<D> {
     }
 
     fn changed_on_disk(&self, project: &Project) -> bool {
-        !self.is_internal()
-            && load(project, &self.aref).is_ok_and(|t| TextureAsset::from_ron(&self.saved).ok() != Some(t))
+        !self.is_internal() && load(project, &self.aref).is_ok_and(|t| t != self.saved)
     }
 
     /// A built-in texture never changes (read-only documents are "reloaded" on activation).
@@ -319,7 +318,7 @@ impl<D: TextureDomain> TabDoc for TextureDoc<D> {
             return;
         }
         if let Ok(on_disk) = load(project, &self.aref) {
-            self.saved = on_disk.to_ron();
+            self.saved = on_disk;
         }
     }
 
@@ -587,6 +586,10 @@ pub(crate) mod tests {
         const IMAGE_VIEW: ViewKindId = ViewKindId("test.image");
         const POLICY: TexturePolicy =
             TexturePolicy { extensions: &["ktx2", "png"], shape: TextureShape::Plain2d, internal: None, presets: true };
+
+        fn disk_owners(_editor: &editor_core::state::editor::Editor, _file: &str) -> Vec<AssetRef> {
+            Vec::new()
+        }
     }
 
     /// [`TestTexture`] without presets (a cube map domain).
@@ -597,6 +600,10 @@ pub(crate) mod tests {
         const VIEW: ViewKindId = ViewKindId("cube.texture");
         const IMAGE_VIEW: ViewKindId = ViewKindId("cube.image");
         const POLICY: TexturePolicy = TexturePolicy { presets: false, ..TestTexture::POLICY };
+
+        fn disk_owners(_editor: &editor_core::state::editor::Editor, _file: &str) -> Vec<AssetRef> {
+            Vec::new()
+        }
     }
 
     fn aref(path: &str) -> AssetRef {

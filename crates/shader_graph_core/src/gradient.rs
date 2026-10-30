@@ -7,6 +7,7 @@
 use std::collections::HashSet;
 use std::hash::{BuildHasher, RandomState};
 
+use project_core::probe_version;
 use serde::{Deserialize, Serialize};
 
 use crate::model::LoadError;
@@ -84,12 +85,6 @@ fn is_default_mid(mid: &f32) -> bool {
     *mid == DEFAULT_MID
 }
 
-#[derive(Deserialize)]
-#[serde(rename = "GradientCollection")]
-struct VersionProbe {
-    format_version: u32,
-}
-
 impl GradientCollection {
     /// A collection of [`SLOTS`] empty slots. Ids are drawn from `next_id`; `0`, values above `i32::MAX` and
     /// duplicates are drawn again (so `next_id` must eventually yield enough distinct valid ids).
@@ -125,9 +120,7 @@ impl GradientCollection {
     /// Parses a collection file (older format versions would migrate here), normalizes it and checks its structure:
     /// slot count, ids, stop count (`LoadError::Parse` naming the problem).
     pub fn from_ron(text: &str) -> Result<Self, LoadError> {
-        let probe: VersionProbe =
-            ron::Options::default().from_str(text).map_err(|e| LoadError::Parse(e.to_string()))?;
-        match probe.format_version {
+        match probe_version(text)? {
             v if v > GRADIENTS_FORMAT_VERSION => {
                 Err(LoadError::TooNew { found: v, supported: GRADIENTS_FORMAT_VERSION })
             }

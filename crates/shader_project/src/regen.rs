@@ -300,11 +300,26 @@ pub fn regenerate(project: &Project, opts: &RegenOptions) -> std::io::Result<Reg
     regenerate_set(project, &set, opts)
 }
 
+const LIGHT_CRATE: CrateContribution = CrateContribution {
+    domain: project_core::DomainId::new("light"),
+    plugin: "QuillshadeLightInternalPlugin",
+    bevy_features: &[],
+    dependencies: &[],
+};
+
 /// [`plan_set`], then [`commit`] of its output and the umbrella crate files; blocked files (E008) are reported at
 /// their asset (which is then not `ok`) or at the project.
 pub fn regenerate_set(project: &Project, set: &AssetSet, opts: &RegenOptions) -> std::io::Result<RegenReport> {
     let (mut report, output) = plan_set(project, set, opts);
-    let committed = commit(project, &[output], opts.crates, opts.dry_run)?;
+    let crates: &[CrateContribution] = if opts.crates.len() == 1
+        && opts.crates[0].domain == MATERIAL
+        && project.module_dir(LIGHT_CRATE.domain).join("mod.rs").is_file()
+    {
+        &[MATERIAL_CRATE, LIGHT_CRATE]
+    } else {
+        opts.crates
+    };
+    let committed = commit(project, &[output], crates, opts.dry_run)?;
     for b in committed.blocked {
         let d = Diagnostic::new(Code::E008, b.message);
         let owner = b.owner.as_deref();
@@ -637,7 +652,8 @@ pub fn plan_set(project: &Project, set: &AssetSet, opts: &RegenOptions) -> (Rege
                 && has_marker(&old)
             {
                 keep.insert(rs);
-                entries.push(entry_from_old(id, &old));
+                let asset = set.assets.get(id).and_then(|a| a.as_ref().ok());
+                entries.push(entry_from_old(id, asset, &old));
                 // Without an old entry (manifest deleted): an empty one, the game keeps the compiled defaults.
                 manifest_materials.push(
                     old_manifest
@@ -805,10 +821,14 @@ fn texture_field_ids(set: &AssetSet) -> Vec<String> {
     project.chain(INTERNAL_TEXTURES.iter().map(|t| t.id.to_string())).chain(gradients).collect()
 }
 
-/// Rebuilds a crate entry of a material whose current graph is broken from its previous module.
-fn entry_from_old(id: &AssetId, old: &str) -> MaterialEntry {
+/// Rebuilds a crate entry of a material whose current graph is broken from its loaded asset (if any) and previous
+/// module.
+fn entry_from_old(id: &AssetId, asset: Option<&Asset>, old: &str) -> MaterialEntry {
     let base = shader_graph_core::ident::to_pascal_case(id.name());
-    let pbr = old.contains("impl MaterialExtension for");
+    let pbr = match asset.and_then(|a| a.kind.material()) {
+        Some(kind) => matches!(kind, shader_graph_core::MaterialKind::Pbr3d(_)),
+        None => old.contains("impl MaterialExtension for"),
+    };
     let params = format!("{base}Params");
     MaterialEntry {
         path: id.path.clone(),

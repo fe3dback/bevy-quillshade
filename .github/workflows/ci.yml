@@ -46,7 +46,7 @@ jobs:
       # The kits' model halves and the Light backend, as generator backends use them: without their default `editor`
       # feature. The workspace build above unifies features and so always builds them with it.
       - name: Kits without the editor feature
-        run: cargo clippy -p curve_kit -p texture_kit -p light_domain --no-default-features -- -D warnings
+        run: cargo clippy -p curve_kit -p texture_kit -p light_domain --no-default-features --all-targets -- -D warnings
       # The committed generated crate; that it matches a fresh regen is checked by the `test` job on every OS.
       - name: Generated crate builds and is clippy-clean
         working-directory: examples/sample_game

@@ -8,14 +8,14 @@ use editor_core::message::Level;
 use editor_core::state::editor::Editor;
 use editor_core::tab::Tab;
 use editor_core::util::text::plural;
-use project_core::regen::{DomainBackend, commit};
+use project_core::regen::commit;
 use project_core::writer::Change;
 use project_core::{AssetRef, Diagnostic, DomainId};
 use texture_kit::editor::TextureDoc;
 
 use super::{EnvironmentDoc, LightTexture};
 use crate::backend::{
-    ENVIRONMENT_SUFFIX, LIGHT, LightAssets, LightBackend, TEXTURE_SUFFIX, rewrite_texture_refs, validate,
+    ENVIRONMENT_SUFFIX, LIGHT, LightAssets, TEXTURE_SUFFIX, plan_assets, rewrite_texture_refs, validate,
 };
 
 /// What the Light domain keeps between frames.
@@ -29,20 +29,25 @@ pub struct LightState {
 
 impl LightState {
     /// Re-reads the assets from disk, then [`LightState::revalidate`].
-    fn reload(&mut self, editor: &mut Editor) {
-        self.assets = editor.project.as_ref().map(LightAssets::load).unwrap_or_default();
-        self.revalidate(editor);
+    fn reload(editor: &mut Editor) {
+        let assets = editor.project.as_ref().map(LightAssets::load).unwrap_or_default();
+        editor.domains.get_mut::<Self>().expect("Light domain not registered").assets = assets;
+        Self::revalidate(editor);
     }
 
     /// The diagnostics of the assets as the open tabs show them; the console/logs, the trees' error colours and the
     /// Texture tabs' problems redraw when they changed.
-    fn revalidate(&mut self, editor: &mut Editor) {
+    fn revalidate(editor: &mut Editor) {
         let diagnostics = match &editor.project {
-            Some(project) => validate(project, &shown(&self.assets, &editor.tabs)),
+            Some(project) => {
+                let assets = &editor.domains.get::<Self>().expect("Light domain not registered").assets;
+                validate(project, &shown(assets, &editor.tabs))
+            }
             None => Vec::new(),
         };
-        if diagnostics != self.diagnostics {
-            self.diagnostics = diagnostics;
+        let state = editor.domains.get_mut::<Self>().expect("Light domain not registered");
+        if diagnostics != state.diagnostics {
+            state.diagnostics = diagnostics;
             editor.ui.log += 1;
             editor.ui.browser += 1;
             editor.ui.props += 1;
@@ -52,10 +57,11 @@ impl LightState {
     /// Writes the Light module and the umbrella crate files from what is saved (design §6.5): every registered
     /// domain's contribution, so the umbrella keeps every domain's module. Logs what was written and blocked files
     /// (E008); a changed Rust file needs a rebuild of the game.
-    fn regenerate(&mut self, editor: &mut Editor) {
+    fn regenerate(editor: &mut Editor) {
         let Some(project) = editor.project.clone() else { return };
         let list = editor.domain_list.clone();
-        let plan = LightBackend.plan(&project, false);
+        let assets = &editor.domains.get::<Self>().expect("Light domain not registered").assets;
+        let plan = plan_assets(&project, assets);
         let committed = match commit(&project, &[plan.output], list.crate_contributions(), false) {
             Ok(c) => c,
             Err(e) => return editor.io_error("Regeneration failed", e),
@@ -78,13 +84,7 @@ impl LightState {
     /// The Light texture `from` was renamed to `to` (`None`: deleted) and the environment files on disk naming it were
     /// rewritten (`rewritten`): the open environment tabs follow ([`EnvironmentDoc::retarget`]: their edits and undo
     /// history stay), then the assets reload and the module regenerates. Returns the environments that showed it.
-    fn texture_moved(
-        &mut self,
-        editor: &mut Editor,
-        from: &str,
-        to: Option<&str>,
-        rewritten: Vec<String>,
-    ) -> Vec<String> {
+    fn texture_moved(editor: &mut Editor, from: &str, to: Option<&str>, rewritten: Vec<String>) -> Vec<String> {
         let mut shown = rewritten;
         for doc in editor.tabs.iter_mut().filter_map(|t| t.get_mut::<EnvironmentDoc>()) {
             // Edited, saved and undo / redo states alike: a clean tab stays clean, a dirty one keeps its edits.
@@ -95,8 +95,8 @@ impl LightState {
         shown.sort();
         editor.ui.props += 1;
         editor.ui.tabs += 1;
-        self.reload(editor);
-        self.regenerate(editor);
+        Self::reload(editor);
+        Self::regenerate(editor);
         shown
     }
 }
@@ -125,28 +125,28 @@ impl DomainState for LightState {
         LIGHT
     }
 
-    fn rescan(&mut self, editor: &mut Editor) {
-        self.reload(editor);
+    fn rescan(editor: &mut Editor) {
+        Self::reload(editor);
     }
 
     /// An edit of a Light tab, or a Light command: the diagnostics follow the open documents.
-    fn after_apply(&mut self, editor: &mut Editor) {
-        self.revalidate(editor);
+    fn after_apply(editor: &mut Editor) {
+        Self::revalidate(editor);
     }
 
     /// The saved files are read again and the module regenerates.
-    fn after_save(&mut self, editor: &mut Editor, _tabs: &[usize]) {
-        self.reload(editor);
-        self.regenerate(editor);
+    fn after_save(editor: &mut Editor, _tabs: &[usize]) {
+        Self::reload(editor);
+        Self::regenerate(editor);
     }
 
     fn diagnostics(&self) -> Vec<Diagnostic> {
         self.diagnostics.clone()
     }
 
-    fn generate(&mut self, editor: &mut Editor) {
-        self.reload(editor);
-        self.regenerate(editor);
+    fn generate(editor: &mut Editor) {
+        Self::reload(editor);
+        Self::regenerate(editor);
     }
 
     /// A Light texture that environments show: they lose their cube map.
@@ -168,9 +168,9 @@ impl DomainState for LightState {
 
     /// A renamed Light texture: the environments naming it (files and open tabs) follow. Any rename regenerates (the
     /// module lists the environments); core rescanned first.
-    fn renamed(&mut self, editor: &mut Editor, from: &AssetRef, to: &AssetRef) {
+    fn renamed(editor: &mut Editor, from: &AssetRef, to: &AssetRef) {
         if from.suffix != TEXTURE_SUFFIX {
-            return self.regenerate(editor);
+            return Self::regenerate(editor);
         }
         let Some(project) = editor.project.clone() else { return };
         let rewritten = match rewrite_texture_refs(&project, &from.path, Some(&to.path)) {
@@ -180,7 +180,7 @@ impl DomainState for LightState {
                 Vec::new()
             }
         };
-        let shown = self.texture_moved(editor, &from.path, Some(&to.path), rewritten);
+        let shown = Self::texture_moved(editor, &from.path, Some(&to.path), rewritten);
         if !shown.is_empty() {
             let what = plural(shown.len(), "environment", "environments");
             editor.info(format!("Updated the cube map of {what}: {}", shown.join(", ")));
@@ -188,9 +188,9 @@ impl DomainState for LightState {
     }
 
     /// A deleted Light texture: the environments naming it lose their cube map, with a warning.
-    fn deleted(&mut self, editor: &mut Editor, r: &AssetRef) {
+    fn deleted(editor: &mut Editor, r: &AssetRef) {
         if r.suffix != TEXTURE_SUFFIX {
-            return self.regenerate(editor);
+            return Self::regenerate(editor);
         }
         let Some(project) = editor.project.clone() else { return };
         let rewritten = match rewrite_texture_refs(&project, &r.path, None) {
@@ -200,7 +200,7 @@ impl DomainState for LightState {
                 Vec::new()
             }
         };
-        let shown = self.texture_moved(editor, &r.path, None, rewritten);
+        let shown = Self::texture_moved(editor, &r.path, None, rewritten);
         if !shown.is_empty() {
             let text = format!(
                 "Deleted {} was the cube map of {}: {}; they have none now",
@@ -213,7 +213,7 @@ impl DomainState for LightState {
     }
 
     /// Opens the diagnostic's asset.
-    fn focus_diagnostic(&mut self, editor: &mut Editor, diag: &Diagnostic) {
+    fn focus_diagnostic(editor: &mut Editor, diag: &Diagnostic) {
         let Some(rel) = diag.asset.as_deref() else { return };
         if let Some(r) = project_core::asset_ref::parse(rel, LIGHT, &[ENVIRONMENT_SUFFIX, TEXTURE_SUFFIX]) {
             editor.open_ref(&r);

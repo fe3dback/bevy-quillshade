@@ -79,14 +79,14 @@ fn material_gradient_binding_has_no_owning_node() {
     );
     let lines: Vec<&str> = wesl.text.lines().collect();
     for (suffix, binding) in [
-        ("@binding(101) var gc_common_terrain: texture_2d<f32>;", 101),
-        ("@binding(102) var gc_common_terrain_sampler: sampler;", 102),
+        ("@binding(101) var gc_common__terrain: texture_2d<f32>;", 101),
+        ("@binding(102) var gc_common__terrain_sampler: sampler;", 102),
     ] {
         let at = lines.iter().position(|l| l.ends_with(suffix)).unwrap_or_else(|| panic!("{binding}\n{}", wesl.text));
         assert!(lines[at].starts_with("@group(constants::MATERIAL_BIND_GROUP) "), "{}", lines[at]);
         assert_eq!(wesl.node_at_line(at + 1), None, "binding {binding} belongs to no node");
     }
-    assert!(wesl.text.contains("sg_sample_gradient(gc_common_terrain, gc_common_terrain_sampler, "), "{}", wesl.text);
+    assert!(wesl.text.contains("sg_sample_gradient(gc_common__terrain, gc_common__terrain_sampler, "), "{}", wesl.text);
     assert!(wesl.text.contains("import super::super::stdlib::texture::sg_sample_gradient;"), "{}", wesl.text);
 }
 
@@ -100,7 +100,7 @@ fn function_gradient_params_follow_fixed_textures() {
         &ir,
         &GenCtx { functions: &fns, source_file: "quillshade/material/common/g.ron" },
     );
-    let want = "fn fun_g(b_uv0: vec2<f32>, ft_common_g_n2: texture_2d<f32>, ft_common_g_n2_sampler: sampler, \
-                gc_common_terrain: texture_2d<f32>, gc_common_terrain_sampler: sampler) -> vec3<f32> {";
+    let want = "fn fun_g(b_uv0: vec2<f32>, ft_common__g_n2: texture_2d<f32>, ft_common__g_n2_sampler: sampler, \
+                gc_common__terrain: texture_2d<f32>, gc_common__terrain_sampler: sampler) -> vec3<f32> {";
     assert!(wesl.text.contains(want), "{want}\n{}", wesl.text);
 }

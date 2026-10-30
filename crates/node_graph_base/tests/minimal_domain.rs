@@ -24,11 +24,11 @@ use editor_core::menu::MenuEntry;
 use editor_core::state::editor::Editor;
 use editor_core::tab::{Tab, ViewKindId};
 use editor_core::ui::icons::{IconId, IconRef};
-use node_graph_base::canvas::{ERROR, NodeHeader, NodeKey};
+use node_graph_base::canvas::{ERROR, FrameKey, FrameTitleStrip, NodeHeader, NodeKey};
 use node_graph_base::{
-    DiagMark, DropItem, EditorCanvas, EditorCanvasMarker, FrameField, GRID_SNAP, GraphCtxRef, GraphDomain, GraphEdit,
-    GraphHotkey, GraphView, MovePlan, NodeLook, NodeView, PaletteEntry, PinKey, PinLook, PinRef, PlaceSpec, PreviewRow,
-    register_graph,
+    DiagMark, DropItem, EditorCanvas, EditorCanvasMarker, FrameField, FrameView, GRID_SNAP, GraphCtxRef, GraphDomain,
+    GraphEdit, GraphHotkey, GraphView, MovePlan, NodeLook, NodeView, PaletteEntry, PinKey, PinLook, PinRef, PlaceSpec,
+    PreviewRow, register_graph,
 };
 use project_core::regen::DomainBackend;
 use project_core::{AssetRef, DomainId, Project};
@@ -47,6 +47,7 @@ struct TinyDoc<const K: usize> {
     aref: AssetRef,
     nodes: BTreeMap<String, (f32, f32)>,
     edges: Vec<(String, String)>,
+    frames: Vec<FrameView>,
     errors: BTreeSet<String>,
     selection: BTreeSet<String>,
     enclosed: BTreeSet<String>,
@@ -60,6 +61,7 @@ impl<const K: usize> TinyDoc<K> {
             aref: AssetRef { domain: DOMAINS[K], path: "g".into(), suffix: "tiny" },
             nodes: nodes.into_iter().map(|(id, p)| (id.to_string(), p)).collect(),
             edges: Vec::new(),
+            frames: Vec::new(),
             errors: BTreeSet::new(),
             selection: BTreeSet::new(),
             enclosed: BTreeSet::new(),
@@ -71,10 +73,16 @@ impl<const K: usize> TinyDoc<K> {
     fn edit(&mut self, edit: &GraphEdit) {
         match edit {
             GraphEdit::Connect { from, to } => self.edges.push((from.0.clone(), to.0.clone())),
-            GraphEdit::Moved { nodes, .. } => {
+            GraphEdit::Moved { nodes, frames } => {
                 for (id, p) in nodes {
                     if let Some(at) = self.nodes.get_mut(id) {
                         *at = *p;
+                    }
+                }
+                for (id, (x, y)) in frames {
+                    if let Some(f) = self.frames.iter_mut().find(|f| &f.id == id) {
+                        f.rect.0 = *x;
+                        f.rect.1 = *y;
                     }
                 }
             }
@@ -146,7 +154,7 @@ impl<const K: usize> GraphDomain for TinyGraph<K> {
         GraphView {
             nodes: doc.nodes.iter().map(|(id, p)| NodeView { id: id.clone(), pos: Vec2::new(p.0, p.1) }).collect(),
             edges: doc.edges.iter().map(|(a, b)| (pin(a, "out", true), pin(b, "in", false))).collect(),
-            frames: Vec::new(),
+            frames: doc.frames.clone(),
             selection: &doc.selection,
             selected_frame: None,
             enclosed_frames: &doc.enclosed,
@@ -453,4 +461,72 @@ fn two_graph_domains_apply_the_active_ones_view_requests() {
     let fit = *app.world().get::<CanvasView>(canvas).unwrap();
     assert_ne!(fit, view, "fit moved the camera");
     assert!(app.world().resource::<Editor>().view_requests.is_empty());
+}
+
+/// Moving nodes or updating a comment frame's position/size/title in the model (bumping `revision` without changing
+/// node looks or edges) updates the canvas in place and preserves the existing `GraphNode`, `FrameKey` and `Edge`
+/// entities.
+#[test]
+fn moving_nodes_and_updating_frames_preserves_canvas_entities_in_place() {
+    let mut app = app();
+    {
+        let mut editor = app.world_mut().resource_mut::<Editor>();
+        let d = editor.active_doc_mut::<TinyDoc<0>>().unwrap();
+        d.frames.push(FrameView {
+            id: "f0".into(),
+            rect: (-20.0, -20.0, 400.0, 300.0),
+            title: "Before".into(),
+            hue: Some(120.0),
+            color: None,
+            nodes: vec!["a".into()],
+        });
+        d.edges.push(("a".into(), "b".into()));
+        d.revision += 1;
+    }
+    app.update();
+    app.update();
+
+    let snapshot = |app: &mut App| {
+        let w = app.world_mut();
+        let nodes: BTreeMap<String, Entity> =
+            w.query::<(Entity, &NodeKey)>().iter(w).map(|(e, k)| (k.0.clone(), e)).collect();
+        let frames: BTreeMap<String, Entity> =
+            w.query::<(Entity, &FrameKey)>().iter(w).map(|(e, k)| (k.0.clone(), e)).collect();
+        let edges: Vec<Entity> = w.query_filtered::<Entity, With<Edge>>().iter(w).collect();
+        (nodes, frames, edges)
+    };
+    let (nodes_before, frames_before, edges_before) = snapshot(&mut app);
+    assert_eq!(nodes_before.len(), 3);
+    assert_eq!(frames_before.len(), 1);
+    assert_eq!(edges_before.len(), 1);
+
+    // Move node `b` and frame `f0`, and update `f0`'s size and title in the model (bumping `revision`).
+    act(
+        &mut app,
+        GraphEdit::Moved { nodes: vec![("b".into(), (180.0, -40.0))], frames: vec![("f0".into(), (20.0, 30.0))] },
+    );
+    {
+        let mut editor = app.world_mut().resource_mut::<Editor>();
+        let d = editor.active_doc_mut::<TinyDoc<0>>().unwrap();
+        d.frames[0].rect = (20.0, 30.0, 520.0, 360.0);
+        d.frames[0].title = "After".into();
+        d.revision += 1;
+    }
+    app.update();
+    app.update();
+
+    let (nodes_after, frames_after, edges_after) = snapshot(&mut app);
+    assert_eq!(nodes_after, nodes_before, "GraphNode entities preserved in place");
+    assert_eq!(frames_after, frames_before, "FrameKey entity preserved in place");
+    assert_eq!(edges_after, edges_before, "Edge entity preserved in place");
+
+    let b_entity = nodes_after["b"];
+    assert_eq!(app.world().get::<NodePosition>(b_entity).unwrap().0, Vec2::new(180.0, -40.0));
+    let f_entity = frames_after["f0"];
+    assert_eq!(app.world().get::<NodePosition>(f_entity).unwrap().0, Vec2::new(20.0, 30.0));
+    let f_node = app.world().get::<Node>(f_entity).unwrap();
+    assert_eq!((f_node.width, f_node.height), (px(520.0), px(360.0)));
+    let w = app.world_mut();
+    let title = w.query_filtered::<&Text, With<FrameTitleStrip>>().single(w).unwrap();
+    assert_eq!(title.0, "After");
 }

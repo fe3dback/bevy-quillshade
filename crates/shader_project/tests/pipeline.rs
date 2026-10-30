@@ -942,18 +942,18 @@ fn function_fixed_texture_is_hidden_input() {
         assert_eq!(ir.function_sig.as_ref().unwrap().textures, tex_layer_hidden("textures/rock_albedo"), "{path}");
         assert!(ir.textures.is_empty(), "{path}: functions have no material bindings");
     }
-    let hidden = "ft_common_tex_layer_n02: texture_2d<f32>, ft_common_tex_layer_n02_sampler: sampler) -> vec3<f32> {";
+    let hidden = "ft_common__tex_layer_n02: texture_2d<f32>, ft_common__tex_layer_n02_sampler: sampler) -> vec3<f32> {";
     let inner = read(&p.root.join("assets/quillshade/material/autogen/functions/dir_common/fun_tex_layer.wesl"));
     assert!(inner.contains(&format!("fn fun_tex_layer(inp_tint: vec3<f32>, b_uv0: vec2<f32>, {hidden}")), "{inner}");
     assert!(
-        inner.contains("textureSample(ft_common_tex_layer_n02, ft_common_tex_layer_n02_sampler, b_uv0)"),
+        inner.contains("textureSample(ft_common__tex_layer_n02, ft_common__tex_layer_n02_sampler, b_uv0)"),
         "{inner}"
     );
     let outer = read(&p.root.join("assets/quillshade/material/autogen/functions/dir_common/fun_tex_layer_outer.wesl"));
     assert!(outer.contains(&format!("fn fun_tex_layer_outer(inp_scale: f32, b_uv0: vec2<f32>, {hidden}")), "{outer}");
     assert!(
         outer.contains(
-            "fun_tex_layer(vec3<f32>(1.0, 1.0, 1.0), b_uv0, ft_common_tex_layer_n02, ft_common_tex_layer_n02_sampler)"
+            "fun_tex_layer(vec3<f32>(1.0, 1.0, 1.0), b_uv0, ft_common__tex_layer_n02, ft_common__tex_layer_n02_sampler)"
         ),
         "{outer}"
     );
@@ -974,7 +974,7 @@ fn material_dedups_hidden_texture_per_origin() {
     assert_eq!(
         ir.textures,
         vec![TextureBinding {
-            ident: "ft_common_tex_layer_n02".into(),
+            ident: "ft_common__tex_layer_n02".into(),
             source: TextureSource::Fixed { node: "n02".into(), origin: Some("common/tex_layer".into()) },
             texture: "textures/rock_albedo".into(),
             binding: 101,
@@ -982,16 +982,16 @@ fn material_dedups_hidden_texture_per_origin() {
     );
     let wesl = read(&p.root.join("assets/quillshade/material/autogen/dir_env/mat_tex_layers.wesl"));
     for l in [
-        "@binding(101) var ft_common_tex_layer_n02: texture_2d<f32>;",
-        "@binding(102) var ft_common_tex_layer_n02_sampler: sampler;",
+        "@binding(101) var ft_common__tex_layer_n02: texture_2d<f32>;",
+        "@binding(102) var ft_common__tex_layer_n02_sampler: sampler;",
     ] {
         assert!(wesl.contains(l), "{l}\n{wesl}");
     }
-    assert_eq!(wesl.matches("ft_common_tex_layer_n02, ft_common_tex_layer_n02_sampler)").count(), 3, "{wesl}");
+    assert_eq!(wesl.matches("ft_common__tex_layer_n02, ft_common__tex_layer_n02_sampler)").count(), 3, "{wesl}");
     let rs = read(&p.root.join("crates/quillshade/src/material/materials/dir_env/mat_tex_layers.rs"));
     for l in [
-        "    #[texture(101)]\n    #[sampler(102)]\n    pub ft_common_tex_layer_n02: Handle<Image>,",
-        "            ft_common_tex_layer_n02: Handle::default(),",
+        "    #[texture(101)]\n    #[sampler(102)]\n    pub ft_common__tex_layer_n02: Handle<Image>,",
+        "            ft_common__tex_layer_n02: Handle::default(),",
     ] {
         assert!(rs.contains(l), "{l}\n{rs}");
     }
@@ -1117,7 +1117,7 @@ fn gradient_binding_compiles_directly_and_through_functions() {
     g.link((&wpo, "rgb"), (&out, WPO_PIN));
     let mat = build(&g.finish(), "env/grad_mat", &fns);
     let idents: Vec<&str> = mat.textures.iter().map(|t| t.ident.as_str()).collect();
-    assert_eq!(idents, ["ft_common_grad_n01", "gc_common_terrain"]);
+    assert_eq!(idents, ["ft_common__grad_n01", "gc_common__terrain"]);
     assert!(mat.vertex.is_some(), "World Position Offset samples the gradient in the vertex stage");
 
     let gen_fn =
@@ -1129,16 +1129,16 @@ fn gradient_binding_compiles_directly_and_through_functions() {
         &GenCtx { functions: &fns, source_file: "quillshade/material/env/grad_mat.material.ron" },
     )
     .text;
-    let hidden = "ft_common_grad_n01: texture_2d<f32>, ft_common_grad_n01_sampler: sampler, gc_common_terrain: \
-                  texture_2d<f32>, gc_common_terrain_sampler: sampler) -> vec3<f32> {";
+    let hidden = "ft_common__grad_n01: texture_2d<f32>, ft_common__grad_n01_sampler: sampler, gc_common__terrain: \
+                  texture_2d<f32>, gc_common__terrain_sampler: sampler) -> vec3<f32> {";
     assert!(inner_wesl.contains(&format!("fn fun_grad(b_uv0: vec2<f32>, {hidden}")), "{inner_wesl}");
     assert!(outer_wesl.contains(&format!("fn fun_grad_outer(b_uv0: vec2<f32>, {hidden}")), "{outer_wesl}");
-    let args = "ft_common_grad_n01, ft_common_grad_n01_sampler, gc_common_terrain, gc_common_terrain_sampler)";
+    let args = "ft_common__grad_n01, ft_common__grad_n01_sampler, gc_common__terrain, gc_common__terrain_sampler)";
     assert!(outer_wesl.contains(&format!("fun_grad(b_uv0, {args}")), "{outer_wesl}");
     assert!(mat_wesl.contains(&format!("fun_grad_outer(b_uv0, {args}")), "{mat_wesl}");
     for l in [
-        "@binding(103) var gc_common_terrain: texture_2d<f32>;",
-        "@binding(104) var gc_common_terrain_sampler: sampler;",
+        "@binding(103) var gc_common__terrain: texture_2d<f32>;",
+        "@binding(104) var gc_common__terrain_sampler: sampler;",
     ] {
         assert_eq!(mat_wesl.matches(l).count(), 1, "{l}\n{mat_wesl}");
     }
@@ -1361,7 +1361,7 @@ fn regen_writes_manifest() {
     assert!(matches!(rock.params["inp_wetness"], ParamValue::Float(_)));
     assert!(!rock.params.contains_key("inp_albedo"), "texture parameters are in `textures`");
     let layers = manifest_material(&materials, "env/tex_layers");
-    assert_eq!(layers.textures["ft_common_tex_layer_n02"], "textures/rock_albedo");
+    assert_eq!(layers.textures["ft_common__tex_layer_n02"], "textures/rock_albedo");
 
     // The generated crate embeds the manifest and has a field per material and texture.
     let lib = read(&p.root.join("crates/quillshade/src/material/mod.rs"));
@@ -1444,7 +1444,7 @@ fn e011_textures_not_in_manifest() {
     assert_eq!(rock.textures["inp_albedo"], "@internal/default");
     assert_eq!(rock.textures["inp_normal_map"], "textures/rock_normal");
     let layers = manifest_material(&materials, "env/tex_layers");
-    assert_eq!(layers.textures["ft_common_tex_layer_n02"], "@internal/default");
+    assert_eq!(layers.textures["ft_common__tex_layer_n02"], "@internal/default");
     // Design §3.1: `BakedTextures` keeps a field for both (an asset error must not break the game's build; the
     // runtime gives them the default texture).
     let texs = read(&p.root.join("crates/quillshade/src/material/baked/textures.rs"));
@@ -1687,8 +1687,8 @@ fn gradients_png_and_manifest_written() {
     );
     assert_eq!([s.address_mode_u, s.address_mode_v], [AddressMode::ClampToEdge; 2]);
     let m = manifest_material(&materials, &u.material.path);
-    assert_eq!(m.textures["gc_common_terrain"], "@gradients/common/terrain");
-    assert_eq!(m.bindings, ["gc_common_terrain"]);
+    assert_eq!(m.textures["gc_common__terrain"], "@gradients/common/terrain");
+    assert_eq!(m.bindings, ["gc_common__terrain"]);
 
     let texs = read(&p.root.join("crates/quillshade/src/material/baked/textures.rs"));
     assert!(texs.contains("\"@gradients/common/terrain\" => Some(&self.gradients.common.terrain)"), "{texs}");
@@ -1839,8 +1839,24 @@ fn foreign_gradients_dir_is_e008() {
     assert!(internal_dir(&p).join("default.png").is_file());
     let (textures, materials) = manifest(&p);
     assert!(textures.iter().all(|t| !t.id.starts_with("@gradients/")), "{textures:?}");
-    assert_eq!(manifest_material(&materials, &u.material.path).textures["gc_common_terrain"], "@internal/default");
+    assert_eq!(manifest_material(&materials, &u.material.path).textures["gc_common__terrain"], "@internal/default");
     // Its `BakedTextures` field stays (the public shape of the crate does not depend on the directory).
     let texs = read(&p.root.join("crates/quillshade/src/material/baked/textures.rs"));
     assert!(texs.contains("\"@gradients/common/terrain\" => Some(&self.gradients.common.terrain)"), "{texs}");
+}
+
+#[test]
+fn regenerate_preserves_existing_light_module_in_umbrella() {
+    let (_d, p) = temp_project();
+    let light_mod = p.root.join("crates/quillshade/src/light/mod.rs");
+    std::fs::create_dir_all(light_mod.parent().unwrap()).unwrap();
+    std::fs::write(&light_mod, "// @generated by bevy-shader-editor\npub struct QuillshadeLightInternalPlugin;\n")
+        .unwrap();
+
+    let r = regenerate(&p, &RegenOptions::default()).unwrap();
+    assert!(!r.has_errors(), "{:?}", r.diagnostics().collect::<Vec<_>>());
+    let umbrella = read(&p.root.join("crates/quillshade/src/lib.rs"));
+    assert!(umbrella.contains("pub mod material;"), "{umbrella}");
+    assert!(umbrella.contains("pub mod light;"), "{umbrella}");
+    assert!(umbrella.contains("light::QuillshadeLightInternalPlugin"), "{umbrella}");
 }

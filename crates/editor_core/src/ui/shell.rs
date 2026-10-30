@@ -1,4 +1,4 @@
-//! The window shell (spec §9, `CLAUDE.md` → "Editor"): mainbar (top: main menu and domain tabs), the secondbar across
+//! The window shell (spec §9, `AGENTS.md` → "Editor"): mainbar (top: main menu and domain tabs), the secondbar across
 //! the whole window under it (main actions and tabs, design §14.3), then left sidebar (project tree, assets tree),
 //! center column (editor topbar, editor content, editor statusbar, console/logs) and right sidebar; the welcome screen
 //! covers the secondbar and the panels while no project is open. The editor topbar / statusbar and the right sidebar

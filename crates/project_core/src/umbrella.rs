@@ -42,10 +42,12 @@ fn cargo_toml(bevy: BevyDep, crates: &[CrateContribution]) -> String {
         BevyDep::Version => format!(r#"{{ version = "0.20", default-features = false, features = {features} }}"#),
         BevyDep::Workspace => format!("{{ workspace = true, features = {features} }}"),
     };
-    let mut deps: BTreeMap<&str, &str> = BTreeMap::new();
+    let mut deps: BTreeMap<&str, String> = BTreeMap::new();
     for c in crates {
-        for (name, value) in c.dependencies {
-            deps.entry(name).or_insert(value);
+        for &(name, value) in c.dependencies {
+            deps.entry(name)
+                .and_modify(|existing| *existing = merge_dep_values(existing, value))
+                .or_insert_with(|| value.to_string());
         }
     }
     let mut out = format!(
@@ -56,6 +58,64 @@ fn cargo_toml(bevy: BevyDep, crates: &[CrateContribution]) -> String {
         out.push_str(&format!("{name} = {value}\n"));
     }
     out
+}
+
+fn parse_dep_table(spec: &str) -> Option<toml::Table> {
+    let doc: toml::Table = format!("d = {spec}").parse().ok()?;
+    match doc.get("d")? {
+        toml::Value::Table(t) => Some(t.clone()),
+        toml::Value::String(v) => {
+            let mut t = toml::Table::new();
+            t.insert("version".into(), toml::Value::String(v.clone()));
+            Some(t)
+        }
+        _ => None,
+    }
+}
+
+/// Merges two dependency TOML specifications for the same crate, combining their `features` lists deterministically
+/// (preserving first-seen order without duplicates).
+fn merge_dep_values(existing: &str, incoming: &str) -> String {
+    if existing == incoming {
+        return existing.to_string();
+    }
+    let (Some(mut a), Some(b)) = (parse_dep_table(existing), parse_dep_table(incoming)) else {
+        return existing.to_string();
+    };
+    let features_of = |t: &toml::Table| -> Vec<String> {
+        t.get("features")
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect()
+    };
+    let mut features = Vec::new();
+    for f in features_of(&a).into_iter().chain(features_of(&b)) {
+        if !features.contains(&f) {
+            features.push(f);
+        }
+    }
+    for (k, v) in b {
+        if k != "features" {
+            a.entry(k).or_insert(v);
+        }
+    }
+    a.remove("features");
+    let mut parts: Vec<String> = Vec::new();
+    for key in ["version", "workspace", "path", "default-features"] {
+        if let Some(v) = a.remove(key) {
+            parts.push(format!("{key} = {v}"));
+        }
+    }
+    for (k, v) in a {
+        parts.push(format!("{k} = {v}"));
+    }
+    if !features.is_empty() {
+        let list = features.iter().map(|f| format!("\"{f}\"")).collect::<Vec<_>>().join(", ");
+        parts.push(format!("features = [{list}]"));
+    }
+    format!("{{ {} }}", parts.join(", "))
 }
 
 fn lib_rs(project: &Project, crates: &[CrateContribution]) -> String {
@@ -138,6 +198,22 @@ mod tests {
         assert!(toml.contains(r#"features = ["bevy_asset", "bevy_pbr", "x11"]"#), "{toml}");
         assert_eq!(toml.matches("serde =").count(), 1, "{toml}");
         assert!(toml.parse::<toml::Table>().is_ok());
+
+        let c1 = CrateContribution {
+            domain: DomainId::new("material"),
+            plugin: "A",
+            bevy_features: &[],
+            dependencies: &[("serde", r#"{ version = "1", features = ["derive", "std"] }"#)],
+        };
+        let c2 = CrateContribution {
+            domain: DomainId::new("light"),
+            plugin: "B",
+            bevy_features: &[],
+            dependencies: &[("serde", r#"{ version = "1", features = ["rc", "derive"] }"#)],
+        };
+        let merged = get(&files(&p, &[c1, c2], None), "Cargo.toml");
+        assert!(merged.contains(r#"serde = { version = "1", features = ["derive", "std", "rc"] }"#), "{merged}");
+        assert!(merged.parse::<toml::Table>().is_ok());
     }
 
     #[test]

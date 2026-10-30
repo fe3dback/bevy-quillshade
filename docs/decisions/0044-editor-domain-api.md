@@ -1,6 +1,6 @@
 # 0044: Editor domain API
 
-Design reference: `docs/superpowers/specs/2026-10-28-multi-domain-editor-design.md` (§5, §6, §7, §11). Extends
+Design reference: `AGENTS.md` and decisions 0043–0045. Extends
 decision 0043 (the backend side) to the editor.
 
 ## Context
@@ -66,21 +66,15 @@ A second domain (Light, Plan C) would have needed edits to all of them. Plan B d
   per domain (`get::<T>()` downcasts; `DomainState: Any`, so no `as_any` boilerplate). Core calls its hooks — `apply`,
   `after_apply`, `after_save`, `before_close`, `rescan`, `diagnostics`, `console_diagnostics`, `tree_items`,
   `generate`, `delete_message`, `rename_file`, `renamed`, `before_delete`, `delete_file`, `deleted`,
-  `focus_diagnostic`, `files_changed` — through `Editor::with_domain(id, f)`, which takes the state out for the call
-  and puts it back, so a hook has the editor and its own state mutably. Console/logs lines written meanwhile carry
-  the domain (`Message::domain`; `Editor::as_domain` tags lines of registrar callbacks the same way). Keeping the
-  state in `Editor` rather than in Bevy resources keeps the editor logic testable without a world. Opening a project
-  runs `generate` (after the first `rescan`) of every real domain with a crate contribution whose
+  `focus_diagnostic`, `files_changed` — through `Editor::with_domain(id, f)`, which passes a `DomainHooks` dispatch
+  table while keeping the state inside `editor.domains`, so a hook and any nested `with_domain` call can access the
+  state directly via `editor.domains.get::<T>()` / `editor.domains.get_mut::<T>()`. Console/logs lines written
+  meanwhile carry the domain (`Message::domain`; `Editor::as_domain` tags lines of registrar callbacks the same way).
+  Keeping the state in `Editor` rather than in Bevy resources keeps the editor logic testable without a world. Opening
+  a project runs `generate` (after the first `rescan`) of every real domain with a crate contribution whose
   `crates/quillshade/src/<id>/mod.rs` is missing: any domain's save rewrites the umbrella `src/lib.rs`, which names
   every domain's module, so a module never generated would leave the crate uncompilable.
-- **Lending.** A domain whose `Editor`-side code reads its state through `editor.domains` (Material: about a hundred
-  methods in its `MaterialEditor`-style extension traits) may lend the taken state back for the hook's duration
-  (`MaterialState::lent`); the `self` the hook got is a placeholder meanwhile, and a lent state that is not given
-  back panics instead of silently dropping the project. A nested `with_domain` of the same id finds the lent state;
-  on a domain that does not lend its state it returns `None` silently (a hook calling `editor.rescan()` skips its
-  own domain's rescan, and so does `try_create_for_file`'s). Rewriting every Material method to take its state
-  explicitly would have bought no behaviour.
-- **`after_save(&mut self, editor, tabs: &[usize])`** runs once per domain and save operation (Save, Save All, Save
+- **`after_save(editor, tabs: &[usize])`** runs once per domain and save operation (Save, Save All, Save
   All and Quit, Save in the close prompt, Save before a project switch / close) with that domain's saved tabs, so one
   Save All regenerates Material once. Save All also calls it for domains with no dirty tab (empty slice); creating an
   asset calls it with an empty slice to mean "follow as after a save".
@@ -184,4 +178,4 @@ single-crate module layout — decisions 0013 (icons: `IconId` only), 0026 (modu
 `for_each_kind`), 0032 (input contexts per `ViewKind`) and 0034 (where the canvas and widgets live) — are superseded
 in part by this one (paths, closed enums, the kind list); they are no longer in the tree (removed in commit
 `195c3ae`, kept in git history), and their rules that did not change (icon review, Feathers widgets, input contexts
-and their priorities) still apply as `CLAUDE.md` states them.
+and their priorities) still apply as `AGENTS.md` states them.

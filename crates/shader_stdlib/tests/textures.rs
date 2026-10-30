@@ -246,7 +246,7 @@ fn fixed_texture_inside_function_is_a_hidden_input() {
     );
     assert!(ir.textures.is_empty(), "functions have no material bindings");
     assert!(
-        ir.main.lines.iter().any(|l| l.expr.contains("textureSample(ft_test_mat_s, ft_test_mat_s_sampler, ")),
+        ir.main.lines.iter().any(|l| l.expr.contains("textureSample(ft_test__mat_s, ft_test__mat_s_sampler, ")),
         "{:?}",
         ir.main
     );
@@ -290,18 +290,18 @@ fn material_binds_hidden_textures_of_called_functions() {
     assert_eq!(
         ir.textures,
         vec![TextureBinding {
-            ident: "ft_a_layer_n1".into(),
+            ident: "ft_a__layer_n1".into(),
             source: TextureSource::Fixed { node: "n1".into(), origin: Some("a/layer".into()) },
             texture: "textures/rock".into(),
             binding: 101,
         }]
     );
-    let calls = ir.main.lines.iter().filter(|l| l.expr == "fun_layer(ft_a_layer_n1, ft_a_layer_n1_sampler)").count();
+    let calls = ir.main.lines.iter().filter(|l| l.expr == "fun_layer(ft_a__layer_n1, ft_a__layer_n1_sampler)").count();
     assert_eq!(calls, 2, "{:?}", ir.main);
 }
 
-/// `ft_{fn}_{node}` maps `/` to `_`, so `a/b_c` and `a_b/c` could produce the same identifier for the same node id:
-/// reported (E006) instead of generating a shader with a duplicate binding.
+/// `ft_{fn}_{node}` maps `/` to `__`, so `a/b_c` and `a_b/c` produce distinct identifiers (`ft_a__b_c_n1` vs
+/// `ft_a_b__c_n1`) and coexist without collision.
 #[test]
 fn hidden_texture_ident_clash_is_e006() {
     let mut fns = BTreeMap::new();
@@ -315,11 +315,10 @@ fn hidden_texture_ident_clash_is_e006() {
     a.connect((&c2, "rgb"), (&add, "b"));
     a.connect((&add, "out"), ("out", "color"));
     let r = build_with(&a, &fns);
-    assert!(
-        r.diagnostics.iter().any(|d| d.code == Code::E006 && d.message.contains("`ft_a_b_c_n1`")),
-        "{:?}",
-        r.diagnostics
-    );
+    assert!(!r.has_errors(), "{:?}", r.diagnostics);
+    let ir = r.ir.unwrap();
+    let idents: Vec<&str> = ir.textures.iter().map(|t| t.ident.as_str()).collect();
+    assert_eq!(idents, ["ft_a__b_c_n1", "ft_a_b__c_n1"]);
 }
 
 #[test]

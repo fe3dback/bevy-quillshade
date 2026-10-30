@@ -51,8 +51,7 @@ impl WriteBatch {
             for (path, bytes) in &self.writes {
                 let dir = path.parent().ok_or_else(|| std::io::Error::other("file without parent"))?;
                 std::fs::create_dir_all(dir)?;
-                let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-                let tmp = dir.join(format!(".{name}.tmp-{}", std::process::id()));
+                let tmp = temp_path(path)?;
                 std::fs::write(&tmp, bytes)?;
                 temps.push((tmp, path.clone()));
             }
@@ -79,6 +78,28 @@ impl WriteBatch {
         }
         Ok(())
     }
+}
+
+/// Hidden temporary path next to `path` (`.{file_name}.tmp-{pid}`): skipped by source scans (leading `.`) and
+/// orphan cleanup (`.tmp-`).
+fn temp_path(path: &Path) -> std::io::Result<PathBuf> {
+    let dir = path.parent().ok_or_else(|| std::io::Error::other("file without parent"))?;
+    let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    Ok(dir.join(format!(".{name}.tmp-{}", std::process::id())))
+}
+
+/// Writes `content` to `path` atomically: creates parent directories, writes to a `.{file_name}.tmp-{pid}` file in the
+/// same directory, and renames it into place.
+pub fn write_atomic(path: &Path, content: impl AsRef<[u8]>) -> std::io::Result<()> {
+    let dir = path.parent().ok_or_else(|| std::io::Error::other("file without parent"))?;
+    std::fs::create_dir_all(dir)?;
+    let tmp = temp_path(path)?;
+    std::fs::write(&tmp, content.as_ref())?;
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
 }
 
 /// Removes empty directories below `root` (not `root` itself). Symlinked directories are not followed (a link loop,

@@ -127,11 +127,71 @@ impl NodeDef for UserDef {
             }
         }
         let t = self.node.template.trim();
-        let body = if t.contains("return") { t.to_string() } else { format!("return {};", t.trim_end_matches(';')) };
+        let body = if has_return_keyword(t) { t.to_string() } else { format!("return {};", t.trim_end_matches(';')) };
         let body: String = body.lines().map(|l| format!("    {l}\n")).collect();
         c.add_fn(&name, format!("fn {name}({}) -> {} {{\n{body}}}\n", args.join(", "), self.node.output.wesl()));
         c.define("out", format!("{name}({})", call.join(", ")));
     }
+}
+
+/// Whether `code` contains `return` as a standalone WGSL keyword token (outside `//` line comments, `/* ... */`
+/// block comments, and string literals).
+pub(crate) fn has_return_keyword(code: &str) -> bool {
+    let bytes = code.as_bytes();
+    let len = bytes.len();
+    let is_ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let mut i = 0;
+    while i < len {
+        if i + 1 < len && bytes[i] == b'/' && bytes[i + 1] == b'/' {
+            i += 2;
+            while i < len && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if i + 1 < len && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+            i += 2;
+            let mut depth = 1usize;
+            while i < len && depth > 0 {
+                if i + 1 < len && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+                    depth += 1;
+                    i += 2;
+                } else if i + 1 < len && bytes[i] == b'*' && bytes[i + 1] == b'/' {
+                    depth -= 1;
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            continue;
+        }
+        if bytes[i] == b'"' {
+            i += 1;
+            while i < len && bytes[i] != b'"' {
+                if bytes[i] == b'\\' && i + 1 < len {
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            if i < len {
+                i += 1;
+            }
+            continue;
+        }
+        if is_ident(bytes[i]) {
+            let start = i;
+            while i < len && is_ident(bytes[i]) {
+                i += 1;
+            }
+            if &bytes[start..i] == b"return" {
+                return true;
+            }
+            continue;
+        }
+        i += 1;
+    }
+    false
 }
 
 #[cfg(test)]
@@ -169,5 +229,14 @@ mod tests {
         assert!(e.contains("MaterialAttributes (PBR)"), "{e}");
         let e = crate::nodes::utility::parse_custom_inputs("a: MaterialAttributes (PBR)").unwrap_err();
         assert!(e.starts_with("unknown type") && e.ends_with("Int, Texture2D)"), "{e}");
+    }
+
+    #[test]
+    fn return_keyword_detection_skips_identifiers_and_comments() {
+        assert!(!has_return_keyword("returned_val * 2.0"));
+        assert!(!has_return_keyword("x + 1.0 // return x"));
+        assert!(!has_return_keyword("x + 1.0 /* return */"));
+        assert!(has_return_keyword("return x + 1.0"));
+        assert!(has_return_keyword("if (x > 0.0) { return 1.0; } return 0.0"));
     }
 }

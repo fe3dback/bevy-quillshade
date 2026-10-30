@@ -151,13 +151,7 @@ pub fn load(project: &Project, r: &AssetRef) -> Result<Curve, String> {
 /// Writes a curve file (creating `quillshade/<domain>/` and the parent directories), through a temporary file.
 pub fn save(project: &Project, r: &AssetRef, curve: &Curve) -> io::Result<()> {
     project.ensure_layout()?;
-    let file = file(project, r);
-    if let Some(dir) = file.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    let tmp = file.with_extension("ron.tmp");
-    std::fs::write(&tmp, curve.to_ron())?;
-    std::fs::rename(&tmp, &file)
+    project_core::writer::write_atomic(&file(project, r), curve.to_ron())
 }
 
 /// The "Curve" template: a straight ramp from (0, 0) to (1, 1) at `r`, which must not exist yet.

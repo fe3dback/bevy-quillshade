@@ -509,7 +509,11 @@ pub fn register(r: &mut Registry) {
                     }
                     let out_ty = c.out_type("out");
                     let code = c.param("code").as_str().trim().to_string();
-                    let body = if code.contains("return") { code } else { format!("return {};", code.trim_end_matches(';')) };
+                    let body = if crate::user::has_return_keyword(&code) {
+                        code
+                    } else {
+                        format!("return {};", code.trim_end_matches(';'))
+                    };
                     let body: String = body.lines().map(|l| format!("    {l}\n")).collect();
                     let def = format!("fn {name}({}) -> {} {{\n{body}}}\n", args.join(", "), out_ty.wesl());
                     c.add_fn(&name, def);

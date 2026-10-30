@@ -393,6 +393,10 @@ mod tests {
         const VIEW: ViewKindId = ViewKindId("test.texture");
         const IMAGE_VIEW: ViewKindId = ViewKindId("test.image");
         const POLICY: TexturePolicy = TexturePolicy { internal: Some(|| &INTERNAL), ..TestTexture::POLICY };
+
+        fn disk_owners(_editor: &editor_core::state::editor::Editor, _file: &str) -> Vec<project_core::AssetRef> {
+            Vec::new()
+        }
     }
 
     type Cache = GameImageCache<TestTexture>;
@@ -635,6 +639,10 @@ mod tests {
         const IMAGE_VIEW: ViewKindId = ViewKindId("test.image");
         const POLICY: TexturePolicy = TestTexture::POLICY;
         const PREVIEW_FIRST_LAYER: bool = true;
+
+        fn disk_owners(_editor: &editor_core::state::editor::Editor, _file: &str) -> Vec<project_core::AssetRef> {
+            Vec::new()
+        }
     }
 
     #[test]

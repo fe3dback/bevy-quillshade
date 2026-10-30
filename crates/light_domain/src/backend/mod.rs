@@ -41,20 +41,24 @@ impl DomainBackend for LightBackend {
     /// compile: `compile` is ignored.
     fn plan(&self, project: &Project, _compile: bool) -> DomainPlan {
         let assets = LightAssets::load(project);
-        let diagnostics = validate(project, &assets);
-        let failed: BTreeSet<&str> =
-            diagnostics.iter().filter(|d| d.is_error()).filter_map(|d| d.asset.as_deref()).collect();
-        let sources: Vec<(String, &str)> =
-            assets.environments.keys().map(|p| (environment_ref(p).source_rel(), p.as_str())).collect();
-        let listed: Vec<&str> =
-            sources.iter().filter(|(rel, _)| !failed.contains(rel.as_str())).map(|(_, p)| *p).collect();
-        let module = project.module_dir(LIGHT);
-        let file = OutFile { path: module.join("mod.rs"), bytes: codegen::module(&listed).into_bytes(), owner: None };
-        let roots =
-            vec![OutRoot { dir: module, binary: false }, OutRoot { dir: project.output_dir(LIGHT), binary: false }];
-        DomainPlan {
-            diagnostics,
-            output: DomainOutput { domain: LIGHT, files: vec![file], keep: BTreeSet::new(), roots, orphan_scan: true },
-        }
+        plan_assets(project, &assets)
+    }
+}
+
+/// Validates `assets` and builds the Light domain's plan (`crates/quillshade/src/light/mod.rs` listing the
+/// environments without an error).
+pub fn plan_assets(project: &Project, assets: &LightAssets) -> DomainPlan {
+    let diagnostics = validate(project, assets);
+    let failed: BTreeSet<&str> =
+        diagnostics.iter().filter(|d| d.is_error()).filter_map(|d| d.asset.as_deref()).collect();
+    let sources: Vec<(String, &str)> =
+        assets.environments.keys().map(|p| (environment_ref(p).source_rel(), p.as_str())).collect();
+    let listed: Vec<&str> = sources.iter().filter(|(rel, _)| !failed.contains(rel.as_str())).map(|(_, p)| *p).collect();
+    let module = project.module_dir(LIGHT);
+    let file = OutFile { path: module.join("mod.rs"), bytes: codegen::module(&listed).into_bytes(), owner: None };
+    let roots = vec![OutRoot { dir: module, binary: false }, OutRoot { dir: project.output_dir(LIGHT), binary: false }];
+    DomainPlan {
+        diagnostics,
+        output: DomainOutput { domain: LIGHT, files: vec![file], keep: BTreeSet::new(), roots, orphan_scan: true },
     }
 }

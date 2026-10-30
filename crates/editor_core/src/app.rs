@@ -282,9 +282,10 @@ pub fn run(domains: Vec<Box<dyn EditorDomain>>, project: Option<PathBuf>, window
             copy_to_clipboard,
             quit,
             remember_window_size.run_if(not(resource_exists::<FixedWindowSize>)),
-            debug_screenshot.after(apply_actions),
-            crate::demo::scripted_input,
         ),
-    )
-    .run();
+    );
+    if std::env::var_os("SHADER_EDITOR_SCREENSHOT").is_some() || std::env::var_os("SHADER_EDITOR_INPUT").is_some() {
+        app.add_systems(Update, (debug_screenshot.after(apply_actions), crate::demo::scripted_input));
+    }
+    app.run();
 }

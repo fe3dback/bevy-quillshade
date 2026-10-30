@@ -202,7 +202,7 @@ fn keep_mine_takes_the_file_as_saved_baseline() {
     e.apply(Action::KeepMine(asset_key(&pulse)));
     let (doc, curve_doc) = (e.tabs[0].get::<Doc>().unwrap(), e.curve_doc().unwrap());
     assert_eq!(doc.saved, asset.to_ron());
-    assert_eq!(curve_doc.saved, curve.to_ron());
+    assert_eq!(curve_doc.saved, curve);
     assert_eq!((&doc.asset, &curve_doc.curve), (&rock_edit, &pulse_edit), "the edits stay");
     assert!(e.tabs.iter().all(|t| t.doc().is_dirty()));
 }

@@ -10,7 +10,19 @@ use wesl::{CompileOptions, Feature, Features, Resolver};
 
 /// Bevy crates whose WESL modules are reachable from materials.
 const BEVY_CRATES: [&str; 4] = ["bevy_pbr", "bevy_render", "bevy_core_pipeline", "bevy_sprite_render"];
-const BEVY_VERSION: &str = "0.20";
+const BEVY_MAJOR_MINOR: (u32, u32) = (0, 20);
+
+fn parse_semver(ver: &str) -> Option<(u32, u32, u32)> {
+    let base = ver.split('-').next()?;
+    let mut parts = base.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    let patch = parts.next()?.parse().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((major, minor, patch))
+}
 
 /// Bevy WESL sources indexed by module path (`bevy_pbr::render::forward_io`).
 #[derive(Clone, Default)]
@@ -26,17 +38,18 @@ impl BevySources {
             .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cargo")))?;
         let registry = home.join("registry").join("src");
         for index in std::fs::read_dir(&registry).ok()?.flatten() {
-            let mut best: Option<(String, PathBuf)> = None;
+            let mut best: Option<((u32, u32, u32), String, PathBuf)> = None;
             for entry in std::fs::read_dir(index.path()).ok()?.flatten() {
                 let name = entry.file_name().to_string_lossy().to_string();
                 if let Some(ver) = name.strip_prefix("bevy_pbr-")
-                    && ver.starts_with(BEVY_VERSION)
-                    && best.as_ref().is_none_or(|(b, _)| ver > b.as_str())
+                    && let Some(sv) = parse_semver(ver)
+                    && (sv.0, sv.1) == BEVY_MAJOR_MINOR
+                    && best.as_ref().is_none_or(|(b, _, _)| sv > *b)
                 {
-                    best = Some((ver.to_string(), index.path()));
+                    best = Some((sv, ver.to_string(), index.path()));
                 }
             }
-            if let Some((ver, dir)) = best {
+            if let Some((_, ver, dir)) = best {
                 return Self::load(&dir, &ver);
             }
         }
@@ -249,4 +262,18 @@ pub fn variants_for(kind: &shader_graph_core::MaterialKind) -> &'static [Variant
 /// Parses a standalone WESL snippet (Custom node fn) and returns the parser error, if any.
 pub fn parse_error(source: &str) -> Option<String> {
     source.parse::<wesl::syntax::TranslationUnit>().err().map(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn semver_comparison_orders_patch_numbers_numerically() {
+        assert_eq!(parse_semver("0.20.9"), Some((0, 20, 9)));
+        assert_eq!(parse_semver("0.20.10"), Some((0, 20, 10)));
+        assert!(parse_semver("0.20.10") > parse_semver("0.20.9"));
+        assert!(parse_semver("0.20.2") > parse_semver("0.20.1"));
+        assert_eq!(parse_semver("0.20"), None);
+    }
 }

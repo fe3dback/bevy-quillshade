@@ -14,5 +14,5 @@ pub use registrar::{
     AssetKindDef, AssetTemplate, DomainDef, DomainInfo, DomainRegistrar, EditorDomain, GameAssetsDef, Highlighter,
     ParseTabFn, QuickStartDef, SceneFn, StepFn, TabExistsFn, TreeAsset, TreeFolder,
 };
-pub use state::{DomainState, DomainStates};
+pub use state::{DomainHooks, DomainHooksFor, DomainState, DomainStates};
 pub use tool::{TOOL_KEY_PREFIX, ToolDef, ToolId};

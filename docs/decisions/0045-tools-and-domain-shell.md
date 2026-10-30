@@ -1,8 +1,7 @@
 # 0045: Tools, the project domain and the domain shell; the Light domain
 
-Design reference: `docs/superpowers/specs/2026-10-28-multi-domain-editor-design.md` (§14, which amends §2, §8.1,
-§9.2 and §9.3). Extends decisions 0043 (backend layout) and 0044 (editor domain API); supersedes in part 0044's
-"Known limits" and the domain bar of design §8.1.
+Design reference: `AGENTS.md` and decisions 0043–0045. Extends decisions 0043 (backend layout) and 0044 (editor domain API); supersedes in part 0044's
+"Known limits" and the domain bar of the initial multi-domain design.
 
 ## Context
 

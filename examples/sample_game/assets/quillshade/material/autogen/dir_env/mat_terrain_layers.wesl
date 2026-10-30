@@ -2,19 +2,18 @@
 // bevy 0.20, stdlib v1
 import bevy_pbr::render::{pbr_fragment::pbr_input_from_standard_material, pbr_functions::alpha_discard};
 @if(PREPASS_PIPELINE)
-import bevy_pbr::{prepass::io::{VertexOutput, FragmentOutput}, deferred::functions::deferred_output};
+import bevy_pbr::{prepass::io::{Vertex, UncompressedVertex, VertexOutput, FragmentOutput, decompress_vertex}, deferred::functions::deferred_output};
 @else
-import bevy_pbr::render::{forward_io::{VertexOutput, FragmentOutput}, pbr_functions::{apply_pbr_lighting, main_pass_post_lighting_processing}};
-@if(!PREPASS_PIPELINE)
-import bevy_pbr::render::{mesh_bindings::mesh, mesh_functions, skinning, morph, forward_io::{Vertex, UncompressedVertex, decompress_vertex}, view_transformations::position_world_to_clip};
+import bevy_pbr::render::{forward_io::{Vertex, UncompressedVertex, VertexOutput, FragmentOutput, decompress_vertex}, pbr_functions::{apply_pbr_lighting, main_pass_post_lighting_processing}};
+import bevy_pbr::render::{mesh_bindings::mesh, mesh_functions, skinning, morph, view_transformations::position_world_to_clip};
 import super::super::functions::dir_common::fun_rock_layer::fun_rock_layer;
 import super::super::stdlib::material::{MaterialAttributesPbr, sg_lerp_attributes_pbr};
 import super::super::stdlib::shading::{sg_slope_angle, sg_world_aligned_blend};
 import super::super::stdlib::texture::sg_sample_gradient;
 import super::super::stdlib::transform::sg_tbn;
 
-@group(constants::MATERIAL_BIND_GROUP) @binding(101) var gc_common_terrain: texture_2d<f32>;
-@group(constants::MATERIAL_BIND_GROUP) @binding(102) var gc_common_terrain_sampler: sampler;
+@group(constants::MATERIAL_BIND_GROUP) @binding(101) var gc_common__terrain: texture_2d<f32>;
+@group(constants::MATERIAL_BIND_GROUP) @binding(102) var gc_common__terrain_sampler: sampler;
 // The game's compiled material enables this feature; after a change of parameters, texture bindings,
 // World Position Offset, blend mode, two-sided or shading the shader stops compiling here until the game
 // is rebuilt.
@@ -37,7 +36,7 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     let n_n11_out: f32 = (n_n10_y * 0.25f);
     let n_n12_out: f32 = (n_n11_out + 0.5f);
     let n_n13_out: f32 = saturate(n_n12_out);
-    let n_n14_rgba: vec4<f32> = sg_sample_gradient(gc_common_terrain, gc_common_terrain_sampler, n_n13_out, 0.00390625f);
+    let n_n14_rgba: vec4<f32> = sg_sample_gradient(gc_common__terrain, gc_common__terrain_sampler, n_n13_out, 0.00390625f);
     let n_n15_out: vec3<f32> = (vec3<f32>(0.15, 0.45, 0.1) * n_n14_rgba.rgb);
     let n_n03_attributes: MaterialAttributesPbr = MaterialAttributesPbr(n_n15_out, 0.0f, 0.5f, 0.7f, vec3<f32>(0.0, 0.0, 0.0), 1.0f, 1.0f, vec3<f32>(0.0, 0.0, 1.0), 1.0f);
     let n_n07_out: MaterialAttributesPbr = sg_lerp_attributes_pbr(n_n05_layer, n_n03_attributes, n_n06_mask);
@@ -62,7 +61,6 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     return out;
 }
 
-@if(!PREPASS_PIPELINE)
 fn sg_morph_vertex(vertex_in: UncompressedVertex, instance_index: u32) -> UncompressedVertex {
     var vertex = vertex_in;
     @if(MORPH_TARGETS) {
@@ -76,14 +74,13 @@ fn sg_morph_vertex(vertex_in: UncompressedVertex, instance_index: u32) -> Uncomp
                 continue;
             }
             vertex.position += weight * morph::morph_position(vertex_index, i, morph_descriptor_index);
-            @if(VERTEX_NORMALS) vertex.normal += weight * morph::morph_normal(vertex_index, i, morph_descriptor_index);
-            @if(VERTEX_TANGENTS) vertex.tangent += vec4<f32>(weight * morph::morph_tangent(vertex_index, i, morph_descriptor_index), 0.0);
+            @if(VERTEX_NORMALS && (!PREPASS_PIPELINE || NORMAL_PREPASS_OR_DEFERRED_PREPASS)) vertex.normal += weight * morph::morph_normal(vertex_index, i, morph_descriptor_index);
+            @if(VERTEX_TANGENTS && (!PREPASS_PIPELINE || NORMAL_PREPASS_OR_DEFERRED_PREPASS)) vertex.tangent += vec4<f32>(weight * morph::morph_tangent(vertex_index, i, morph_descriptor_index), 0.0);
         }
     }
     return vertex;
 }
 
-@if(!PREPASS_PIPELINE)
 @vertex
 fn vertex(vertex_no_morph: Vertex) -> VertexOutput {
     var out: VertexOutput;
@@ -92,17 +89,26 @@ fn vertex(vertex_no_morph: Vertex) -> VertexOutput {
     let mesh_world_from_local = mesh_functions::get_world_from_local(vertex_no_morph.instance_index);
     var world_from_local = mesh_world_from_local;
     @if(SKINNED) world_from_local = skinning::skin_model(vertex.joint_indices, vertex.joint_weights, vertex_no_morph.instance_index);
-    @if(VERTEX_NORMALS && SKINNED) out.world_normal = skinning::skin_normals(world_from_local, vertex.normal);
-    @if(VERTEX_NORMALS && !SKINNED) out.world_normal = mesh_functions::mesh_normal_local_to_world(vertex.normal, vertex_no_morph.instance_index);
+    @if(VERTEX_NORMALS && (!PREPASS_PIPELINE || NORMAL_PREPASS_OR_DEFERRED_PREPASS) && SKINNED) out.world_normal = skinning::skin_normals(world_from_local, vertex.normal);
+    @if(VERTEX_NORMALS && (!PREPASS_PIPELINE || NORMAL_PREPASS_OR_DEFERRED_PREPASS) && !SKINNED) out.world_normal = mesh_functions::mesh_normal_local_to_world(vertex.normal, vertex_no_morph.instance_index);
     @if(VERTEX_POSITIONS) out.world_position = mesh_functions::mesh_position_local_to_world(world_from_local, vec4<f32>(vertex.position, 1.0));
+    @if(PREPASS_PIPELINE && MOTION_VECTOR_PREPASS) {
+        var prev_model = mesh_functions::get_previous_world_from_local(vertex_no_morph.instance_index);
+        @if(SKINNED && HAS_PREVIOUS_SKIN) prev_model = skinning::skin_prev_model(vertex.joint_indices, vertex.joint_weights, vertex_no_morph.instance_index);
+        out.previous_world_position = mesh_functions::mesh_position_local_to_world(prev_model, vec4<f32>(vertex.position, 1.0));
+    }
     @if(VERTEX_UVS_A) out.uv = vertex.uv;
     @if(VERTEX_UVS_B) out.uv_b = vertex.uv_b;
-    @if(VERTEX_TANGENTS) out.world_tangent = mesh_functions::mesh_tangent_local_to_world(world_from_local, vertex.tangent, vertex_no_morph.instance_index);
+    @if(VERTEX_TANGENTS && (!PREPASS_PIPELINE || NORMAL_PREPASS_OR_DEFERRED_PREPASS)) out.world_tangent = mesh_functions::mesh_tangent_local_to_world(world_from_local, vertex.tangent, vertex_no_morph.instance_index);
     @if(VERTEX_COLORS) out.color = vertex.color;
     @if(VERTEX_OUTPUT_INSTANCE_INDEX) out.instance_index = vertex_no_morph.instance_index;
     @if(VISIBILITY_RANGE_DITHER) out.visibility_range_dither = mesh_functions::get_visibility_range_dither_level(vertex_no_morph.instance_index, mesh_world_from_local[3]);
     // --- world position offset ---
     out.world_position = vec4<f32>(out.world_position.xyz + vec3<f32>(0.0, 0.02, 0.0), 1.0);
     out.position = position_world_to_clip(out.world_position.xyz);
+    @if(PREPASS_PIPELINE && UNCLIPPED_DEPTH_ORTHO_EMULATION) {
+        out.unclipped_depth = out.position.z;
+        out.position.z = min(out.position.z, 1.0);
+    }
     return out;
 }

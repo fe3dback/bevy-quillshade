@@ -2,8 +2,16 @@
 //! [`GradientCollection::bake_rgba8`] (sRGB-encoded bytes, row = slot), written to
 //! `assets/quillshade/material/gradients/<collection>.png`.
 
+use std::collections::VecDeque;
+use std::sync::Mutex;
+
 use shader_graph_core::gradient::{GradientCollection, SAMPLES, SLOTS};
 use shader_graph_core::texture::{FilterMode, SamplerSettings, TextureSettings};
+
+/// Maximum number of encoded gradient PNGs kept in the process-wide memoization cache.
+const CACHE_CAP: usize = 32;
+
+static CACHE: Mutex<VecDeque<(GradientCollection, Vec<u8>)>> = Mutex::new(VecDeque::new());
 
 /// Loader settings of a baked collection (its manifest entry): sRGB (a sample returns linear values), `ClampToEdge`,
 /// `Linear` mag / min filters, `Nearest` mipmap filter (the PNG has no mips; the shader samples level 0).
@@ -22,8 +30,17 @@ pub fn texture_settings() -> TextureSettings {
 /// The PNG of collection `c`. Byte-deterministic on every platform (the writer compares bytes, CI fails on a diff
 /// after `regen`): fixed encoder settings and the pure-Rust `fdeflate` backend, never `flate2`, whose output depends
 /// on the backend feature-unification picks. No `sRGB` / `gAMA` chunk: the game reads `is_srgb` from the loader
-/// settings of the manifest entry.
+/// settings of the manifest entry. Memoized by [`GradientCollection`] so repeated live validations and scoped
+/// regenerations do not re-bake unchanged collections.
 pub fn encode(c: &GradientCollection) -> Vec<u8> {
+    if let Ok(mut cache) = CACHE.lock()
+        && let Some(i) = cache.iter().position(|(k, _)| k == c)
+    {
+        let entry = cache.remove(i).expect("cached gradient PNG");
+        let out = entry.1.clone();
+        cache.push_back(entry);
+        return out;
+    }
     let mut out = Vec::new();
     let mut encoder = png::Encoder::new(&mut out, SAMPLES as u32, SLOTS as u32);
     encoder.set_color(png::ColorType::Rgba);
@@ -34,6 +51,14 @@ pub fn encode(c: &GradientCollection) -> Vec<u8> {
     let mut writer = encoder.write_header().expect("PNG header");
     writer.write_image_data(&c.bake_rgba8()).expect("PNG data");
     writer.finish().expect("PNG end");
+    if let Ok(mut cache) = CACHE.lock() {
+        if let Some(i) = cache.iter().position(|(k, _)| k == c) {
+            cache.remove(i);
+        } else if cache.len() >= CACHE_CAP {
+            cache.pop_front();
+        }
+        cache.push_back((c.clone(), out.clone()));
+    }
     out
 }
 

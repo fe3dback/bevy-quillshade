@@ -1,6 +1,6 @@
 # 0043: Multi-domain project layout and domain backends
 
-Design reference: `docs/superpowers/specs/2026-10-28-multi-domain-editor-design.md` (§4, §6.5, §7, §8.3, §10).
+Design reference: `AGENTS.md` and decisions 0043–0045.
 
 ## Context
 

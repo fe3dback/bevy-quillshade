@@ -158,8 +158,9 @@ impl Project {
     /// Creates `quillshade/` and a default `project.ron` if missing.
     pub fn ensure_layout(&self) -> std::io::Result<()> {
         std::fs::create_dir_all(self.quillshade_dir())?;
-        if !self.settings_path().exists() {
-            std::fs::write(self.settings_path(), settings_text(&self.settings)?)?;
+        let path = self.settings_path();
+        if !path.exists() {
+            crate::writer::write_atomic(&path, settings_text(&self.settings)?)?;
         }
         Ok(())
     }
@@ -229,11 +230,7 @@ pub fn read_settings(path: &Path) -> Result<ProjectSettings, OpenError> {
 /// watcher never reads half a file), in the style [`Project::ensure_layout`] writes. `project` is not changed: the
 /// caller adopts `settings` as [`Project::settings`] once this succeeded (the Project Settings tool, design §14.2).
 pub fn save_settings(project: &Project, settings: &ProjectSettings) -> std::io::Result<()> {
-    let batch = crate::writer::WriteBatch {
-        writes: vec![(project.settings_path(), settings_text(settings)?.into_bytes())],
-        deletes: Vec::new(),
-    };
-    batch.apply(&[])
+    crate::writer::write_atomic(&project.settings_path(), settings_text(settings)?)
 }
 
 /// `project.ron`'s text: struct names, 2-space indent, `\n` line ends, a final newline.
@@ -242,14 +239,50 @@ fn settings_text(settings: &ProjectSettings) -> std::io::Result<String> {
     Ok(ron::ser::to_string_pretty(settings, cfg).map_err(std::io::Error::other)? + "\n")
 }
 
-/// Minimal cargo-style glob: `*` matches one path segment.
+/// Cargo-style glob: `**` matches zero or more path segments; `*` matches zero or more characters within a segment
+/// (multiple `*` per segment supported).
 pub fn glob_match(pattern: &str, path: &str) -> bool {
     let p: Vec<&str> = pattern.split('/').collect();
     let s: Vec<&str> = path.split('/').collect();
-    p.len() == s.len()
-        && p.iter().zip(&s).all(|(a, b)| {
-            if let Some((pre, post)) = a.split_once('*') { b.starts_with(pre) && b.ends_with(post) } else { a == b }
-        })
+    match_segments(&p, &s)
+}
+
+fn match_segments(p: &[&str], s: &[&str]) -> bool {
+    let Some((&first, rest_p)) = p.split_first() else {
+        return s.is_empty();
+    };
+    if first == "**" {
+        match_segments(rest_p, s) || (!s.is_empty() && match_segments(p, &s[1..]))
+    } else {
+        let Some((&seg, rest_s)) = s.split_first() else {
+            return false;
+        };
+        segment_match(first, seg) && match_segments(rest_p, rest_s)
+    }
+}
+
+fn segment_match(pat: &str, seg: &str) -> bool {
+    let parts: Vec<&str> = pat.split('*').collect();
+    if parts.len() == 1 {
+        return pat == seg;
+    }
+    let Some(mut rest) = seg.strip_prefix(parts[0]) else {
+        return false;
+    };
+    let Some(middle) = rest.strip_suffix(parts[parts.len() - 1]) else {
+        return false;
+    };
+    rest = middle;
+    for part in &parts[1..parts.len() - 1] {
+        if part.is_empty() {
+            continue;
+        }
+        let Some(pos) = rest.find(part) else {
+            return false;
+        };
+        rest = &rest[pos + part.len()..];
+    }
+    true
 }
 
 /// Drops the `\\?\` prefix Windows `canonicalize` adds (`\\?\C:\…`, `\\?\UNC\server\…`): a verbatim path takes `/`
@@ -397,6 +430,15 @@ mod tests {
         assert!(glob_match("crates/quillshade", "crates/quillshade"));
         assert!(!glob_match("crates/*", "crates/quillshade/x"));
         assert!(!glob_match("other/*", "crates/quillshade"));
+        assert!(glob_match("**", "crates/quillshade"));
+        assert!(glob_match("crates/**", "crates/quillshade"));
+        assert!(glob_match("crates/**", "crates/a/b/quillshade"));
+        assert!(glob_match("crates/**/quillshade", "crates/quillshade"));
+        assert!(glob_match("crates/**/quillshade", "crates/a/b/quillshade"));
+        assert!(!glob_match("crates/**/quillshade", "crates/a/b/other"));
+        assert!(glob_match("crates/*_*_*", "crates/bevy_shader_editor"));
+        assert!(glob_match("crates/*quill*shade*", "crates/quillshade"));
+        assert!(!glob_match("crates/a*a", "crates/a"));
     }
 
     #[test]

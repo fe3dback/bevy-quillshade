@@ -24,9 +24,10 @@ pub const LAYOUT_FEATURE: &str = "SG_LAYOUT_7fbb96d1";
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone, Default)]
 pub struct TerrainLayersExt {
     /// Gradient collection `common/terrain`; `new` sets `Handle::default()` (Bevy's white image).
+    #[allow(non_snake_case)]
     #[texture(101)]
     #[sampler(102)]
-    pub gc_common_terrain: Handle<Image>,
+    pub gc_common__terrain: Handle<Image>,
 }
 
 impl MaterialExtension for TerrainLayersExt {
@@ -39,6 +40,14 @@ impl MaterialExtension for TerrainLayersExt {
     }
 
     fn vertex_shader() -> ShaderRef {
+        SHADER_PATH.into()
+    }
+
+    fn prepass_vertex_shader() -> ShaderRef {
+        SHADER_PATH.into()
+    }
+
+    fn deferred_vertex_shader() -> ShaderRef {
         SHADER_PATH.into()
     }
 
@@ -64,7 +73,7 @@ impl TerrainLayersExt {
     #[allow(dead_code)]
     pub(crate) fn new() -> Self {
         Self {
-            gc_common_terrain: Handle::default(),
+            gc_common__terrain: Handle::default(),
         }
     }
 
@@ -72,7 +81,7 @@ impl TerrainLayersExt {
     /// default, with a warning), `tex` maps a Texture asset id to its image.
     pub(crate) fn from_values(v: &MaterialValues, tex: &dyn Fn(&str) -> Handle<Image>) -> Self {
         Self {
-            gc_common_terrain: tex(v.texture(BAKED_ID, "gc_common_terrain")),
+            gc_common__terrain: tex(v.texture(BAKED_ID, "gc_common__terrain")),
         }
     }
 

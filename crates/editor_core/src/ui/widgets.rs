@@ -72,7 +72,7 @@ pub fn scroll_column() -> impl Scene {
     }
 }
 
-/// What a [`GroupButton`] shows: one of our icons (16 px, per `CLAUDE.md` → Icons) or a text.
+/// What a [`GroupButton`] shows: one of our icons (16 px, per `AGENTS.md` → Icons) or a text.
 #[derive(Clone, Debug)]
 pub enum Caption {
     Icon(IconRef),

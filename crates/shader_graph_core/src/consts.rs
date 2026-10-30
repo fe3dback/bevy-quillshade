@@ -3,6 +3,7 @@
 
 use std::collections::BTreeMap;
 
+use project_core::probe_version;
 use serde::{Deserialize, Serialize};
 
 use crate::model::LoadError;
@@ -101,12 +102,6 @@ pub struct GlobalConsts {
     pub consts: Vec<GlobalConst>,
 }
 
-#[derive(Deserialize)]
-#[serde(rename = "GlobalConsts")]
-struct VersionProbe {
-    format_version: u32,
-}
-
 impl GlobalConsts {
     pub fn new(name: impl Into<String>, consts: Vec<GlobalConst>) -> Self {
         let mut c = GlobalConsts { format_version: CONSTS_FORMAT_VERSION, name: name.into(), consts };
@@ -116,9 +111,7 @@ impl GlobalConsts {
 
     /// Parses a table file (older format versions would migrate here).
     pub fn from_ron(text: &str) -> Result<GlobalConsts, LoadError> {
-        let probe: VersionProbe =
-            ron::Options::default().from_str(text).map_err(|e| LoadError::Parse(e.to_string()))?;
-        match probe.format_version {
+        match probe_version(text)? {
             v if v > CONSTS_FORMAT_VERSION => Err(LoadError::TooNew { found: v, supported: CONSTS_FORMAT_VERSION }),
             CONSTS_FORMAT_VERSION => {
                 let mut c: GlobalConsts =

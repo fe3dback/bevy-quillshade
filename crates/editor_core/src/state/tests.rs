@@ -124,15 +124,19 @@ impl<const N: usize> DomainState for DummyState<N> {
         IDS[N]
     }
 
-    fn rescan(&mut self, editor: &mut Editor) {
-        let Some(p) = &editor.project else { return self.notes.clear() };
+    fn rescan(editor: &mut Editor) {
+        let Some(p) = &editor.project else {
+            editor.domains.get_mut::<Self>().unwrap().notes.clear();
+            return;
+        };
         let dir = p.domain_dir(IDS[N]);
         let rels = project_core::files::walk_files(&dir).into_iter().map(|f| p.rel(&f));
-        self.notes = rels.filter_map(|rel| project_core::asset_ref::parse(&rel, IDS[N], &[NOTE])).collect();
+        let notes = rels.filter_map(|rel| project_core::asset_ref::parse(&rel, IDS[N], &[NOTE])).collect();
+        editor.domains.get_mut::<Self>().unwrap().notes = notes;
     }
 
     /// Any command: a console/logs line.
-    fn apply(&mut self, editor: &mut Editor, _action: &crate::dynval::Payload) {
+    fn apply(editor: &mut Editor, _action: &crate::dynval::Payload) {
         editor.info("ping");
     }
 
@@ -141,7 +145,7 @@ impl<const N: usize> DomainState for DummyState<N> {
         Some(self.notes.iter().map(item).collect())
     }
 
-    fn generate(&mut self, editor: &mut Editor) {
+    fn generate(editor: &mut Editor) {
         editor.info("generated");
     }
 
@@ -150,13 +154,13 @@ impl<const N: usize> DomainState for DummyState<N> {
     }
 
     /// Opens the note the diagnostic names.
-    fn focus_diagnostic(&mut self, editor: &mut Editor, diag: &Diagnostic) {
+    fn focus_diagnostic(editor: &mut Editor, diag: &Diagnostic) {
         if let Some(path) = diag.asset.as_deref().and_then(|a| a.strip_prefix(&format!("quillshade/{}/", IDS[N]))) {
             editor.open_ref(&note(N, path.trim_end_matches(".note.ron")));
         }
     }
 
-    fn rename_file(&mut self, editor: &mut Editor, r: &AssetRef, new_path: &str) -> Result<AssetRef, String> {
+    fn rename_file(editor: &mut Editor, r: &AssetRef, new_path: &str) -> Result<AssetRef, String> {
         let p = editor.project.as_ref().ok_or("no project")?;
         let to = AssetRef { path: new_path.into(), ..r.clone() };
         let target = p.root.join(to.source_rel());
@@ -165,23 +169,24 @@ impl<const N: usize> DomainState for DummyState<N> {
         Ok(to)
     }
 
-    fn renamed(&mut self, editor: &mut Editor, from: &AssetRef, to: &AssetRef) {
-        let known = self.notes.contains(to) && !self.notes.contains(from);
+    fn renamed(editor: &mut Editor, from: &AssetRef, to: &AssetRef) {
+        let notes = &editor.domains.get::<Self>().unwrap().notes;
+        let known = notes.contains(to) && !notes.contains(from);
         editor.info(format!("renamed hook, rescanned first: {known}"));
     }
 
-    fn before_delete(&mut self, editor: &mut Editor, r: &AssetRef) {
+    fn before_delete(editor: &mut Editor, r: &AssetRef) {
         let open = editor.asset_tab(r).is_some();
         editor.info(format!("before delete, tab open: {open}"));
     }
 
-    fn delete_file(&mut self, editor: &mut Editor, r: &AssetRef) -> Result<(), String> {
+    fn delete_file(editor: &mut Editor, r: &AssetRef) -> Result<(), String> {
         let p = editor.project.as_ref().ok_or("no project")?;
         std::fs::remove_file(p.root.join(r.source_rel())).map_err(|e| e.to_string())
     }
 
-    fn deleted(&mut self, editor: &mut Editor, r: &AssetRef) {
-        let gone = !self.notes.contains(r) && editor.asset_tab(r).is_none();
+    fn deleted(editor: &mut Editor, r: &AssetRef) {
+        let gone = !editor.domains.get::<Self>().unwrap().notes.contains(r) && editor.asset_tab(r).is_none();
         editor.info(format!("deleted hook, rescanned and closed: {gone}"));
     }
 }
@@ -1604,7 +1609,7 @@ impl<const N: usize> DomainState for BuiltState<N> {
     fn id(&self) -> DomainId {
         BUILT[N]
     }
-    fn generate(&mut self, editor: &mut Editor) {
+    fn generate(editor: &mut Editor) {
         editor.info(format!("generated {}", BUILT[N]));
     }
 }

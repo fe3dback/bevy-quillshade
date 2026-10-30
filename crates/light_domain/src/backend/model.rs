@@ -101,12 +101,7 @@ pub fn load_environment(file: &Path) -> Result<Environment, String> {
 
 /// Writes an environment file through a temporary file next to it, creating the parent directories.
 pub fn save_environment(file: &Path, env: &Environment) -> io::Result<()> {
-    if let Some(dir) = file.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    let tmp = file.with_extension("ron.tmp");
-    std::fs::write(&tmp, env.to_ron())?;
-    std::fs::rename(&tmp, file)
+    project_core::writer::write_atomic(file, env.to_ron())
 }
 
 /// Every Light asset file of the project (`quillshade/light/**`), in path order; files and folders whose name starts

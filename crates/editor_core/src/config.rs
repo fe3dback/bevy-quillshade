@@ -92,12 +92,7 @@ impl UserConfig {
         if std::fs::read_to_string(path).ok().as_deref() == Some(text.as_str()) {
             return Ok(());
         }
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        let tmp = path.with_extension("ron.tmp");
-        std::fs::write(&tmp, text)?;
-        std::fs::rename(tmp, path)
+        project_core::writer::write_atomic(path, text)
     }
 
     /// Whether `panel` is shown: its own flag, folded with Zen mode, which has priority. The one place the layout

@@ -25,3 +25,8 @@ tempfile = { workspace = true }
 # `cargo test -p texture_kit` links Bevy dynamically, as the workspace build does (dev-dependencies only: the kit's own
 # feature set stays without it).
 bevy = { workspace = true, features = ["dynamic_linking"] }
+
+[[test]]
+name = "policy_editor"
+path = "tests/policy_editor.rs"
+required-features = ["editor"]

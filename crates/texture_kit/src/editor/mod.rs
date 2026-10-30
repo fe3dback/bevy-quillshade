@@ -123,19 +123,8 @@ pub trait TextureDomain: Sized + Send + Sync + 'static {
     }
 
     /// The domain's Texture assets on disk that point at the game file `file` (path under `assets/`), in path order:
-    /// one file — one asset (design §1.1). By default the files are read now; a domain keeping its assets in its state
-    /// answers from there (Material: its last scan).
-    fn disk_owners(editor: &Editor, file: &str) -> Vec<AssetRef> {
-        let Some(project) = &editor.project else { return Vec::new() };
-        let dir = project.domain_dir(Self::DOMAIN);
-        let mut found: Vec<AssetRef> = project_core::files::walk_files(&dir)
-            .into_iter()
-            .filter_map(|f| project_core::asset_ref::parse(&project.rel(&f), Self::DOMAIN, &[Self::SUFFIX]))
-            .filter(|r| load(project, r).is_ok_and(|t| t.path == file))
-            .collect();
-        found.sort_by(|a, b| a.path.cmp(&b.path));
-        found
-    }
+    /// one file — one asset (design §1.1). Read from the domain's state (its last scan).
+    fn disk_owners(editor: &Editor, file: &str) -> Vec<AssetRef>;
 
     /// The problems the right sidebar lists for the Texture asset `r`: by default the domain's diagnostics of it.
     fn problems(editor: &Editor, r: &AssetRef) -> Vec<Diagnostic> {

@@ -44,7 +44,7 @@ pub const EDITOR_VERSION: &str = match option_env!("SHADER_EDITOR_VERSION") {
     None => env!("CARGO_PKG_VERSION"),
 };
 pub const PROJECT_URL: &str = "https://github.com/fe3dback/bevy-quillshade";
-pub const AUTHORS: &str = "claude code / fe3dback";
+pub const AUTHORS: &str = "AI / fe3dback";
 pub const LICENSE: &str = "MIT";
 /// Shown small and dimmed on the welcome screen and in About.
 pub const DISCLAIMER: &str = "Unofficial, community-driven editor, not supported by the Bevy developers. It will most \

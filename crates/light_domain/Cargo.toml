@@ -34,3 +34,8 @@ ktx2 = { workspace = true }
 [[example]]
 name = "make_sample"
 test = true
+
+[[test]]
+name = "editor"
+path = "tests/editor.rs"
+required-features = ["editor"]
