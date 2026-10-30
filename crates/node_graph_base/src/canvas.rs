@@ -8,12 +8,15 @@ use std::marker::PhantomData;
 
 use bevy::feathers::controls::NumberInputValue;
 use bevy::input_focus::InputFocus;
+use bevy::input_focus::tab_navigation::TabIndex;
+use bevy::picking::cursor::EntityCursor;
 use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
 use bevy::text::{EditableText, TextReadWriteMode};
 use bevy::ui::Selected;
 use bevy::ui::ui_transform::UiGlobalTransform;
 use bevy::ui_widgets::popover::Popover;
+use bevy::window::SystemCursorIcon;
 use bevy_noodle::prelude::GraphEdit as NoodleEdit;
 use bevy_noodle::prelude::*;
 use bevy_noodle::style::kit;
@@ -31,7 +34,7 @@ use editor_core::ui::props::PropField;
 
 use crate::domain::{GraphCtxRef, GraphDomain, active};
 use crate::edit::{GraphEdit, PinKey};
-use crate::layout::{GRID_SNAP, enclosed, tidy};
+use crate::layout::{GRID_SNAP, MIN_FRAME_SIZE, enclosed, grid_point, tidy};
 use crate::view::{FrameView, NodeLook, NodeShape, NodeView, PinLook, PreviewRow};
 
 /// Model id on a node entity.
@@ -49,6 +52,77 @@ pub struct NodeHeader;
 /// On a comment frame's title (a strip across the frame's top): a double click there edits the title (design §5.5).
 #[derive(Component, Default, Clone, Debug)]
 pub struct FrameTitleStrip;
+
+/// Edge or corner resize handle on a comment frame (`TabIndex(-1)` keeps `bevy_noodle` from starting a frame drag).
+#[derive(Component, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FrameResizeHandle {
+    pub left: bool,
+    pub right: bool,
+    pub top: bool,
+    pub bottom: bool,
+}
+
+impl FrameResizeHandle {
+    /// Cursor icon shown when hovering over this resize handle.
+    pub fn cursor(self) -> SystemCursorIcon {
+        match (self.left, self.right, self.top, self.bottom) {
+            (true, false, true, false) | (false, true, false, true) => SystemCursorIcon::NwseResize,
+            (true, false, false, true) | (false, true, true, false) => SystemCursorIcon::NeswResize,
+            (true, false, false, false) | (false, true, false, false) => SystemCursorIcon::EwResize,
+            (false, false, true, false) | (false, false, false, true) => SystemCursorIcon::NsResize,
+            _ => SystemCursorIcon::Default,
+        }
+    }
+
+    /// Applies a graph-space drag `delta` to `initial` `(x, y, w, h)`, snapping the moved edge(s) to [`GRID_SNAP`] and
+    /// clamping width and height to [`MIN_FRAME_SIZE`].
+    pub fn apply(self, initial: (f32, f32, f32, f32), delta: Vec2) -> (f32, f32, f32, f32) {
+        let (x0, y0, w0, h0) = initial;
+        let r0 = x0 + w0.max(MIN_FRAME_SIZE.0);
+        let b0 = y0 + h0.max(MIN_FRAME_SIZE.1);
+        let (x, w) = if self.left {
+            let x = grid_point(x0 + delta.x).min(r0 - MIN_FRAME_SIZE.0);
+            (x, (r0 - x).max(MIN_FRAME_SIZE.0))
+        } else if self.right {
+            (x0, grid_point(w0 + delta.x).max(MIN_FRAME_SIZE.0))
+        } else {
+            (x0, w0)
+        };
+        let (y, h) = if self.top {
+            let y = grid_point(y0 + delta.y).min(b0 - MIN_FRAME_SIZE.1);
+            (y, (b0 - y).max(MIN_FRAME_SIZE.1))
+        } else if self.bottom {
+            (y0, grid_point(h0 + delta.y).max(MIN_FRAME_SIZE.1))
+        } else {
+            (y0, h0)
+        };
+        let (x, y) = tidy((x, y));
+        let (w, h) = tidy((w, h));
+        (x, y, w, h)
+    }
+}
+
+/// Active comment frame resize gesture on `G`'s canvas.
+#[derive(Resource)]
+struct ActiveFrameResize<G> {
+    active: Option<FrameResizeState>,
+    graph: PhantomData<fn() -> G>,
+}
+
+impl<G> Default for ActiveFrameResize<G> {
+    fn default() -> Self {
+        ActiveFrameResize { active: None, graph: PhantomData }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct FrameResizeState {
+    frame_entity: Entity,
+    frame_id: String,
+    handle: FrameResizeHandle,
+    initial_rect: (f32, f32, f32, f32),
+    current_rect: (f32, f32, f32, f32),
+}
 
 /// On the previewed node (decision 0022): its outline pulses (`node_outlines`).
 #[derive(Component, Default, Clone, Debug)]
@@ -179,6 +253,7 @@ impl<G> Default for CanvasPlugin<G> {
 impl<G: GraphDomain> Plugin for CanvasPlugin<G> {
     fn build(&self, app: &mut App) {
         app.init_resource::<PendingMoves<G>>()
+            .init_resource::<ActiveFrameResize<G>>()
             .init_resource::<MoveVerdicts<G>>()
             .init_resource::<SettleState<G>>()
             .init_resource::<CanvasMarks<G>>()
@@ -204,7 +279,12 @@ impl<G: GraphDomain> Plugin for CanvasPlugin<G> {
             .add_observer(check_connection::<G>)
             .add_observer(start_move_verdicts::<G>)
             .add_observer(check_move::<G>)
-            .add_observer(request_move_wires::<G>);
+            .add_observer(request_move_wires::<G>)
+            .add_observer(on_frame_resize_press::<G>)
+            .add_observer(on_frame_resize_start::<G>)
+            .add_observer(on_frame_resize_drag::<G>)
+            .add_observer(on_frame_resize_end::<G>)
+            .add_observer(on_frame_resize_cancel::<G>);
     }
 }
 
@@ -565,12 +645,67 @@ fn frame_look(c: Color) -> (SelectedBorderColor, BackgroundColor) {
 
 /// Height (graph px) of a comment frame's title strip, one 16 px line.
 const FRAME_TITLE_HEIGHT: f32 = 20.0;
+/// Thickness (graph px) of a comment frame's edge resize hit strip.
+const FRAME_RESIZE_EDGE: f32 = 8.0;
+/// Size (graph px) of a comment frame's corner resize handle.
+const FRAME_RESIZE_CORNER: f32 = 14.0;
+
+fn frame_resize_handle(handle: FrameResizeHandle, owner: GraphOf, color: Color) -> impl Scene {
+    let edge = px(FRAME_RESIZE_EDGE);
+    let corner = px(FRAME_RESIZE_CORNER);
+    let inset = px(-2.0);
+    let (left, right, width) = match (handle.left, handle.right) {
+        (true, false) => (inset, Val::Auto, if handle.top || handle.bottom { corner } else { edge }),
+        (false, true) => (Val::Auto, inset, if handle.top || handle.bottom { corner } else { edge }),
+        _ => (corner, corner, Val::Auto),
+    };
+    let (top, bottom, height) = match (handle.top, handle.bottom) {
+        (true, false) => (inset, Val::Auto, if handle.left || handle.right { corner } else { edge }),
+        (false, true) => (Val::Auto, inset, if handle.left || handle.right { corner } else { edge }),
+        _ => (corner, corner, Val::Auto),
+    };
+    let (border, border_color) = if handle.right && handle.bottom {
+        let g = color.with_alpha(0.55);
+        (
+            UiRect { right: px(2.0), bottom: px(2.0), ..default() },
+            BorderColor { top: Color::NONE, left: Color::NONE, right: g, bottom: g },
+        )
+    } else {
+        (UiRect::DEFAULT, BorderColor::all(Color::NONE))
+    };
+    bsn! {
+        Node {
+            position_type: PositionType::Absolute,
+            left: left,
+            right: right,
+            top: top,
+            bottom: bottom,
+            width: width,
+            height: height,
+            border: border,
+            border_radius: BorderRadius::bottom_right(px(6.0)),
+        }
+        border_color
+        EntityCursor::System({ handle.cursor() })
+        handle
+        owner
+        TabIndex(-1)
+    }
+}
 
 fn frame_scene(f: &FrameView, canvas: Entity, owner: GraphOf) -> impl Scene {
     let c = frame_color(f);
     let (x, y, w, h) = f.rect;
     let (pos, title, key) = (Vec2::new(x, y), f.title.clone(), FrameKey(f.id.clone()));
     let (border, bg) = frame_look(c);
+    let h_l = FrameResizeHandle { left: true, ..default() };
+    let h_r = FrameResizeHandle { right: true, ..default() };
+    let h_t = FrameResizeHandle { top: true, ..default() };
+    let h_b = FrameResizeHandle { bottom: true, ..default() };
+    let h_tl = FrameResizeHandle { left: true, top: true, ..default() };
+    let h_tr = FrameResizeHandle { right: true, top: true, ..default() };
+    let h_bl = FrameResizeHandle { left: true, bottom: true, ..default() };
+    let h_br = FrameResizeHandle { right: true, bottom: true, ..default() };
     bsn! {
         GraphNode
         // Dragging it carries the nodes inside (bevy_noodle).
@@ -598,6 +733,22 @@ fn frame_scene(f: &FrameView, canvas: Entity, owner: GraphOf) -> impl Scene {
             TextColor(c)
             Node { width: percent(100), min_height: px(FRAME_TITLE_HEIGHT) }
             FrameTitleStrip
+            --
+            @frame_resize_handle(h_l, owner, c)
+            --
+            @frame_resize_handle(h_r, owner, c)
+            --
+            @frame_resize_handle(h_t, owner, c)
+            --
+            @frame_resize_handle(h_b, owner, c)
+            --
+            @frame_resize_handle(h_tl, owner, c)
+            --
+            @frame_resize_handle(h_tr, owner, c)
+            --
+            @frame_resize_handle(h_bl, owner, c)
+            --
+            @frame_resize_handle(h_br, owner, c)
         ]
     }
 }
@@ -614,6 +765,9 @@ fn shown_key<G: GraphDomain>(editor: &Editor) -> Option<(TabKey, u64)> {
 /// No gesture is running and no finished move is waiting for its commit (a rebuild would put the nodes back).
 pub fn idle<G: GraphDomain>(world: &mut World) -> bool {
     if world.get_resource::<PendingMoves<G>>().is_some_and(|m| !m.entities.is_empty()) {
+        return false;
+    }
+    if world.get_resource::<ActiveFrameResize<G>>().is_some_and(|r| r.active.is_some()) {
         return false;
     }
     // A dragged wire, or wires lifted by a Ctrl+drag (design §5.3).
@@ -650,7 +804,7 @@ fn sync_inline_fields<G: GraphDomain>(
             (_, v) => NumberInputValue::F32(display_value(v.floats().get(field.comp).copied().unwrap_or(0.0))),
         };
         if *shown != want {
-            commands.entity(e).insert(want);
+            commands.entity(e).try_insert(want);
         }
     }
 }
@@ -831,8 +985,17 @@ pub fn rebuild_canvas<G: GraphDomain>(world: &mut World) {
                     tc.set_if_neq(TextColor(want_color));
                 }
             }
+            if world.get::<FrameResizeHandle>(child).is_some_and(|h| h.right && h.bottom)
+                && let Some(mut bc) = world.get_mut::<BorderColor>(child)
+            {
+                let g = want_color.with_alpha(0.55);
+                bc.set_if_neq(BorderColor { top: Color::NONE, left: Color::NONE, right: g, bottom: g });
+            }
         }
     } else {
+        if let Some(mut r) = world.get_resource_mut::<ActiveFrameResize<G>>() {
+            r.active = None;
+        }
         // View per document.
         if !same_doc {
             let view = world.get::<CanvasView>(canvas).map(|v| (v.pan, v.zoom));
@@ -1108,6 +1271,179 @@ fn request_move_wires<G: GraphDomain>(
     request.reject();
 }
 
+fn drag_graph_delta(
+    pos: Vec2,
+    distance: Vec2,
+    canvases: &Query<(&CanvasView, Option<&ComputedNode>, Option<&UiGlobalTransform>)>,
+    canvas: Entity,
+    ui_scale: f32,
+) -> Option<Vec2> {
+    let (view, computed, transform) = canvases.get(canvas).ok()?;
+    if let (Some(c), Some(t)) = (computed, transform)
+        && let (Some(now), Some(start)) =
+            (window_to_graph(pos, c, t, view, ui_scale), window_to_graph(pos - distance, c, t, view, ui_scale))
+    {
+        return Some(now - start);
+    }
+    Some(distance / (view.zoom.max(0.01) * ui_scale.max(0.01)))
+}
+
+fn on_frame_resize_press<G: GraphDomain>(
+    mut ev: On<PointerPress>,
+    handles: Query<&ChildOf, With<FrameResizeHandle>>,
+    frames: Query<&GraphOf, With<FrameKey>>,
+    ec: Option<Res<EditorCanvas<G>>>,
+    mut commands: Commands,
+) {
+    if ev.button != PointerButton::Primary {
+        return;
+    }
+    let Some(ec) = ec else { return };
+    let Ok(parent) = handles.get(ev.event_target()) else { return };
+    let frame_entity = parent.parent();
+    let Ok(owner) = frames.get(frame_entity) else { return };
+    if owner.0 != G::VIEW {
+        return;
+    }
+    ev.propagate(false);
+    commands.select(ec.canvas, vec![frame_entity], SelectMode::Replace);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn on_frame_resize_start<G: GraphDomain>(
+    mut ev: On<PointerDragStart>,
+    handles: Query<(&FrameResizeHandle, &ChildOf)>,
+    frames: Query<(&FrameKey, &GraphOf, &NodePosition, &Node)>,
+    editor: Option<Res<Editor>>,
+    mut resize: ResMut<ActiveFrameResize<G>>,
+) {
+    if ev.button != PointerButton::Primary {
+        return;
+    }
+    let Ok((&handle, parent)) = handles.get(ev.event_target()) else { return };
+    let frame_entity = parent.parent();
+    let Ok((frame_key, owner, pos, node)) = frames.get(frame_entity) else { return };
+    if owner.0 != G::VIEW {
+        return;
+    }
+    ev.propagate(false);
+    let from_model = editor
+        .as_deref()
+        .and_then(active::<G>)
+        .and_then(|d| G::view(d).frames.into_iter().find(|f| f.id == frame_key.0).map(|f| f.rect));
+    let initial_rect = from_model.unwrap_or_else(|| {
+        let w = match node.width {
+            Val::Px(w) => w,
+            _ => MIN_FRAME_SIZE.0,
+        };
+        let h = match node.height {
+            Val::Px(h) => h,
+            _ => MIN_FRAME_SIZE.1,
+        };
+        (pos.0.x, pos.0.y, w, h)
+    });
+    resize.active = Some(FrameResizeState {
+        frame_entity,
+        frame_id: frame_key.0.clone(),
+        handle,
+        initial_rect,
+        current_rect: initial_rect,
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+fn on_frame_resize_drag<G: GraphDomain>(
+    mut ev: On<PointerDrag>,
+    handles: Query<&ChildOf, With<FrameResizeHandle>>,
+    mut frames: Query<(&GraphOf, &mut NodePosition, &mut Node), With<FrameKey>>,
+    ec: Option<Res<EditorCanvas<G>>>,
+    canvases: Query<(&CanvasView, Option<&ComputedNode>, Option<&UiGlobalTransform>)>,
+    ui_scale: Option<Res<UiScale>>,
+    mut resize: ResMut<ActiveFrameResize<G>>,
+) {
+    if ev.button != PointerButton::Primary {
+        return;
+    }
+    let Some(ec) = ec else { return };
+    let Ok(parent) = handles.get(ev.event_target()) else { return };
+    let frame_entity = parent.parent();
+    let Some(state) = resize.active.as_mut().filter(|s| s.frame_entity == frame_entity) else { return };
+    let Ok((owner, mut pos, mut node)) = frames.get_mut(frame_entity) else { return };
+    if owner.0 != G::VIEW {
+        return;
+    }
+    ev.propagate(false);
+    let scale = ui_scale.map_or(1.0, |s| s.0);
+    let Some(delta) = drag_graph_delta(ev.pointer.position, ev.distance, &canvases, ec.canvas, scale) else { return };
+    let (x, y, w, h) = state.handle.apply(state.initial_rect, delta);
+    state.current_rect = (x, y, w, h);
+    pos.set_if_neq(NodePosition(Vec2::new(x, y)));
+    node.width = px(w);
+    node.height = px(h);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn on_frame_resize_end<G: GraphDomain>(
+    mut ev: On<PointerDragEnd>,
+    handles: Query<&ChildOf, With<FrameResizeHandle>>,
+    mut frames: Query<(&GraphOf, &mut NodePosition, &mut Node), With<FrameKey>>,
+    ec: Option<Res<EditorCanvas<G>>>,
+    canvases: Query<(&CanvasView, Option<&ComputedNode>, Option<&UiGlobalTransform>)>,
+    ui_scale: Option<Res<UiScale>>,
+    mut resize: ResMut<ActiveFrameResize<G>>,
+    mut actions: ResMut<Actions>,
+) {
+    if ev.button != PointerButton::Primary {
+        return;
+    }
+    let Ok(parent) = handles.get(ev.event_target()) else { return };
+    let frame_entity = parent.parent();
+    if resize.active.as_ref().is_none_or(|s| s.frame_entity != frame_entity) {
+        return;
+    }
+    let Some(mut state) = resize.active.take() else { return };
+    ev.propagate(false);
+    let scale = ui_scale.map_or(1.0, |s| s.0);
+    if let Some(ec) = ec
+        && let Some(delta) = drag_graph_delta(ev.pointer.position, ev.distance, &canvases, ec.canvas, scale)
+    {
+        state.current_rect = state.handle.apply(state.initial_rect, delta);
+    }
+    let (x, y, w, h) = state.current_rect;
+    if let Ok((owner, mut pos, mut node)) = frames.get_mut(frame_entity)
+        && owner.0 == G::VIEW
+    {
+        pos.set_if_neq(NodePosition(Vec2::new(x, y)));
+        node.width = px(w);
+        node.height = px(h);
+    }
+    if state.current_rect != state.initial_rect {
+        actions.push(GraphEdit::ResizeFrame { id: state.frame_id, rect: state.current_rect });
+    }
+}
+
+fn on_frame_resize_cancel<G: GraphDomain>(
+    ev: On<PointerCancel>,
+    handles: Query<&ChildOf, With<FrameResizeHandle>>,
+    mut frames: Query<(&GraphOf, &mut NodePosition, &mut Node), With<FrameKey>>,
+    mut resize: ResMut<ActiveFrameResize<G>>,
+) {
+    let Ok(parent) = handles.get(ev.event_target()) else { return };
+    let frame_entity = parent.parent();
+    if resize.active.as_ref().is_none_or(|s| s.frame_entity != frame_entity) {
+        return;
+    }
+    let Some(state) = resize.active.take() else { return };
+    let (x, y, w, h) = state.initial_rect;
+    if let Ok((owner, mut pos, mut node)) = frames.get_mut(frame_entity)
+        && owner.0 == G::VIEW
+    {
+        pos.set_if_neq(NodePosition(Vec2::new(x, y)));
+        node.width = px(w);
+        node.height = px(h);
+    }
+}
+
 fn sync_from_canvas<G: GraphDomain>(
     mut applied: MessageReader<EditApplied>,
     keys: Query<&PinKey>,
@@ -1191,7 +1527,7 @@ fn sync_selection<G: GraphDomain>(
 ) {
     let Some(ec) = ec else { return };
     let Some(d) = active::<G>(&editor) else { return };
-    if ec.shown.as_ref().map(|s| &s.0) != editor.active_key().as_ref() {
+    if ec.shown != shown_key::<G>(&editor) {
         return;
     }
     let d = G::view(d);
@@ -1239,6 +1575,7 @@ fn frame_colors<G: GraphDomain>(
     editor: Res<Editor>,
     mut frames: Query<(&FrameKey, &GraphOf, &mut SelectedBorderColor, &mut BackgroundColor, &Children)>,
     mut titles: Query<&mut TextColor>,
+    mut grips: Query<(&FrameResizeHandle, &mut BorderColor)>,
 ) {
     if !editor.is_changed() {
         return;
@@ -1254,6 +1591,13 @@ fn frame_colors<G: GraphDomain>(
         for child in children {
             if let Ok(mut t) = titles.get_mut(*child) {
                 t.set_if_neq(TextColor(c));
+            }
+            if let Ok((h, mut bc)) = grips.get_mut(*child)
+                && h.right
+                && h.bottom
+            {
+                let g = c.with_alpha(0.55);
+                bc.set_if_neq(BorderColor { top: Color::NONE, left: Color::NONE, right: g, bottom: g });
             }
         }
     }

@@ -4022,6 +4022,40 @@ fn open_project_dialog_lists_and_forgets_recent() {
     assert!(app.world().resource::<Editor>().dialog.is_some(), "the dialog stays open");
 }
 
+/// Picking a non-first recent project from the Open project dialog reorders `recent_projects` while closing the
+/// dialog in the same frame; `redraw_recent` must not queue child commands on the despawned dialog's `RecentList`.
+#[test]
+fn open_recent_from_dialog_switches_project_without_despawn_panic() {
+    use material_domain::ui::dialog::DialogRoot;
+    use material_domain::ui::welcome::WelcomePlugin;
+
+    let (dir_a, mut app) = app_with(|app| {
+        app.add_plugins((
+            material_domain::ui::dialog::DialogPlugin,
+            bevy::ui_widgets::DialogPlugin,
+            bevy::ui_widgets::ModalDialogPlugin,
+            WelcomePlugin,
+        ));
+    });
+    let dir_b = tempfile::tempdir().unwrap();
+    std::fs::write(dir_b.path().join("Cargo.toml"), "[package]\nname = \"g2\"\n").unwrap();
+    std::fs::create_dir_all(dir_b.path().join("assets")).unwrap();
+    fixtures::save_all(&Project::open(dir_b.path()).unwrap()).unwrap();
+
+    app.world_mut().resource_mut::<Editor>().config.recent_projects =
+        vec![dir_a.path().to_path_buf(), dir_b.path().to_path_buf()];
+    act(&mut app, Action::OpenProjectDialog);
+    app.update();
+    assert!(app.world_mut().query_filtered::<Entity, With<DialogRoot>>().single(app.world()).is_ok());
+
+    act(&mut app, Action::OpenProject(dir_b.path().to_path_buf()));
+    let editor = app.world().resource::<Editor>();
+    assert!(editor.dialog.is_none());
+    assert_eq!(editor.project.as_ref().map(|p| p.root.as_path()), Some(dir_b.path()));
+    assert_eq!(editor.config.recent_projects.first().map(|p| p.as_path()), Some(dir_b.path()));
+    assert!(app.world_mut().query_filtered::<Entity, With<DialogRoot>>().single(app.world()).is_err());
+}
+
 /// A node's comment shows on the canvas inside the node (absolute, above its header) as a text, and goes with it.
 #[test]
 fn node_comment_is_drawn_above_the_node() {
@@ -4060,14 +4094,19 @@ mod bars {
     use editor_core::doc_kind::{DocCtx, TabDoc};
     use editor_core::domain::{DomainInfo, DomainList, DomainRegistrar, EditorDomain, ToolDef, ToolId};
     use editor_core::tab::ViewKindId;
-    use editor_core::theme::{DOMAIN_TAB_ACTIVE_TEXT, DOMAIN_TAB_TEXT, TAB_GREY, TOOL_TAB_ACTIVE_BG, TOOL_TAB_BG};
-    use editor_core::ui::OnActivate;
+    use editor_core::theme::{
+        DOMAIN_TAB_ACTIVE_BG, DOMAIN_TAB_ACTIVE_TEXT, DOMAIN_TAB_TEXT, MAINBAR_BG, TAB_GREY, TOOL_TAB_ACTIVE_BG,
+        TOOL_TAB_BG,
+    };
     use editor_core::ui::icons::{IconId, IconRef, UiIcon};
-    use editor_core::ui::shell::{LeftSidebar, MainBar, NavButton, shell};
+    use editor_core::ui::shell::{
+        LeftSidebar, MainBar, MainBarSeparator, NavButton, ProjectErrorsText, ProjectText, shell, show_project,
+    };
     use editor_core::ui::tabs::{
         DomainActions, DomainTab, DomainTabs, MainActions, ROW_GAP, SecondBar, TAB_H, TAB_ROW_MIN_H, TabIndexOf,
         TabRow, TabsPlugin,
     };
+    use editor_core::ui::{HoverRow, OnActivate};
     use editor_core::{Editor, EditorPlugins};
     use project_core::{AssetRef, DomainId, Project};
     use shader_project::{AssetId, AssetType, fixtures};
@@ -4169,7 +4208,7 @@ mod bars {
         app.init_resource::<bevy::feathers::controls::UnitsRegistry>();
         app.insert_resource(bevy::feathers::theme::UiTheme(bevy::feathers::dark_theme::create_dark_theme()));
         app.insert_resource(editor);
-        app.add_plugins((EditorPlugins, TabsPlugin));
+        app.add_plugins((EditorPlugins, TabsPlugin)).add_systems(Update, show_project);
         let viewport = Viewport { physical_size: WINDOW.as_uvec2(), ..default() };
         app.world_mut().spawn((Camera2d, Camera { viewport: Some(viewport), ..default() }, IsDefaultUiCamera));
         app.world_mut().spawn_scene(shell(Vec::new(), Vec::new(), None)).unwrap();
@@ -4311,7 +4350,7 @@ mod bars {
         assert!((grown - two).abs() <= 1.0, "the secondbar grows by one row ({grown} px, want {two})");
     }
 
-    /// Design §14.3: the domain tabs keep the mainbar at its height from before they moved there.
+    /// Design §14.3: the domain tabs keep the mainbar at its height from before they moved there, on [`MAINBAR_BG`].
     #[test]
     fn mainbar_height_unchanged() {
         const MAINBAR_H: f32 = 31.0;
@@ -4320,10 +4359,12 @@ mod bars {
         let (top, bottom, width) = rect(&mut app, main);
         assert!((bottom - top - MAINBAR_H).abs() <= 0.5, "the mainbar is {} px high", bottom - top);
         assert!((width - WINDOW.x).abs() <= 1.0);
+        assert_eq!(app.world().get::<BackgroundColor>(main).unwrap().0, MAINBAR_BG);
     }
 
-    /// Design §14.3: one domain tab per domain in the mainbar, the project domain's last; each shows its name and no
-    /// icon, the active one in the brighter text colour; activating one switches to its domain.
+    /// Design §14.3: one domain tab per domain in the mainbar, the project domain's last; each is a full-height
+    /// rectangular button showing its name and no icon, the active one on [`DOMAIN_TAB_ACTIVE_BG`] in the brighter text
+    /// colour; activating one switches to its domain.
     #[test]
     fn domain_tabs_in_mainbar_show_every_name() {
         let (_dir, mut app) = shell_app();
@@ -4336,9 +4377,18 @@ mod bars {
             let w = app.world();
             assert!(is_under(w, *e, main) && !is_under(w, *e, second), "{id:?} is in the mainbar only");
             assert_eq!(w.get::<OnActivate>(*e).map(|a| a.0.clone()), Some(Action::SwitchDomain(*id)));
+            let node = w.get::<Node>(*e).unwrap();
+            assert_eq!(node.height, percent(100));
+            assert_eq!(node.border_radius, BorderRadius::ZERO);
         }
         let shown = |app: &mut App| {
             domain_tabs(app).into_iter().map(|(e, _)| (texts(app, e), icons(app, e).len())).collect::<Vec<_>>()
+        };
+        let bgs = |app: &mut App| {
+            domain_tabs(app)
+                .into_iter()
+                .map(|(e, _)| app.world().get::<BackgroundColor>(e).unwrap().0)
+                .collect::<Vec<_>>()
         };
         let looks = shown(&mut app);
         let names: Vec<Vec<String>> = looks.iter().map(|(t, _)| t.iter().map(|(s, _)| s.clone()).collect()).collect();
@@ -4346,18 +4396,19 @@ mod bars {
         assert!(looks.iter().all(|(_, icons)| *icons == 0), "no icons");
         let colours: Vec<Color> = looks.iter().map(|(t, _)| t[0].1).collect();
         assert_eq!(colours, [DOMAIN_TAB_ACTIVE_TEXT, DOMAIN_TAB_TEXT, DOMAIN_TAB_TEXT]);
+        assert_eq!(bgs(&mut app), [DOMAIN_TAB_ACTIVE_BG, Color::NONE, Color::NONE]);
         assert_ne!(DOMAIN_TAB_ACTIVE_TEXT, DOMAIN_TAB_TEXT);
 
         act(&mut app, Action::SwitchDomain(TOOLBOX));
         let colours: Vec<Color> = shown(&mut app).iter().map(|(t, _)| t[0].1).collect();
         assert_eq!(colours, [DOMAIN_TAB_TEXT, DOMAIN_TAB_ACTIVE_TEXT, DOMAIN_TAB_TEXT], "follows the active domain");
+        assert_eq!(bgs(&mut app), [Color::NONE, DOMAIN_TAB_ACTIVE_BG, Color::NONE]);
     }
 
-    /// Design §14.3: switching the domain restyles the domain tabs in place: the same entities, the new active one a
-    /// Normal button, and a focused one (Tab, then Enter) keeps the focus.
+    /// Design §14.3: switching the domain restyles the domain tabs in place: the same entities, the new active one
+    /// filled with [`DOMAIN_TAB_ACTIVE_BG`], and a focused one (Tab, then Enter) keeps the focus.
     #[test]
     fn domain_switch_keeps_the_domain_tabs_and_focus() {
-        use bevy::feathers::controls::ButtonVariant;
         use bevy::input_focus::{FocusCause, InputFocus};
         let (_dir, mut app) = shell_app();
         let before = domain_tabs(&mut app);
@@ -4369,31 +4420,56 @@ mod bars {
         let w = app.world();
         assert_eq!(w.resource::<InputFocus>().get(), Some(toolbox), "the focus stays on the activated tab");
         assert!(w.get_entity(toolbox).is_ok());
-        let variants: Vec<Option<&ButtonVariant>> = before.iter().map(|(e, _)| w.get::<ButtonVariant>(*e)).collect();
+        let fills: Vec<(Color, Color)> = before
+            .iter()
+            .map(|(e, _)| (w.get::<BackgroundColor>(*e).unwrap().0, w.get::<HoverRow>(*e).unwrap().base))
+            .collect();
         assert_eq!(
-            variants,
-            [Some(&ButtonVariant::Plain), Some(&ButtonVariant::Normal), Some(&ButtonVariant::Plain)],
-            "only the active domain's tab has the button fill"
+            fills,
+            [(Color::NONE, Color::NONE), (DOMAIN_TAB_ACTIVE_BG, DOMAIN_TAB_ACTIVE_BG), (Color::NONE, Color::NONE),],
+            "only the active domain's tab has the active fill"
         );
     }
 
-    /// Design §14.3: without a project the domain tabs and their separator are hidden (they would do nothing).
+    /// Design §14.3: without a project the domain tabs, the mainbar's separators and the error count are hidden (only
+    /// `"No project"` stays).
     #[test]
     fn domain_tabs_hidden_without_project() {
         use editor_core::action::Unsaved;
         let (_dir, mut app) = shell_app();
-        let shown = |app: &mut App| {
-            let e = single::<DomainTabs>(app);
+        let shown = |app: &mut App, e: Entity| {
             let w = app.world();
             (w.get::<Node>(e).unwrap().display != Display::None, *w.get::<Visibility>(e).unwrap() != Visibility::Hidden)
         };
-        assert_eq!(shown(&mut app), (true, true), "a project is open");
+        let separators = |app: &mut App| {
+            let w = app.world_mut();
+            w.query_filtered::<Entity, With<MainBarSeparator>>().iter(w).collect::<Vec<_>>()
+        };
+        let tabs = single::<DomainTabs>(&mut app);
+        let project_text = single::<ProjectText>(&mut app);
+        let errors_text = single::<ProjectErrorsText>(&mut app);
+        let seps = separators(&mut app);
+        assert_eq!(seps.len(), 2, "two mainbar separators");
+        assert_eq!(shown(&mut app, tabs), (true, true), "a project is open");
+        assert_eq!(shown(&mut app, errors_text), (true, true));
+        for &s in &seps {
+            assert_eq!(shown(&mut app, s), (true, true));
+        }
+        assert!(!app.world().get::<Text>(project_text).unwrap().0.contains('|'), "no text pipe in ProjectText");
+        assert_eq!(app.world().get::<Text>(errors_text).unwrap().0, "0 errors");
+
         act(&mut app, Action::CloseProject(Unsaved::Discard));
         assert!(app.world().resource::<Editor>().project.is_none());
-        assert_eq!(shown(&mut app), (false, false), "no project: hidden, and skipped by Tab");
-        let e = single::<DomainTabs>(&mut app);
-        let (_, _, width) = rect(&mut app, e);
-        assert_eq!(width, 0.0, "the separator (its border) goes with it");
+        assert_eq!(shown(&mut app, tabs), (false, false), "no project: hidden, and skipped by Tab");
+        assert_eq!(shown(&mut app, errors_text), (false, false), "error count hidden without a project");
+        for &s in &seps {
+            assert_eq!(shown(&mut app, s), (false, false), "separators hidden without a project");
+            let (_, _, width) = rect(&mut app, s);
+            assert_eq!(width, 0.0);
+        }
+        assert_eq!(app.world().get::<Text>(project_text).unwrap().0, "No project");
+        let (_, _, width) = rect(&mut app, tabs);
+        assert_eq!(width, 0.0);
     }
 
     /// Design §14.4: the left sidebar shows the active domain's panes: Material's Project tree and Game Assets,
@@ -4459,5 +4535,47 @@ mod bars {
         assert!(texts(&mut app, tool).iter().all(|(_, c)| *c == TAB_GREY), "the other real domain's tool tab");
         let material = tab(&mut app, 0);
         assert!(texts(&mut app, material).iter().all(|(_, c)| *c != TAB_GREY));
+    }
+
+    /// Closing all tabs after opening a generated WESL text tab hides every `ViewOf` (including `TEXT_VIEW`) and shows
+    /// the [`EmptyHint`].
+    #[test]
+    fn closing_all_tabs_hides_text_view_and_shows_empty_hint() {
+        use editor_core::action::{CloseTabs, Unsaved};
+        use editor_core::editors::ViewOf;
+        use editor_core::editors::text::TEXT as TEXT_VIEW;
+        use editor_core::ui::shell::{EmptyHint, show_active_view, show_empty_hint};
+        use editor_core::ui::text_view::{TextViewPlugin, text_view};
+        use material_domain::ops::{MaterialAction, MaterialRegen};
+        use material_domain::tab::WESL;
+
+        let (_dir, mut app) = shell_app();
+        app.add_plugins(TextViewPlugin)
+            .add_systems(Update, (show_active_view, show_empty_hint).after(editor_core::apply_actions));
+        app.world_mut().spawn_scene(text_view()).unwrap();
+        app.update();
+
+        let id = AssetId::new(AssetType::Material, "env/rock_wet");
+        act(&mut app, Action::OpenAsset(id.to_ref()));
+        app.world_mut().resource_mut::<Editor>().regenerate();
+        act(&mut app, MaterialAction::ShowGenerated(id, WESL));
+        assert_eq!(app.world().resource::<Editor>().tabs.len(), 2);
+
+        let text_vis = |app: &mut App| {
+            let w = app.world_mut();
+            w.query::<(&ViewOf, &Visibility)>().iter(w).find(|(v, _)| v.0 == TEXT_VIEW).map(|(_, vis)| *vis).unwrap()
+        };
+        let hint_vis = |app: &mut App| {
+            let e = single::<EmptyHint>(app);
+            *app.world().get::<Visibility>(e).unwrap()
+        };
+
+        assert_eq!(text_vis(&mut app), Visibility::Inherited, "WESL text tab is active and visible");
+        assert_eq!(hint_vis(&mut app), Visibility::Hidden);
+
+        act(&mut app, Action::CloseTabs { which: CloseTabs::All, at: 0, unsaved: Unsaved::Discard });
+        assert!(app.world().resource::<Editor>().tabs.is_empty());
+        assert_eq!(text_vis(&mut app), Visibility::Hidden, "closing all tabs hides TEXT_VIEW");
+        assert_eq!(hint_vis(&mut app), Visibility::Inherited, "empty hint is shown when no tabs remain");
     }
 }

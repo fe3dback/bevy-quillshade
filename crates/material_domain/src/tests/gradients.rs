@@ -452,3 +452,35 @@ fn route_declaration_pastes_as_usage() {
     assert_eq!(kinds(&e, "stdlib::NamedRoute"), before + 1);
     assert_eq!(kinds(&e, "stdlib::NamedRouteUsage"), 0);
 }
+
+#[test]
+fn opening_sample_gradient_node_selects_configured_slot() {
+    use shader_stdlib::nodes::color::{GRADIENT_COLLECTION_PARAM, GRADIENT_SLOT_PARAM, SAMPLE_GRADIENT_KIND};
+
+    let (_dir, mut e, id) = gradients_project();
+    let slot_id = gdoc(&e).collection.slots[5].id;
+    // Select slot 0 in the gradients tab first so we verify opening the node switches to slot 5.
+    ga(&mut e, GradientsAction::SelectSlot(0));
+    assert_eq!(gdoc(&e).slot, 0);
+
+    open_rock_wet(&mut e);
+    let node = add(&mut e, SAMPLE_GRADIENT_KIND);
+    let set =
+        |key: &str, value: Value| set_value(GraphProp::Param { node: node.clone(), key: key.into() }, value, false);
+    e.apply(set(GRADIENT_COLLECTION_PARAM, Value::Str("common/ramps".into())));
+
+    // With slot 0 (no slot picked), open_action falls back to plain Action::OpenAsset.
+    assert_eq!(e.referenced_gradient_slot(&node), None);
+    assert_eq!(e.open_action(&node), Some(Action::OpenAsset(id.to_ref())));
+
+    // With a valid slot picked, open_action (and header_action) returns MaterialAction::OpenGradient.
+    e.apply(set(GRADIENT_SLOT_PARAM, Value::Int(slot_id as i32)));
+    assert_eq!(e.referenced_gradient_slot(&node), Some(slot_id));
+    let expected: Action = MaterialAction::OpenGradient { id: id.clone(), slot_id }.into();
+    assert_eq!(e.open_action(&node), Some(expected.clone()));
+    assert_eq!(e.header_action(&node), Some(expected.clone()));
+
+    e.apply(expected);
+    assert_eq!(gdoc(&e).id, id);
+    assert_eq!(gdoc(&e).slot, 5);
+}

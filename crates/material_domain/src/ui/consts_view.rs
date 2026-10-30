@@ -254,11 +254,11 @@ fn sync_fields(
             let (min, max) = slider_range(x);
             // Re-inserting the value redraws the fill bar for the new range; the edit that left the range has
             // finished (typed values arrive on Enter or focus loss), so the field is not being typed into.
-            commands.entity(e).insert((SoftLimit(NumberInputRange::F32(min..=max)), want));
+            commands.entity(e).try_insert((SoftLimit(NumberInputRange::F32(min..=max)), want));
             continue;
         }
         if Some(e) != typing && *shown != want {
-            commands.entity(e).insert(want);
+            commands.entity(e).try_insert(want);
         }
     }
     for (e, field, shown) in &pickers {
@@ -274,7 +274,7 @@ fn sync_fields(
         let want = linear_color(&rgba);
         let (a, b) = (shown.0.to_linear().to_f32_array(), want.to_linear().to_f32_array());
         if a.iter().zip(b).any(|(x, y)| (x - y).abs() > 1e-5) {
-            commands.entity(e).insert(ColorInputValue(want));
+            commands.entity(e).try_insert(ColorInputValue(want));
         }
     }
 }

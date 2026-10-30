@@ -23,13 +23,16 @@ pub mod widgets;
 pub use editor_core::editors::ViewOf;
 pub use editor_core::menu::MainMenu;
 pub use editor_core::theme::{ACCENT, ACCENT_RGB};
-pub use editor_core::theme::{BORDER, PANEL_BG, ROW_HOVER, TEXT, TEXT_DIM, TOPBAR_BG, text};
+pub use editor_core::theme::{
+    BORDER, MAINBAR_BG, MAINBAR_SEPARATOR, PANEL_BG, ROW_HOVER, TEXT, TEXT_DIM, TOPBAR_BG, text,
+};
 pub use editor_core::ui::HoverRow;
 pub use editor_core::ui::OnActivate;
 pub use editor_core::ui::shell::{
-    DocArea, DocKindText, EmptyHint, HEADER_BG, LeftSidebar, MainMenuBarrier, MainMenuPopup, NavButton, ProjectText,
-    ROW_ACTIVE, UiPlugin, VIEW_BG, activate_action, clipped_text, fill_main_menus, left_sidebar, main_menu,
-    main_menu_barrier, project_name, show_left_sidebar,
+    DocArea, DocKindText, EmptyHint, HEADER_BG, LeftSidebar, MainBarSeparator, MainMenuBarrier, MainMenuPopup,
+    NavButton, ProjectErrorsText, ProjectText, ROW_ACTIVE, UiPlugin, VIEW_BG, activate_action, clipped_text,
+    fill_main_menus, left_sidebar, main_menu, main_menu_barrier, mainbar_separator, project_name, show_left_sidebar,
+    show_project,
 };
 pub use editor_core::ui::widgets::scroll_column;
 pub use editor_core::ui::{button, icon_button, icon_tool_button, tool_button};

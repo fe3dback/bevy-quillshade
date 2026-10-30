@@ -59,7 +59,7 @@ impl Plugin for AreasPlugin {
         for kind in &kinds.0 {
             (kind.build)(app);
         }
-        app.add_systems(Update, (show_active_areas, redraw_statusbar))
+        app.add_systems(Update, (show_active_areas, redraw_statusbar).after(crate::apply_actions))
             .add_observer(spawn_topbar_areas)
             .add_observer(spawn_sidebar_areas);
     }

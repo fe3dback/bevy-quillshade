@@ -25,6 +25,11 @@ pub const ACCENT: Color = Color::srgb_u8(ACCENT_RGB[0], ACCENT_RGB[1], ACCENT_RG
 pub const TEXT_DIM: Color = Color::srgb(0.55, 0.57, 0.62);
 /// A row under the pointer ([`crate::ui::HoverRow`]).
 pub const ROW_HOVER: Color = Color::srgba(1.0, 1.0, 1.0, 0.06);
+/// Background of the mainbar (design §14.3): darker than all other editor surfaces (`VIEW_BG`, [`TOPBAR_BG`],
+/// [`PANEL_BG`], `HEADER_BG`).
+pub const MAINBAR_BG: Color = Color::srgb_u8(18, 19, 22);
+/// Vertical divider line in the mainbar (`ui::shell::MainBarSeparator`).
+pub const MAINBAR_SEPARATOR: Color = Color::srgb_u8(45, 48, 55);
 /// Background of the sidebars and the console/logs.
 pub const PANEL_BG: Color = Color::srgb_u8(32, 34, 39);
 /// Background of the editor topbar and the editor statusbar (the active tab joins it).
@@ -39,7 +44,10 @@ pub const TOOL_TAB_ACTIVE_BG: Color = Color::srgb_u8(46, 68, 112);
 /// Text and icon of a greyed tab: one of a real domain other than the active one (design §14.3). [`TEXT_DIM`] made
 /// translucent, so it also fades solid icons, whose tint sets only their alpha (`ui::icons::icon`).
 pub const TAB_GREY: Color = Color::srgba(0.55, 0.57, 0.62, 0.55);
-/// Name of an inactive domain tab in the mainbar (design §14.3): a neutral dim grey on a plain button.
+/// Background of the active domain tab in the mainbar (design §14.3): warm orange matching the [`ACCENT`] palette with
+/// high contrast for [`DOMAIN_TAB_ACTIVE_TEXT`].
+pub const DOMAIN_TAB_ACTIVE_BG: Color = Color::srgb_u8(180, 88, 28);
+/// Name of an inactive domain tab in the mainbar (design §14.3): a neutral dim grey on a transparent fill.
 pub const DOMAIN_TAB_TEXT: Color = Color::srgb(0.60, 0.61, 0.64);
-/// Name of the active domain tab: near white on Feathers' neutral button fill, brighter than [`TEXT`].
+/// Name of the active domain tab: near white on [`DOMAIN_TAB_ACTIVE_BG`], brighter than [`TEXT`].
 pub const DOMAIN_TAB_ACTIVE_TEXT: Color = Color::srgb(0.96, 0.96, 0.97);

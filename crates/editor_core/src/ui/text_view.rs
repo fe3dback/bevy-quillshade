@@ -38,7 +38,7 @@ pub struct TextViewPlugin;
 
 impl Plugin for TextViewPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, redraw).add_observer(scroll_code);
+        app.add_systems(Update, redraw.after(crate::apply_actions)).add_observer(scroll_code);
     }
 }
 
@@ -96,7 +96,12 @@ fn redraw(
     mut scrolls: Local<HashMap<String, Vec2>>,
     mut commands: Commands,
 ) {
-    let Some(t) = editor.tab().and_then(|t| t.get::<TextDoc>()) else { return };
+    let Some(t) = editor.tab().and_then(|t| t.get::<TextDoc>()) else {
+        if let (Some((rel, _)), Ok((_, scroll))) = (last.take(), code.single()) {
+            scrolls.insert(rel, scroll.0);
+        }
+        return;
+    };
     let key = (t.rel.clone(), t.revision);
     if last.as_ref() == Some(&key) {
         return;

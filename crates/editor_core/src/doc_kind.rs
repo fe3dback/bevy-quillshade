@@ -160,7 +160,7 @@ pub struct StatusInfo {
     pub dirty: bool,
     pub errors: usize,
     pub warnings: usize,
-    /// Kind-specific counts, shown in order (`12 nodes`, `340 WESL lines`).
+    /// Kind-specific counts, shown in order (`3 points`, `340 WESL lines`).
     pub counts: Vec<String>,
 }
 

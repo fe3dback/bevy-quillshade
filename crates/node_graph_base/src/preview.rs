@@ -182,7 +182,7 @@ fn update_previews<P: NodePreview>(
         if known.is_some_and(|s| s.na) != show_na {
             let vis = if show_na { Visibility::Inherited } else { Visibility::Hidden };
             for c in children.iter().filter(|c| na.contains(*c)) {
-                commands.entity(c).insert(vis);
+                commands.entity(c).try_insert(vis);
             }
         }
         shown.insert(root, Shown { key, size, na: show_na });

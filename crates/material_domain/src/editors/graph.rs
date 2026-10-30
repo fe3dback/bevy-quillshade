@@ -284,8 +284,7 @@ pub(crate) fn asset_subpanes(editor: &Editor, d: &Doc) -> Vec<Box<dyn Scene>> {
     common_subpanes(d, out)
 }
 
-/// The subpanes every graph asset shows after its own: canvas hotkeys, then the description last (design §5; the
-/// counts are in the editor statusbar).
+/// The subpanes every graph asset shows after its own: canvas hotkeys, then the description last (design §5).
 fn common_subpanes(d: &Doc, mut out: Vec<Box<dyn Scene>>) -> Vec<Box<dyn Scene>> {
     let hotkeys = GRAPH_HOTKEYS.map(|tip| -> Box<dyn Scene> { Box::new(text(tip, TEXT_DIM, 12.0)) });
     out.push(subpane_box("Hotkeys", hotkeys.into()));
@@ -348,7 +347,8 @@ pub(crate) fn node_subpanes(editor: &Editor, id: &str) -> Vec<Box<dyn Scene>> {
             AssetType::Texture => "Open texture",
             AssetType::Gradients => "Open gradients",
         };
-        node.push(Box::new(button(label, Action::OpenAsset(target.to_ref()), false)));
+        let open = editor.open_action(id).unwrap_or_else(|| Action::OpenAsset(target.to_ref()));
+        node.push(Box::new(button(label, open, false)));
     }
     out.push(subpane_box("Node", node));
     let params = editor.domains.material().registry.resolved_params(&n.kind, &n.params);
@@ -539,14 +539,9 @@ impl TabDoc for Doc {
     }
 
     fn status(&self, ctx: &StatusCtx) -> Option<StatusInfo> {
-        let mut counts = vec![
-            plural(self.asset.nodes.len(), "node", "nodes"),
-            plural(self.asset.edges.len(), "wire", "wires"),
-            plural(self.asset.comments.len(), "comment", "comments"),
-        ];
         // Lines of the asset's `.wesl` as last written by regeneration or read by a generated text tab.
         let wesl_lines = ctx.domain::<MaterialState>().and_then(|m| m.wesl_lines.get(&self.id)).copied();
-        counts.extend(wesl_lines.map(|n| plural(n, "WESL line", "WESL lines")));
+        let counts = wesl_lines.map(|n| plural(n, "WESL line", "WESL lines")).into_iter().collect();
         Some(StatusInfo::new(Doc::is_dirty(self), ctx, counts))
     }
 }

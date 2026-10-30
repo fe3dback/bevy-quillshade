@@ -461,23 +461,15 @@ fn add_comment_with_selection_wraps_it() {
     assert_eq!(f.nodes, members);
 }
 
-/// Design §5: the statusbar counts wires and comments too (the sidebar's "Info" subpane is gone).
+/// Design §5: the graph statusbar shows only the generated WESL line count (no node, wire or comment counts).
 #[test]
-fn graph_status_counts_wires_and_comments() {
+fn graph_status_shows_only_wesl_lines() {
     let (_dir, mut e) = project();
     open_rock_wet(&mut e);
     let counts = e.status_info().unwrap().counts;
-    let a = &e.doc().unwrap().asset;
-    let (nodes, wires, comments) = (a.nodes.len(), a.edges.len(), a.comments.len());
-    for want in [
-        crate::util::text::plural(nodes, "node", "nodes"),
-        crate::util::text::plural(wires, "wire", "wires"),
-        crate::util::text::plural(comments, "comment", "comments"),
-    ] {
-        assert!(counts.contains(&want), "{want} in {counts:?}");
-    }
+    assert_eq!(counts.len(), 1, "{counts:?}");
+    assert!(counts[0].ends_with(" WESL line") || counts[0].ends_with(" WESL lines"), "{counts:?}");
     e.apply(GraphEdit::Select(BTreeSet::new()));
     e.apply(GraphEdit::AddComment(None));
-    let want = crate::util::text::plural(comments + 1, "comment", "comments");
-    assert!(e.status_info().unwrap().counts.contains(&want));
+    assert_eq!(e.status_info().unwrap().counts, counts, "adding a comment does not add a statusbar count");
 }

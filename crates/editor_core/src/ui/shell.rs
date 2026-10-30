@@ -9,10 +9,10 @@ use std::path::Path;
 
 use crate::action::{Action, Actions};
 use crate::config::Panel;
-use crate::editors::{EditorKinds, ViewOf};
+use crate::editors::ViewOf;
 use crate::logo;
 use crate::menu::MainMenu;
-use crate::theme::{BORDER, PANEL_BG, TEXT, TEXT_DIM, text};
+use crate::theme::{BORDER, MAINBAR_BG, MAINBAR_SEPARATOR, PANEL_BG, TEXT, TEXT_DIM, text};
 use crate::tooltip::{self, Tooltip};
 use crate::ui::icons;
 use crate::ui::widgets::{self, pane_box, pane_title, scroll_column};
@@ -44,12 +44,35 @@ pub struct DocArea;
 #[derive(Component, Default, Clone)]
 pub struct MainBar;
 
+/// A vertical divider in the [`MainBar`], hidden with the domain tabs while no project is open.
+#[derive(Component, Default, Clone)]
+pub struct MainBarSeparator;
+
+/// A vertical divider line in the [`MainBar`].
+pub fn mainbar_separator() -> impl Scene {
+    bsn! {
+        MainBarSeparator
+        Node {
+            width: px(1),
+            height: px(16),
+            margin: UiRect::axes(px(6), px(0)),
+            flex_shrink: 0.0,
+        }
+        BackgroundColor(MAINBAR_SEPARATOR)
+        Pickable::IGNORE
+    }
+}
+
 #[derive(Component, Default, Clone)]
 pub struct EmptyHint;
 
-/// The mainbar's project text (`name  |  N errors`, the full path as its tooltip).
+/// The mainbar's project name (the full path as its tooltip).
 #[derive(Component, Default, Clone)]
 pub struct ProjectText;
+
+/// The mainbar's error count (`N errors`, the full path as its tooltip), after a [`MainBarSeparator`].
+#[derive(Component, Default, Clone)]
+pub struct ProjectErrorsText;
 
 /// Watermark in the main view's bottom-right corner naming the open document's type.
 #[derive(Component, Default, Clone)]
@@ -96,7 +119,8 @@ impl Plugin for UiPlugin {
                 main_menu_barrier,
                 show_left_sidebar,
                 close_requested,
-            ),
+            )
+                .after(crate::apply_actions),
         )
         .add_observer(activate_action)
         .add_observer(crate::ui::row_hover_on)
@@ -211,7 +235,7 @@ pub fn main_menu_barrier(
         commands.spawn_scene(bsn! { @dialog::menu_barrier() MainMenuBarrier });
     } else if !open {
         for b in &barriers {
-            commands.entity(b).despawn();
+            commands.entity(b).try_despawn();
         }
     }
 }
@@ -260,9 +284,9 @@ fn sync_nav_buttons(
             continue;
         }
         if on {
-            commands.entity(button).remove::<InteractionDisabled>();
+            commands.entity(button).try_remove::<InteractionDisabled>();
         } else {
-            commands.entity(button).insert(InteractionDisabled);
+            commands.entity(button).try_insert(InteractionDisabled);
         }
         let tint = if on { TEXT } else { TEXT.with_alpha(widgets::DISABLED_ICON_ALPHA) };
         for e in children.iter_descendants(button) {
@@ -277,33 +301,29 @@ fn sync_nav_buttons(
 /// of one editor kind (that is the editor topbar's); Back / Forward are in the secondbar.
 fn main_bar() -> impl Scene {
     let tip = Tooltip::default();
+    let err_tip = Tooltip::default();
     let menus: Vec<Box<dyn Scene>> =
         MainMenu::ORDER.into_iter().map(|m| Box::new(main_menu(m)) as Box<dyn Scene>).collect();
     bsn! {
         MainBar
         Node {
+            height: px(31),
             flex_direction: FlexDirection::Row,
             align_items: AlignItems::Center,
             column_gap: px(2),
-            padding: UiRect::axes(px(6), px(3)),
+            padding: UiRect::new(px(6), px(12), px(0), px(0)),
             border: UiRect::bottom(px(1)),
         }
-        BackgroundColor(HEADER_BG)
+        BackgroundColor(MAINBAR_BG)
         BorderColor::all(BORDER)
         Children [
             @logo::logo(20.0) Node { margin: UiRect::axes(px(4), px(0)) }
             --
             {menus}
             --
-            // The separator is the domain tabs' left border, as high as the menu buttons.
+            @mainbar_separator()
+            --
             @tabs::domain_tabs()
-            Node {
-                align_self: AlignSelf::Stretch,
-                margin: UiRect::left(px(6)),
-                padding: UiRect::left(px(8)),
-                border: UiRect::left(px(1)),
-            }
-            BorderColor::all(BORDER)
             --
             Node { flex_grow: 1.0 }
             --
@@ -312,7 +332,14 @@ fn main_bar() -> impl Scene {
             TextFont { font_size: FontSize::Px(12.0) }
             TextColor(TEXT_DIM)
             tip
-            Node { margin: UiRect::right(px(6)) }
+            --
+            @mainbar_separator()
+            --
+            ProjectErrorsText
+            Text("")
+            TextFont { font_size: FontSize::Px(12.0) }
+            TextColor(TEXT_DIM)
+            err_tip
         ]
     }
 }
@@ -466,13 +493,11 @@ pub fn shell(views: Vec<Box<dyn Scene>>, overlays: Vec<Box<dyn Scene>>, rust: Op
     }
 }
 
-/// Shows the active tab's view; without a tab, the first registered kind's (Material: the empty graph canvas).
-fn show_active_view(editor: Res<Editor>, kinds: Res<EditorKinds>, mut q: Query<(&ViewOf, &mut Visibility)>) {
-    let Some(active) = editor.tab().map(|t| t.doc().view()).or_else(|| kinds.0.first().map(|k| k.view)) else {
-        return;
-    };
+/// Shows the active tab's view; without a tab, every view is hidden (the empty hint shows on `VIEW_BG`).
+pub fn show_active_view(editor: Res<Editor>, mut q: Query<(&ViewOf, &mut Visibility)>) {
+    let active = editor.tab().map(|t| t.doc().view());
     for (view, mut v) in &mut q {
-        v.set_if_neq(if view.0 == active { Visibility::Inherited } else { Visibility::Hidden });
+        v.set_if_neq(if Some(view.0) == active { Visibility::Inherited } else { Visibility::Hidden });
     }
 }
 
@@ -500,7 +525,7 @@ pub fn empty_hint(editor: &Editor) -> &'static str {
 }
 
 /// Shows the [`EmptyHint`] while no tab is active, with the active domain's text.
-fn show_empty_hint(
+pub fn show_empty_hint(
     editor: Res<Editor>,
     mut q: Query<&mut Visibility, With<EmptyHint>>,
     mut texts: Query<&mut Text, With<EmptyHintText>>,
@@ -528,14 +553,15 @@ fn show_doc_kind(editor: Res<Editor>, mut q: Query<&mut Text, With<DocKindText>>
     }
 }
 
-/// The mainbar's project text and tooltip, and the window title. Keyed like the editor statusbar (`areas`): the log
-/// revision (diagnostics; opening or closing a project logs), the tabs revision (tab titles, saves), the active tab
-/// and its document's revision (the dirty mark). Not on every change of `Editor`: the error count clones all
-/// diagnostics and the dirty mark serialises a graph.
-fn show_project(
+/// The mainbar's project name, error count and tooltips, and the window title. Keyed like the editor statusbar
+/// (`areas`): the log revision (diagnostics; opening or closing a project logs), the tabs revision (tab titles, saves),
+/// the active tab and its document's revision (the dirty mark). Not on every change of `Editor`: the error count clones
+/// all diagnostics and the dirty mark serialises a graph.
+pub fn show_project(
     editor: Res<Editor>,
-    mut q: Query<(&mut Text, &mut Tooltip), With<ProjectText>>,
-    spawned: Query<(), Added<ProjectText>>,
+    mut q: Query<(&mut Text, &mut Tooltip), (With<ProjectText>, Without<ProjectErrorsText>)>,
+    mut errors_q: Query<(&mut Text, &mut Tooltip, &mut Node, &mut Visibility), With<ProjectErrorsText>>,
+    spawned: Query<(), Or<(Added<ProjectText>, Added<ProjectErrorsText>)>>,
     mut windows: Query<&mut Window>,
     mut last: Local<Option<(u64, u64, Option<usize>, u64)>>,
 ) {
@@ -544,19 +570,25 @@ fn show_project(
         return;
     }
     *last = Some(key);
-    let (status, path) = match &editor.project {
+    let (name, errors_text, path, has_project) = match &editor.project {
         Some(p) => {
             let errors = editor.error_count();
-            (
-                format!("{}  |  {}", project_name(&p.root), plural(errors, "error", "errors")),
-                p.root.display().to_string(),
-            )
+            (project_name(&p.root), plural(errors, "error", "errors"), p.root.display().to_string(), true)
         }
-        None => ("No project".into(), "No project open".into()),
+        None => ("No project".into(), String::new(), "No project open".into(), false),
     };
     for (mut t, mut tip) in &mut q {
-        if t.0 != status {
-            t.0 = status.clone();
+        if t.0 != name {
+            t.0 = name.clone();
+        }
+        if tip.0 != path {
+            tip.0 = path.clone();
+        }
+    }
+    for (mut t, mut tip, mut node, mut visibility) in &mut errors_q {
+        areas::display(&mut node, &mut visibility, has_project);
+        if t.0 != errors_text {
+            t.0 = errors_text.clone();
         }
         if tip.0 != path {
             tip.0 = path.clone();

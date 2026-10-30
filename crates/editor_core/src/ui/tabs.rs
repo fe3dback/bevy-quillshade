@@ -1,7 +1,8 @@
 //! The domain tabs and the secondbar (design §14.3; spec §9 "State").
 //!
-//! - **Domain tabs** ([`DomainTabs`]): in the mainbar after the main menu, Blender style, one Feathers button per
-//!   domain (the project domain last) showing only its name, the active one brighter ([`restyle_domain_tabs`]).
+//! - **Domain tabs** ([`DomainTabs`]): in the mainbar after the main menu, Blender style, one custom button per
+//!   domain (the project domain last) showing only its name, the active one highlighted in [`DOMAIN_TAB_ACTIVE_BG`]
+//!   with [`DOMAIN_TAB_ACTIVE_TEXT`] ([`restyle_domain_tabs`]).
 //! - **Secondbar** ([`SecondBar`]): the whole window's width under the mainbar, `{main actions} | {domain actions} |
 //!   {tabs}`. The main actions ([`MainActions`]) are Back / Forward; the domain actions ([`DomainActions`]) reserve a
 //!   slot that nothing fills yet; the open tabs of every domain wrap in [`TabRow`], one tab row high, growing by
@@ -12,23 +13,28 @@
 use crate::action::{Action, Actions, CloseTabs, Unsaved};
 use crate::tab::labels;
 use crate::theme::{
-    BORDER, DOMAIN_TAB_ACTIVE_TEXT, DOMAIN_TAB_TEXT, TAB_BG, TAB_GREY, TEXT, TEXT_DIM, TOOL_TAB_ACTIVE_BG, TOOL_TAB_BG,
-    TOPBAR_BG, text,
+    BORDER, DOMAIN_TAB_ACTIVE_BG, DOMAIN_TAB_ACTIVE_TEXT, DOMAIN_TAB_TEXT, ROW_HOVER, TAB_BG, TAB_GREY, TEXT, TEXT_DIM,
+    TOOL_TAB_ACTIVE_BG, TOOL_TAB_BG, TOPBAR_BG, text,
 };
 use crate::tooltip::Tooltip;
 use crate::ui::HoverRow;
 use crate::ui::icons::{IconId, IconRef, icon};
 use bevy::feathers::constants::{fonts, size};
 use bevy::feathers::controls::{ButtonVariant, FeathersToolButton};
+use bevy::feathers::focus::FocusIndicator;
+use bevy::input_focus::tab_navigation::TabIndex;
+use bevy::picking::cursor::EntityCursor;
+use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
 use bevy::text::FontSourceTemplate;
 use bevy::ui_widgets::Button;
+use bevy::window::SystemCursorIcon;
 use project_core::DomainId;
 
 use super::OnActivate;
 use super::dialog::open_icon_menu;
 use super::icon_button;
-use super::shell::{HEADER_BG, NavButton};
+use super::shell::{HEADER_BG, MainBarSeparator, NavButton};
 use crate::state::editor::Editor;
 
 /// The secondbar: [`MainActions`], [`DomainActions`], then [`TabRow`].
@@ -73,7 +79,10 @@ pub struct TabsPlugin;
 
 impl Plugin for TabsPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, (redraw, spawn_domain_tabs, restyle_domain_tabs, show_domain_tabs));
+        app.add_systems(
+            Update,
+            (redraw, spawn_domain_tabs, restyle_domain_tabs, show_domain_tabs).after(crate::apply_actions),
+        );
     }
 }
 
@@ -136,25 +145,45 @@ pub fn second_bar() -> impl Scene {
 pub fn domain_tabs() -> impl Scene {
     bsn! {
         DomainTabs
-        Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(2) }
+        Node {
+            height: percent(100),
+            flex_direction: FlexDirection::Row,
+            align_items: AlignItems::Center,
+            column_gap: px(2),
+        }
     }
 }
 
-/// The look of a domain tab: the active one is a Normal button (Feathers' neutral fill) with
-/// [`DOMAIN_TAB_ACTIVE_TEXT`], the others Plain buttons with [`DOMAIN_TAB_TEXT`].
-fn domain_tab_look(active: bool) -> (ButtonVariant, Color) {
-    if active { (ButtonVariant::Normal, DOMAIN_TAB_ACTIVE_TEXT) } else { (ButtonVariant::Plain, DOMAIN_TAB_TEXT) }
+/// The look of a domain tab: the active one has [`DOMAIN_TAB_ACTIVE_BG`] with [`DOMAIN_TAB_ACTIVE_TEXT`], the others
+/// a transparent fill with [`DOMAIN_TAB_TEXT`].
+fn domain_tab_look(active: bool) -> (Color, Color) {
+    if active { (DOMAIN_TAB_ACTIVE_BG, DOMAIN_TAB_ACTIVE_TEXT) } else { (Color::NONE, DOMAIN_TAB_TEXT) }
 }
 
-/// One domain tab: a Feathers tool button with the domain's name and no icon, in [`domain_tab_look`].
+/// One domain tab: a full-height rectangular button with the domain's name and no icon, in [`domain_tab_look`].
 fn domain_tab(id: DomainId, title: &'static str, active: bool) -> impl Scene {
     let (tab, act, name) = (DomainTab(id), OnActivate(Action::SwitchDomain(id)), DomainTabName(id));
-    let (variant, ink) = domain_tab_look(active);
+    let (bg, ink) = domain_tab_look(active);
+    let hover = HoverRow { base: bg };
     bsn! {
-        @FeathersToolButton { @variant: variant, @caption: bsn! { @domain_tab_name(title, ink) name } }
-        Node { flex_shrink: 0.0, padding: UiRect::axes(px(10), px(0)) }
+        Node {
+            height: percent(100),
+            flex_shrink: 0.0,
+            justify_content: JustifyContent::Center,
+            align_items: AlignItems::Center,
+            padding: UiRect::axes(px(10), px(0)),
+            border_radius: BorderRadius::ZERO,
+        }
+        BackgroundColor(bg)
+        Button
+        Hovered::default()
+        EntityCursor::System(SystemCursorIcon::Pointer)
+        TabIndex(0)
+        FocusIndicator
+        hover
         tab
         act
+        Children [ @domain_tab_name(title, ink) name ]
     }
 }
 
@@ -162,8 +191,7 @@ fn domain_tab(id: DomainId, title: &'static str, active: bool) -> impl Scene {
 #[derive(Component, Clone)]
 pub struct DomainTabName(pub DomainId);
 
-/// A domain tab's name: the font of the main menu's captions in a colour of its own (a Feathers caption takes the
-/// button's text colour).
+/// A domain tab's name: the font of the main menu's captions in a colour of its own.
 fn domain_tab_name(title: &'static str, ink: Color) -> impl Scene {
     bsn! {
         Text(title)
@@ -188,7 +216,7 @@ fn spawn_domain_tabs(editor: Res<Editor>, bars: Query<Entity, Added<DomainTabs>>
 fn restyle_domain_tabs(
     editor: Res<Editor>,
     added: Query<(), Or<(Added<DomainTab>, Added<DomainTabName>)>>,
-    mut tabs: Query<(&DomainTab, &mut ButtonVariant)>,
+    mut tabs: Query<(&DomainTab, &mut BackgroundColor, &mut HoverRow, Option<&Hovered>)>,
     mut names: Query<(&DomainTabName, &mut TextColor)>,
     mut last: Local<Option<Option<DomainId>>>,
 ) {
@@ -196,8 +224,11 @@ fn restyle_domain_tabs(
         return;
     }
     *last = Some(editor.active_domain);
-    for (DomainTab(id), mut variant) in &mut tabs {
-        variant.set_if_neq(domain_tab_look(editor.active_domain == Some(*id)).0);
+    for (DomainTab(id), mut bg, mut hover, hovered) in &mut tabs {
+        let (base, _) = domain_tab_look(editor.active_domain == Some(*id));
+        hover.base = base;
+        let fill = if hovered.is_some_and(|h| h.0) && base.alpha() < 0.2 { ROW_HOVER } else { base };
+        bg.set_if_neq(BackgroundColor(fill));
     }
     for (DomainTabName(id), mut color) in &mut names {
         color.set_if_neq(TextColor(domain_tab_look(editor.active_domain == Some(*id)).1));
@@ -209,12 +240,12 @@ pub fn domain_tabs_shown(editor: &Editor) -> bool {
     editor.project.is_some()
 }
 
-/// Hides the domain tabs, their separator (the container's border) included, while no project is open
-/// ([`domain_tabs_shown`]). Runs when that changed or the container was spawned.
+/// Hides the domain tabs and the mainbar's separators ([`MainBarSeparator`]) while no project is open
+/// ([`domain_tabs_shown`]). Runs when that changed or one was spawned.
 fn show_domain_tabs(
     editor: Res<Editor>,
-    spawned: Query<(), Added<DomainTabs>>,
-    mut bars: Query<(&mut Node, &mut Visibility), With<DomainTabs>>,
+    spawned: Query<(), Or<(Added<DomainTabs>, Added<MainBarSeparator>)>>,
+    mut bars: Query<(&mut Node, &mut Visibility), Or<(With<DomainTabs>, With<MainBarSeparator>)>>,
     mut last: Local<Option<bool>>,
 ) {
     let shown = domain_tabs_shown(&editor);
@@ -385,11 +416,13 @@ mod tests {
         assert!(Color::from(shown).luminance() < TEXT_DIM.luminance());
     }
 
-    /// Design §14.3: the domain tabs are neutral, apart from the accent and the tool tabs' blue; the active one's
-    /// text is clearly brighter than an inactive one's.
+    /// Design §14.3: the domain tabs' text is neutral, the active one's clearly brighter and set on the warm orange
+    /// [`DOMAIN_TAB_ACTIVE_BG`] (apart from the tool tabs' blue), while the mainbar's [`MAINBAR_BG`] is darker than
+    /// the other editor surfaces.
     #[test]
     fn domain_tabs_are_neutral_and_the_active_brighter() {
-        use crate::theme::{DOMAIN_TAB_ACTIVE_TEXT, DOMAIN_TAB_TEXT};
+        use crate::theme::{DOMAIN_TAB_ACTIVE_BG, DOMAIN_TAB_ACTIVE_TEXT, DOMAIN_TAB_TEXT, MAINBAR_BG, PANEL_BG};
+        use crate::ui::shell::VIEW_BG;
         for c in [DOMAIN_TAB_TEXT, DOMAIN_TAB_ACTIVE_TEXT] {
             assert!(c != ACCENT && c != TOOL_TAB_BG && c != TOOL_TAB_ACTIVE_BG);
             let c = c.to_srgba();
@@ -397,6 +430,14 @@ mod tests {
             assert!(spread < 0.08, "neutral: {c:?}");
         }
         assert!(DOMAIN_TAB_ACTIVE_TEXT.luminance() > DOMAIN_TAB_TEXT.luminance() * 1.5);
+        assert_eq!(domain_tab_look(true), (DOMAIN_TAB_ACTIVE_BG, DOMAIN_TAB_ACTIVE_TEXT));
+        assert_eq!(domain_tab_look(false), (Color::NONE, DOMAIN_TAB_TEXT));
+        let active_bg = DOMAIN_TAB_ACTIVE_BG.to_srgba();
+        assert!(active_bg.red > active_bg.green && active_bg.green > active_bg.blue, "orange: {active_bg:?}");
+        assert!(DOMAIN_TAB_ACTIVE_TEXT.luminance() > DOMAIN_TAB_ACTIVE_BG.luminance() * 3.0);
+        for surface in [VIEW_BG, TOPBAR_BG, PANEL_BG, HEADER_BG] {
+            assert!(MAINBAR_BG.luminance() < surface.luminance(), "{surface:?}");
+        }
     }
 
     /// Design §14.3: the secondbar's minimum is one tab row.

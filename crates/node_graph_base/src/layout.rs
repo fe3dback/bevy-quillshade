@@ -6,6 +6,9 @@ use std::collections::{BTreeMap, BTreeSet};
 /// Size of a comment frame added around no node, in graph units (design §6.1).
 pub const EMPTY_FRAME_SIZE: (f32, f32) = (400.0, 300.0);
 
+/// Minimum width and height of a comment frame when resized, in graph units.
+pub const MIN_FRAME_SIZE: (f32, f32) = (120.0, 80.0);
+
 /// Node positions snap to multiples of this many graph units when touched (design §4.1); positions loaded from a
 /// file are kept as they are.
 pub const GRID_SNAP: f32 = 10.0;

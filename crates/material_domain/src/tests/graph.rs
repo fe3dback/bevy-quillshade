@@ -830,3 +830,55 @@ fn committing_the_shown_rounded_value_keeps_precision() {
     e.apply(set_component(alpha, 0, 0.5, true));
     assert_eq!(e.doc().unwrap().asset.nodes[&lerp].inputs.get("alpha"), Some(&Value::Float(0.5)));
 }
+
+#[test]
+fn route_usage_header_double_click_focuses_declaration() {
+    use shader_graph_core::registry::ROUTE_PARAM;
+
+    let (_dir, mut e) = project();
+    e.apply(Action::OpenAsset(AssetId::new(AssetType::Material, "env/rock_wet").to_ref()));
+    e.view_requests.clear();
+    let decl = add(&mut e, "stdlib::NamedRoute");
+    let usage = add(&mut e, "stdlib::NamedRouteUsage");
+
+    // Before a target route is chosen, double-clicking the usage header does nothing (no comment dialog).
+    assert_eq!(e.route_declaration_of(&usage), None);
+    assert_eq!(e.header_action(&usage), None);
+
+    // Point the usage at the declaration.
+    e.apply(set_value(
+        GraphProp::Param { node: usage.clone(), key: ROUTE_PARAM.into() },
+        Value::Str(decl.clone()),
+        false,
+    ));
+    assert_eq!(e.route_declaration_of(&usage), Some(decl.clone()));
+    let act = e.header_action(&usage);
+    assert_eq!(act, Some(MaterialAction::FocusNode(decl.clone()).into()));
+
+    // Applying the header action selects the declaration and queues FitSelection.
+    e.apply(act.unwrap());
+    assert_eq!(e.doc().unwrap().selection, [decl].into());
+    assert_eq!(e.doc().unwrap().selected_frame, None);
+    assert!(e.view_requests.contains(&ViewRequest::FitSelection));
+}
+
+#[test]
+fn resize_frame_updates_comment_rect_with_undo() {
+    let (_dir, mut e) = project();
+    e.apply(Action::OpenAsset(AssetId::new(AssetType::Material, "env/rock_wet").to_ref()));
+    e.apply(GraphEdit::Select(BTreeSet::new()));
+    e.apply(GraphEdit::AddComment(Some((100.0, 200.0))));
+    let last = e.doc().unwrap().asset.comments.last().unwrap();
+    let frame_id = last.id.clone();
+    let initial_rect = last.rect;
+    assert_eq!(initial_rect, (100.0, 200.0, 400.0, 300.0));
+
+    let resized = (80.0, 160.0, 520.0, 360.0);
+    e.apply(GraphEdit::ResizeFrame { id: frame_id, rect: resized });
+    assert_eq!(e.doc().unwrap().asset.comments.last().unwrap().rect, resized);
+
+    e.apply(Action::Tab(TabAction::Undo));
+    assert_eq!(e.doc().unwrap().asset.comments.last().unwrap().rect, initial_rect);
+    e.apply(Action::Tab(TabAction::Redo));
+    assert_eq!(e.doc().unwrap().asset.comments.last().unwrap().rect, resized);
+}

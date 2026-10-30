@@ -229,6 +229,12 @@ pub enum MaterialAction {
     ShowFile(AssetId, Option<&'static str>),
     /// Opens the file generated from an asset in language [`WESL`] / [`RUST`] in a read-only text tab.
     ShowGenerated(AssetId, &'static str),
+    /// Selects `node` in the active graph and centers the canvas on it (double-clicking the header of a Named Route
+    /// usage node jumps to its declaration).
+    FocusNode(NodeId),
+    /// Opens a gradient collection asset in a tab and selects the slot with stable `slot_id` (double-clicking a
+    /// `Sample Gradient` node or clicking its "Open gradients" button).
+    OpenGradient { id: AssetId, slot_id: u32 },
 }
 
 impl From<MaterialAction> for Action {

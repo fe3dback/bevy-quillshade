@@ -35,7 +35,7 @@ pub struct EditorCorePlugin;
 
 impl Plugin for EditorCorePlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<Actions>().add_systems(Update, (apply_actions, poll_watcher));
+        app.init_resource::<Actions>().add_systems(Update, (poll_watcher, apply_actions).chain());
         let Some(editor) = app.world().get_resource::<Editor>() else {
             panic!("EditorCorePlugin needs the Editor resource (Editor::new with the domain list) inserted first");
         };

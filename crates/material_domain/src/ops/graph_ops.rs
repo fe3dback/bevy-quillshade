@@ -2,6 +2,7 @@ use super::droppable::{DroppableFile, Dropped, ImageFile, droppable_for};
 use super::*;
 use crate::doc::snap;
 use shader_graph_core::model::Edge;
+use shader_graph_core::registry::ROUTE_PARAM;
 use shader_stdlib::nodes::color::{GRADIENT_COLLECTION_PARAM, SAMPLE_GRADIENT_KIND};
 use shader_stdlib::nodes::utility::{CURVE_PARAM, SAMPLE_CURVE_KIND};
 
@@ -77,11 +78,17 @@ pub trait MaterialGraphOps {
     fn rename_target(&self, node: &str) -> Option<GraphProp>;
 
     /// What a double click on the header of `node` does (design §5.5), first that applies: opens the file it refers
-    /// to ([`Self::open_action`]), renames it ([`Self::rename_target`]), edits its comment.
+    /// to ([`Self::open_action`]), focuses the declaration of a Named Route usage ([`Self::route_declaration_of`]),
+    /// renames it ([`Self::rename_target`]), edits its comment.
     fn header_action(&self, node: &str) -> Option<Action>;
 
+    /// The Named Route declaration node that a Named Route usage `node` of the active graph references (`None` for any
+    /// other node or a dangling route id).
+    fn route_declaration_of(&self, node: &str) -> Option<NodeId>;
+
     /// Opens the file `node` refers to in a tab ([`Self::referenced_asset`]): a double click on the node's body and
-    /// its menu's "Open in tab". `None` when it refers to nothing.
+    /// its menu's "Open in tab". For a Sample Gradient node with a valid slot, also selects that slot
+    /// ([`Self::referenced_gradient_slot`]). `None` when it refers to nothing.
     fn open_action(&self, node: &str) -> Option<Action>;
 
     /// The editor asset node `node` of the active graph refers to (decision 0023): a function call's function, a
@@ -89,6 +96,10 @@ pub trait MaterialGraphOps {
     /// collection. `None` for user nodes, unset params and dangling targets. Drives node double-click and the props
     /// panel's "Open …" button.
     fn referenced_asset(&self, node: &str) -> Option<AssetId>;
+
+    /// Stable slot id (`u32`) that `node` (e.g. `stdlib::SampleGradient`) references inside its gradient collection,
+    /// when both the collection and the slot exist (`None` otherwise).
+    fn referenced_gradient_slot(&self, node: &str) -> Option<u32>;
 
     /// Rewrites every unconnected polymorphic input of `node` to `ty`: they resolve to one common type
     /// (the widest), so changing only one pin could not narrow it.
@@ -530,16 +541,43 @@ impl MaterialGraphOps for Editor {
     }
 
     fn header_action(&self, node: &str) -> Option<Action> {
-        self.doc()?.asset.nodes.get(node)?;
+        let d = self.doc()?;
+        let n = d.asset.nodes.get(node)?;
         if let Some(open) = self.open_action(node) {
             return Some(open);
+        }
+        if let Some(decl) = self.route_declaration_of(node) {
+            return Some(MaterialAction::FocusNode(decl).into());
+        }
+        if self.domains.material().registry.get(&n.kind).is_some_and(|def| def.role() == NodeRole::RouteUsage) {
+            return None;
         }
         let target = self.rename_target(node).unwrap_or_else(|| GraphProp::NodeComment(node.to_string()));
         Some(MaterialAction::TextDialog(target).into())
     }
 
+    fn route_declaration_of(&self, node: &str) -> Option<NodeId> {
+        let d = self.doc()?;
+        let n = d.asset.nodes.get(node)?;
+        let def = self.domains.material().registry.get(&n.kind)?;
+        if def.role() != NodeRole::RouteUsage {
+            return None;
+        }
+        let params = self.domains.material().registry.resolved_params(&n.kind, &n.params);
+        let decl = params.get(ROUTE_PARAM)?.as_str();
+        let decl_node = d.asset.nodes.get(decl)?;
+        let decl_def = self.domains.material().registry.get(&decl_node.kind)?;
+        (decl_def.role() == NodeRole::RouteDeclaration).then(|| decl.to_string())
+    }
+
     fn open_action(&self, node: &str) -> Option<Action> {
-        self.referenced_asset(node).map(|id| Action::OpenAsset(id.to_ref()))
+        let id = self.referenced_asset(node)?;
+        if id.ty == AssetType::Gradients
+            && let Some(slot_id) = self.referenced_gradient_slot(node)
+        {
+            return Some(MaterialAction::OpenGradient { id, slot_id }.into());
+        }
+        Some(Action::OpenAsset(id.to_ref()))
     }
 
     fn referenced_asset(&self, node: &str) -> Option<AssetId> {
@@ -584,6 +622,27 @@ impl MaterialGraphOps for Editor {
             }
         }
         None
+    }
+
+    fn referenced_gradient_slot(&self, node: &str) -> Option<u32> {
+        let n = self.doc()?.asset.nodes.get(node)?;
+        let def = self.domains.material().registry.get(&n.kind)?;
+        let params = self.domains.material().registry.resolved_params(&n.kind, &n.params);
+        let col_path = def
+            .params()
+            .iter()
+            .find(|p| p.kind == ParamKind::GradientCollection)
+            .and_then(|p| params.get(&p.id))
+            .map(Value::as_str)?;
+        let slot_id =
+            def.params().iter().find(|p| p.kind == ParamKind::GradientSlot).and_then(|p| params.get(&p.id)).and_then(
+                |v| match v {
+                    Value::Int(i) => u32::try_from(*i).ok(),
+                    _ => None,
+                },
+            )?;
+        let col = self.gradient_collection(col_path)?;
+        col.position(slot_id).map(|_| slot_id)
     }
 
     fn set_pin_type(&mut self, node: &str, ty: PinType) {

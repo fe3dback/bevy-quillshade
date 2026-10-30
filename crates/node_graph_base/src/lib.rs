@@ -21,11 +21,13 @@ pub mod palette;
 pub mod preview;
 pub mod view;
 
-pub use canvas::{CanvasPlugin, CanvasSystems, EditorCanvas, EditorCanvasMarker, GraphOf, GraphViews};
+pub use canvas::{
+    CanvasPlugin, CanvasSystems, EditorCanvas, EditorCanvasMarker, FrameResizeHandle, GraphOf, GraphViews,
+};
 pub use domain::{GraphCtxRef, GraphDomain, active};
 pub use edit::{GraphEdit, PinKey, PinRef, graph_edit};
 pub use editor::{GraphCtx, GraphEditor};
-pub use layout::{EMPTY_FRAME_SIZE, GRID_SNAP, snap, tidy};
+pub use layout::{EMPTY_FRAME_SIZE, GRID_SNAP, MIN_FRAME_SIZE, snap, tidy};
 pub use view::{
     DiagMark, DropItem, Emphasis, FrameField, FrameView, GraphHotkey, GraphView, MovePlan, NodeLook, NodeShape,
     NodeView, PaletteEntry, PickFn, PinLook, PlaceSpec, PreviewRow,

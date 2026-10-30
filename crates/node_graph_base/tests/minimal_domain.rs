@@ -24,11 +24,11 @@ use editor_core::menu::MenuEntry;
 use editor_core::state::editor::Editor;
 use editor_core::tab::{Tab, ViewKindId};
 use editor_core::ui::icons::{IconId, IconRef};
-use node_graph_base::canvas::{ERROR, FrameKey, FrameTitleStrip, NodeHeader, NodeKey};
+use node_graph_base::canvas::{ERROR, FrameKey, FrameResizeHandle, FrameTitleStrip, NodeHeader, NodeKey};
 use node_graph_base::{
     DiagMark, DropItem, EditorCanvas, EditorCanvasMarker, FrameField, FrameView, GRID_SNAP, GraphCtxRef, GraphDomain,
-    GraphEdit, GraphHotkey, GraphView, MovePlan, NodeLook, NodeView, PaletteEntry, PinKey, PinLook, PinRef, PlaceSpec,
-    PreviewRow, register_graph,
+    GraphEdit, GraphHotkey, GraphView, MIN_FRAME_SIZE, MovePlan, NodeLook, NodeView, PaletteEntry, PinKey, PinLook,
+    PinRef, PlaceSpec, PreviewRow, register_graph,
 };
 use project_core::regen::DomainBackend;
 use project_core::{AssetRef, DomainId, Project};
@@ -84,6 +84,11 @@ impl<const K: usize> TinyDoc<K> {
                         f.rect.0 = *x;
                         f.rect.1 = *y;
                     }
+                }
+            }
+            GraphEdit::ResizeFrame { id, rect } => {
+                if let Some(f) = self.frames.iter_mut().find(|f| &f.id == id) {
+                    f.rect = *rect;
                 }
             }
             GraphEdit::Select(sel) => self.selection = sel.clone(),
@@ -529,4 +534,63 @@ fn moving_nodes_and_updating_frames_preserves_canvas_entities_in_place() {
     let w = app.world_mut();
     let title = w.query_filtered::<&Text, With<FrameTitleStrip>>().single(w).unwrap();
     assert_eq!(title.0, "After");
+}
+
+/// Dragging a comment frame's resize handle resizes the frame on the grid without moving the nodes inside, and
+/// clamps to [`MIN_FRAME_SIZE`].
+#[test]
+fn dragging_a_frame_resize_handle_resizes_the_frame_on_the_grid() {
+    let mut app = app();
+    let canvas = app.world().resource::<EditorCanvas<Tiny>>().canvas;
+    let size = ComputedNode { size: Vec2::new(800.0, 600.0), inverse_scale_factor: 1.0, ..default() };
+    app.world_mut().entity_mut(canvas).insert(size);
+    {
+        let mut editor = app.world_mut().resource_mut::<Editor>();
+        let d = editor.active_doc_mut::<TinyDoc<0>>().unwrap();
+        d.frames.push(FrameView {
+            id: "f0".into(),
+            rect: (100.0, 200.0, 400.0, 300.0),
+            title: "Group".into(),
+            hue: None,
+            color: None,
+            nodes: vec!["a".into()],
+        });
+        d.revision += 1;
+    }
+    app.update();
+    app.update();
+
+    let (br_handle, tl_handle) = {
+        let w = app.world_mut();
+        let f0 = w.query::<(Entity, &FrameKey)>().iter(w).find(|(_, k)| k.0 == "f0").unwrap().0;
+        let mut q = w.query::<(Entity, &FrameResizeHandle, &ChildOf)>();
+        let br = q.iter(w).find(|(_, h, p)| p.parent() == f0 && h.right && h.bottom && !h.left && !h.top).unwrap().0;
+        let tl = q.iter(w).find(|(_, h, p)| p.parent() == f0 && h.left && h.top && !h.right && !h.bottom).unwrap().0;
+        (br, tl)
+    };
+
+    let drag = |app: &mut App, handle: Entity, by: Vec2| {
+        let button = PointerButton::Primary;
+        let hit = HitData::new(Entity::PLACEHOLDER, 0.0, None, None);
+        pointer(app, handle, |w, entity, pointer| w.trigger(PointerDragStart { entity, pointer, button, hit }));
+        pointer(app, handle, |w, entity, pointer| {
+            w.trigger(PointerDrag { entity, pointer, button, distance: by, delta: by })
+        });
+        pointer(app, handle, |w, entity, pointer| w.trigger(PointerDragEnd { entity, pointer, button, distance: by }));
+        app.update();
+        app.update();
+    };
+
+    // Drag bottom-right corner by (53, -42) -> snaps to (50, -40) -> rect becomes (100, 200, 450, 260).
+    drag(&mut app, br_handle, Vec2::new(53.0, -42.0));
+    assert_eq!(doc(&app).frames[0].rect, (100.0, 200.0, 450.0, 260.0));
+    assert_eq!(doc(&app).nodes["a"], (0.0, 0.0), "nodes inside are not moved by a frame resize");
+
+    // Drag top-left corner by (50, 30) -> anchors bottom-right at (550, 460) -> rect becomes (150, 230, 400, 230).
+    drag(&mut app, tl_handle, Vec2::new(50.0, 30.0));
+    assert_eq!(doc(&app).frames[0].rect, (150.0, 230.0, 400.0, 230.0));
+
+    // Drag bottom-right far past the minimum size -> clamps to MIN_FRAME_SIZE.
+    drag(&mut app, br_handle, Vec2::new(-1000.0, -1000.0));
+    assert_eq!(doc(&app).frames[0].rect, (150.0, 230.0, MIN_FRAME_SIZE.0, MIN_FRAME_SIZE.1));
 }

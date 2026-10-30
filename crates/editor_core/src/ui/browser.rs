@@ -64,7 +64,7 @@ pub struct BrowserPlugin;
 
 impl Plugin for BrowserPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, (redraw, show_panes, redraw_tools))
+        app.add_systems(Update, (redraw, show_panes, redraw_tools).after(crate::apply_actions))
             .add_observer(click_row)
             .add_observer(click_background)
             .add_observer(drop_on_folder);

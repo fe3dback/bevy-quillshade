@@ -445,7 +445,7 @@ dependencies = [
 
 [[package]]
 name = "bevy-quillshade"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "clap",
  "curve_kit",
@@ -2532,7 +2532,7 @@ checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
 
 [[package]]
 name = "curve_kit"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bevy",
  "bevy_enhanced_input",
@@ -2653,7 +2653,7 @@ checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
 
 [[package]]
 name = "editor_core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bevy",
  "bevy_enhanced_input",
@@ -3774,7 +3774,7 @@ dependencies = [
 
 [[package]]
 name = "light_domain"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bevy",
  "editor_core",
@@ -3884,7 +3884,7 @@ dependencies = [
 
 [[package]]
 name = "material_domain"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bevy",
  "bevy_enhanced_input",
@@ -4051,7 +4051,7 @@ dependencies = [
 
 [[package]]
 name = "node_graph_base"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bevy",
  "bevy_enhanced_input",
@@ -4867,7 +4867,7 @@ checksum = "3d595e54a326bc53c1c197b32d295e14b169e3cfeaa8dc82b529f947fba6bcf5"
 
 [[package]]
 name = "project_core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "notify",
  "ron",
@@ -5321,7 +5321,7 @@ dependencies = [
 
 [[package]]
 name = "shader_codegen_rust"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "project_core",
  "ron",
@@ -5333,7 +5333,7 @@ dependencies = [
 
 [[package]]
 name = "shader_codegen_wesl"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "insta",
  "naga",
@@ -5345,7 +5345,7 @@ dependencies = [
 
 [[package]]
 name = "shader_graph_core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "curve_kit",
  "project_core",
@@ -5358,7 +5358,7 @@ dependencies = [
 
 [[package]]
 name = "shader_project"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "insta",
  "ktx2",
@@ -5374,7 +5374,7 @@ dependencies = [
 
 [[package]]
 name = "shader_stdlib"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "ron",
  "serde",
@@ -5668,7 +5668,7 @@ dependencies = [
 
 [[package]]
 name = "texture_kit"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bevy",
  "editor_core",

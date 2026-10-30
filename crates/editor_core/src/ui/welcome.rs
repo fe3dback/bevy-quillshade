@@ -1,6 +1,6 @@
 //! Welcome screen, shown over the panels while no project is open (decision 0018): the logo, recent projects
-//! (a click opens one), Open / New project, one line per domain ([`crate::domain::DomainInfo::summary`]) and how to
-//! hook the generated crate into the game. Also the Quick Start dialog's body ([`quick_start`], design §8.2).
+//! (a click opens one), Open / New project, and how to hook the generated crate into the game. Also the Quick Start
+//! dialog's body ([`quick_start`], design §8.2).
 
 use std::path::PathBuf;
 
@@ -10,7 +10,7 @@ use bevy::prelude::*;
 use bevy::text::FontSourceTemplate;
 use bevy::ui_widgets::ScrollArea;
 
-use crate::action::Action;
+use crate::action::{Action, Dialog, Submit};
 use crate::highlight::style_color;
 use crate::logo::logo;
 use crate::theme::{TEXT, TEXT_DIM, text};
@@ -23,7 +23,6 @@ use super::{OnActivate, button, icon_button};
 use crate::domain::Highlighter;
 use crate::quick_start::Step;
 use crate::state::editor::Editor;
-use project_core::DomainId;
 
 #[derive(Component, Default, Clone)]
 pub struct Welcome;
@@ -41,7 +40,7 @@ pub struct WelcomePlugin;
 
 impl Plugin for WelcomePlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, (show_welcome, redraw_recent, fill_domain_summaries));
+        app.add_systems(Update, (show_welcome, redraw_recent.after(super::dialog::redraw)).after(crate::apply_actions));
     }
 }
 
@@ -68,7 +67,7 @@ pub fn welcome(rust: Option<Highlighter>) -> impl Scene {
         Children [
             @logo(256.0)
             --
-            @text("Bevy Shader Editor", TEXT, 30.0) Node { margin: UiRect::top(px(8)) }
+            @text(crate::EDITOR_TITLE, TEXT, 30.0) Node { margin: UiRect::top(px(8)) }
             --
             @text(version, TEXT_DIM, 13.0)
             --
@@ -97,62 +96,29 @@ pub fn welcome(rust: Option<Highlighter>) -> impl Scene {
                         @button("New Project...", Action::NewProjectDialog, true)
                     ]
                     --
-                    @setup_help(rust)
+                    {setup_help(rust)}
                 ]
             ]
         ]
     }
 }
 
-/// The welcome screen's list of the domains, one [`crate::domain::DomainInfo::summary`] line each, filled once by
-/// [`fill_domain_summaries`].
-#[derive(Component, Default, Clone)]
-pub struct DomainSummaries;
-
-/// How to use a new project (README "Connecting to the game"): what New Project sets up, the domains' lines
-/// ([`DomainSummaries`]) and the hook-up.
-fn setup_help(rust: Option<Highlighter>) -> impl Scene {
-    let lines: Vec<Box<dyn Scene>> = vec![
-        Box::new(text(
-            "New Project sets up a Bevy game crate (the directory with its Cargo.toml): it creates assets/ and \
-             quillshade/ there. Every save rewrites the generated Rust crate crates/quillshade/. The domains:",
-            TEXT_DIM,
-            13.0,
-        )),
-        Box::new(bsn! { DomainSummaries Node { flex_direction: FlexDirection::Column, row_gap: px(4) } }),
-        Box::new(text("Then hook the generated crate into the game. In Cargo.toml:", TEXT_DIM, 13.0)),
-        Box::new(code(
-            "[workspace]\nmembers = [\"crates/quillshade\"]\n\n[dependencies]\n\
-             bevy = { version = \"0.20\", features = [\"file_watcher\"] }\n\
-             quillshade = { path = \"crates/quillshade\" }",
-            None,
-        )),
-        Box::new(text("and add the plugin to the app (file_watcher enables hot reload):", TEXT_DIM, 13.0)),
-        Box::new(code("App::new().add_plugins((DefaultPlugins, quillshade::QuillshadePlugin))", rust)),
-    ];
-    bsn! {
-        Node { flex_direction: FlexDirection::Column, row_gap: px(6), margin: UiRect::top(px(8)) }
-        Children [ {lines} ]
-    }
-}
-
-/// Fills the welcome screen's [`DomainSummaries`] once spawned: each real domain's icon and summary line.
-fn fill_domain_summaries(editor: Res<Editor>, lists: Query<Entity, Added<DomainSummaries>>, mut commands: Commands) {
-    for at in &lists {
-        for d in editor.domain_list.domains().iter().filter(|d| d.id != DomainId::PROJECT) {
-            let (id, summary) = (d.info.icon, d.info.summary.to_string());
-            commands.spawn_scene(bsn! {
-                Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Start, column_gap: px(6) }
-                ChildOf(at)
-                // The full Fira Mono: the default font's subset has no em dash.
-                Children [
-                    @icon(id, 16.0, TEXT)
-                    --
-                    @text(summary, TEXT_DIM, 13.0) TextFont { font: FontSourceTemplate::Handle(fonts::MONO) }
-                ]
-            });
-        }
-    }
+/// How to hook the generated crate into the game (`Cargo.toml` dependency and `QuillshadePlugin`).
+fn setup_help(rust: Option<Highlighter>) -> Vec<Box<dyn Scene>> {
+    vec![
+        Box::new(bsn! {
+            Text("After creating a project, add the generated crate to Cargo.toml:")
+            TextFont { font_size: FontSize::Px(12.0) }
+            TextColor(TEXT_DIM)
+        }),
+        Box::new(code("[dependencies]\nquillshade = { path = \"crates/quillshade\" }", None)),
+        Box::new(bsn! {
+            Text("And enable the plugin in the app:")
+            TextFont { font_size: FontSize::Px(12.0) }
+            TextColor(TEXT_DIM)
+        }),
+        Box::new(code("app.add_plugins(quillshade::QuillshadePlugin);", rust)),
+    ]
 }
 
 /// Body of the Quick Start dialog showing step `step` of `steps` (clamped): the step tabs, then the step's heading
@@ -284,6 +250,11 @@ fn redraw_recent(
     }
     *last = Some(recent.clone());
     for (list, RecentList { limit, compact }) in &lists {
+        // The compact list belongs to the Open project dialog (`DialogRoot`), which `dialog::redraw` despawns when
+        // the dialog closes (e.g. when a recent project row in it is clicked).
+        if *compact && !matches!(editor.dialog, Some(Dialog::Input { submit: Submit::OpenProject, .. })) {
+            continue;
+        }
         commands.entity(list).despawn_children();
         if recent.is_empty() {
             commands.spawn_scene(bsn! { @text("No recent projects yet.", TEXT_DIM, 13.0) ChildOf(list) });

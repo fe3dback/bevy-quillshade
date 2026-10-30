@@ -54,7 +54,9 @@ pub struct LogPlugin;
 
 impl Plugin for LogPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, (redraw, show_log)).add_observer(click_row).add_observer(toggle_all);
+        app.add_systems(Update, (redraw, show_log).after(crate::apply_actions))
+            .add_observer(click_row)
+            .add_observer(toggle_all);
     }
 }
 

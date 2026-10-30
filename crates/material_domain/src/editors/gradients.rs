@@ -201,8 +201,8 @@ fn sync_slot_list(
     *last = Some(key);
     for (e, row, selected) in &rows {
         match (row.0 == g.slot, selected) {
-            (true, false) => _ = commands.entity(e).insert(Selected),
-            (false, true) => _ = commands.entity(e).remove::<Selected>(),
+            (true, false) => _ = commands.entity(e).try_insert(Selected),
+            (false, true) => _ = commands.entity(e).try_remove::<Selected>(),
             _ => {}
         }
     }

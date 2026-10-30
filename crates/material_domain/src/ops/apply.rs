@@ -72,6 +72,28 @@ impl MaterialApply for Editor {
             MaterialAction::TextDialog(target) => crate::graph_domain::text_dialog(self, target),
             MaterialAction::ShowFile(id, which) => self.show_file(&id, which),
             MaterialAction::ShowGenerated(id, lang) => self.show_generated(&id, lang),
+            MaterialAction::FocusNode(node) => {
+                let Some(d) = self.doc_mut() else { return };
+                if !d.asset.nodes.contains_key(&node) {
+                    return;
+                }
+                d.set_selection([node]);
+                d.selected_frame = None;
+                d.revision += 1;
+                self.view_requests.retain(|v| *v != ViewRequest::FitAll);
+                self.view_requests.push(ViewRequest::FitSelection);
+                self.ui.props += 1;
+            }
+            MaterialAction::OpenGradient { id, slot_id } => {
+                self.open_asset(&id);
+                if let Some(d) = self.gradients_doc_mut()
+                    && d.id == id
+                    && let Some(pos) = d.collection.position(slot_id)
+                {
+                    d.select_slot(pos);
+                    self.ui.props += 1;
+                }
+            }
         }
     }
 

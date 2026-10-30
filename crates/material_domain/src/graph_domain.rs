@@ -363,6 +363,25 @@ pub(crate) fn graph_edit(e: &mut Editor, edit: GraphEdit) {
             let after = shown(e);
             e.domains.material_mut().moves.push((before, after));
         }
+        GraphEdit::ResizeFrame { id, rect } => {
+            let shown = |e: &Editor| e.doc().and_then(|d| Some((e.active_key()?, d.revision)));
+            let before = shown(e);
+            if let Some(d) = e.doc_mut() {
+                let clamped = (
+                    rect.0,
+                    rect.1,
+                    rect.2.max(node_graph_base::MIN_FRAME_SIZE.0),
+                    rect.3.max(node_graph_base::MIN_FRAME_SIZE.1),
+                );
+                d.edit(|a| {
+                    if let Some(f) = a.comments.iter_mut().find(|f| f.id == id) {
+                        f.rect = clamped;
+                    }
+                });
+            }
+            let after = shown(e);
+            e.domains.material_mut().moves.push((before, after));
+        }
         GraphEdit::AutoLayout => e.auto_layout(),
         // Around the selection; with none, a default-size frame at `at` on the grid (the graph editor resolves
         // `None` to the visible canvas centre; headless it is the origin).

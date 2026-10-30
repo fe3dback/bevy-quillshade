@@ -37,6 +37,9 @@ pub mod util;
 pub use app::{EditorCorePlugin, EditorPlugins, apply_actions, run};
 pub use state::editor::{Editor, UiRev};
 
+/// Display name of the editor shown on the welcome screen and in Help → About.
+pub const EDITOR_TITLE: &str = "Quillshade Editor";
+
 /// Editor version (Help → About, `--version`): the release tag, which CI passes as `SHADER_EDITOR_VERSION` at build
 /// time; the workspace version otherwise.
 pub const EDITOR_VERSION: &str = match option_env!("SHADER_EDITOR_VERSION") {
@@ -47,5 +50,4 @@ pub const PROJECT_URL: &str = "https://github.com/fe3dback/bevy-quillshade";
 pub const AUTHORS: &str = "AI / fe3dback";
 pub const LICENSE: &str = "MIT";
 /// Shown small and dimmed on the welcome screen and in About.
-pub const DISCLAIMER: &str = "Unofficial, community-driven editor, not supported by the Bevy developers. It will most \
-     likely be discontinued once the official Bevy editor ships with a built-in material editor.";
+pub const DISCLAIMER: &str = "Unofficial, community-driven editor, not supported by the Bevy developers.";

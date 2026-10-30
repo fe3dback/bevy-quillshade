@@ -58,11 +58,14 @@ The design's **domain bar** at the bottom of the window (§2, §8.1) is not buil
 tabs at the left of a full-width tabs bar; the owner then moved them into the top bar and renamed the areas
 (2026-10-30). The final layout:
 
-- **mainbar** (was "menu_bar"): logo, main menu, a separator, the **domain tabs**, then the project name and error
-  count. Domain tabs are Feathers tool buttons, one per domain in registration order, the project domain last; each
-  shows only its name (no icon), the inactive ones plain with dim text, the active one with Feathers' neutral fill and
-  near-white text — no orange accent, no tool-tab blue. They are tabbable, hidden while no project is open, and
-  updated in place (not respawned) so keyboard focus survives a switch. The mainbar is no taller than before.
+- **mainbar** (was "menu_bar"): logo, main menu, a separator (`MainBarSeparator`), the **domain tabs**, then the
+  project name (`ProjectText`), a separator (`MainBarSeparator`) and the error count (`ProjectErrorsText`), on
+  `MAINBAR_BG` (darker than all other editor surfaces). Domain tabs are custom full-height rectangular buttons
+  (`BorderRadius::ZERO`), one per domain in registration order, the project domain last; each shows only its name (no
+  icon), the inactive ones transparent with dim text, the active one with `DOMAIN_TAB_ACTIVE_BG` (warm orange matching
+  the accent palette) and near-white text (`DOMAIN_TAB_ACTIVE_TEXT`). They are tabbable, hidden (with the separators
+  and the error count) while no project is open, and updated in place (not respawned) so keyboard focus survives a
+  switch. The mainbar is no taller than before (`31px`).
 - **secondbar** (was "tabs bar"): the full window width under the mainbar, above both sidebars, in three sections
   `{main actions} | {domain actions} | {tabs}`, separated only between non-empty sections: **main actions** = Back /
   Forward (moved from the mainbar, unchanged); **domain actions** = a reserved slot for a domain's main actions, an
@@ -72,10 +75,11 @@ tabs at the left of a full-width tabs bar; the owner then moved them into the to
   a real domain other than the active one is **greyed** (text, icon and close cross) but stays clickable and
   activating it switches the domain; project tool tabs are never greyed. Ctrl+Tab cycles through all tabs.
 - Zen mode hides neither bar.
-- **Theme tokens** (`editor_core::theme`): `TAB_BG` (an asset tab), `TOOL_TAB_BG` / `TOOL_TAB_ACTIVE_BG` (dark blue),
-  `TAB_GREY` (translucent, because a solid icon's tint sets only its alpha — an opaque grey would leave Material's
-  orange icons at full colour), `DOMAIN_TAB_TEXT` / `DOMAIN_TAB_ACTIVE_TEXT` (neutral, the active one brighter; the
-  backgrounds are Feathers' own button tokens).
+- **Theme tokens** (`editor_core::theme`): `MAINBAR_BG` (mainbar background, darker than all other surfaces),
+  `MAINBAR_SEPARATOR` (vertical divider in the mainbar), `TAB_BG` (an asset tab), `TOOL_TAB_BG` / `TOOL_TAB_ACTIVE_BG`
+  (dark blue), `TAB_GREY` (translucent, because a solid icon's tint sets only its alpha — an opaque grey would leave
+  Material's orange icons at full colour), `DOMAIN_TAB_ACTIVE_BG` (warm orange fill of the active domain tab),
+  `DOMAIN_TAB_TEXT` / `DOMAIN_TAB_ACTIVE_TEXT` (neutral text, the active one brighter).
 - **Left sidebar, menus, welcome** (design §14.4): the left sidebar shows only the active domain's project tree and
   Game Assets (hidden for a domain without them); with the project domain active it lists the project tools. The
   Assets menu is the active domain's "New …" items, New folder (when it has asset kinds), a separator and Generate.

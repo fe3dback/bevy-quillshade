@@ -66,8 +66,8 @@ fn tab_doc_dispatch_matches_kinds() {
     assert_eq!(e.asset_index(&tuning), Some(3));
 }
 
-/// The editor statusbar's data (design §2.3): unsaved marker, this asset's errors / warnings, a node count and the
-/// generated WESL's line count.
+/// The editor statusbar's data (design §2.3): unsaved marker, this asset's errors / warnings and the generated WESL's
+/// line count.
 #[test]
 fn status_of_graph_counts_nodes_and_diagnostics() {
     let (dir, mut e) = project();
@@ -76,17 +76,15 @@ fn status_of_graph_counts_nodes_and_diagnostics() {
     let status = e.status_info().expect("a graph tab has a statusbar");
     assert!(!status.dirty);
     let wesl_lines = |n| crate::util::text::plural(n, "WESL line", "WESL lines");
-    let any_wesl = |c: &String| c.ends_with(" WESL line") || c.ends_with(" WESL lines");
     // Opening the project generated every domain without its module (design §6.5): the count is the file's.
     let generated = std::fs::read_to_string(super::graph::rock_wet_wesl(&e)).unwrap();
-    assert_eq!(status.counts.iter().filter(|c| any_wesl(c)).count(), 1, "{:?}", status.counts);
-    assert!(status.counts.contains(&wesl_lines(generated.lines().count())), "{:?}", status.counts);
+    assert_eq!(status.counts, vec![wesl_lines(generated.lines().count())]);
     // An unconnected node: a warning of this asset.
     e.apply(MaterialAction::AddNode { kind: "stdlib::Time".into(), pos: (0.0, 0.0), link: None, params: Vec::new() });
     e.validate();
     let status = e.status_info().unwrap();
     assert!(status.dirty);
-    assert_eq!(status.counts[0], crate::util::text::plural(e.doc().unwrap().asset.nodes.len(), "node", "nodes"));
+    assert_eq!(status.counts, vec![wesl_lines(generated.lines().count())]);
     let own: Vec<&Diagnostic> = e.domains.material().diags.get(&rock).into_iter().flatten().collect();
     assert_eq!(status.errors, own.iter().filter(|d| d.is_error()).count());
     assert_eq!(status.warnings, own.iter().filter(|d| !d.is_error()).count());

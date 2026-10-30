@@ -33,6 +33,8 @@ pub enum GraphEdit {
     MoveWires { node: String, pin: String, output: bool, to: (String, String) },
     /// Final node / comment frame positions after a drag (one undo step).
     Moved { nodes: Vec<(String, (f32, f32))>, frames: Vec<(String, (f32, f32))> },
+    /// Final comment frame rectangle `(x, y, w, h)` after a resize drag (one undo step).
+    ResizeFrame { id: String, rect: (f32, f32, f32, f32) },
     /// The node selection (clears the selected comment frame).
     Select(BTreeSet<String>),
     /// The selected comment frame.

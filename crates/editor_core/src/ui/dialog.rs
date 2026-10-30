@@ -45,14 +45,14 @@ pub struct DialogPlugin;
 
 impl Plugin for DialogPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, redraw)
+        app.add_systems(Update, redraw.after(crate::apply_actions))
             .add_observer(close_requested)
             .add_observer(submit_clicked)
             .add_observer(submit_on_enter);
     }
 }
 
-fn redraw(
+pub(super) fn redraw(
     editor: Res<Editor>,
     list: Res<DomainList>,
     roots: Query<Entity, With<DialogRoot>>,
@@ -64,7 +64,7 @@ fn redraw(
     }
     *last = editor.dialog.clone();
     for e in &roots {
-        commands.entity(e).despawn();
+        commands.entity(e).try_despawn();
     }
     let Some(d) = &editor.dialog else { return };
     let (title, body, buttons): (String, Vec<Box<dyn Scene>>, Vec<Box<dyn Scene>>) = match d {
@@ -195,7 +195,7 @@ fn about() -> impl Scene {
             --
             Node { flex_direction: FlexDirection::Column, row_gap: px(6), min_width: px(0) }
             Children [
-                @text("Bevy Shader Editor", TEXT, 20.0)
+                @text(crate::EDITOR_TITLE, TEXT, 20.0)
                 --
                 @text(version, TEXT_DIM, 13.0)
                 --
