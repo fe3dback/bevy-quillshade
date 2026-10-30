@@ -83,10 +83,29 @@ pub fn commit(
     let umbrella = umbrella::files(project, crates, date.as_deref())
         .into_iter()
         .map(|(path, text)| (None, OutFile { path, bytes: text.into_bytes(), owner: None }));
-    let desired: Vec<(Option<DomainId>, OutFile)> =
-        outputs.iter().flat_map(|o| o.files.iter().map(|f| (Some(o.domain), f.clone()))).chain(umbrella).collect();
+    let desired: Vec<(Option<DomainId>, OutFile)> = outputs
+        .iter()
+        .flat_map(|o| {
+            let enabled = project.domain_enabled(o.domain);
+            let module_dir = project.module_dir(o.domain);
+            o.files
+                .iter()
+                .filter(move |f| enabled || !f.path.starts_with(&module_dir))
+                .map(move |f| (Some(o.domain), f.clone()))
+        })
+        .chain(umbrella)
+        .collect();
     let binary_roots: Vec<&PathBuf> =
         outputs.iter().flat_map(|o| &o.roots).filter(|r| r.binary).map(|r| &r.dir).collect();
+    let disabled_roots: Vec<OutRoot> = crates
+        .iter()
+        .map(|c| c.domain)
+        .chain(outputs.iter().map(|o| o.domain))
+        .filter(|&d| !project.domain_enabled(d))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .map(|d| OutRoot { dir: project.module_dir(d), binary: false })
+        .collect();
 
     // Compare with disk, refuse to overwrite foreign files (E008), binary ones included. Files in the binary roots
     // are owned through the directory marker (the domain produces them only when it is present).
@@ -116,11 +135,19 @@ pub fn commit(
         committed.blocked.push(Blocked { domain, path, owner, message });
     }
 
-    // Orphans (a domain's full regeneration only, inside its own roots): marker files that no source produces any
-    // more; in a binary root every file nobody produces. A file under two nested roots is deleted once.
-    let keep: BTreeSet<&PathBuf> = outputs.iter().flat_map(|o| &o.keep).collect();
+    // Orphans (a domain's full regeneration only, inside its own roots, plus disabled domains' module dirs): marker
+    // files that no source produces any more; in a binary root every file nobody produces. A file under two nested
+    // roots is deleted once.
+    let keep: BTreeSet<&PathBuf> = outputs
+        .iter()
+        .flat_map(|o| {
+            let enabled = project.domain_enabled(o.domain);
+            let module_dir = project.module_dir(o.domain);
+            o.keep.iter().filter(move |p| enabled || !p.starts_with(&module_dir))
+        })
+        .collect();
     let mut deleted: BTreeSet<PathBuf> = BTreeSet::new();
-    for root in outputs.iter().filter(|o| o.orphan_scan).flat_map(|o| &o.roots) {
+    for root in outputs.iter().filter(|o| o.orphan_scan).flat_map(|o| &o.roots).chain(&disabled_roots) {
         for f in walk_files(&root.dir) {
             if desired_paths.contains(&f) || keep.contains(&f) || deleted.contains(&f) {
                 continue;
@@ -137,7 +164,8 @@ pub fn commit(
 
     committed.changes = batch.changes();
     if !dry_run && !batch.is_empty() {
-        let roots: Vec<PathBuf> = outputs.iter().flat_map(|o| &o.roots).map(|r| r.dir.clone()).collect();
+        let roots: Vec<PathBuf> =
+            outputs.iter().flat_map(|o| &o.roots).chain(&disabled_roots).map(|r| r.dir.clone()).collect();
         batch.apply(&roots)?;
     }
     Ok(committed)
@@ -194,7 +222,7 @@ pub fn run(
         report.diagnostics.push(Diagnostic::warning("W105", text).in_asset("Cargo.toml"));
     }
     let mut outputs = Vec::new();
-    for b in backends.iter().filter(|b| only.is_empty() || only.contains(&b.id())) {
+    for b in backends.iter().filter(|b| (only.is_empty() || only.contains(&b.id())) && project.domain_enabled(b.id())) {
         let plan = b.plan(project, compile);
         report.diagnostics.extend(plan.diagnostics);
         outputs.push(plan.output);
@@ -330,7 +358,7 @@ mod tests {
         assert!(bin.join(OWNED_DIR_MARKER).is_file() && p.output_dir(A).join("foreign.txt").is_file());
     }
 
-    /// The umbrella files only: a domain's orphan marker files stay.
+    /// The umbrella files and disabled domains' module dirs only: a domain's output files and orphans stay.
     #[test]
     fn write_umbrella_touches_only_the_umbrella() {
         let (_d, p) = project();
@@ -341,11 +369,40 @@ mod tests {
         let mut off = p.clone();
         off.settings.domains.insert(A.as_str().into(), crate::layout::DomainEntry { enabled: false });
         let c = write_umbrella(&off, &[a.crate_contribution()]).unwrap();
-        assert_eq!(c.changes, [Change::Modify(p.crate_dir().join("src/lib.rs"))]);
+        assert_eq!(
+            c.changes,
+            [Change::Modify(p.crate_dir().join("src/lib.rs")), Change::Delete(p.module_dir(A).join("a.txt"))],
+        );
         assert!(c.blocked.is_empty());
         let lib = std::fs::read_to_string(p.crate_dir().join("src/lib.rs")).unwrap();
-        assert!(lib.contains("pub mod alpha;") && !lib.contains("alpha::FakePlugin"), "{lib}");
-        assert!(orphan.is_file(), "no orphan scan");
+        assert!(!lib.contains("pub mod alpha;") && !lib.contains("alpha::FakePlugin"), "{lib}");
+        assert!(!p.module_dir(A).exists());
+        assert!(p.output_dir(A).join("a.txt").is_file());
+        assert!(orphan.is_file(), "no orphan scan in output_dir");
+    }
+
+    #[test]
+    fn run_skips_disabled_domain_and_removes_its_module_dir() {
+        let (_d, mut p) = project();
+        let (a, b) = (Fake::new(A, &["mod.rs"]), Fake::new(B, &["mod.rs"]));
+        // Any domain not listed in `project.ron` is enabled by default.
+        assert!(p.domain_enabled(A) && p.domain_enabled(B));
+        run(&p, &[&a, &b], &[], false, false).unwrap();
+        assert!(p.module_dir(A).join("mod.rs").is_file() && p.module_dir(B).join("mod.rs").is_file());
+
+        // Disable `alpha` while leaving `beta` unlisted in `domains` (enabled by default).
+        p.settings.domains.insert(A.as_str().into(), crate::layout::DomainEntry { enabled: false });
+        assert!(!p.domain_enabled(A) && p.domain_enabled(B));
+
+        let a_next = Fake::new(A, &["mod.rs", "extra.rs"]);
+        let r = run(&p, &[&a_next, &b], &[], false, false).unwrap();
+        assert!(!r.has_errors(), "{:?}", r.diagnostics);
+        assert!(!p.module_dir(A).exists(), "disabled domain's module dir should be deleted");
+        assert!(!p.output_dir(A).join("extra.rs").exists(), "disabled domain should not plan new files");
+        assert!(p.output_dir(A).join("mod.rs").is_file(), "existing output_dir files are kept");
+        assert!(p.module_dir(B).join("mod.rs").is_file());
+        let lib = std::fs::read_to_string(p.crate_dir().join("src/lib.rs")).unwrap();
+        assert!(!lib.contains("pub mod alpha;") && lib.contains("pub mod beta;"), "{lib}");
     }
 
     #[test]

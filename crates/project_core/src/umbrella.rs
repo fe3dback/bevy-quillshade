@@ -119,14 +119,14 @@ fn merge_dep_values(existing: &str, incoming: &str) -> String {
 }
 
 fn lib_rs(project: &Project, crates: &[CrateContribution]) -> String {
+    let enabled: Vec<&CrateContribution> = crates.iter().filter(|c| project.domain_enabled(c.domain)).collect();
     let mut out = format!("{}\n", marker::header("//", None));
     out.push_str("//! Quillshade umbrella crate: add [`QuillshadePlugin`] to the app.\n\nuse bevy::prelude::*;\n\n");
-    for c in crates {
+    for c in &enabled {
         out.push_str(&format!("pub mod {};\n", c.domain));
     }
     out.push_str(&format!("\npub const AUTOGEN_VERSION: u32 = {GENERATOR_VERSION};\n\n"));
     out.push_str("/// Adds every enabled domain's plugin.\npub struct QuillshadePlugin;\n\n");
-    let enabled: Vec<&CrateContribution> = crates.iter().filter(|c| project.domain_enabled(c.domain)).collect();
     out.push_str("impl Plugin for QuillshadePlugin {\n");
     if enabled.is_empty() {
         out.push_str("    fn build(&self, _app: &mut App) {}\n");
@@ -181,7 +181,7 @@ mod tests {
             contrib("light", "QuillshadeLightInternalPlugin", &[]),
         ];
         let lib = get(&files(&p, &cs, None), "src/lib.rs");
-        assert!(lib.contains("pub mod material;") && lib.contains("pub mod light;"), "{lib}");
+        assert!(lib.contains("pub mod material;") && !lib.contains("pub mod light;"), "{lib}");
         assert!(lib.contains("material::QuillshadeMaterialInternalPlugin"), "{lib}");
         assert!(!lib.contains("light::QuillshadeLightInternalPlugin"), "{lib}");
         assert!(lib.contains("QuillshadePlugin"));

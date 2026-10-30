@@ -75,6 +75,7 @@ impl WriteBatch {
         }
         for root in cleanup_roots {
             remove_empty_dirs(root);
+            let _ = std::fs::remove_dir(root);
         }
         Ok(())
     }
