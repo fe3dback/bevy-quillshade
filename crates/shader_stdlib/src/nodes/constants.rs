@@ -141,7 +141,9 @@ pub fn register(r: &mut Registry) {
     register_parameters(r);
 }
 
-/// Parameter of the `Global*` nodes: the name of the constant they read (decision 0017).
+/// Parameter of the `Global*` nodes: the constant table asset id (`"common/tuning"`), `""` = none (decision 0017).
+pub const GLOBAL_CONST_TABLE_PARAM: &str = "table";
+/// Parameter of the `Global*` nodes: the id of the constant in the table, `0` = none (decision 0017).
 pub const GLOBAL_CONST_PARAM: &str = "const";
 
 /// Nodes reading a constant of a global constant table; its value is inlined as a literal (decision 0017).
@@ -180,21 +182,21 @@ fn register_globals(r: &mut Registry) {
             "GlobalToggle",
             ConstType::Toggle,
             &["global", "const", "table", "toggle", "switch", "0", "1"][..],
-            "Reads a global `toggle` constant (`0.0` or `1.0` `f32`) from `quillshade/material/consts.consts.ron` for branchless math (such as `Multiply` or `Lerp`).\n\nNote: To strip an entire shader branch at compile time with `If`, use `GlobalCompileBool`. For a runtime `bool` (`true`/`false`) with `RuntimeIf`, use `GlobalRuntimeBool`.",
+            "Reads a global `toggle` constant (`0.0` or `1.0` `f32`) from a `.consts.ron` table for branchless math (such as `Multiply` or `Lerp`).\n\nNote: To strip an entire shader branch at compile time with `If`, use `GlobalCompileBool`. For a runtime `bool` (`true`/`false`) with `RuntimeIf`, use `GlobalRuntimeBool`.",
         ),
         (
             "stdlib::GlobalRuntimeBool",
             "GlobalRuntimeBool",
             ConstType::RuntimeBool,
             &["global", "const", "table", "runtimeBool", "bool", "flag"][..],
-            "Reads a global `runtimeBool` constant (`true` or `false`) from `quillshade/material/consts.consts.ron` for runtime GPU logic (`RuntimeIf`, `And`, `Or`, `Not`).\n\nNote: Both branches of `RuntimeIf` still execute on the GPU. To strip an inactive branch at compile time with `If`, use `GlobalCompileBool`. For a `0.0`/`1.0` `f32` value, use `GlobalToggle`.",
+            "Reads a global `runtimeBool` constant (`true` or `false`) from a `.consts.ron` table for runtime GPU logic (`RuntimeIf`, `And`, `Or`, `Not`).\n\nNote: Both branches of `RuntimeIf` still execute on the GPU. To strip an inactive branch at compile time with `If`, use `GlobalCompileBool`. For a `0.0`/`1.0` `f32` value, use `GlobalToggle`.",
         ),
         (
             "stdlib::GlobalCompileBool",
             "GlobalCompileBool",
             ConstType::CompileBool,
             &["global", "const", "table", "compileBool", "compileFlag", "flag", "static"][..],
-            "Reads a global `compileBool` flag from `quillshade/material/consts.consts.ron`. Editor-only and evaluated during shader compilation: never appears in WESL, and allows `If` to completely discard the inactive shader branch.\n\nNote: For runtime GPU boolean logic (`RuntimeIf`), use `GlobalRuntimeBool`. For a `0.0`/`1.0` `f32` multiplier, use `GlobalToggle`.",
+            "Reads a global `compileBool` flag from a `.consts.ron` table. Editor-only and evaluated during shader compilation: never appears in WESL, and allows `If` to completely discard the inactive shader branch.\n\nNote: For runtime GPU boolean logic (`RuntimeIf`), use `GlobalRuntimeBool`. For a `0.0`/`1.0` `f32` multiplier, use `GlobalToggle`.",
         ),
     ] {
         let pin = ty.pin_type();
@@ -203,64 +205,53 @@ fn register_globals(r: &mut Registry) {
                 .kw(kw)
                 .desc(desc)
                 .param(ParamDef::new(
-                    GLOBAL_CONST_PARAM,
-                    "Constant",
-                    ParamKind::GlobalConst(ty),
+                    GLOBAL_CONST_TABLE_PARAM,
+                    "Table",
+                    ParamKind::GlobalConsts,
                     Value::Str(String::new()),
                 ))
+                .param(ParamDef::new(GLOBAL_CONST_PARAM, "Constant", ParamKind::GlobalConst(ty), Value::Int(0)))
                 .build(
                     move |_| sig(vec![], vec![pin_out("out", "", pin)]),
                     move |c| {
-                        let name = c.param(GLOBAL_CONST_PARAM).as_str().to_string();
-                        if ty == ConstType::CompileBool {
-                            let val = if name.is_empty() {
-                                c.diag(Code::W106, "no global constant selected; outputs 1.0 (true for a flag)");
-                                true
-                            } else {
-                                match c.global_const(&name) {
-                                    Some(g) if g.ty == ty => g.value.as_bool(),
-                                    Some(g) => {
-                                        let found = g.ty.label();
-                                        c.diag(
-                                            Code::E003,
-                                            format!(
-                                                "global constant `{name}` is {found}, this node reads {}",
-                                                ty.label()
-                                            ),
-                                        );
-                                        return;
-                                    }
-                                    None => {
-                                        c.diag(Code::E006, format!("global constant `{name}` does not exist"));
-                                        return;
-                                    }
-                                }
-                            };
-                            c.define_compile_bool("out", val);
-                            return;
-                        }
-                        let lit = if name.is_empty() {
+                        let table = c.param(GLOBAL_CONST_TABLE_PARAM).as_str().to_string();
+                        let cid = u32::try_from(c.param(GLOBAL_CONST_PARAM).as_i32()).unwrap_or(0);
+                        if table.is_empty() || cid == 0 {
                             // 1.0 rather than zero: a divisor or `log` argument stays valid.
                             c.diag(Code::W106, "no global constant selected; outputs 1.0 (true for a flag)");
-                            Value::Float(1.0).wesl_literal(pin)
-                        } else {
-                            match c.global_const(&name) {
-                                Some(g) if g.ty == ty => ty.wesl_literal(&g.value),
-                                Some(g) => {
-                                    let found = g.ty.label();
-                                    c.diag(
-                                        Code::E003,
-                                        format!("global constant `{name}` is {found}, this node reads {}", ty.label()),
-                                    );
-                                    return;
-                                }
-                                None => {
-                                    c.diag(Code::E006, format!("global constant `{name}` does not exist"));
-                                    return;
-                                }
+                            if ty == ConstType::CompileBool {
+                                c.define_compile_bool("out", true);
+                            } else {
+                                c.alias("out", Operand::Value(Value::Float(1.0).wesl_literal(pin)));
                             }
+                            return;
+                        }
+                        let Some(t) = c.const_table(&table) else {
+                            c.diag(
+                                Code::E006,
+                                format!("global constant table `{table}` does not exist or cannot be loaded"),
+                            );
+                            return;
                         };
-                        c.alias("out", Operand::Value(lit));
+                        let Some(g) = t.get_by_id(cid) else {
+                            c.diag(Code::E006, format!("global constant #{cid} is not in table `{table}`"));
+                            return;
+                        };
+                        if g.ty != ty {
+                            let name = &g.name;
+                            let found = g.ty.label();
+                            c.diag(
+                                Code::E003,
+                                format!("global constant `{name}` is {found}, this node reads {}", ty.label()),
+                            );
+                            return;
+                        }
+                        if ty == ConstType::CompileBool {
+                            c.define_compile_bool("out", g.value.as_bool());
+                        } else {
+                            let lit = ty.wesl_literal(&g.value);
+                            c.alias("out", Operand::Value(lit));
+                        }
                     },
                 ),
         );

@@ -53,14 +53,16 @@ Asset(
       kind: "stdlib::GlobalConstF32",
       pos: (-530.0148, 73.61316),
       params: {
-        "const": Str("glow_amount"),
+        "const": Int(1003),
+        "table": Str("common/tuning"),
       },
     ),
     "01m5snxy0d3d3kk068athbvtst": Node(
       kind: "stdlib::GlobalConstVec3",
       pos: (-43.19693, -375.26147),
       params: {
-        "const": Str("base_color"),
+        "const": Int(1001),
+        "table": Str("common/tuning"),
       },
     ),
   },

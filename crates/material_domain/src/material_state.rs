@@ -43,8 +43,6 @@ pub struct MaterialState {
     /// Node / frame drags applied since the canvas last looked: the graph shown before and after each
     /// (`crate::follow_moves`).
     pub(crate) moves: Vec<(Option<(TabKey, u64)>, Option<(TabKey, u64)>)>,
-    /// The constants the asset being deleted defines ([`DomainState::before_delete`] to [`DomainState::deleted`]).
-    pub(crate) deleting: Vec<String>,
     /// [`Editor::project_generation`] the per-project fields belong to: a rescan after the project was opened or
     /// closed starts them over.
     pub(crate) loaded: u64,
@@ -67,7 +65,6 @@ impl Default for MaterialState {
             validated: None,
             tabs_closed: false,
             moves: Vec::new(),
-            deleting: Vec::new(),
             loaded: 0,
         }
     }
@@ -134,10 +131,6 @@ impl DomainState for MaterialState {
 
     fn renamed(editor: &mut Editor, from: &AssetRef, to: &AssetRef) {
         editor.material_renamed(from, to);
-    }
-
-    fn before_delete(editor: &mut Editor, r: &AssetRef) {
-        editor.material_before_delete(r);
     }
 
     fn delete_file(editor: &mut Editor, r: &AssetRef) -> Result<(), String> {

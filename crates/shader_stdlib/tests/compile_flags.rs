@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use shader_graph_core::consts::{ConstType, GlobalConst, NoConsts};
+use shader_graph_core::consts::{ConstType, GlobalConst, GlobalConsts, NoConsts};
 use shader_graph_core::ir::{build_ir, build_ir_with_overrides};
 use shader_graph_core::model::{Asset, AssetKind, MaterialKind, Node, PbrSettings};
 use shader_graph_core::registry::{
@@ -168,7 +168,12 @@ fn compile_if_reports_type_and_required_pin_diagnostics_in_inactive_branch() {
 fn compile_logic_global_compile_bool_and_routes_forward_compile_bool() {
     let mut a = pbr();
     let out = node(&mut a, "out", "output::Pbr3d", &[]);
-    let g_flag = node(&mut a, "gflag", "stdlib::GlobalCompileBool", &[("const", Value::Str("use_snow".into()))]);
+    let g_flag = node(
+        &mut a,
+        "gflag",
+        "stdlib::GlobalCompileBool",
+        &[("table", Value::Str("tuning".into())), ("const", Value::Int(1))],
+    );
     let p_flag = node(
         &mut a,
         "pflag",
@@ -200,8 +205,11 @@ fn compile_logic_global_compile_bool_and_routes_forward_compile_bool() {
     a.connect((&ifnode, "out"), (&out, "base_color"));
 
     let consts = BTreeMap::from([(
-        "use_snow".to_string(),
-        GlobalConst::new("use_snow", ConstType::CompileBool, Value::Bool(true)),
+        "tuning".to_string(),
+        GlobalConsts::new(
+            "tuning",
+            vec![GlobalConst::with_id(1, "use_snow", ConstType::CompileBool, Value::Bool(true))],
+        ),
     )]);
     let reg = shader_stdlib::registry();
 
@@ -239,13 +247,23 @@ fn runtime_bool_and_toggle_nodes_emit_expected_wesl() {
     let mut a = pbr();
     let out = node(&mut a, "out", "output::Pbr3d", &[]);
     let toggle = node(&mut a, "tog", "stdlib::Toggle", &[("value", Value::Bool(true))]);
-    let gtog = node(&mut a, "gtog", "stdlib::GlobalToggle", &[("const", Value::Str("boost".into()))]);
+    let gtog = node(
+        &mut a,
+        "gtog",
+        "stdlib::GlobalToggle",
+        &[("table", Value::Str("tuning".into())), ("const", Value::Int(1))],
+    );
     let mul = node(&mut a, "mul", "stdlib::Multiply", &[]);
     a.connect((&toggle, "out"), (&mul, "a"));
     a.connect((&gtog, "out"), (&mul, "b"));
 
     let rbool = node(&mut a, "rb", "stdlib::RuntimeBool", &[("value", Value::Bool(true))]);
-    let grbool = node(&mut a, "grb", "stdlib::GlobalRuntimeBool", &[("const", Value::Str("invert".into()))]);
+    let grbool = node(
+        &mut a,
+        "grb",
+        "stdlib::GlobalRuntimeBool",
+        &[("table", Value::Str("tuning".into())), ("const", Value::Int(2))],
+    );
     let prbool = node(&mut a, "prb", "param::RuntimeBool", &[("name", Value::Str("active".into()))]);
     let cmp = node(&mut a, "cmp", "stdlib::Compare", &[("op", Value::Str(">=".into()))]);
     let r_and = node(&mut a, "rand", "stdlib::And", &[]);
@@ -295,10 +313,16 @@ fn runtime_bool_and_toggle_nodes_emit_expected_wesl() {
     a.connect((&r_if, "out"), (&r_cmp_if, "gt"));
     a.connect((&r_cmp_if, "out"), (&out, "roughness"));
 
-    let consts = BTreeMap::from([
-        ("boost".to_string(), GlobalConst::new("boost", ConstType::Toggle, Value::Bool(true))),
-        ("invert".to_string(), GlobalConst::new("invert", ConstType::RuntimeBool, Value::Bool(false))),
-    ]);
+    let consts = BTreeMap::from([(
+        "tuning".to_string(),
+        GlobalConsts::new(
+            "tuning",
+            vec![
+                GlobalConst::with_id(1, "boost", ConstType::Toggle, Value::Bool(true)),
+                GlobalConst::with_id(2, "invert", ConstType::RuntimeBool, Value::Bool(false)),
+            ],
+        ),
+    )]);
     let reg = shader_stdlib::registry();
     let res = build_ir(&a, "test/mat", &reg, &NoFunctions, &NoCurves, &consts, &NoTextures, &NoGradients);
     assert!(!res.has_errors(), "{:?}", res.diagnostics);

@@ -6,7 +6,7 @@ use shader_graph_core::curve::Curve;
 use shader_graph_core::gradient::GradientCollection;
 use shader_graph_core::model::{Asset, AssetKind, MaterialKind, Node};
 use shader_graph_core::registry::{
-    FUNCTION_PREFIX, ParamKind, Registry, const_refs, curve_refs, gradient_refs, texture_refs,
+    FUNCTION_PREFIX, ParamKind, Registry, const_refs, const_table_refs, curve_refs, gradient_refs, texture_refs,
 };
 use shader_graph_core::texture::{MATERIAL_TEXTURES, TextureAsset};
 
@@ -138,9 +138,8 @@ fn create(project: &Project, path: &str, kind: AssetKind) -> Result<AssetId, OpE
     Ok(id)
 }
 
-/// Renames/moves an asset; function, curve, Texture asset and gradient collection references in other assets are
-/// updated (constants are referenced by name, so moving their table changes nothing for its users). A Texture asset
-/// keeps its image path: the game file is never moved.
+/// Renames/moves an asset; function, curve, constant table, Texture asset and gradient collection references in other
+/// assets are updated. A Texture asset keeps its image path: the game file is never moved.
 pub fn rename(project: &Project, id: &AssetId, new_path: &str) -> Result<AssetId, OpError> {
     check_path(new_path)?;
     let new_id = AssetId::new(id.ty, new_path);
@@ -178,6 +177,7 @@ pub fn rename(project: &Project, id: &AssetId, new_path: &str) -> Result<AssetId
     std::fs::remove_file(id.file(project))?;
     match id.ty {
         AssetType::Curve => rewrite_graphs(project, |a, r| rename_curve_refs(a, r, &id.path, new_path))?,
+        AssetType::Consts => rewrite_graphs(project, |a, r| rename_const_table_refs(a, r, &id.path, new_path))?,
         AssetType::Texture => rewrite_graphs(project, |a, r| rename_texture_refs(a, r, &id.path, new_path))?,
         AssetType::Gradients => rewrite_graphs(project, |a, r| rename_gradient_refs(a, r, &id.path, new_path))?,
         _ => {}
@@ -264,10 +264,42 @@ fn set_refs(asset: &mut Asset, refs: Vec<(String, String, String)>, old: &str, n
     changed
 }
 
-/// Clears every reference of `asset`'s nodes to global constant `name` (they then output 1.0, W106); returns
-/// whether anything changed. Used when the constant changes its type or is deleted (decision 0017).
-pub fn clear_const_refs(asset: &mut Asset, registry: &Registry, name: &str) -> bool {
-    set_refs(asset, const_refs(asset, registry), name, "")
+/// Points every node of `asset` that reads constant table `old` to `new` (constant ids stay); returns whether
+/// anything changed.
+pub fn rename_const_table_refs(asset: &mut Asset, registry: &Registry, old: &str, new: &str) -> bool {
+    set_refs(asset, const_table_refs(asset, registry), old, new)
+}
+
+/// Clears every reference of `asset`'s nodes to constant table `id`: the table parameter becomes `""` and the
+/// constant parameters ([`ParamKind::GlobalConst`]) of the same nodes `0`, so they output 1.0 (W106, decision 0017);
+/// returns whether anything changed. Used when the table is deleted.
+pub fn clear_const_table_refs(asset: &mut Asset, registry: &Registry, id: &str) -> bool {
+    let refs: Vec<_> = const_table_refs(asset, registry).into_iter().filter(|r| r.2 == id).collect();
+    for (node, _, _) in &refs {
+        let Some(n) = asset.nodes.get_mut(node) else { continue };
+        let Some(def) = registry.get(&n.kind) else { continue };
+        for p in def.params().into_iter().filter(|p| matches!(p.kind, ParamKind::GlobalConst(_))) {
+            n.params.insert(p.id, Value::Int(0));
+        }
+    }
+    set_refs(asset, refs, id, "")
+}
+
+/// Clears every reference of `asset`'s nodes to global constant `(table, id)` (the constant parameter becomes `0`, so
+/// they output 1.0, W106); returns whether anything changed. Used when the constant changes its type or is deleted
+/// (decision 0017).
+pub fn clear_const_refs(asset: &mut Asset, registry: &Registry, table: &str, id: u32) -> bool {
+    let mut changed = false;
+    for (node, param, t, cid) in const_refs(asset, registry) {
+        if t == table
+            && cid == id
+            && let Some(n) = asset.nodes.get_mut(&node)
+        {
+            n.params.insert(param, Value::Int(0));
+            changed = true;
+        }
+    }
+    changed
 }
 
 /// Moves an asset into directory `dir` (`""` = the Material source root).
@@ -277,11 +309,12 @@ pub fn move_to(project: &Project, id: &AssetId, dir: &str) -> Result<AssetId, Op
 }
 
 /// Deletes the asset source; autogen is removed by the following full regeneration. Deleting a Texture asset keeps
-/// its game image and clears the references to it in every graph (design §1.2); deleting a gradient collection
-/// clears the references to it too (gradient design §6).
+/// its game image and clears the references to it in every graph (design §1.2); deleting a gradient collection or
+/// constant table clears the references to it too (gradient design §6, decision 0017).
 pub fn delete(project: &Project, id: &AssetId) -> Result<(), OpError> {
     std::fs::remove_file(id.file(project))?;
     match id.ty {
+        AssetType::Consts => rewrite_graphs(project, |a, r| clear_const_table_refs(a, r, &id.path))?,
         AssetType::Texture => rewrite_graphs(project, |a, r| clear_texture_refs(a, r, &id.path))?,
         AssetType::Gradients => rewrite_graphs(project, |a, r| clear_gradient_refs(a, r, &id.path))?,
         _ => {}

@@ -62,11 +62,21 @@ fn header_name(registry: &Registry, asset: &Asset, id: &str, routes: &[(NodeId, 
         NodeRole::RouteDeclaration => params.get("name").map(|v| v.as_str().to_string()),
         NodeRole::RouteUsage => usage_route(routes, &params).map(str::to_string),
         _ if has_label(&n.kind) => Some(n.label.clone()),
-        _ => def
-            .params()
-            .into_iter()
-            .find(|p| matches!(p.kind, ParamKind::GlobalConst(_)))
-            .and_then(|p| params.get(&p.id).map(|v| v.as_str().to_string())),
+        _ => {
+            let table = def
+                .params()
+                .into_iter()
+                .find(|p| p.kind == ParamKind::GlobalConsts)
+                .and_then(|p| params.get(&p.id).map(|v| v.as_str().to_string()))
+                .filter(|s| !s.is_empty());
+            let cid = def
+                .params()
+                .into_iter()
+                .find(|p| matches!(p.kind, ParamKind::GlobalConst(_)))
+                .and_then(|p| params.get(&p.id).map(|v| v.as_i32()))
+                .filter(|id| *id > 0);
+            table.zip(cid).map(|(t, id)| format!("{t}#{id}"))
+        }
     };
     name.filter(|s| !s.is_empty())
 }
@@ -139,11 +149,13 @@ mod tests {
         labelled.label = "tint".into();
         let labelled = a.add_node(labelled);
         assert_eq!(color(&reg, &a, &labelled), name_header_color("tint"));
-        // Global*: by the constant's name, set or not.
+        // Global*: by the constant's `(table, id)`, set or not.
         let global = a.add_node(
-            Node::new("stdlib::GlobalConstF32", (0.0, 0.0)).with_param("const", Value::Str("roughness_base".into())),
+            Node::new("stdlib::GlobalConstF32", (0.0, 0.0))
+                .with_param("table", Value::Str("common/tuning".into()))
+                .with_param("const", Value::Int(1003)),
         );
-        assert_eq!(color(&reg, &a, &global), name_header_color("roughness_base"));
+        assert_eq!(color(&reg, &a, &global), name_header_color("common/tuning#1003"));
         let unset = a.add_node(Node::new("stdlib::GlobalConstF32", (0.0, 0.0)));
         assert_eq!(color(&reg, &a, &unset), category_color("Constants"));
     }

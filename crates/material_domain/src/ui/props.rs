@@ -105,6 +105,7 @@ fn keyed_select(target: PropKey, choices: &[(String, String)], current: &str) ->
 pub(crate) struct Choices {
     pub routes: Vec<(String, String)>,
     pub curves: Vec<(String, String)>,
+    pub const_tables: Vec<(String, String)>,
     pub consts: Vec<(String, String)>,
     pub textures: Vec<(String, String)>,
     pub gradients: Vec<(String, String)>,
@@ -186,7 +187,12 @@ pub(crate) fn value_widget(target: PropKey, kind: &ParamKind, v: &Value, choices
     match kind {
         ParamKind::Route => keyed_select(target, &choices.routes, v.as_str()),
         ParamKind::Curve => keyed_select(target, &choices.curves, v.as_str()),
-        ParamKind::GlobalConst(_) => keyed_select(target, &choices.consts, v.as_str()),
+        // `(none)`: the node outputs 1.0 (`false` for flags, W106); picking a table resets the constant.
+        ParamKind::GlobalConsts => keyed_select(target, &choices.const_tables, v.as_str()),
+        ParamKind::GlobalConst(_) => {
+            let cur = u32::try_from(v.as_i32()).ok().filter(|id| *id != 0).map_or(String::new(), |id| id.to_string());
+            keyed_select(target, &choices.consts, &cur)
+        }
         // `(none)`: the node uses the default texture (W110).
         ParamKind::Texture => keyed_select(target, &choices.textures, v.as_str()),
         // `(none)`: the node outputs white (W111); picking a collection resets the slot (gradient design §6).

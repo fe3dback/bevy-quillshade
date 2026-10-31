@@ -80,21 +80,34 @@ impl ConstsDoc {
         }
     }
 
-    /// Appends a constant with the value 1.0 in every component (`true` for flags): zero is a poor default in
-    /// shaders (`log(0)`, `x / 0` fail to compile).
-    pub fn add(&mut self, name: &str, ty: ConstType) {
-        let c = GlobalConst::new(name, ty, Value::Float(1.0));
+    /// Appends a constant with a fresh non-zero id and the value 1.0 in every component (`true` for flags): zero is a
+    /// poor default in shaders (`log(0)`, `x / 0` fail to compile). Returns the new constant's id.
+    pub fn add(&mut self, name: &str, ty: ConstType) -> u32 {
+        let id = self.table.next_id();
+        let c = GlobalConst::with_id(id, name, ty, Value::Float(1.0));
         self.edit(None, true, |t| t.consts.push(c));
+        id
     }
 
-    pub fn remove(&mut self, name: &str) {
-        self.edit(None, true, |t| t.consts.retain(|c| c.name != name));
+    pub fn remove(&mut self, id: u32) {
+        self.edit(None, true, |t| t.consts.retain(|c| c.id != id));
+    }
+
+    /// Renames a constant (`merge` edits of one constant are one undo step); keeps the view layout so typing into the
+    /// name field does not despawn it.
+    pub fn set_name(&mut self, id: u32, name: &str, merge: bool) {
+        let key = MergeKey::Named(format!("name:{id}"));
+        self.edit(merge.then_some(key), false, |t| {
+            if let Some(c) = t.get_by_id_mut(id) {
+                c.name = name.to_string();
+            }
+        });
     }
 
     /// Changes a constant's type; the value is converted (`vec3` → `f32` keeps `x`, numbers → bool: not zero).
-    pub fn set_type(&mut self, name: &str, ty: ConstType) {
+    pub fn set_type(&mut self, id: u32, ty: ConstType) {
         self.edit(None, true, |t| {
-            if let Some(c) = t.get_mut(name) {
+            if let Some(c) = t.get_by_id_mut(id) {
                 c.value = ty.normalize(&c.value);
                 c.ty = ty;
             }
@@ -102,10 +115,10 @@ impl ConstsDoc {
     }
 
     /// Sets a constant's value (normalized to its type); `merge` edits of one constant are one undo step.
-    pub fn set_value(&mut self, name: &str, value: Value, merge: bool) {
-        let key = MergeKey::Named(format!("value:{name}"));
+    pub fn set_value(&mut self, id: u32, value: Value, merge: bool) {
+        let key = MergeKey::Named(format!("value:{id}"));
         self.edit(merge.then_some(key), false, |t| {
-            if let Some(c) = t.get_mut(name) {
+            if let Some(c) = t.get_by_id_mut(id) {
                 c.value = c.ty.normalize(&value);
             }
         });
@@ -179,25 +192,34 @@ mod tests {
     #[test]
     fn edits_undo_and_layout() {
         let mut d = doc();
-        d.add("wind", ConstType::Vec3);
-        assert_eq!(d.table.get("wind").unwrap().value, Value::Float3([1.0; 3]));
+        let id = d.add("wind", ConstType::Vec3);
+        assert_eq!(d.table.get_by_id(id).unwrap().value, Value::Float3([1.0; 3]));
         assert!(d.is_dirty());
         let layout = d.layout;
         for x in [0.1, 0.2, 0.3] {
-            d.set_value("wind", Value::Float3([x, 0.5, 0.5]), true);
+            d.set_value(id, Value::Float3([x, 0.5, 0.5]), true);
         }
         d.end_merge();
         assert_eq!(d.layout, layout, "value edits keep the view");
-        d.set_type("wind", ConstType::F32);
+        for n in ["Wind", "Wind (gust)"] {
+            d.set_name(id, n, true);
+        }
+        d.end_merge();
+        assert_eq!(d.table.get_by_id(id).unwrap().name, "Wind (gust)");
+        assert_eq!(d.layout, layout, "name edits keep the view");
+        assert!(d.undo());
+        assert_eq!(d.table.get_by_id(id).unwrap().name, "wind");
+        let layout = d.layout;
+        d.set_type(id, ConstType::F32);
         assert_eq!(d.table.get("wind").unwrap().value, Value::Float(0.3));
         assert!(d.layout > layout);
         assert!(d.undo());
         assert_eq!(d.table.get("wind").unwrap().value, Value::Float3([0.3, 0.5, 0.5]));
         assert!(d.undo(), "the drag was one step");
         assert_eq!(d.table.get("wind").unwrap().value, Value::Float3([1.0; 3]));
-        d.remove("wind");
+        d.remove(id);
         assert!(!d.is_dirty(), "back to the saved (empty) table");
         assert!(d.undo());
-        assert!(d.table.get("wind").is_some());
+        assert!(d.table.get_by_id(id).is_some());
     }
 }

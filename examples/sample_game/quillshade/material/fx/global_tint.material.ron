@@ -15,14 +15,16 @@ Asset(
       kind: "stdlib::GlobalConstVec3",
       pos: (0.0, 0.0),
       params: {
-        "const": Str("base_color"),
+        "const": Int(1001),
+        "table": Str("common/tuning"),
       },
     ),
     "n03": Node(
       kind: "stdlib::GlobalConstVec4",
       pos: (0.0, 135.0),
       params: {
-        "const": Str("glow_color"),
+        "const": Int(1002),
+        "table": Str("common/tuning"),
       },
     ),
     "n04": Node(
@@ -39,7 +41,8 @@ Asset(
       kind: "stdlib::GlobalConstF32",
       pos: (0.0, 270.0),
       params: {
-        "const": Str("glow_amount"),
+        "const": Int(1003),
+        "table": Str("common/tuning"),
       },
     ),
     "n06": Node(
@@ -56,7 +59,8 @@ Asset(
       kind: "stdlib::GlobalConstVec2",
       pos: (0.0, 607.5),
       params: {
-        "const": Str("stripe_scale"),
+        "const": Int(1004),
+        "table": Str("common/tuning"),
       },
     ),
     "n09": Node(
@@ -78,7 +82,8 @@ Asset(
       kind: "stdlib::GlobalToggle",
       pos: (630.0, 675.0),
       params: {
-        "const": Str("use_stripes"),
+        "const": Int(1005),
+        "table": Str("common/tuning"),
       },
     ),
     "n13": Node(
@@ -98,7 +103,8 @@ Asset(
       kind: "stdlib::GlobalCompileBool",
       pos: (1050.0, 67.5),
       params: {
-        "const": Str("fancy_stripes"),
+        "const": Int(1006),
+        "table": Str("common/tuning"),
       },
     ),
     "n16": Node(

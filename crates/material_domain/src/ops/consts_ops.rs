@@ -53,24 +53,26 @@ impl ConstsDoc {
     /// Value a property widget shows.
     pub(crate) fn prop_of(&self, target: &ConstsProp) -> Option<PropValue> {
         match target {
-            ConstsProp::Value(name) => Some(prop_value(&self.table.get(name)?.value)),
-            ConstsProp::Type(name) => Some(PropValue::Str(self.table.get(name)?.ty.label().into())),
+            ConstsProp::Name(id) => Some(PropValue::Str(self.table.get_by_id(*id)?.name.clone())),
+            ConstsProp::Value(id) => Some(prop_value(&self.table.get_by_id(*id)?.value)),
+            ConstsProp::Type(id) => Some(PropValue::Str(self.table.get_by_id(*id)?.ty.label().into())),
             ConstsProp::DraftName => Some(PropValue::Str(self.draft_name.clone())),
             ConstsProp::DraftType => Some(PropValue::Str(self.draft_ty.label().into())),
         }
     }
 
-    /// Sets a property; `merge`d value edits of one constant are one undo step. None redraws the right sidebar: the
-    /// table view keys on [`ConstsDoc::layout`].
+    /// Sets a property; `merge`d name or value edits of one constant are one undo step. None redraws the right
+    /// sidebar: the table view keys on [`ConstsDoc::layout`].
     fn set_prop(&mut self, ctx: &mut DocCtx, target: &ConstsProp, value: &PropValue, merge: bool) {
         if self.prop_of(target).as_ref() == Some(value) {
             return;
         }
         match target {
-            ConstsProp::Value(name) => self.set_value(name, model_value(value), merge),
-            ConstsProp::Type(name) => {
+            ConstsProp::Name(id) => self.set_name(*id, value.as_str(), merge),
+            ConstsProp::Value(id) => self.set_value(*id, model_value(value), merge),
+            ConstsProp::Type(id) => {
                 if let Some(ty) = ConstType::from_label(value.as_str()) {
-                    ctx.defer(ConstsAction::SetType { name: name.clone(), ty, confirmed: false });
+                    ctx.defer(ConstsAction::SetType { id: *id, ty, confirmed: false });
                 }
             }
             ConstsProp::DraftName => self.draft_name = value.as_str().to_string(),
@@ -83,21 +85,17 @@ impl ConstsDoc {
     }
 }
 
-/// Global constant tables (decision 0017): edits that check the project's other tables or the graphs reading them.
+/// Global constant tables (decision 0017): edits that check the graphs reading them.
 pub trait MaterialConsts {
     fn consts_action(&mut self, action: ConstsAction);
 
-    /// Those of `names` the global constant table `table` defines (a name repeated in a later table belongs to the
-    /// first one, which nodes read).
-    fn owned_consts(&self, table: &AssetId, names: impl IntoIterator<Item = String>) -> Vec<String>;
-
-    /// Runs `apply` on the active table, an edit that breaks the readers of constants `names` (type change, delete,
-    /// an undo/redo doing either). Without readers it just runs. With readers and not `confirmed` yet it opens a
-    /// dialog listing them, whose OK runs `again`; once confirmed the edit runs, the table is saved and the readers'
+    /// Runs `apply` on the active table, an edit that breaks the readers of `consts` (`(id, name)` pairs: type change,
+    /// delete, an undo/redo doing either). Without readers it just runs. With readers and not `confirmed` yet it opens
+    /// a dialog listing them, whose OK runs `again`; once confirmed the edit runs, the table is saved and the readers'
     /// references are cleared (decision 0017).
     fn breaking_edit(
         &mut self,
-        names: Vec<String>,
+        consts: Vec<(u32, String)>,
         confirmed: bool,
         what: &str,
         ok: &str,
@@ -105,30 +103,27 @@ pub trait MaterialConsts {
         apply: impl FnOnce(&mut ConstsDoc),
     );
 
-    /// Graphs whose nodes read any of global constants `names` (open documents as edited, the rest as saved), with
+    /// Graphs whose nodes read any of constants `ids` of `table` (open documents as edited, the rest as saved), with
     /// the number of such nodes.
-    fn const_usages(&self, names: &[String]) -> Vec<(AssetId, usize)>;
+    fn const_usages(&self, table: &str, ids: &[u32]) -> Vec<(AssetId, usize)>;
 
-    /// Clears every reference to constants `names` (decision 0017): open graphs are edited (and saved unless they
-    /// had unsaved changes), closed ones are rewritten on disk; then the project regenerates.
-    fn clear_const_usages(&mut self, names: &[String]);
+    /// Clears every reference to constants `consts` (`(id, name)`) of `table` (decision 0017): open graphs are edited
+    /// (and saved unless they had unsaved changes), closed ones are rewritten on disk; then the project regenerates.
+    fn clear_const_usages(&mut self, table: &str, consts: &[(u32, String)]);
 }
 
 impl MaterialConsts for Editor {
     fn consts_action(&mut self, action: ConstsAction) {
         let Some(c) = self.consts_doc() else { return };
-        let id = c.id.clone();
         match action {
             ConstsAction::Add => {
                 let (name, ty) = (c.draft_name.trim().to_string(), c.draft_ty);
-                let problem = match check_ident(&name) {
-                    Err(e) => Some(e),
-                    Ok(()) if c.table.get(&name).is_some() => Some(format!("`{name}` is already in this table")),
-                    Ok(()) => self
-                        .global_consts()
-                        .get(&name)
-                        .filter(|(table, _)| *table != id)
-                        .map(|(table, _)| format!("`{name}` is already defined in {table}")),
+                let problem = if name.is_empty() {
+                    Some("constant name must not be empty".into())
+                } else if c.table.consts.iter().any(|k| k.name.trim() == name) {
+                    Some(format!("`{name}` is already in this table"))
+                } else {
+                    None
                 };
                 let Some(c) = self.consts_doc_mut() else { return };
                 match problem {
@@ -142,37 +137,41 @@ impl MaterialConsts for Editor {
                     }
                 }
             }
-            ConstsAction::SetType { name, ty, confirmed } => {
-                let Some(from) = c.table.get(&name).map(|k| k.ty) else { return };
+            ConstsAction::SetType { id: cid, ty, confirmed } => {
+                let Some(k) = c.table.get_by_id(cid) else { return };
+                let (from, name) = (k.ty, k.name.clone());
                 if from == ty {
                     return;
                 }
                 let what = format!("Changing `{name}` from {} to {}", from.label(), ty.label());
-                let again = ConstsAction::SetType { name: name.clone(), ty, confirmed: true }.into();
-                let names = self.owned_consts(&id, [name.clone()]);
-                self.breaking_edit(names, confirmed, &what, "Change type", again, |c| c.set_type(&name, ty));
+                let again = ConstsAction::SetType { id: cid, ty, confirmed: true }.into();
+                self.breaking_edit(vec![(cid, name)], confirmed, &what, "Change type", again, move |c| {
+                    c.set_type(cid, ty);
+                });
             }
-            ConstsAction::Delete { name, confirmed } => {
+            ConstsAction::Delete { id: cid, confirmed } => {
+                let Some(k) = c.table.get_by_id(cid) else { return };
+                let name = k.name.clone();
                 let what = format!("Deleting `{name}`");
-                let again = ConstsAction::Delete { name: name.clone(), confirmed: true }.into();
-                let names = self.owned_consts(&id, [name.clone()]);
-                self.breaking_edit(names, confirmed, &what, "Delete", again, |c| c.remove(&name));
+                let again = ConstsAction::Delete { id: cid, confirmed: true }.into();
+                self.breaking_edit(vec![(cid, name)], confirmed, &what, "Delete", again, move |c| {
+                    c.remove(cid);
+                });
             }
             ConstsAction::History { undo, confirmed } => {
                 let target = if undo { c.peek_undo() } else { c.peek_redo() };
                 let Some(target) = target else { return };
                 // Constants the step removes or retypes break their readers like a direct edit would.
-                let changed: Vec<String> = c
+                let changed: Vec<(u32, String)> = c
                     .table
                     .consts
                     .iter()
-                    .filter(|k| target.get(&k.name).is_none_or(|t| t.ty != k.ty))
-                    .map(|k| k.name.clone())
+                    .filter(|k| target.get_by_id(k.id).is_none_or(|t| t.ty != k.ty))
+                    .map(|k| (k.id, k.name.clone()))
                     .collect();
                 let what = if undo { "Undo" } else { "Redo" };
                 let again = ConstsAction::History { undo, confirmed: true }.into();
-                let names = self.owned_consts(&id, changed);
-                self.breaking_edit(names, confirmed, what, what, again, |c| {
+                self.breaking_edit(changed, confirmed, what, what, again, |c| {
                     if undo {
                         c.undo();
                     } else {
@@ -184,14 +183,9 @@ impl MaterialConsts for Editor {
         self.ui.props += 1;
     }
 
-    fn owned_consts(&self, table: &AssetId, names: impl IntoIterator<Item = String>) -> Vec<String> {
-        let all = self.global_consts();
-        names.into_iter().filter(|n| all.get(n).is_some_and(|(t, _)| t == table)).collect()
-    }
-
     fn breaking_edit(
         &mut self,
-        names: Vec<String>,
+        consts: Vec<(u32, String)>,
         confirmed: bool,
         what: &str,
         ok: &str,
@@ -199,7 +193,10 @@ impl MaterialConsts for Editor {
         apply: impl FnOnce(&mut ConstsDoc),
     ) {
         self.dialog = None;
-        let usages = self.const_usages(&names);
+        let Some(table) = self.consts_doc().map(|c| c.id.path.clone()) else { return };
+        let ids: Vec<u32> = consts.iter().map(|(id, _)| *id).collect();
+        let names: Vec<String> = consts.iter().map(|(_, n)| n.clone()).collect();
+        let usages = self.const_usages(&table, &ids);
         if !usages.is_empty() && !confirmed {
             self.dialog = Some(Dialog::Confirm {
                 title: "Constant in use".into(),
@@ -222,18 +219,21 @@ impl MaterialConsts for Editor {
             {
                 return;
             }
-            self.clear_const_usages(&names);
+            self.clear_const_usages(&table, &consts);
         }
     }
 
-    fn const_usages(&self, names: &[String]) -> Vec<(AssetId, usize)> {
+    fn const_usages(&self, table: &str, ids: &[u32]) -> Vec<(AssetId, usize)> {
         let mut out = Vec::new();
-        if names.is_empty() {
+        if ids.is_empty() {
             return out;
         }
         for (id, a) in &self.overridden_set().assets {
             let Ok(a) = a else { continue };
-            let n = const_refs(a, &self.domains.material().registry).iter().filter(|r| names.contains(&r.2)).count();
+            let n = const_refs(a, &self.domains.material().registry)
+                .iter()
+                .filter(|r| r.2 == table && ids.contains(&r.3))
+                .count();
             if n > 0 {
                 out.push((id.clone(), n));
             }
@@ -241,10 +241,11 @@ impl MaterialConsts for Editor {
         out
     }
 
-    fn clear_const_usages(&mut self, names: &[String]) {
+    fn clear_const_usages(&mut self, table: &str, consts: &[(u32, String)]) {
         let Some(project) = self.project.clone() else { return };
         let registry = self.domains.material().registry.clone();
-        let reads = |a: &Asset| const_refs(a, &registry).iter().any(|r| names.contains(&r.2));
+        let ids: Vec<u32> = consts.iter().map(|(id, _)| *id).collect();
+        let reads = |a: &Asset| const_refs(a, &registry).iter().any(|r| r.2 == table && ids.contains(&r.3));
         let mut cleared = Vec::new();
         for i in 0..self.tabs.len() {
             let Some(d) = self.tabs[i].get_mut::<Doc>() else { continue };
@@ -253,8 +254,8 @@ impl MaterialConsts for Editor {
             }
             let was_dirty = d.is_dirty();
             d.edit(|a| {
-                for name in names {
-                    ops::clear_const_refs(a, &registry, name);
+                for &(cid, _) in consts {
+                    ops::clear_const_refs(a, &registry, table, cid);
                 }
             });
             cleared.push(d.id.source_rel());
@@ -262,22 +263,22 @@ impl MaterialConsts for Editor {
                 self.save(i);
             }
         }
-        let ids: Vec<AssetId> =
+        let asset_ids: Vec<AssetId> =
             self.domains.material().disk.assets.keys().filter(|id| self.doc_index(id).is_none()).cloned().collect();
-        for id in ids {
+        for id in asset_ids {
             let Ok(mut a) = assets::load(&project, &id) else { continue };
             if !reads(&a) {
                 continue;
             }
-            for name in names {
-                ops::clear_const_refs(&mut a, &registry, name);
+            for &(cid, _) in consts {
+                ops::clear_const_refs(&mut a, &registry, table, cid);
             }
             if let Err(e) = ops::save(&project, &id, &a) {
                 return self.io_error(&format!("Cannot save {}", id.source_rel()), e);
             }
             cleared.push(id.source_rel());
         }
-        let list = names.iter().map(|n| format!("`{n}`")).collect::<Vec<_>>().join(", ");
+        let list = consts.iter().map(|(_, n)| format!("`{n}`")).collect::<Vec<_>>().join(", ");
         self.info(format!("Cleared references to {list} in {}", cleared.join(", ")));
         self.regenerate();
         self.touch_all();

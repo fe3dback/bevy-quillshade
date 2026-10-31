@@ -245,7 +245,7 @@ fn edit_verbs_reach_every_kind() {
     assert_eq!(e.curve_doc().unwrap().curve.points, points, "curve");
 
     e.apply(Action::OpenAsset(AssetId::new(AssetType::Consts, "common/tuning").to_ref()));
-    let amount = ConstsProp::Value("glow_amount".into());
+    let amount = ConstsProp::Value(GLOW_AMOUNT_ID);
     e.apply(set_value(amount.clone(), Value::Float(0.9), false));
     assert_eq!(shown(&e, &amount), Some(Value::Float(0.9)));
     undo(&mut e);

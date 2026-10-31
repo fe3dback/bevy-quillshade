@@ -532,7 +532,7 @@ fn node_previews_follow_the_model_without_rebuild() {
 
     // A node reading an unknown constant shows "n/a".
     let target = GraphProp::Param { node: amount.clone(), key: "const".into() };
-    act(&mut app, set_value(target, Value::Str("missing".into()), false));
+    act(&mut app, set_value(target, Value::Int(99999), false));
     let (_, text, na_hidden) = row(&mut app);
     assert_eq!((text.as_deref(), na_hidden), (Some(""), false));
 }

@@ -504,7 +504,11 @@ pub fn curve_bands() -> Asset {
 pub fn global_tint() -> Asset {
     let kind = AssetKind::Material(MaterialKind::Unlit3d(UnlitSettings::default()));
     let mut g = GraphBuilder::new("global_tint", kind);
-    let global = |name: &str| [("const", s(name))];
+    let tuning = &const_tables()[0].1;
+    let global = |name: &str| {
+        let id = tuning.get(name).expect("fixture const").id as i32;
+        [("table", s("common/tuning")), ("const", Value::Int(id))]
+    };
     let out = g.node("output::Unlit3d", (1100.0, 0.0));
     let base = g.node_p("stdlib::GlobalConstVec3", (0.0, 0.0), &global("base_color"));
     let glow = g.node_p("stdlib::GlobalConstVec4", (0.0, 100.0), &global("glow_color"));
@@ -745,18 +749,18 @@ pub fn keyword_names() -> Asset {
 
 /// Global constant table fixtures: (`quillshade/material/`-relative path, table).
 pub fn const_tables() -> Vec<(&'static str, GlobalConsts)> {
-    let c = GlobalConst::new;
+    let c = GlobalConst::with_id;
     vec![(
         "common/tuning",
         GlobalConsts::new(
             "tuning",
             vec![
-                c("base_color", ConstType::Vec3, Value::Float3([0.05, 0.1, 0.3])),
-                c("glow_color", ConstType::Vec4, Value::Float4([1.0, 0.5, 0.1, 1.0])),
-                c("glow_amount", ConstType::F32, Value::Float(0.35)),
-                c("stripe_scale", ConstType::Vec2, Value::Float2([8.0, 1.0])),
-                c("use_stripes", ConstType::Toggle, Value::Bool(true)),
-                c("fancy_stripes", ConstType::CompileBool, Value::Bool(true)),
+                c(1001, "base_color", ConstType::Vec3, Value::Float3([0.05, 0.1, 0.3])),
+                c(1002, "glow_color", ConstType::Vec4, Value::Float4([1.0, 0.5, 0.1, 1.0])),
+                c(1003, "glow_amount", ConstType::F32, Value::Float(0.35)),
+                c(1004, "stripe_scale", ConstType::Vec2, Value::Float2([8.0, 1.0])),
+                c(1005, "use_stripes", ConstType::Toggle, Value::Bool(true)),
+                c(1006, "fancy_stripes", ConstType::CompileBool, Value::Bool(true)),
             ],
         ),
     )]

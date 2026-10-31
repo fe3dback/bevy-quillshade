@@ -113,12 +113,18 @@ impl NodePreview for ConstPreview {
         let n = doc.asset.nodes.get(node)?;
         let def = editor.domains.material().registry.get(&n.kind)?;
         let params = editor.domains.material().registry.resolved_params(&n.kind, &n.params);
+        let table = def
+            .params()
+            .into_iter()
+            .find(|p| p.kind == ParamKind::GlobalConsts)
+            .and_then(|p| params.get(&p.id))
+            .map(|v| v.as_str())?;
         let (id, ty) = def.params().into_iter().find_map(|p| match p.kind {
             ParamKind::GlobalConst(ty) => Some((p.id, ty)),
             _ => None,
         })?;
-        let name = params.get(&id)?.as_str().to_string();
-        let (_, c) = editor.global_consts().remove(&name)?;
+        let cid = u32::try_from(params.get(&id)?.as_i32()).ok().filter(|id| *id != 0)?;
+        let c = editor.const_table(table)?.get_by_id(cid)?.clone();
         (c.ty == ty).then_some(c)
     }
 

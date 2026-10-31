@@ -598,9 +598,10 @@ impl MaterialGraphOps for Editor {
                 ParamKind::Curve if self.curve_paths().iter().any(|c| c == v) => {
                     return Some(AssetId::new(AssetType::Curve, v));
                 }
-                ParamKind::GlobalConst(_) => {
-                    if let Some((table, _)) = self.global_consts().remove(v) {
-                        return Some(table);
+                ParamKind::GlobalConsts => {
+                    let id = AssetId::new(AssetType::Consts, v);
+                    if self.domains.material().disk.consts.contains_key(&id) {
+                        return Some(id);
                     }
                 }
                 ParamKind::GradientCollection => {
@@ -841,15 +842,21 @@ impl Doc {
         }
     }
 
-    /// `v` as the model value of `target`: a param holding a pin type gets the type back from its label.
+    /// `v` as the model value of `target`: a param holding a pin type gets the type back from its label, and a
+    /// `GlobalConst` param parses its constant id (`0` for `(none)`).
     fn model_value_for(&self, target: &GraphProp, v: &PropValue, m: &MaterialState) -> Value {
         if let (GraphProp::Param { node, key }, PropValue::Str(s)) = (target, v)
             && let Some(n) = self.asset.nodes.get(node)
             && let Some(def) = m.registry.get(&n.kind)
-            && def.params().iter().any(|p| p.id == *key && matches!(p.kind, ParamKind::PinType(_)))
-            && let Some(t) = PinType::from_label(s)
         {
-            return Value::Type(t);
+            if def.params().iter().any(|p| p.id == *key && matches!(p.kind, ParamKind::PinType(_)))
+                && let Some(t) = PinType::from_label(s)
+            {
+                return Value::Type(t);
+            }
+            if def.params().iter().any(|p| p.id == *key && matches!(p.kind, ParamKind::GlobalConst(_))) {
+                return Value::Int(s.parse::<i32>().unwrap_or(0));
+            }
         }
         model_value(v)
     }
@@ -1037,18 +1044,23 @@ impl Doc {
         true
     }
 
-    /// The `GradientSlot` param of `node` that setting its param `key` to `value` resets: `key` is a
-    /// `GradientCollection` param, `value` another collection than the current one and a slot is picked.
+    /// The `GradientSlot` or `GlobalConst` param of `node` that setting its param `key` to `value` resets: `key` is a
+    /// `GradientCollection` or `GlobalConsts` param, `value` another collection/table than the current one and a
+    /// slot/constant is picked.
     fn slot_param_reset_by(&self, node: &str, key: &str, value: &Value, registry: &Registry) -> Option<String> {
         let n = self.asset.nodes.get(node)?;
         let params = registry.get(&n.kind)?.params();
-        if !params.iter().any(|p| p.id == key && p.kind == ParamKind::GradientCollection) {
-            return None;
-        }
+        let is_gradient = params.iter().find(|p| p.id == key).and_then(|p| match p.kind {
+            ParamKind::GradientCollection => Some(true),
+            ParamKind::GlobalConsts => Some(false),
+            _ => None,
+        })?;
         if registry.resolved_params(&n.kind, &n.params).get(key) == Some(value) {
             return None;
         }
-        let slot = params.into_iter().find(|p| p.kind == ParamKind::GradientSlot)?;
+        let slot = params.into_iter().find(|p| {
+            if is_gradient { p.kind == ParamKind::GradientSlot } else { matches!(p.kind, ParamKind::GlobalConst(_)) }
+        })?;
         n.params.get(&slot.id).is_some_and(|v| *v != Value::Int(0)).then_some(slot.id)
     }
 }

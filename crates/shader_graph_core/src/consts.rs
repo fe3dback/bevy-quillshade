@@ -1,7 +1,11 @@
 //! Global constant tables (`quillshade/material/**/*.consts.ron`, decision 0017): named values read by the `Global*`
 //! nodes and copied into the generated WESL as literals.
 
-use std::collections::BTreeMap;
+use std::collections::hash_map::RandomState;
+use std::collections::{BTreeMap, HashSet};
+use std::hash::BuildHasher;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::SystemTime;
 
 use project_core::probe_version;
 use serde::{Deserialize, Serialize};
@@ -100,8 +104,32 @@ impl ConstType {
     }
 }
 
+/// Whether `id` is a valid constant id (`1..=i32::MAX as u32`; `0` means "none").
+pub fn valid_id(id: u32) -> bool {
+    id != 0 && id <= i32::MAX as u32
+}
+
+/// Generates a random non-zero constant id (`1..=i32::MAX as u32`).
+pub fn random_id() -> u32 {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let mut state = RandomState::new().hash_one((SystemTime::now(), COUNTER.fetch_add(1, Ordering::Relaxed)));
+    loop {
+        state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        let id = ((z ^ (z >> 31)) >> 33) as u32;
+        if valid_id(id) {
+            return id;
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GlobalConst {
+    /// Stable random id (`1..=i32::MAX as u32`): `Global*` nodes refer to a constant by `(table, id)`, so renaming it
+    /// in the table changes neither material RON nor generated WESL.
+    pub id: u32,
     pub name: String,
     pub ty: ConstType,
     pub value: Value,
@@ -109,7 +137,11 @@ pub struct GlobalConst {
 
 impl GlobalConst {
     pub fn new(name: impl Into<String>, ty: ConstType, value: Value) -> Self {
-        GlobalConst { name: name.into(), ty, value: ty.normalize(&value) }
+        Self::with_id(random_id(), name, ty, value)
+    }
+
+    pub fn with_id(id: u32, name: impl Into<String>, ty: ConstType, value: Value) -> Self {
+        GlobalConst { id, name: name.into(), ty, value: ty.normalize(&value) }
     }
 }
 
@@ -128,7 +160,7 @@ impl GlobalConsts {
         c
     }
 
-    /// Parses a table file (older format versions would migrate here).
+    /// Parses a table file (older format versions would migrate here), normalizes values, and checks constant ids.
     pub fn from_ron(text: &str) -> Result<GlobalConsts, LoadError> {
         match probe_version(text)? {
             v if v > CONSTS_FORMAT_VERSION => Err(LoadError::TooNew { found: v, supported: CONSTS_FORMAT_VERSION }),
@@ -136,6 +168,7 @@ impl GlobalConsts {
                 let mut c: GlobalConsts =
                     ron::Options::default().from_str(text).map_err(|e| LoadError::Parse(e.to_string()))?;
                 c.normalize();
+                c.check().map_err(LoadError::Parse)?;
                 Ok(c)
             }
             v => Err(LoadError::Unsupported(v)),
@@ -159,6 +192,38 @@ impl GlobalConsts {
         }
     }
 
+    /// Structural rules a loaded file must satisfy.
+    fn check(&self) -> Result<(), String> {
+        let mut seen = HashSet::with_capacity(self.consts.len());
+        for (pos, c) in self.consts.iter().enumerate() {
+            if !valid_id(c.id) {
+                return Err(format!("const {pos}: id {} must be in 1..={}", c.id, i32::MAX));
+            }
+            if !seen.insert(c.id) {
+                return Err(format!("const {pos}: duplicate id {}", c.id));
+            }
+        }
+        Ok(())
+    }
+
+    /// Generates a random constant id not yet used in this table.
+    pub fn next_id(&self) -> u32 {
+        loop {
+            let id = random_id();
+            if self.get_by_id(id).is_none() {
+                return id;
+            }
+        }
+    }
+
+    pub fn get_by_id(&self, id: u32) -> Option<&GlobalConst> {
+        self.consts.iter().find(|c| c.id == id)
+    }
+
+    pub fn get_by_id_mut(&mut self, id: u32) -> Option<&mut GlobalConst> {
+        self.consts.iter_mut().find(|c| c.id == id)
+    }
+
     pub fn get(&self, name: &str) -> Option<&GlobalConst> {
         self.consts.iter().find(|c| c.name == name)
     }
@@ -168,23 +233,23 @@ impl GlobalConsts {
     }
 }
 
-/// Global constants of the project that nodes can read (valid and unique names).
+/// Global constant tables of the project that nodes can read.
 pub trait ConstLookup {
-    fn global_const(&self, name: &str) -> Option<&GlobalConst>;
+    fn const_table(&self, path: &str) -> Option<&GlobalConsts>;
 }
 
 /// No project constants (tests, signatures).
 pub struct NoConsts;
 
 impl ConstLookup for NoConsts {
-    fn global_const(&self, _name: &str) -> Option<&GlobalConst> {
+    fn const_table(&self, _path: &str) -> Option<&GlobalConsts> {
         None
     }
 }
 
-impl ConstLookup for BTreeMap<String, GlobalConst> {
-    fn global_const(&self, name: &str) -> Option<&GlobalConst> {
-        self.get(name)
+impl ConstLookup for BTreeMap<String, GlobalConsts> {
+    fn const_table(&self, path: &str) -> Option<&GlobalConsts> {
+        self.get(path)
     }
 }
 
@@ -198,10 +263,11 @@ mod tests {
             "globals",
             vec![
                 GlobalConst::new("wind", ConstType::F32, Value::Float(0.5)),
-                GlobalConst { name: "tint".into(), ty: ConstType::Vec3, value: Value::Float(1.0) },
+                GlobalConst { id: random_id(), name: "tint".into(), ty: ConstType::Vec3, value: Value::Float(1.0) },
                 GlobalConst::new("fancy", ConstType::CompileBool, Value::Bool(true)),
             ],
         );
+        assert!(t.consts.iter().all(|c| valid_id(c.id)));
         assert_eq!(t.get("tint").unwrap().value, Value::Float3([1.0; 3]));
         let text = t.to_ron();
         assert!(text.starts_with("GlobalConsts("), "{text}");
@@ -209,6 +275,14 @@ mod tests {
         assert_eq!(GlobalConsts::from_ron(&text).unwrap(), t);
         let too_new = "GlobalConsts(format_version: 9, name: \"x\")";
         assert!(matches!(GlobalConsts::from_ron(too_new), Err(LoadError::TooNew { .. })));
+    }
+
+    #[test]
+    fn invalid_or_duplicate_ids_are_rejected() {
+        let zero_id = "GlobalConsts(format_version: 1, name: \"g\", consts: [GlobalConst(id: 0, name: \"x\", ty: F32, value: Float(1.0))])";
+        assert!(matches!(GlobalConsts::from_ron(zero_id), Err(LoadError::Parse(msg)) if msg.contains("must be in")));
+        let dup_id = "GlobalConsts(format_version: 1, name: \"g\", consts: [GlobalConst(id: 7, name: \"x\", ty: F32, value: Float(1.0)), GlobalConst(id: 7, name: \"y\", ty: F32, value: Float(2.0))])";
+        assert!(matches!(GlobalConsts::from_ron(dup_id), Err(LoadError::Parse(msg)) if msg.contains("duplicate id 7")));
     }
 
     #[test]

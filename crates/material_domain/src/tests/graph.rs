@@ -148,7 +148,7 @@ fn number_drag_is_one_undo_step() {
     assert_eq!(input(&e), None, "one undo restores the value before the drag");
 
     e.apply(Action::OpenAsset(tuning().to_ref()));
-    let amount = ConstsProp::Value("glow_amount".into());
+    let amount = ConstsProp::Value(GLOW_AMOUNT_ID);
     let before = shown(&e, &amount);
     for v in [2.0, 3.0] {
         e.apply(set_value(amount.clone(), Value::Float(v), true));

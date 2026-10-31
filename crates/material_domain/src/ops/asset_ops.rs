@@ -14,15 +14,11 @@ pub trait MaterialAssets {
     /// to a renamed curve / Texture asset / gradient collection follow the rewrite, autogen regenerates.
     fn material_renamed(&mut self, from: &AssetRef, to: &AssetRef);
 
-    /// Asset `r` is about to be deleted (its tabs still open): the constants a table defines, which their readers lose
-    /// (unless another table defines the same name), as edited.
-    fn material_before_delete(&mut self, r: &AssetRef);
-
     /// Deletes `r`'s file: references to it in other assets are cleared on disk ([`ops::delete`]).
     fn material_delete_file(&mut self, r: &AssetRef) -> Result<(), String>;
 
-    /// Asset `r` was deleted (core rescanned): open graphs referring to a deleted Texture asset / gradient collection
-    /// follow the rewrite, the readers of lost constants are cleared, autogen regenerates.
+    /// Asset `r` was deleted (core rescanned): open graphs referring to a deleted Texture asset / gradient collection /
+    /// constant table follow the rewrite, autogen regenerates.
     fn material_deleted(&mut self, r: &AssetRef);
 
     /// `ops::rename` / `ops::delete` rewrote the references to asset `target` (found by `refs`) on disk; open graph
@@ -49,12 +45,17 @@ impl MaterialAssets for Editor {
         let id = AssetId::from_ref(r)?;
         let message = if id.ty.has_wesl() {
             format!("Delete {} and its generated files?", id.source_rel())
-        } else {
-            let names = self.owned_consts(&id, self.global_consts().into_keys());
-            match self.const_usages(&names) {
+        } else if id.ty == AssetType::Consts
+            && let Some(t) = self.const_table(&id.path)
+        {
+            let ids: Vec<u32> = t.consts.iter().map(|c| c.id).collect();
+            let names: Vec<String> = t.consts.iter().map(|c| c.name.clone()).collect();
+            match self.const_usages(&id.path, &ids) {
                 u if u.is_empty() => format!("Delete {}?", id.source_rel()),
                 u => usage_message(&format!("Deleting {}", id.source_rel()), &names, &u),
             }
+        } else {
+            format!("Delete {}?", id.source_rel())
         };
         Some(message)
     }
@@ -109,14 +110,12 @@ impl MaterialAssets for Editor {
             AssetType::Gradients => self.follow_ref_rewrite(gradient_refs, &id.path, |a, r| {
                 ops::rename_gradient_refs(a, r, &id.path, &new_id.path);
             }),
+            AssetType::Consts => self.follow_ref_rewrite(const_table_refs, &id.path, |a, r| {
+                ops::rename_const_table_refs(a, r, &id.path, &new_id.path);
+            }),
             _ => {}
         }
         self.regenerate();
-    }
-
-    fn material_before_delete(&mut self, r: &AssetRef) {
-        let owned = AssetId::from_ref(r).map(|id| self.owned_consts(&id, self.global_consts().into_keys()));
-        self.domains.material_mut().deleting = owned.unwrap_or_default();
     }
 
     fn material_delete_file(&mut self, r: &AssetRef) -> Result<(), String> {
@@ -127,7 +126,6 @@ impl MaterialAssets for Editor {
     }
 
     fn material_deleted(&mut self, r: &AssetRef) {
-        let owned = std::mem::take(&mut self.domains.material_mut().deleting);
         let Some(id) = AssetId::from_ref(r) else { return };
         let id = &id;
         self.domains.material_mut().wesl_lines.remove(id);
@@ -139,15 +137,12 @@ impl MaterialAssets for Editor {
             AssetType::Gradients => self.follow_ref_rewrite(gradient_refs, &id.path, |a, r| {
                 ops::clear_gradient_refs(a, r, &id.path);
             }),
+            AssetType::Consts => self.follow_ref_rewrite(const_table_refs, &id.path, |a, r| {
+                ops::clear_const_table_refs(a, r, &id.path);
+            }),
             _ => {}
         }
-        let left = self.global_consts();
-        let lost: Vec<String> = owned.into_iter().filter(|n| !left.contains_key(n)).collect();
-        if self.const_usages(&lost).is_empty() {
-            self.regenerate();
-        } else {
-            self.clear_const_usages(&lost);
-        }
+        self.regenerate();
     }
 
     fn follow_ref_rewrite(

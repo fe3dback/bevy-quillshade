@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
-use crate::consts::{ConstLookup, ConstType, GlobalConst};
+use crate::consts::{ConstLookup, ConstType, GlobalConsts};
 use crate::curve::{Interp, curve_fn_alias};
 use crate::diag::{Code, Diagnostic};
 use crate::gradient::GradientCollection;
@@ -40,7 +40,11 @@ pub enum ParamKind {
     Route,
     /// Path of a curve asset of the project (`env/falloff`, stored as `Value::Str`; decision 0015).
     Curve,
-    /// Name of a global constant of this type from any constant table (stored as `Value::Str`; decision 0017).
+    /// Id of a global constant table asset of the project (`common/tuning`); `""` = none (stored as `Value::Str`;
+    /// decision 0017).
+    GlobalConsts,
+    /// Id of a global constant ([`crate::consts::GlobalConst::id`]) of this type in the table chosen by the node's
+    /// [`ParamKind::GlobalConsts`] param; `0` = none (stored as `Value::Int`; decision 0017).
     GlobalConst(ConstType),
     /// Id of a Texture asset of the project (`textures/env/rock`) or of an internal texture (`@internal/default`);
     /// `""` = none (stored as `Value::Str`; design §1.2).
@@ -222,16 +226,42 @@ pub fn curve_refs(asset: &crate::model::Asset, registry: &Registry) -> Vec<(Node
     out
 }
 
-/// Global constant names `asset` refers to through [`ParamKind::GlobalConst`] parameters:
-/// `(node id, param id, name)`.
-pub fn const_refs(asset: &crate::model::Asset, registry: &Registry) -> Vec<(NodeId, String, String)> {
+/// Global constant table ids `asset` refers to through [`ParamKind::GlobalConsts`] parameters:
+/// `(node id, param id, table id)`; empty references are skipped (decision 0017).
+pub fn const_table_refs(asset: &crate::model::Asset, registry: &Registry) -> Vec<(NodeId, String, String)> {
     let mut out = Vec::new();
     for (id, n) in &asset.nodes {
         let Some(def) = registry.get(&n.kind) else { continue };
-        for p in def.params().into_iter().filter(|p| matches!(p.kind, ParamKind::GlobalConst(_))) {
-            let name = n.params.get(&p.id).unwrap_or(&p.default).as_str();
-            if !name.is_empty() {
-                out.push((id.clone(), p.id, name.to_string()));
+        for p in def.params().into_iter().filter(|p| p.kind == ParamKind::GlobalConsts) {
+            let table = n.params.get(&p.id).unwrap_or(&p.default).as_str();
+            if !table.is_empty() {
+                out.push((id.clone(), p.id, table.to_string()));
+            }
+        }
+    }
+    out
+}
+
+/// Global constants `asset` refers to through [`ParamKind::GlobalConsts`] + [`ParamKind::GlobalConst`] parameters:
+/// `(node id, const param id, table id, const id)`.
+pub fn const_refs(asset: &crate::model::Asset, registry: &Registry) -> Vec<(NodeId, String, String, u32)> {
+    let mut out = Vec::new();
+    for (id, n) in &asset.nodes {
+        let Some(def) = registry.get(&n.kind) else { continue };
+        let params = def.params();
+        let Some(table) = params
+            .iter()
+            .find(|p| p.kind == ParamKind::GlobalConsts)
+            .map(|p| n.params.get(&p.id).unwrap_or(&p.default).as_str())
+            .filter(|t| !t.is_empty())
+        else {
+            continue;
+        };
+        for p in params.iter().filter(|p| matches!(p.kind, ParamKind::GlobalConst(_))) {
+            if let Ok(cid) = u32::try_from(n.params.get(&p.id).unwrap_or(&p.default).as_i32())
+                && cid != 0
+            {
+                out.push((id.clone(), p.id.clone(), table.to_string(), cid));
             }
         }
     }
@@ -877,9 +907,9 @@ impl EmitCtx<'_> {
         Some(curve_fn_alias(path, interp))
     }
 
-    /// A global constant of the project (`None` if no table defines `name`).
-    pub fn global_const(&self, name: &str) -> Option<&GlobalConst> {
-        self.env.consts.global_const(name)
+    /// A global constant table of the project (`None` if no table exists at `path`).
+    pub fn const_table(&self, path: &str) -> Option<&GlobalConsts> {
+        self.env.consts.const_table(path)
     }
 
     /// Adds a standalone fn definition (Custom node).

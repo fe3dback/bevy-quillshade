@@ -11,15 +11,15 @@ use editor_core::action::{Handled, TabAction};
 use editor_core::dynval::{Payload, PropKey, PropTarget, PropValue};
 use editor_core::history::MergeKey;
 use project_core::AssetRef;
-use shader_graph_core::consts::{ConstType, GlobalConst};
+use shader_graph_core::consts::{ConstType, GlobalConsts};
 use shader_graph_core::gradient::{GradientCollection, MAX_STOPS, Stop};
-use shader_graph_core::ident::check_ident;
 use shader_graph_core::ir::declared_function_sig;
 use shader_graph_core::model::{
     Asset, AssetKind, BlendMode, MaterialKind, NodeId, PbrOutputMode, PreviewMode, Shading,
 };
 use shader_graph_core::registry::{
     Conversion, FUNCTION_PREFIX, Hotkey, HotkeyKey, NodeAction, NodeOp, NodeRole, ParamKind, const_refs,
+    const_table_refs,
 };
 use shader_graph_core::{Code, Diagnostic, PinType, Registry, Value};
 use shader_project::layout::{MATERIAL, MaterialLayout, USER_NODES_DIR};
@@ -131,9 +131,11 @@ pub trait MaterialEditor {
     /// Tab index of an asset's editable document (graph, curve, constant table or Texture asset).
     fn asset_index(&self, id: &AssetId) -> Option<usize>;
 
-    /// Every global constant by name with its table: open tables as edited, the others as saved. A name defined in
-    /// several tables keeps the first one (path order), as in code generation.
-    fn global_consts(&self) -> BTreeMap<String, (AssetId, GlobalConst)>;
+    /// The project's loadable constant tables as `(id, label)` choices (a `GlobalConsts` parameter).
+    fn const_tables(&self) -> Vec<(String, String)>;
+
+    /// Constant table `id` (its path): an open tab's unsaved state first, then the file as last scanned.
+    fn const_table(&self, id: &str) -> Option<&GlobalConsts>;
 
     /// Paths of the project's loadable curve assets (choices of a `Curve` parameter).
     fn curve_paths(&self) -> Vec<String>;
@@ -227,12 +229,17 @@ impl MaterialEditor for Editor {
         self.asset_tab(&id.to_ref())
     }
 
-    fn global_consts(&self) -> BTreeMap<String, (AssetId, GlobalConst)> {
-        let mut set = AssetSet { consts: self.domains.material().disk.consts.clone(), ..Default::default() };
-        for c in self.tabs.iter().filter_map(Tab::get::<ConstsDoc>) {
-            set.consts.insert(c.id.clone(), Ok(c.table.clone()));
-        }
-        shader_project::regen::collect_consts(&set).0
+    fn const_tables(&self) -> Vec<(String, String)> {
+        let ok = self.domains.material().disk.consts.iter().filter(|(_, c)| c.is_ok()).map(|(id, _)| id.path.clone());
+        ok.map(|p| (p.clone(), p)).collect()
+    }
+
+    fn const_table(&self, id: &str) -> Option<&GlobalConsts> {
+        let open = self.tabs.iter().filter_map(Tab::get::<ConstsDoc>).find(|c| c.id.path == id);
+        open.map(|c| &c.table).or_else(|| {
+            let id = AssetId::new(AssetType::Consts, id);
+            self.domains.material().disk.consts.get(&id).and_then(|c| c.as_ref().ok())
+        })
     }
 
     fn curve_paths(&self) -> Vec<String> {

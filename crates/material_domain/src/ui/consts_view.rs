@@ -119,7 +119,7 @@ fn slider_range(v: f32) -> (f32, f32) {
 /// Editor of a constant's value: `f32` a number input with a soft limit, `vecN` colour picker + component fields,
 /// flags a checkbox.
 fn value_editor(c: &GlobalConst) -> Box<dyn Scene> {
-    let target = PropKey::new(ConstsProp::Value(c.name.clone()));
+    let target = PropKey::new(ConstsProp::Value(c.id));
     match c.ty {
         ConstType::F32 => {
             let value = c.value.as_f32();
@@ -166,7 +166,7 @@ fn form(c: &ConstsDoc) -> Vec<Box<dyn Scene>> {
                     IconId::Plus,
                     "Add",
                     add,
-                    "Add the constant (names are unique project-wide)",
+                    "Add the constant (names are unique in this table)",
                 )),
             ),
         ],
@@ -189,11 +189,11 @@ fn table(c: &ConstsDoc) -> Vec<Box<dyn Scene>> {
         out.push(Box::new(text("No constants yet: add one above.", TEXT_DIM, 13.0)));
     }
     for k in &c.table.consts {
-        let delete = Action::from(ConstsAction::Delete { name: k.name.clone(), confirmed: false });
+        let delete = Action::from(ConstsAction::Delete { id: k.id, confirmed: false });
         out.push(row(
             vec![
-                cell(Some(NAME_W), Box::new(text(k.name.clone(), TEXT, 14.0))),
-                cell(Some(TYPE_W), type_select(ConstsProp::Type(k.name.clone()), k.ty)),
+                cell(Some(NAME_W), text_w(ConstsProp::Name(k.id), k.name.clone(), false)),
+                cell(Some(TYPE_W), type_select(ConstsProp::Type(k.id), k.ty)),
                 cell(None, value_editor(k)),
                 Box::new(icon_button(IconId::Delete, delete, "Delete the constant (asks when nodes read it)")),
             ],

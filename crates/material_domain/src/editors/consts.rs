@@ -65,7 +65,7 @@ fn consts_rows(c: &ConstsDoc) -> Vec<Box<dyn Scene>> {
     let table: Vec<Box<dyn Scene>> =
         vec![Box::new(text(c.id.source_rel(), TEXT, 15.0)), Box::new(text("Type: Global Consts", TEXT_DIM, 12.0))];
     let usage = [
-        "Read a constant with the Global* nodes (Constants category); names are unique project-wide.",
+        "Read a constant with the Global* nodes (Constants category); names are unique in each table, and renaming a constant does not change WESL or materials.",
         "Values are copied into the generated WESL as literals: saving the table regenerates the shaders reading it.",
         "toggle reads as f32 1.0 / 0.0 (GlobalToggle); runtimeBool is a shader bool for RuntimeIf, And, Or, Not (GlobalRuntimeBool); compileBool is an editor-only compile-time flag that prunes inactive If branches from WESL (GlobalCompileBool).",
         "Changing a type or deleting a constant clears the references of the nodes reading it (after a confirmation).",

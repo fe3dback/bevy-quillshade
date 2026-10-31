@@ -7,12 +7,11 @@ use shader_codegen_rust::MaterialEntry;
 use shader_codegen_rust::manifest::{ManifestMaterial, ManifestTexture, manifest_ron, parse_manifest};
 use shader_codegen_wesl::check::{self, BevySources, Files};
 use shader_codegen_wesl::{GenCtx, Generated, paths};
-use shader_graph_core::consts::GlobalConst;
+use shader_graph_core::consts::GlobalConsts;
 use shader_graph_core::gradient::{GradientCollection, texture_id};
-use shader_graph_core::ident::check_ident;
 use shader_graph_core::ir::{Ir, IrResult, build_ir, declared_function_sig, find_cycle};
 use shader_graph_core::model::{Asset, Preview};
-use shader_graph_core::registry::{FUNCTION_PREFIX, const_refs, curve_refs, gradient_refs, texture_refs};
+use shader_graph_core::registry::{FUNCTION_PREFIX, const_table_refs, curve_refs, gradient_refs, texture_refs};
 use shader_graph_core::texture::{self, INTERNAL_PREFIX, MATERIAL_TEXTURES, ProblemKind};
 use shader_graph_core::{Code, Diagnostic, FunctionSig, Registry};
 use shader_stdlib::internal::{DEFAULT_TEXTURE, INTERNAL_TEXTURES};
@@ -94,7 +93,6 @@ pub struct DepGraph {
 impl DepGraph {
     pub fn build(set: &AssetSet, registry: &Registry) -> DepGraph {
         let mut g = DepGraph::default();
-        let (consts, _) = collect_consts(set);
         let mut add = |user: &AssetId, used: AssetId| {
             g.uses.entry(user.clone()).or_default().insert(used.clone());
             g.used_by.entry(used).or_default().insert(user.clone());
@@ -109,10 +107,8 @@ impl DepGraph {
             for (_, _, path) in curve_refs(a, registry) {
                 add(id, AssetId::new(AssetType::Curve, path));
             }
-            for (_, _, name) in const_refs(a, registry) {
-                if let Some((table, _)) = consts.get(&name) {
-                    add(id, table.clone());
-                }
+            for (_, _, table) in const_table_refs(a, registry) {
+                add(id, AssetId::new(AssetType::Consts, table));
             }
             // Internal textures are not project assets.
             for (_, _, texture) in texture_refs(a, registry) {
@@ -143,13 +139,12 @@ impl DepGraph {
     }
 }
 
-/// Global constants nodes can read (decision 0017), by name with their table, and the problems of every table:
-/// load errors, bad paths (the whole table is ignored), bad or repeated names (that constant is ignored; a name
-/// defined again in a later table, in path order, is reported there and the first definition counts).
-pub type ConstTables = (BTreeMap<String, (AssetId, GlobalConst)>, BTreeMap<AssetId, Vec<Diagnostic>>);
+/// Global constant tables nodes can read (decision 0017), by path, and the problems of every table:
+/// load errors, bad paths (the whole table is ignored), empty or repeated names within the same table (E005).
+pub type ConstTables = (BTreeMap<String, GlobalConsts>, BTreeMap<AssetId, Vec<Diagnostic>>);
 
 pub fn collect_consts(set: &AssetSet) -> ConstTables {
-    let mut consts: BTreeMap<String, (AssetId, GlobalConst)> = BTreeMap::new();
+    let mut consts: BTreeMap<String, GlobalConsts> = BTreeMap::new();
     let mut diags: BTreeMap<AssetId, Vec<Diagnostic>> = BTreeMap::new();
     for (id, table) in &set.consts {
         let d = diags.entry(id.clone()).or_default();
@@ -162,18 +157,16 @@ pub fn collect_consts(set: &AssetSet) -> ConstTables {
                 continue;
             }
         };
+        let mut seen = BTreeSet::new();
         for c in &table.consts {
-            let problem = match (check_ident(&c.name), consts.get(&c.name)) {
-                (Err(e), _) => format!("constant name: {e}"),
-                (Ok(()), Some((other, _))) if other == id => format!("duplicate constant `{}`", c.name),
-                (Ok(()), Some((other, _))) => format!("constant `{}` is already defined in {other}", c.name),
-                (Ok(()), None) => {
-                    consts.insert(c.name.clone(), (id.clone(), c.clone()));
-                    continue;
-                }
-            };
-            d.push(Diagnostic::new(Code::E005, problem).in_asset(id.source_rel()));
+            let name = c.name.trim();
+            if name.is_empty() {
+                d.push(Diagnostic::new(Code::E005, "constant name must not be empty").in_asset(id.source_rel()));
+            } else if !seen.insert(name) {
+                d.push(Diagnostic::new(Code::E005, format!("duplicate constant `{name}`")).in_asset(id.source_rel()));
+            }
         }
+        consts.insert(id.path.clone(), table.clone());
     }
     (consts, diags)
 }
@@ -380,9 +373,10 @@ pub fn plan_set(project: &Project, set: &AssetSet, opts: &RegenOptions) -> (Rege
     // Global constants: values are inlined by the nodes reading them, tables generate nothing.
     let (consts, const_diags) = collect_consts(set);
     for (id, d) in const_diags {
-        results.entry(id).or_default().diagnostics.extend(d);
+        let r = results.entry(id).or_default();
+        r.ok = !d.iter().any(Diagnostic::is_error);
+        r.diagnostics.extend(d);
     }
-    let consts: BTreeMap<String, GlobalConst> = consts.into_iter().map(|(name, (_, c))| (name, c)).collect();
     // Texture assets: validated only, they generate nothing.
     for (id, d) in texture_diagnostics(project, set) {
         let r = results.entry(id).or_default();

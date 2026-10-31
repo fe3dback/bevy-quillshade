@@ -355,12 +355,12 @@ pub(crate) fn node_subpanes(editor: &Editor, id: &str) -> Vec<Box<dyn Scene>> {
     let choices = Choices {
         routes: route_declarations(&d.asset, &editor.domains.material().registry),
         curves: editor.curve_paths().into_iter().map(|p| (p.clone(), p)).collect(),
+        const_tables: editor.const_tables(),
         consts: Vec::new(),
         textures: editor.texture_choices(),
         gradients: editor.gradient_collections(),
         slots: gradient_slots(editor, &def.params(), &params),
     };
-    let global_consts = editor.global_consts();
     let inline = inline_for_param(&n.kind, &params);
     let mut rows: Vec<Box<dyn Scene>> = Vec::new();
     // Params that only apply to other settings (FunctionInput `min` / `max` of a non-Float input) are hidden.
@@ -374,13 +374,37 @@ pub(crate) fn node_subpanes(editor: &Editor, id: &str) -> Vec<Box<dyn Scene>> {
             c.curves.push((v.as_str().to_string(), format!("{} (missing)", v.as_str())));
             choices_here = Some(c);
         }
-        // Constants of the node's type; a missing one or one of another type stays visible (E006 / E003).
+        // A deleted or broken constant table stays visible as the current choice (the node reports E006).
+        if p.kind == ParamKind::GlobalConsts
+            && !v.as_str().is_empty()
+            && !choices.const_tables.iter().any(|c| c.0 == v.as_str())
+        {
+            let mut c = choices.clone();
+            c.const_tables.push((v.as_str().to_string(), format!("{} (missing)", v.as_str())));
+            choices_here = Some(c);
+        }
+        // Constants of the node's type in the selected table; a missing one or one of another type stays visible
+        // (E006 / E003).
         if let ParamKind::GlobalConst(ty) = p.kind {
             let mut c = choices.clone();
-            c.consts = global_consts.iter().filter(|k| k.1.1.ty == ty).map(|k| (k.0.clone(), k.0.clone())).collect();
-            if !v.as_str().is_empty() && !c.consts.iter().any(|k| k.0 == v.as_str()) {
-                let why = global_consts.get(v.as_str()).map_or("missing".into(), |k| format!("is {}", k.1.ty.label()));
-                c.consts.push((v.as_str().to_string(), format!("{} ({why})", v.as_str())));
+            let table = def
+                .params()
+                .into_iter()
+                .find(|p| p.kind == ParamKind::GlobalConsts)
+                .and_then(|p| params.get(&p.id))
+                .map(Value::as_str)
+                .and_then(|t| editor.const_table(t));
+            if let Some(t) = table {
+                c.consts = t.consts.iter().filter(|k| k.ty == ty).map(|k| (k.id.to_string(), k.name.clone())).collect();
+            }
+            if let Some(cid) = u32::try_from(v.as_i32()).ok().filter(|id| *id != 0)
+                && !c.consts.iter().any(|(id, _)| *id == cid.to_string())
+            {
+                let label = match table.and_then(|t| t.get_by_id(cid)) {
+                    Some(k) => format!("{} (is {})", k.name, k.ty.label()),
+                    None => format!("#{cid} (missing)"),
+                };
+                c.consts.push((cid.to_string(), label));
             }
             choices_here = Some(c);
         }

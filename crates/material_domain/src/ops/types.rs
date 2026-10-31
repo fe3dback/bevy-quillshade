@@ -47,10 +47,12 @@ pub use crate::curve::{CurveAction, CurveEdit, CurveKey, CurveProp};
 /// What a property widget of a global constant table edits (decision 0017).
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConstsProp {
-    /// Value of a constant.
-    Value(String),
-    /// Type of a constant (a change may ask first).
-    Type(String),
+    /// Name of a constant (by its `GlobalConst::id`).
+    Name(u32),
+    /// Value of a constant (by its `GlobalConst::id`).
+    Value(u32),
+    /// Type of a constant (by its `GlobalConst::id`; a change may ask first).
+    Type(u32),
     /// Name in the add form.
     DraftName,
     /// Type in the add form.
@@ -159,9 +161,9 @@ pub enum ConstsAction {
     /// Adds the constant of the add form.
     Add,
     /// Changes a constant's type; `confirmed` once the user agreed to clear the references that break.
-    SetType { name: String, ty: ConstType, confirmed: bool },
+    SetType { id: u32, ty: ConstType, confirmed: bool },
     /// Deletes a constant; `confirmed` once the user agreed to clear its references.
-    Delete { name: String, confirmed: bool },
+    Delete { id: u32, confirmed: bool },
     /// Undo (`undo`) or redo in the table; asks first when the step retypes or removes a constant nodes read.
     History { undo: bool, confirmed: bool },
 }

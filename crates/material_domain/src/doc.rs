@@ -380,19 +380,17 @@ pub(crate) fn node_title_in(
         _ if has_label(&n.kind) && !n.label.is_empty() => n.label.clone(),
         _ if n.kind.starts_with("stdlib::Constant") => params.get("value").map(short).unwrap_or(name),
         _ => {
-            // Sample Curve: the curve's name (decision 0015); Global*: the constant's name (decision 0017); texture
-            // nodes: the Texture asset's name; Sample Gradient: the collection's name (the gradient's name shows in
-            // its properties: the canvas rebuilds only on graph revisions, not on edits of the collection).
+            // Sample Curve: the curve's name (decision 0015); Global*: the constant table's name (decision 0017);
+            // texture nodes: the Texture asset's name; Sample Gradient: the collection's name (the gradient's or
+            // constant's name shows in its properties: the canvas rebuilds only on graph revisions, not on edits of
+            // the collection or table).
             let curve = def
                 .params()
                 .into_iter()
                 .find(|p| {
                     matches!(
                         p.kind,
-                        ParamKind::Curve
-                            | ParamKind::GlobalConst(_)
-                            | ParamKind::Texture
-                            | ParamKind::GradientCollection
+                        ParamKind::Curve | ParamKind::GlobalConsts | ParamKind::Texture | ParamKind::GradientCollection
                     )
                 })
                 .map(|c| p(&c.id));

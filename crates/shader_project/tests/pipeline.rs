@@ -400,11 +400,35 @@ fn global_consts_are_inlined_and_their_users_follow() {
     assert!(changed[0].ends_with("dir_fx/mat_global_tint.wesl"), "{changed:?}");
     assert!(read(&tint).contains("0.75f"));
 
-    // A name defined twice: E005 at the later table, the first definition counts.
+    // Renaming a constant in the table (including non-snake_case / arbitrary names) changes neither WESL nor material RON.
+    let mat = AssetId::new(AssetType::Material, "fx/global_tint");
+    let mat_ron_before = read(&mat.file(&p));
+    let wesl_before = read(&tint);
+    table.get_by_id_mut(1003).unwrap().name = "Glow Amount (HDR)!".into();
+    ops::save_consts(&p, &id, &table).unwrap();
+    let r = regenerate(&p, &RegenOptions::default()).unwrap();
+    assert!(!r.has_errors(), "{:?}", r.diagnostics().collect::<Vec<_>>());
+    assert!(r.changes.is_empty(), "renaming a constant must not rewrite WESL: {:?}", r.changes);
+    assert_eq!(read(&tint), wesl_before);
+    assert_eq!(read(&mat.file(&p)), mat_ron_before);
+    table.get_by_id_mut(1003).unwrap().name = "glow_amount".into();
+    ops::save_consts(&p, &id, &table).unwrap();
+
+    // Same constant name in another table is valid; duplicate or empty name in the SAME table is E005.
     let other = AssetId::new(AssetType::Consts, "more");
-    let dup = shader_graph_core::GlobalConsts::new(
+    let other_ok = shader_graph_core::GlobalConsts::new(
         "more",
         vec![GlobalConst::new("glow_amount", ConstType::Vec2, Value::Float(0.0))],
+    );
+    ops::save_consts(&p, &other, &other_ok).unwrap();
+    let r = regenerate(&p, &RegenOptions { dry_run: true, ..Default::default() }).unwrap();
+    assert!(!r.has_errors(), "{:?}", r.diagnostics().collect::<Vec<_>>());
+    let dup = shader_graph_core::GlobalConsts::new(
+        "more",
+        vec![
+            GlobalConst::new("same name", ConstType::Vec2, Value::Float(0.0)),
+            GlobalConst::new("same name", ConstType::F32, Value::Float(1.0)),
+        ],
     );
     ops::save_consts(&p, &other, &dup).unwrap();
     let r = regenerate(&p, &RegenOptions { dry_run: true, ..Default::default() }).unwrap();
@@ -412,18 +436,18 @@ fn global_consts_are_inlined_and_their_users_follow() {
     assert_eq!(errors.len(), 1, "{errors:?}");
     assert_eq!((errors[0].code, errors[0].asset.as_deref()), (Code::E005, Some("quillshade/material/more.consts.ron")));
 
-    // Type mismatch (E003), missing constant (E006), cleared reference (W106, outputs zero).
+    // Type mismatch (E003), missing constant (E006), cleared reference (W106, outputs 1.0).
     std::fs::remove_file(other.file(&p)).unwrap();
+    let glow_id = table.get("glow_amount").unwrap().id;
     table.get_mut("glow_amount").unwrap().ty = ConstType::Vec2;
     ops::save_consts(&p, &id, &table).unwrap();
     let r = regenerate(&p, &RegenOptions { dry_run: true, ..Default::default() }).unwrap();
-    let mat = AssetId::new(AssetType::Material, "fx/global_tint");
     let codes = |r: &shader_project::RegenReport| r.assets[&mat].diagnostics.iter().map(|d| d.code).collect::<Vec<_>>();
     assert_eq!(codes(&r), vec![Code::E003], "{:?}", r.assets[&mat].diagnostics);
     let mut a = shader_project::assets::load(&p, &mat).unwrap();
     let (registry, _) = shader_project::regen::project_registry(&p);
-    assert!(ops::clear_const_refs(&mut a, &registry, "glow_amount"));
-    assert!(!ops::clear_const_refs(&mut a, &registry, "glow_amount"));
+    assert!(ops::clear_const_refs(&mut a, &registry, "common/tuning", glow_id));
+    assert!(!ops::clear_const_refs(&mut a, &registry, "common/tuning", glow_id));
     ops::save(&p, &mat, &a).unwrap();
     let r = regenerate(&p, &RegenOptions::default()).unwrap();
     assert_eq!(codes(&r), vec![Code::W106]);
@@ -437,7 +461,8 @@ fn global_consts_are_inlined_and_their_users_follow() {
 
     // Every node without a constant outputs 1.0 / true, and the shader still compiles.
     for name in ["base_color", "glow_color", "stripe_scale", "use_stripes", "fancy_stripes"] {
-        ops::clear_const_refs(&mut a, &registry, name);
+        let cid = table.get(name).unwrap().id;
+        ops::clear_const_refs(&mut a, &registry, "common/tuning", cid);
     }
     ops::save(&p, &mat, &a).unwrap();
     let r = regenerate(&p, &RegenOptions { compile_check: bevy.as_ref(), ..Default::default() }).unwrap();
