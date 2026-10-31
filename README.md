@@ -11,7 +11,7 @@
 <p align="center">
   <img alt="Version 0.3" src="https://img.shields.io/badge/version-0.3-blue">
   <img alt="Bevy 0.20" src="https://img.shields.io/badge/bevy-0.20-232326">
-  <img alt="Status: alpha" src="https://img.shields.io/badge/status-alpha-orange">
+  <img alt="Status: public alpha" src="https://img.shields.io/badge/status-alpha-orange">
   <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-green">
 </p>
 
