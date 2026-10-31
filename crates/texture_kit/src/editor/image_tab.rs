@@ -7,12 +7,14 @@
 use std::fmt;
 use std::marker::PhantomData;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use bevy::prelude::*;
 use editor_core::action::{Action, Handled, TabAction};
 use editor_core::doc_kind::{DocCtx, StatusCtx, TabDoc};
 use editor_core::dynval::{PropKey, PropValue};
 use editor_core::editors::{EditorAreas, SidebarKey, ViewOf, bar_row, fill_sidebar_with, sidebar_body};
+use editor_core::preview::{PreviewHandle, start_preview};
 use editor_core::state::editor::Editor;
 use editor_core::tab::ViewKindId;
 use editor_core::theme::{TEXT, TEXT_DIM, text};
@@ -25,8 +27,8 @@ use project_core::{AssetRef, Project};
 
 use super::ops::{preview_edit, prop_of_key};
 use super::{
-    Channel, CreateTextureForFile, FileStamp, PREVIEW_HOTKEYS, PreviewDoc, PreviewInfoText, TextureDomain, TextureProp,
-    preview_area, preview_controls, texture_for_file,
+    CUBEMAP_PREVIEW_KIND, Channel, CreateTextureForFile, CubeMapViewMode, FileStamp, PREVIEW_HOTKEYS, PreviewDoc,
+    PreviewInfoText, TextureDomain, TextureProp, preview_area, preview_controls, texture_for_file,
 };
 use crate::{AddressMode, SamplerSettings, TextureSettings};
 
@@ -47,6 +49,10 @@ pub struct ImageDoc<D> {
     pub channel: Channel,
     /// The preview repeats the image 3x3 (editor-only).
     pub tiled: bool,
+    /// How a cube-map game image is shown in the preview (3D sphere or 2D strip; editor-only).
+    pub cube_mode: CubeMapViewMode,
+    /// RAII 3D cube-map preview session handle (`editor_core::preview::start_preview`).
+    pub preview: Arc<PreviewHandle>,
     domain: PhantomData<fn() -> D>,
 }
 
@@ -58,6 +64,8 @@ impl<D> Clone for ImageDoc<D> {
             revision: self.revision,
             channel: self.channel,
             tiled: self.tiled,
+            cube_mode: self.cube_mode,
+            preview: Arc::clone(&self.preview),
             domain: PhantomData,
         }
     }
@@ -65,7 +73,11 @@ impl<D> Clone for ImageDoc<D> {
 
 impl<D> fmt::Debug for ImageDoc<D> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ImageDoc").field("path", &self.path).field("revision", &self.revision).finish_non_exhaustive()
+        f.debug_struct("ImageDoc")
+            .field("path", &self.path)
+            .field("cube_mode", &self.cube_mode)
+            .field("revision", &self.revision)
+            .finish_non_exhaustive()
     }
 }
 
@@ -77,6 +89,8 @@ impl<D> ImageDoc<D> {
             revision: 0,
             channel: None,
             tiled: false,
+            cube_mode: CubeMapViewMode::Sphere,
+            preview: Arc::new(start_preview(CUBEMAP_PREVIEW_KIND)),
             domain: PhantomData,
         };
         doc.reload(project);
@@ -127,6 +141,18 @@ impl<D: TextureDomain> PreviewDoc for ImageDoc<D> {
 
     fn set_tiled(&mut self, tiled: bool) {
         self.tiled = tiled;
+    }
+
+    fn cube_mode(&self) -> CubeMapViewMode {
+        self.cube_mode
+    }
+
+    fn set_cube_mode(&mut self, mode: CubeMapViewMode) {
+        self.cube_mode = mode;
+    }
+
+    fn preview_handle(&self) -> Option<&PreviewHandle> {
+        Some(&self.preview)
     }
 }
 
@@ -192,6 +218,10 @@ impl<D: TextureDomain> TabDoc for ImageDoc<D> {
 
     fn config_key(&self) -> Option<String> {
         Some(format!("{GAME_KEY_PREFIX}{}", self.path))
+    }
+
+    fn preview_handle(&self) -> Option<&PreviewHandle> {
+        Some(&self.preview)
     }
 }
 
@@ -296,12 +326,12 @@ pub fn image_view<D: TextureDomain>() -> impl Scene {
     }
 }
 
-/// Rebuilds the editor topbar when another image tab is active, its file changed or its channel changed (the
-/// buttons show the choice; Tile 3x3 shows its own state).
+/// Rebuilds the editor topbar when another image tab is active, its file changed, its channel changed or its cube-map
+/// mode changed (the buttons show the choice; Tile 3x3 shows its own state).
 fn redraw_bar<D: TextureDomain>(
     editor: Res<Editor>,
     bar: Query<Entity, With<ImageViewBar<D>>>,
-    mut last: Local<Option<(PathBuf, String, u64, Option<usize>)>>,
+    mut last: Local<Option<(PathBuf, String, u64, Option<usize>, CubeMapViewMode)>>,
     mut commands: Commands,
 ) {
     let Ok(bar) = bar.single() else { return };
@@ -311,7 +341,7 @@ fn redraw_bar<D: TextureDomain>(
     };
     let Some(project) = &editor.project else { return };
     // The root too: another project's tab of the same path may be restored without a frame in between.
-    let key = (project.root.clone(), doc.path.clone(), doc.revision, doc.channel);
+    let key = (project.root.clone(), doc.path.clone(), doc.revision, doc.channel, doc.cube_mode);
     if last.as_ref() == Some(&key) {
         return;
     }

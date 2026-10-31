@@ -35,11 +35,13 @@ pub struct EditorCorePlugin;
 
 impl Plugin for EditorCorePlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<Actions>().add_systems(Update, (poll_watcher, apply_actions).chain());
+        app.init_resource::<Actions>()
+            .add_systems(Update, (poll_watcher, apply_actions, crate::preview::sync_previews).chain());
         let Some(editor) = app.world().get_resource::<Editor>() else {
             panic!("EditorCorePlugin needs the Editor resource (Editor::new with the domain list) inserted first");
         };
         let list = editor.domain_list.clone();
+        app.insert_resource(crate::preview::PreviewTracker::new(list.previews()));
         app.insert_resource(list.kind_defs());
         app.insert_resource(list.as_ref().clone());
         for add in list.domains().iter().flat_map(|d| d.logic.clone()) {

@@ -1,21 +1,25 @@
 //! The Light domain's state in the editor (design §6.3, §9.2): the assets of the last scan, the diagnostics of what
 //! the open tabs show, generation (Generate, after a save) and what follows a renamed or deleted Light texture.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
+use curve_kit::editor::CurveDoc;
 use editor_core::domain::DomainState;
 use editor_core::message::Level;
 use editor_core::state::editor::Editor;
-use editor_core::tab::Tab;
+use editor_core::tab::{Tab, TextDoc, parse_highlights};
 use editor_core::util::text::plural;
 use project_core::regen::commit;
 use project_core::writer::Change;
 use project_core::{AssetRef, Diagnostic, DomainId};
+use texture_kit::TextureAsset;
 use texture_kit::editor::TextureDoc;
 
-use super::{EnvironmentDoc, LightTexture};
+use super::{EnvironmentDoc, LightCurve, LightTexture};
 use crate::backend::{
-    ENVIRONMENT_SUFFIX, LIGHT, LightAssets, TEXTURE_SUFFIX, plan_assets, rewrite_texture_refs, validate,
+    CURVE_SUFFIX, ENVIRONMENT_SUFFIX, LIGHT, LightAssets, TEXTURE_SUFFIX, plan_assets, rewrite_texture_refs,
+    scan_game_conflicts, texture_ref, validate_in_memory, validate_texture, validate_textures,
 };
 
 /// What the Light domain keeps between frames.
@@ -23,33 +27,92 @@ use crate::backend::{
 pub struct LightState {
     /// The Light assets on disk, as of the last rescan or save.
     pub assets: LightAssets,
-    /// [`validate`] of `assets` with the open tabs' (unsaved) environments and Texture assets in place of their files.
+    /// [`crate::backend::validate`] of `assets` with the open tabs' (unsaved) environments and Texture assets in place
+    /// of their files.
     pub diagnostics: Vec<Diagnostic>,
+    /// Cached per-texture diagnostics (`(asset, diagnostics)`) so curve and environment edits do not touch the disk.
+    pub texture_diags: BTreeMap<String, (TextureAsset, Vec<Diagnostic>)>,
+    /// Cached game Rust conflict warnings (`LW102`) from the last rescan or save.
+    pub game_conflicts: Vec<Diagnostic>,
+    /// Incremented on every `reload` so [`super::PreviewCubemapCache`] knows when to drop cached `.ktx2` handles.
+    pub reload_generation: u64,
 }
 
 impl LightState {
     /// Re-reads the assets from disk, then [`LightState::revalidate`].
     fn reload(editor: &mut Editor) {
-        let Some(project) = editor.project.as_ref().filter(|p| p.domain_enabled(LIGHT)) else {
-            *editor.domains.get_mut::<Self>().expect("Light domain not registered") = Self::default();
+        let project = editor.project.clone().filter(|p| p.domain_enabled(LIGHT));
+        let game_conflicts = project.as_ref().map(scan_game_conflicts).unwrap_or_default();
+        for doc in editor.tabs.iter_mut().filter_map(|t| t.get_mut::<super::InspectGameDoc>()) {
+            doc.set_conflicts(game_conflicts.clone());
+        }
+        let Some(project) = project else {
+            let state = editor.domains.get_mut::<Self>().expect("Light domain not registered");
+            let next_gen = state.reload_generation + 1;
+            *state = Self { reload_generation: next_gen, ..Self::default() };
             return;
         };
-        let assets = LightAssets::load(project);
-        editor.domains.get_mut::<Self>().expect("Light domain not registered").assets = assets;
+        let assets = LightAssets::load(&project);
+        let texture_diags = validate_textures(&project, &assets.textures)
+            .into_iter()
+            .filter_map(|(k, d)| Some((k.clone(), (assets.textures.get(&k)?.clone(), d))))
+            .collect();
+        let state = editor.domains.get_mut::<Self>().expect("Light domain not registered");
+        state.assets = assets;
+        state.texture_diags = texture_diags;
+        state.game_conflicts = game_conflicts;
+        state.reload_generation += 1;
         Self::revalidate(editor);
     }
 
     /// The diagnostics of the assets as the open tabs show them; the console/logs, the trees' error colours and the
     /// Texture tabs' problems redraw when they changed.
     fn revalidate(editor: &mut Editor) {
-        let diagnostics = match editor.project.as_ref().filter(|p| p.domain_enabled(LIGHT)) {
-            Some(project) => {
-                let assets = &editor.domains.get::<Self>().expect("Light domain not registered").assets;
-                validate(project, &shown(assets, &editor.tabs))
+        let Some(project) = editor.project.clone().filter(|p| p.domain_enabled(LIGHT)) else {
+            let state = editor.domains.get_mut::<Self>().expect("Light domain not registered");
+            if !state.diagnostics.is_empty() {
+                state.diagnostics.clear();
+                editor.ui.log += 1;
+                editor.ui.browser += 1;
+                editor.ui.props += 1;
             }
-            None => Vec::new(),
+            return;
+        };
+        let shown_assets = {
+            let state = editor.domains.get::<Self>().expect("Light domain not registered");
+            shown(&state.assets, &editor.tabs)
         };
         let state = editor.domains.get_mut::<Self>().expect("Light domain not registered");
+        let prev_len = state.texture_diags.len();
+        state.texture_diags.retain(|k, _| shown_assets.textures.contains_key(k));
+        let paths_changed = state.texture_diags.len() != prev_len
+            || shown_assets
+                .textures
+                .iter()
+                .any(|(k, t)| state.texture_diags.get(k).is_none_or(|(cached, _)| cached.path != t.path));
+        if paths_changed {
+            state.texture_diags.clear();
+        }
+        if shown_assets.textures.iter().any(|(k, t)| state.texture_diags.get(k).is_none_or(|(cached, _)| cached != t)) {
+            let mut by_file: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+            for (path, t) in &shown_assets.textures {
+                by_file.entry(t.path.as_str()).or_default().push(path.as_str());
+            }
+            for (path, t) in &shown_assets.textures {
+                if state.texture_diags.get(path).is_none_or(|(cached, _)| cached != t) {
+                    let others: Vec<String> = by_file[t.path.as_str()]
+                        .iter()
+                        .filter(|o| **o != path)
+                        .map(|o| texture_ref(o).source_rel())
+                        .collect();
+                    let diags = validate_texture(&project, path, t, &others);
+                    state.texture_diags.insert(path.clone(), (t.clone(), diags));
+                }
+            }
+        }
+        let tex_map: BTreeMap<String, Vec<Diagnostic>> =
+            state.texture_diags.iter().map(|(k, (_, d))| (k.clone(), d.clone())).collect();
+        let diagnostics = validate_in_memory(&shown_assets, &tex_map, &state.game_conflicts);
         if diagnostics != state.diagnostics {
             state.diagnostics = diagnostics;
             editor.ui.log += 1;
@@ -110,13 +173,15 @@ fn is_rust_in(path: &Path, crate_dir: &Path) -> bool {
     path.starts_with(crate_dir) && path.extension().is_some_and(|e| e == "rs")
 }
 
-/// `assets` with the open Light tabs' environments and Texture assets (unsaved edits included) in place of their
-/// files.
-fn shown(assets: &LightAssets, tabs: &[Tab]) -> LightAssets {
+/// `assets` with the open Light tabs' environments, curves and Texture assets (unsaved edits included) in place of
+/// their files.
+pub(super) fn shown(assets: &LightAssets, tabs: &[Tab]) -> LightAssets {
     let mut out = assets.clone();
     for t in tabs.iter().filter(|t| t.domain == LIGHT) {
         if let Some(d) = t.get::<EnvironmentDoc>() {
             out.environments.insert(d.aref.path.clone(), d.env.clone());
+        } else if let Some(d) = t.get::<CurveDoc<LightCurve>>() {
+            out.curves.insert(d.aref.path.clone(), d.curve.clone());
         } else if let Some(d) = t.get::<TextureDoc<LightTexture>>() {
             out.textures.insert(d.aref.path.clone(), d.asset.clone());
         }
@@ -216,11 +281,34 @@ impl DomainState for LightState {
         }
     }
 
-    /// Opens the diagnostic's asset.
+    /// Opens the diagnostic's asset, or a read-only Rust text tab when the diagnostic points to a game `.rs` file
+    /// (`LW102`).
     fn focus_diagnostic(editor: &mut Editor, diag: &Diagnostic) {
         let Some(rel) = diag.asset.as_deref() else { return };
-        if let Some(r) = project_core::asset_ref::parse(rel, LIGHT, &[ENVIRONMENT_SUFFIX, TEXTURE_SUFFIX]) {
+        if let Some(r) = project_core::asset_ref::parse(rel, LIGHT, &[ENVIRONMENT_SUFFIX, CURVE_SUFFIX, TEXTURE_SUFFIX])
+        {
             editor.open_ref(&r);
+        } else if let Some(project) = editor.project.clone() {
+            let mut lines = diag.location.as_deref().map(parse_highlights).unwrap_or_default();
+            if lines.is_empty()
+                && let Some(state) = editor.domains.get::<Self>()
+            {
+                for conflict in state.game_conflicts.iter().filter(|d| d.asset.as_deref() == Some(rel)) {
+                    if let Some(loc) = conflict.location.as_deref() {
+                        lines.extend(parse_highlights(loc));
+                    }
+                }
+            }
+            if let Some(i) = editor.tabs.iter().position(|t| t.get::<TextDoc>().is_some_and(|d| d.rel == rel)) {
+                if let Some(doc) = editor.tabs[i].get_mut::<TextDoc>() {
+                    doc.set_highlights(lines);
+                }
+                editor.activate(i);
+            } else {
+                let source = AssetRef { domain: LIGHT, path: rel.to_string(), suffix: "rs" };
+                let doc = TextDoc::open(&project, source, "rust", project.root.join(rel)).with_highlights(lines);
+                editor.push_tab(Tab::new(LIGHT, doc));
+            }
         }
     }
 }
@@ -228,16 +316,26 @@ impl DomainState for LightState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::{Environment, environment_ref};
+    use crate::backend::{Environment, curve_ref, environment_ref};
+    use curve_kit::Curve;
 
-    /// The open tab's environment replaces its file's in what is validated.
+    /// The open tab's environment or curve replaces its file's in what is validated.
     #[test]
     fn open_tabs_override_the_files() {
         let mut assets = LightAssets::default();
         assets.environments.insert("day".into(), Environment::default());
+        assets.curves.insert("ease".into(), Curve::ramp("ease"));
         let env = Environment { cubemap: Some("sky".into()), ..Environment::default() };
-        let tabs = [Tab::new(LIGHT, EnvironmentDoc::new(environment_ref("day"), env.clone()))];
-        assert_eq!(shown(&assets, &tabs).environments["day"], env);
+        let mut edited_curve = Curve::ramp("ease");
+        edited_curve.max = 2.0;
+        let tabs = [
+            Tab::new(LIGHT, EnvironmentDoc::new(environment_ref("day"), env.clone())),
+            Tab::new(LIGHT, CurveDoc::<LightCurve>::new(curve_ref("ease"), edited_curve.clone())),
+        ];
+        let overridden = shown(&assets, &tabs);
+        assert_eq!(overridden.environments["day"], env);
+        assert_eq!(overridden.curves["ease"], edited_curve);
         assert_eq!(shown(&assets, &[]).environments["day"], Environment::default());
+        assert_eq!(shown(&assets, &[]).curves["ease"], Curve::ramp("ease"));
     }
 }

@@ -18,15 +18,22 @@ use editor_core::dynval::{Payload, PropKey, PropValue};
 use editor_core::menu::MainMenu;
 use editor_core::message::Level;
 use editor_core::state::editor::Editor;
-use editor_core::tab::ViewKindId;
+use editor_core::tab::{TextDoc, ViewKindId};
 use editor_core::ui::areas::{AreasPlugin, editor_topbar, right_sidebar};
 use editor_core::ui::icons::IconId;
 use editor_core::ui::menu::menu_entries;
 use editor_core::ui::props::PropField;
 use editor_core::ui::shell::{DomainWindowPlugin, domain_doc_views};
 use editor_core::ui::tree::{GameAssetsTree, TreeItem, TreeRow, TreeSource, row_menu};
-use light_domain::backend::{Environment, LIGHT, environment_ref, load_environment, save_environment, texture_ref};
-use light_domain::{EnvironmentDoc, EnvironmentProp, LightDomain, LightState, LightTexture};
+use light_domain::backend::{
+    Environment, FogFalloffDef, LIGHT, TonemappingMode, curve_ref, environment_ref, load_environment, save_environment,
+    texture_ref,
+};
+use light_domain::{
+    BlendedSkybox, CgSection, EnvironmentAction, EnvironmentDoc, EnvironmentProp, INSPECT_GAME_TOOL, InspectGameDoc,
+    LIGHT_PREVIEW_TOOL, LightCurve, LightCurveDoc, LightDomain, LightPreviewDoc, LightPreviewProp,
+    LightPreviewSessions, LightState, LightTexture, interpolate_environments,
+};
 use project_core::regen::DomainBackend;
 use project_core::{AssetRef, DomainId, Project};
 use texture_kit::editor::{CreateTextureForFile, TextureAction, TextureDoc, TextureDomain, TextureEdit};
@@ -179,9 +186,15 @@ fn light_assets_menu() {
     let (_dir, mut e) = project();
     e.apply(Action::SwitchDomain(LIGHT));
     let entries = menu_entries(MainMenu::Assets, &e);
-    assert_eq!(labels(&entries), ["New Environment...", "New Texture...", "New folder...", "", "Generate"]);
-    // Both templates make a file that opens in its tab.
-    for (i, (path, suffix)) in [("outdoor/dusk", "environment"), ("textures/stars", "texture")].into_iter().enumerate()
+    assert_eq!(
+        labels(&entries),
+        ["New Environment...", "New Curve...", "New Texture...", "New folder...", "", "Generate"]
+    );
+    // All three templates make a file that opens in its tab.
+    for (i, (path, suffix)) in
+        [("outdoor/dusk", "environment"), ("outdoor/ease", "curve"), ("textures/stars", "texture")]
+            .into_iter()
+            .enumerate()
     {
         e.apply(entries[i].action.clone());
         e.apply(Action::Submit(path.into()));
@@ -208,7 +221,7 @@ fn environment_edit_undo_save() {
     assert_eq!(active_env(&e).env.skybox_brightness, 500.0);
     assert!(e.is_dirty());
     e.apply(Action::Tab(TabAction::Undo));
-    assert_eq!(active_env(&e).env.skybox_brightness, 1000.0);
+    assert_eq!(active_env(&e).env.skybox_brightness, 2500.0);
     assert!(!e.is_dirty());
     e.apply(Action::Tab(TabAction::Redo));
     assert_eq!(active_env(&e).env.skybox_brightness, 500.0);
@@ -230,7 +243,7 @@ fn environment_edit_undo_save() {
     e.apply(Action::Tab(TabAction::CommitInline));
     assert_eq!(active_env(&e).env.env_intensity, 30.0);
     e.apply(Action::Tab(TabAction::Undo));
-    assert_eq!(active_env(&e).env.env_intensity, 1.0);
+    assert_eq!(active_env(&e).env.env_intensity, 2500.0);
     let layout = active_env(&e).layout;
     set_number(&mut e, EnvironmentProp::EnvIntensity, -2.0);
     assert_eq!(active_env(&e).env.env_intensity, 0.0);
@@ -339,7 +352,7 @@ fn rename_light_texture_updates_open_environment() {
     // Undoing the unsaved edit keeps the renamed cube map: the undo state followed too.
     e.apply(Action::OpenAsset(environment_ref("day")));
     e.apply(Action::Tab(TabAction::Undo));
-    assert_eq!(active_env(&e).env.env_intensity, 1.0);
+    assert_eq!(active_env(&e).env.env_intensity, 2500.0);
     assert_eq!(active_env(&e).env.cubemap.as_deref(), Some("skies/blue"));
     assert!(!crate_is_dirty(&e, "day"));
 
@@ -435,10 +448,11 @@ fn app(editor: Editor) -> App {
     app.init_resource::<bevy::feathers::controls::UnitsRegistry>();
     app.insert_resource(bevy::feathers::theme::UiTheme(bevy::feathers::dark_theme::create_dark_theme()));
     app.insert_resource(editor);
-    app.add_plugins((EditorPlugins, AreasPlugin, DomainWindowPlugin));
+    app.add_plugins((EditorPlugins, AreasPlugin, DomainWindowPlugin, editor_core::ui::text_view::TextViewPlugin));
     for view in domain_doc_views(app.world().resource::<DomainList>()) {
         app.world_mut().spawn_scene(view).unwrap();
     }
+    app.world_mut().spawn_scene(editor_core::ui::text_view::text_view()).unwrap();
     app.world_mut().spawn_scene(editor_topbar()).unwrap();
     app.world_mut().spawn_scene(right_sidebar()).unwrap();
     app.finish();
@@ -453,8 +467,8 @@ fn field(app: &mut App, p: EnvironmentProp) -> Option<(Entity, PropField)> {
     q.iter(w).find(|(_, f)| f.target == p).map(|(e, f)| (e, f.clone()))
 }
 
-/// Design §9.2: the form is core's property widgets: a select of "None" and the Light textures, two number fields;
-/// a number field's change reaches the document.
+/// Design §9.2: the form is core's property widgets: a select of "None" and the Light textures, number fields, and
+/// `FeathersColorInput` pickers; changes reach the document and intermediate drag frames do not rebuild the sidebar.
 #[test]
 fn environment_form_uses_core_widgets() {
     let (_dir, editor) = project();
@@ -472,4 +486,631 @@ fn environment_form_uses_core_widgets() {
     app.update();
     app.update();
     assert_eq!(active_env(app.world().resource::<Editor>()).env.skybox_brightness, 250.0);
+
+    // Intermediate drag frames on an already-dirty document do not bump `editor.ui.props`.
+    let props_before = app.world().resource::<Editor>().ui.props;
+    app.world_mut().trigger(ValueChange { source: brightness, value: 300.0f32, is_final: false });
+    app.update();
+    assert_eq!(app.world().resource::<Editor>().ui.props, props_before);
+
+    // `FeathersColorInput` updates color properties and ends its undo merge step on `is_final: true`.
+    let (ambient_color, _) = field(&mut app, EnvironmentProp::AmbientColor).expect("the ambient color picker");
+    app.world_mut().trigger(ValueChange {
+        source: ambient_color,
+        value: Color::linear_rgba(0.25, 0.5, 0.75, 1.0),
+        is_final: true,
+    });
+    app.update();
+    app.update();
+    assert_eq!(active_env(app.world().resource::<Editor>()).env.ambient_color, [0.25, 0.5, 0.75, 1.0]);
+}
+
+/// Editing the extended EnvironmentProp fields (colors, directional lights, tonemapping, color grading, distance fog)
+/// updates the document and supports undo / redo.
+#[test]
+fn extended_environment_fields_edit_and_undo() {
+    let (_dir, mut e) = project();
+    e.apply(Action::OpenAsset(environment_ref("day")));
+    assert_eq!(active_env(&e).env.lights.len(), 3);
+
+    // Add a 4th directional light, edit its name and elevation, then remove the 2nd light.
+    e.apply(EnvironmentAction::AddLight);
+    assert_eq!(active_env(&e).env.lights.len(), 4);
+    assert_eq!(active_env(&e).env.lights[3].name, "Light 4");
+    e.apply(Action::Tab(TabAction::SetValue {
+        key: key(EnvironmentProp::LightName(3)),
+        value: PropValue::Str("Rim".into()),
+        merge: false,
+    }));
+    assert_eq!(active_env(&e).env.lights[3].name, "Rim");
+    set_number(&mut e, EnvironmentProp::LightElevation(3), 42.0);
+    assert_eq!(active_env(&e).env.lights[3].elevation_deg, 42.0);
+    e.apply(EnvironmentAction::RemoveLight(1));
+    assert_eq!(active_env(&e).env.lights.len(), 3);
+    e.apply(Action::Tab(TabAction::Undo));
+    assert_eq!(active_env(&e).env.lights.len(), 4);
+
+    // Edit clear color component 0 (R)
+    e.apply(Action::Tab(TabAction::SetComponent {
+        key: key(EnvironmentProp::ClearColor),
+        comp: 0,
+        value: 0.25,
+        is_final: true,
+    }));
+    assert_eq!(active_env(&e).env.clear_color[0], 0.25);
+
+    // Select Tonemapping mode
+    e.apply(Action::Tab(TabAction::SetValue {
+        key: key(EnvironmentProp::Tonemapping),
+        value: PropValue::Str("AgX".into()),
+        merge: false,
+    }));
+    assert_eq!(active_env(&e).env.tonemapping, TonemappingMode::AgX);
+
+    // Edit color grading shadows contrast
+    set_number(&mut e, EnvironmentProp::CgSectionContrast(CgSection::Shadows), 1.35);
+    assert_eq!(active_env(&e).env.color_grading.shadows.contrast, 1.35);
+
+    // Switch fog falloff mode to Exponential and edit density
+    e.apply(Action::Tab(TabAction::SetValue {
+        key: key(EnvironmentProp::FogFalloffMode),
+        value: PropValue::Str("Exponential".into()),
+        merge: false,
+    }));
+    assert_eq!(active_env(&e).env.fog.falloff, FogFalloffDef::Exponential { density: 0.01 });
+    set_number(&mut e, EnvironmentProp::FogDensity, 0.04);
+    assert_eq!(active_env(&e).env.fog.falloff, FogFalloffDef::Exponential { density: 0.04 });
+
+    e.apply(Action::Tab(TabAction::Undo));
+    assert_eq!(active_env(&e).env.fog.falloff, FogFalloffDef::Exponential { density: 0.01 });
+}
+
+/// Editing an open LightCurve tab updates LW103 live in LightState::diagnostics.
+#[test]
+fn curve_tab_edits_update_live_lw103_diagnostics() {
+    let (_dir, mut e) = project();
+    let p = e.project.as_ref().unwrap().clone();
+    curve_kit::editor::save(&p, &curve_ref("ease"), &curve_kit::Curve::ramp("ease")).unwrap();
+    e.rescan();
+    e.apply(Action::OpenAsset(curve_ref("ease")));
+    assert!(e.active_doc::<LightCurveDoc>().is_some());
+
+    let curve_codes = |e: &Editor| {
+        let s = e.domains.get::<LightState>().unwrap();
+        let rel = curve_ref("ease").source_rel();
+        s.diagnostics
+            .iter()
+            .filter(|d| d.asset.as_deref() == Some(rel.as_str()))
+            .map(|d| d.code.clone())
+            .collect::<Vec<_>>()
+    };
+    assert!(curve_codes(&e).is_empty());
+
+    // Change the curve's Max range from 1.0 to 2.0: LW103 appears immediately on the unsaved tab.
+    let range_key = curve_kit::editor::curve_key::<LightCurve>(curve_kit::editor::CurveProp::Range);
+    e.apply(Action::Tab(TabAction::SetComponent { key: range_key, comp: 1, value: 2.0, is_final: true }));
+    assert_eq!(curve_codes(&e), ["LW103"]);
+
+    // Undo restores Max = 1.0 and clears LW103.
+    e.apply(Action::Tab(TabAction::Undo));
+    assert!(curve_codes(&e).is_empty());
+}
+
+/// Focusing an LW102 diagnostic opens a read-only Rust TextDoc tab for the conflicting game source file with the
+/// conflicting line highlighted.
+#[test]
+fn focus_lw102_diagnostic_opens_game_rust_file_in_text_tab() {
+    use std::collections::BTreeSet;
+
+    let (dir, mut e) = project();
+    let src_dir = dir.path().join("src");
+    std::fs::create_dir_all(&src_dir).unwrap();
+    std::fs::write(src_dir.join("main.rs"), "fn setup() {\n    let _ = DirectionalLight::default();\n}\n").unwrap();
+    e.rescan();
+
+    let diag = e
+        .domains
+        .get::<LightState>()
+        .unwrap()
+        .diagnostics
+        .iter()
+        .find(|d| d.code == "LW102")
+        .cloned()
+        .expect("LW102 diagnostic for src/main.rs");
+    assert_eq!(diag.asset.as_deref(), Some("src/main.rs"));
+    assert_eq!(diag.location.as_deref(), Some("line 2"));
+
+    e.apply(Action::FocusDiagnostic(diag.clone()));
+    let text_doc = e.active_doc::<TextDoc>().expect("opened a read-only TextDoc tab");
+    assert_eq!(text_doc.rel, "src/main.rs");
+    assert_eq!(text_doc.lang, "rust");
+    assert_eq!(text_doc.highlights, BTreeSet::from([2]));
+    assert!(text_doc.text.as_deref().unwrap_or_default().contains("DirectionalLight"));
+    assert_eq!(e.status_info().map(|s| s.counts), Some(vec!["3 lines".to_string(), "highlight=[2]".to_string()]));
+
+    // Focusing the same diagnostic again activates the existing tab rather than duplicating it.
+    e.apply(Action::OpenAsset(environment_ref("day")));
+    let tab_count = e.tabs.len();
+    e.apply(Action::FocusDiagnostic(diag));
+    assert_eq!(e.tabs.len(), tab_count);
+    assert_eq!(e.active_doc::<TextDoc>().map(|d| d.rel.as_str()), Some("src/main.rs"));
+}
+
+/// The `Inspect Game` tool in `Tools -> Inspect Game...` scans game `.rs` files, refreshes on rescan, and focuses
+/// conflicts into read-only Rust `TextDoc` tabs with line highlighting.
+#[test]
+fn inspect_game_tool_in_tools_menu_scans_and_focuses_conflicts() {
+    use std::collections::BTreeSet;
+
+    let (dir, mut e) = project();
+    e.apply(Action::SwitchDomain(LIGHT));
+    let entries = menu_entries(MainMenu::Tools, &e);
+    assert_eq!(labels(&entries), ["Inspect Game...", "Light Transition Preview..."]);
+    assert_eq!(entries[0].action, Action::OpenTool { domain: LIGHT, id: INSPECT_GAME_TOOL, arg: None });
+    assert_eq!(entries[1].action, Action::OpenTool { domain: LIGHT, id: LIGHT_PREVIEW_TOOL, arg: None });
+
+    e.apply(entries[0].action.clone());
+    assert!(e.active_doc::<InspectGameDoc>().is_some_and(|d| d.conflicts.is_empty()));
+
+    let src_dir = dir.path().join("src");
+    std::fs::create_dir_all(&src_dir).unwrap();
+    std::fs::write(
+        src_dir.join("main.rs"),
+        "fn setup() {\n    let _ = DirectionalLight::default();\n    let _ = DistanceFog::default();\n}\n",
+    )
+    .unwrap();
+    e.apply(Action::Rescan);
+
+    let conflicts = e.active_doc::<InspectGameDoc>().expect("Inspect Game tab active").conflicts.clone();
+    assert_eq!(conflicts.len(), 2);
+    assert!(conflicts.iter().all(|d| d.code == "LW102" && d.asset.as_deref() == Some("src/main.rs")));
+    assert_eq!(conflicts[0].location.as_deref(), Some("line 2"));
+    assert_eq!(conflicts[1].location.as_deref(), Some("line 3"));
+
+    e.apply(Action::FocusDiagnostic(conflicts[0].clone()));
+    let text_doc = e.active_doc::<TextDoc>().expect("opened src/main.rs in a read-only TextDoc tab");
+    assert_eq!(text_doc.rel, "src/main.rs");
+    assert_eq!(text_doc.lang, "rust");
+    assert_eq!(text_doc.highlights, BTreeSet::from([2]));
+
+    // Focusing the second conflict in the same file updates `highlights` on the already-open TextDoc tab.
+    e.apply(Action::FocusDiagnostic(conflicts[1].clone()));
+    let text_doc = e.active_doc::<TextDoc>().expect("reused src/main.rs TextDoc tab");
+    assert_eq!(text_doc.highlights, BTreeSet::from([3]));
+}
+
+/// The read-only code view (`text_view`) renders highlighted lines (`highlight=[1,3,5-6]`) with `ACCENT2` background
+/// and unhighlighted lines with `Color::NONE`.
+#[test]
+fn text_view_renders_highlighted_lines_with_accent2_background() {
+    use editor_core::tab::Tab;
+    use editor_core::theme::ACCENT2;
+    use editor_core::ui::text_view::TextViewLine;
+
+    let (dir, mut editor) = project();
+    let p = editor.project.as_ref().unwrap().clone();
+    let rs_path = dir.path().join("src/main.rs");
+    std::fs::create_dir_all(rs_path.parent().unwrap()).unwrap();
+    std::fs::write(&rs_path, "line1();\nline2();\nline3();\nline4();\nline5();\nline6();\n").unwrap();
+
+    let source = AssetRef { domain: LIGHT, path: "src/main.rs".into(), suffix: "rs" };
+    let doc = TextDoc::open(&p, source, "rust", rs_path).with_highlight_spec("highlight=[1,3,5-6]");
+    editor.push_tab(Tab::new(LIGHT, doc));
+
+    let mut app = app(editor);
+    app.update();
+
+    let mut runs: Vec<(TextViewLine, Color)> = app
+        .world_mut()
+        .query::<(&TextViewLine, &BackgroundColor)>()
+        .iter(app.world())
+        .map(|(line, bg)| (*line, bg.0))
+        .collect();
+    runs.sort_by_key(|(line, _)| line.start);
+
+    assert_eq!(
+        runs,
+        vec![
+            (TextViewLine { start: 1, end: 1, highlighted: true }, ACCENT2),
+            (TextViewLine { start: 2, end: 2, highlighted: false }, Color::NONE),
+            (TextViewLine { start: 3, end: 3, highlighted: true }, ACCENT2),
+            (TextViewLine { start: 4, end: 4, highlighted: false }, Color::NONE),
+            (TextViewLine { start: 5, end: 6, highlighted: true }, ACCENT2),
+        ]
+    );
+}
+
+/// Opening an Environment tab starts a 3D RTT preview studio (`start_preview`), syncs edited environment properties to
+/// the preview camera and lights, and cleans up all preview entities and resources on tab close (RAII drop) or
+/// explicit `.clean()`.
+#[test]
+fn environment_preview_starts_on_open_and_cleans_on_close_or_explicit_clean() {
+    use bevy::camera::Exposure;
+    use editor_core::preview::{PreviewEntity, PreviewTracker};
+
+    let (_dir, editor) = project();
+    let mut app = app(editor);
+
+    app.world_mut().resource_mut::<Actions>().push(Action::OpenAsset(environment_ref("day")));
+    app.update();
+
+    let id = active_env(app.world().resource::<Editor>()).preview.id();
+    assert!(id > 0);
+    assert!(app.world().resource::<PreviewTracker>().is_spawned(id));
+    let cam_entity = app.world().resource::<LightPreviewSessions>().sessions.get(&id).expect("session spawned").camera;
+    let entity_count = app.world_mut().query::<&PreviewEntity>().iter(app.world()).filter(|e| e.0 == id).count();
+    assert!(entity_count >= 10, "camera, 3 directional lights, and 7 demo meshes spawned: got {entity_count}");
+
+    // Edit Ev100 and verify the preview camera's Exposure updates in the world.
+    app.world_mut().resource_mut::<Actions>().push(Action::Tab(TabAction::SetComponent {
+        key: key(EnvironmentProp::Ev100),
+        comp: 0,
+        value: 15.5,
+        is_final: true,
+    }));
+    app.update();
+    let exposure = app.world().entity(cam_entity).get::<Exposure>().expect("Exposure on preview camera");
+    assert_eq!(exposure.ev100, 15.5);
+
+    // Close the tab (RAII drop of PreviewHandle) -> sync_previews cleans up session and despawns all PreviewEntity(id).
+    app.world_mut().resource_mut::<Actions>().push(Action::DiscardTab(0));
+    app.update();
+    assert!(!app.world().resource::<PreviewTracker>().is_spawned(id));
+    assert!(!app.world().resource::<LightPreviewSessions>().sessions.contains_key(&id));
+    assert_eq!(app.world_mut().query::<&PreviewEntity>().iter(app.world()).filter(|e| e.0 == id).count(), 0);
+
+    // Reopen `night`, then explicitly call `preview.clean()` while the tab stays open.
+    app.world_mut().resource_mut::<Actions>().push(Action::OpenAsset(environment_ref("night")));
+    app.update();
+    let id2 = active_env(app.world().resource::<Editor>()).preview.id();
+    assert!(id2 > id);
+    assert!(app.world().resource::<PreviewTracker>().is_spawned(id2));
+    active_env(app.world().resource::<Editor>()).preview.clean();
+    app.update();
+    assert!(!app.world().resource::<PreviewTracker>().is_spawned(id2));
+    assert!(!app.world().resource::<LightPreviewSessions>().sessions.contains_key(&id2));
+    assert_eq!(app.world_mut().query::<&PreviewEntity>().iter(app.world()).filter(|e| e.0 == id2).count(), 0);
+}
+
+/// Opening the `Light Preview` tool (`Tools -> Light Preview`) spawns a 3D RTT preview studio, interpolates between
+/// `Env A` and `Env B` using `Linear` or a custom `.curve.ron`, and cleans up all preview entities on tab close.
+#[test]
+fn light_preview_tool_interpolates_transition_and_cleans_raii_handle_on_close() {
+    use bevy::camera::Exposure;
+    use bevy::core_pipeline::tonemapping::Tonemapping;
+    use editor_core::preview::{PreviewEntity, PreviewTracker};
+
+    let (dir, mut editor) = project();
+    let p = editor.project.as_ref().unwrap().clone();
+
+    // Configure `night` with ev100 = 9.0, skybox_brightness = 500.0, tonemapping = AgX.
+    let night_env = Environment {
+        cubemap: None,
+        skybox_brightness: 500.0,
+        ev100: 9.0,
+        tonemapping: TonemappingMode::AgX,
+        ..Environment::default()
+    };
+    save_environment(&dir.path().join(environment_ref("night").source_rel()), &night_env).unwrap();
+
+    // Save a custom curve `smooth` that maps t = 0.5 -> s = 0.25.
+    let mut smooth = curve_kit::Curve::ramp("smooth");
+    smooth.points = vec![(0.0, 0.0), (0.5, 0.25), (1.0, 1.0)];
+    curve_kit::editor::save(&p, &curve_ref("smooth"), &smooth).unwrap();
+    editor.rescan();
+
+    let mut app = app(editor);
+    app.world_mut().resource_mut::<Actions>().push(Action::OpenTool {
+        domain: LIGHT,
+        id: LIGHT_PREVIEW_TOOL,
+        arg: None,
+    });
+    app.update();
+
+    let (id, env_a, env_b, curve, t) = {
+        let ed = app.world().resource::<Editor>();
+        let doc = ed.active_doc::<LightPreviewDoc>().expect("Light Preview tool tab active");
+        (doc.preview.id(), doc.env_a.clone(), doc.env_b.clone(), doc.curve.clone(), doc.t)
+    };
+    assert!(id > 0);
+    assert_eq!((env_a.as_str(), env_b.as_str(), curve.as_str(), t), ("day", "night", "", 0.0));
+    assert!(app.world().resource::<PreviewTracker>().is_spawned(id));
+    let cam_entity = app.world().resource::<LightPreviewSessions>().sessions.get(&id).expect("session spawned").camera;
+
+    // At t = 0.0, preview camera has day's ev100 = 13.0 and TonyMcMapface tonemapping.
+    assert_eq!(app.world().entity(cam_entity).get::<Exposure>().unwrap().ev100, 13.0);
+    assert_eq!(*app.world().entity(cam_entity).get::<Tonemapping>().unwrap(), Tonemapping::TonyMcMapface);
+    // Run one more frame so `style_select_widgets` applies `LineBreak::NoWrap` and `column_gap` to `FeathersSelect`.
+    app.update();
+    {
+        use bevy::feathers::controls::{FeathersMenuButton, FeathersSelect};
+        let w = app.world_mut();
+        let selects: Vec<Entity> = w.query_filtered::<Entity, With<FeathersSelect>>().iter(w).collect();
+        assert_eq!(selects.len(), 3, "Env A, Env B, and Curve selects in LightPreviewBar");
+        let btns: Vec<&Node> = w.query_filtered::<&Node, With<FeathersMenuButton>>().iter(w).collect();
+        assert!(btns.iter().all(|n| n.column_gap == Val::Px(6.0) && n.overflow == Overflow::clip()));
+    }
+
+    // Scrub `t` to 0.5 with Linear curve -> ev100 = lerp(13.0, 9.0, 0.5) = 11.0.
+    app.world_mut().resource_mut::<Actions>().push(Action::Tab(TabAction::SetComponent {
+        key: PropKey::new(LightPreviewProp::T),
+        comp: 0,
+        value: 0.5,
+        is_final: true,
+    }));
+    app.update();
+    assert_eq!(app.world().entity(cam_entity).get::<Exposure>().unwrap().ev100, 11.0);
+
+    // Switch curve to `"smooth"` (where smooth(0.5) == 0.25) -> ev100 = lerp(13.0, 9.0, 0.25) = 12.0.
+    app.world_mut().resource_mut::<Actions>().push(Action::Tab(TabAction::SetValue {
+        key: PropKey::new(LightPreviewProp::Curve),
+        value: PropValue::Str("smooth".into()),
+        merge: false,
+    }));
+    app.update();
+    let ev_smooth = app.world().entity(cam_entity).get::<Exposure>().unwrap().ev100;
+    assert!((ev_smooth - 12.0).abs() < 1e-4, "expected ~12.0, got {ev_smooth}");
+
+    // Scrub `t` to 1.0 -> binary fields switch to `night` (Tonemapping::AgX) and ev100 = 9.0.
+    app.world_mut().resource_mut::<Actions>().push(Action::Tab(TabAction::SetComponent {
+        key: PropKey::new(LightPreviewProp::T),
+        comp: 0,
+        value: 1.0,
+        is_final: true,
+    }));
+    app.update();
+    assert_eq!(app.world().entity(cam_entity).get::<Exposure>().unwrap().ev100, 9.0);
+    assert_eq!(*app.world().entity(cam_entity).get::<Tonemapping>().unwrap(), Tonemapping::AgX);
+
+    // Close the Light Preview tab -> RAII handle drops and despawns all preview entities.
+    app.world_mut().resource_mut::<Actions>().push(Action::DiscardTab(0));
+    app.update();
+    assert!(!app.world().resource::<PreviewTracker>().is_spawned(id));
+    assert!(!app.world().resource::<LightPreviewSessions>().sessions.contains_key(&id));
+    assert_eq!(app.world_mut().query::<&PreviewEntity>().iter(app.world()).filter(|e| e.0 == id).count(), 0);
+
+    // Verify direct `interpolate_environments` cubemap cross-fade and fog cross-mode promotion.
+    let mut a = Environment { cubemap: Some("sky_a".into()), skybox_brightness: 1000.0, ..Environment::default() };
+    let mut b = Environment { cubemap: Some("sky_b".into()), skybox_brightness: 2000.0, ..Environment::default() };
+    a.fog.falloff = FogFalloffDef::Exponential { density: 0.02 };
+    b.fog.falloff = FogFalloffDef::Atmospheric { extinction: [0.06, 0.06, 0.06], inscattering: [0.04, 0.04, 0.04] };
+    let mid_quarter = interpolate_environments(&a, &b, 0.25, 0.25);
+    assert_eq!(mid_quarter.cubemap.as_deref(), Some("sky_a"));
+    assert!((mid_quarter.skybox_brightness - 500.0).abs() < 1e-4);
+    let mid_three_quarters = interpolate_environments(&a, &b, 0.75, 0.75);
+    assert_eq!(mid_three_quarters.cubemap.as_deref(), Some("sky_b"));
+    assert!((mid_three_quarters.skybox_brightness - 1000.0).abs() < 1e-4);
+    assert!(matches!(mid_three_quarters.fog.falloff, FogFalloffDef::Atmospheric { .. }));
+}
+
+/// Transitioning between `envA (cubemap = None, clear_color = light)` and `envB (cubemap = Some("sky"), clear_color =
+/// dark)` in `interpolate_environments` and `LightPreviewDoc` preserves `envA.clear_color` while `raw_t < 1.0`,
+/// switches to `envB.clear_color` at `raw_t = 1.0`, and configures `BlendedSkybox` on the preview camera to blend
+/// directly between `envA.clear_color` and `envB`'s cubemap texture.
+#[test]
+fn light_preview_sky_color_to_cubemap_blending() {
+    let (dir, mut editor) = project();
+
+    let env_a = Environment {
+        cubemap: None,
+        clear_color: [0.8, 0.85, 0.9, 1.0],
+        skybox_brightness: 500.0,
+        sky_top_color: [0.9, 0.95, 1.0, 1.0],
+        sky_horizon_color: [0.8, 0.85, 0.9, 1.0],
+        ground_color: [0.4, 0.38, 0.35, 1.0],
+        ..Environment::default()
+    };
+    let env_b = Environment {
+        cubemap: Some("sky".into()),
+        clear_color: [0.02, 0.02, 0.05, 1.0],
+        skybox_brightness: 2500.0,
+        sky_top_color: [0.05, 0.08, 0.15, 1.0],
+        sky_horizon_color: [0.03, 0.04, 0.08, 1.0],
+        ground_color: [0.01, 0.01, 0.02, 1.0],
+        ..Environment::default()
+    };
+    save_environment(&dir.path().join(environment_ref("night").source_rel()), &env_a).unwrap();
+    save_environment(&dir.path().join(environment_ref("day").source_rel()), &env_b).unwrap();
+    editor.rescan();
+
+    // Direct `interpolate_environments` check:
+    let mid = interpolate_environments(&env_a, &env_b, 0.3, 0.3);
+    assert_eq!(mid.clear_color, env_a.clear_color);
+    let done = interpolate_environments(&env_a, &env_b, 1.0, 1.0);
+    assert_eq!(done.clear_color, env_b.clear_color);
+
+    // Reverse (`Some -> None`):
+    let rev_mid = interpolate_environments(&env_b, &env_a, 0.3, 0.3);
+    assert_eq!(rev_mid.clear_color, env_a.clear_color);
+    let rev_done = interpolate_environments(&env_b, &env_a, 1.0, 1.0);
+    assert_eq!(rev_done.clear_color, env_a.clear_color);
+
+    // Verify `BlendedSkybox` on the preview camera in `LightPreviewDoc` (`night` -> `day` at t = 0.3):
+    let mut app = app(editor);
+    app.world_mut().resource_mut::<Actions>().push(Action::OpenTool {
+        domain: LIGHT,
+        id: LIGHT_PREVIEW_TOOL,
+        arg: None,
+    });
+    app.update();
+
+    app.world_mut().resource_mut::<Actions>().push(Action::Tab(TabAction::SetValue {
+        key: PropKey::new(LightPreviewProp::EnvA),
+        value: PropValue::Str("night".into()),
+        merge: false,
+    }));
+    app.world_mut().resource_mut::<Actions>().push(Action::Tab(TabAction::SetValue {
+        key: PropKey::new(LightPreviewProp::EnvB),
+        value: PropValue::Str("day".into()),
+        merge: false,
+    }));
+    app.world_mut().resource_mut::<Actions>().push(Action::Tab(TabAction::SetComponent {
+        key: PropKey::new(LightPreviewProp::T),
+        comp: 0,
+        value: 0.3,
+        is_final: true,
+    }));
+    app.update();
+
+    let id = app.world().resource::<Editor>().active_doc::<LightPreviewDoc>().unwrap().preview.id();
+    let cam_entity = app.world().resource::<LightPreviewSessions>().sessions.get(&id).unwrap().camera;
+    let ibl_id_before = app
+        .world()
+        .entity(cam_entity)
+        .get::<bevy::light::EnvironmentMapLight>()
+        .expect("EnvironmentMapLight on preview camera")
+        .diffuse_map
+        .id();
+    let skybox = app.world().entity(cam_entity).get::<BlendedSkybox>().expect("BlendedSkybox on preview camera");
+    assert!(skybox.cubemap_a.is_none());
+    assert!(skybox.cubemap_b.is_some());
+    assert_eq!(skybox.color_a, Vec4::from_array(env_a.clear_color));
+    assert_eq!(skybox.color_b, Vec4::from_array(env_b.clear_color));
+    assert!((skybox.blend - 0.3).abs() < 1e-5);
+    assert!((skybox.alpha - 1.0).abs() < 1e-5);
+
+    // Scrub `t` to 0.6 -> procedural IBL updates in-place on the exact same `AssetId<Image>` (zero 1-frame flicker).
+    app.world_mut().resource_mut::<Actions>().push(Action::Tab(TabAction::SetComponent {
+        key: PropKey::new(LightPreviewProp::T),
+        comp: 0,
+        value: 0.6,
+        is_final: true,
+    }));
+    app.update();
+    let ibl_id_after = app
+        .world()
+        .entity(cam_entity)
+        .get::<bevy::light::EnvironmentMapLight>()
+        .expect("EnvironmentMapLight on preview camera")
+        .diffuse_map
+        .id();
+    assert_eq!(ibl_id_before, ibl_id_after, "procedural IBL updates in-place without reallocating AssetId<Image>");
+}
+
+/// Opening a cube-map Texture asset (`sky.texture.ron`) in Light (and Material) uses the shared `CubeMapPreview` with
+/// all 6 faces decoded (never just 1 face), supporting `Sphere` (`3D`: grey sphere inside skybox) and `Strip2d`
+/// (`2D`: all 6 faces stacked vertically).
+#[test]
+fn cubemap_texture_preview_supports_sphere_skybox_and_6_face_strip() {
+    use bevy::core_pipeline::Skybox;
+    use bevy::light::EnvironmentMapLight;
+    use bevy::pbr::StandardMaterial;
+    use texture_kit::editor::{
+        CubeMapPreview, CubeMapPreviewSessions, CubeMapViewMode, GameImageCache, PreviewCubeMode, PreviewPic,
+    };
+
+    assert_eq!(CubeMapViewMode::ALL.map(|m| m.label()), ["3D", "2D"]);
+
+    let (_dir, editor) = project();
+    let mut app = app(editor);
+
+    app.world_mut().resource_mut::<Actions>().push(Action::OpenAsset(light_tex("sky")));
+    app.update();
+    app.update();
+
+    // 1. Verify cache decoded all 6 faces into the 2D strip (4x24, not 4x4!) plus a Cube handle.
+    {
+        let p = app.world().resource::<Editor>().project.clone().unwrap();
+        let settings =
+            app.world().resource::<Editor>().active_doc::<TextureDoc<LightTexture>>().unwrap().asset.settings.clone();
+        let cached = app.world_mut().resource_scope(|world, mut cache: Mut<GameImageCache<LightTexture>>| {
+            let mut images = world.resource_mut::<Assets<Image>>();
+            cache.get_cached(&p, "textures/sky.ktx2", &settings, None, &mut images).unwrap()
+        });
+        assert!(cached.is_cubemap);
+        assert!(cached.cube_handle.is_some());
+        let images = app.world().resource::<Assets<Image>>();
+        assert_eq!(images.get(&cached.handle).unwrap().size(), UVec2::new(4, 24), "all 6 faces stacked in LightDomain");
+    }
+
+    // 2. Default mode is `CubeMapViewMode::Sphere` (`3D` = grey sphere inside cube-map skybox).
+    let id = app.world().resource::<Editor>().active_doc::<TextureDoc<LightTexture>>().unwrap().preview.id();
+    let (cam_entity, sphere_entity, mat_handle) = {
+        let sess = app.world().resource::<CubeMapPreviewSessions>().sessions.get(&id).expect("cubemap preview session");
+        (sess.camera, sess.sphere, sess.sphere_material.clone().expect("sphere material"))
+    };
+    {
+        let w = app.world_mut();
+        let preview_display =
+            w.query_filtered::<&Node, With<CubeMapPreview<LightTexture>>>().single(w).unwrap().display;
+        let (pic, pic_node) = w.query::<(&PreviewPic<LightTexture>, &Node)>().single(w).unwrap();
+        assert_eq!(preview_display, Display::Flex);
+        assert_eq!(pic_node.display, Display::None);
+        assert_eq!(pic.0, UVec2::new(4, 24));
+        assert_eq!(*w.entity(sphere_entity).get::<Visibility>().unwrap(), Visibility::Inherited);
+        assert!(w.entity(cam_entity).get::<Transform>().unwrap().translation.length() > 1.0);
+        assert!(w.entity(cam_entity).get::<Skybox>().is_some());
+        assert!(w.entity(cam_entity).get::<EnvironmentMapLight>().is_some());
+        let mat = w.resource::<Assets<StandardMaterial>>().get(&mat_handle).expect("sphere StandardMaterial");
+        assert_eq!(mat.base_color, Color::srgb(0.5, 0.5, 0.5));
+        assert_eq!(mat.metallic, 0.25);
+        assert_eq!(mat.perceptual_roughness, 0.5);
+    }
+
+    // 3. Switch to `CubeMapViewMode::Strip2d` (`2D` 6-face strip view).
+    app.world_mut().resource_mut::<Actions>().push(PreviewCubeMode::<LightTexture>::new(CubeMapViewMode::Strip2d));
+    app.update();
+    app.update();
+    {
+        let w = app.world_mut();
+        let preview_display =
+            w.query_filtered::<&Node, With<CubeMapPreview<LightTexture>>>().single(w).unwrap().display;
+        let (pic, pic_node) = w.query::<(&PreviewPic<LightTexture>, &Node)>().single(w).unwrap();
+        assert_eq!(preview_display, Display::None);
+        assert_eq!(pic_node.display, Display::Flex);
+        assert_eq!(pic.0, UVec2::new(4, 24));
+        assert!(!w.entity(cam_entity).get::<Camera>().unwrap().is_active);
+    }
+}
+
+/// `EnvironmentDoc` supports `Easy / Advanced` mode (`SetEasy(true)` resets advanced fields to defaults,
+/// `SetEasy(false)` switches to `Advanced` keeping those defaults) and per-property `ResetProp(prop)`.
+#[test]
+fn environment_easy_advanced_mode_and_reset_prop() {
+    let (_dir, mut e) = project();
+    e.apply(Action::OpenAsset(environment_ref("day")));
+    assert!(active_env(&e).easy, "default environment starts in Easy mode");
+    assert!(active_env(&e).is_default(EnvironmentProp::SkyboxBrightness));
+
+    // Edit SkyboxBrightness -> is_default becomes false; ResetProp restores 2500.0 -> is_default becomes true.
+    set_number(&mut e, EnvironmentProp::SkyboxBrightness, 750.0);
+    assert_eq!(active_env(&e).env.skybox_brightness, 750.0);
+    assert!(!active_env(&e).is_default(EnvironmentProp::SkyboxBrightness));
+    e.apply(EnvironmentAction::ResetProp(EnvironmentProp::SkyboxBrightness));
+    assert_eq!(active_env(&e).env.skybox_brightness, 2500.0);
+    assert!(active_env(&e).is_default(EnvironmentProp::SkyboxBrightness));
+
+    // Switch to Advanced mode (`SetEasy(false)`) and modify advanced fields:
+    e.apply(EnvironmentAction::SetEasy(false));
+    assert!(!active_env(&e).easy);
+    set_number(&mut e, EnvironmentProp::SkyboxRotation, 45.0);
+    set_number(&mut e, EnvironmentProp::EnvRotation, -30.0);
+    set_number(&mut e, EnvironmentProp::LightShadowDepthBias(0), 0.12);
+    e.apply(Action::Tab(TabAction::SetValue {
+        key: key(EnvironmentProp::Tonemapping),
+        value: PropValue::Str("AgX".into()),
+        merge: false,
+    }));
+    e.apply(Action::Tab(TabAction::SetValue {
+        key: key(EnvironmentProp::DebandDither),
+        value: PropValue::Bool(false),
+        merge: false,
+    }));
+    assert!(!light_domain::fits_easy(&active_env(&e).env));
+
+    // Switching back to Easy mode (`SetEasy(true)`) resets all advanced fields to their defaults!
+    e.apply(EnvironmentAction::SetEasy(true));
+    assert!(active_env(&e).easy);
+    assert!(light_domain::fits_easy(&active_env(&e).env));
+    assert_eq!(active_env(&e).env.skybox_rotation, 0.0);
+    assert_eq!(active_env(&e).env.env_rotation, 0.0);
+    assert_eq!(active_env(&e).env.lights[0].shadow_depth_bias, 0.02);
+    assert_eq!(active_env(&e).env.tonemapping, TonemappingMode::TonyMcMapface);
+    assert!(active_env(&e).env.deband_dither);
+
+    // Undo restores the Advanced edits and automatically switches back to Advanced mode (`easy == false`).
+    e.apply(Action::Tab(TabAction::Undo));
+    assert!(!active_env(&e).easy);
+    assert_eq!(active_env(&e).env.skybox_rotation, 45.0);
+    assert_eq!(active_env(&e).env.tonemapping, TonemappingMode::AgX);
 }

@@ -13,12 +13,14 @@ pub enum MainMenu {
     Edit,
     View,
     Assets,
+    Tools,
     Help,
 }
 
 impl MainMenu {
     /// The menus in the mainbar, left to right.
-    pub const ORDER: [MainMenu; 5] = [MainMenu::File, MainMenu::Edit, MainMenu::View, MainMenu::Assets, MainMenu::Help];
+    pub const ORDER: [MainMenu; 6] =
+        [MainMenu::File, MainMenu::Edit, MainMenu::View, MainMenu::Assets, MainMenu::Tools, MainMenu::Help];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -26,6 +28,7 @@ impl MainMenu {
             MainMenu::Edit => "Edit",
             MainMenu::View => "View",
             MainMenu::Assets => "Assets",
+            MainMenu::Tools => "Tools",
             MainMenu::Help => "Help",
         }
     }

@@ -24,6 +24,7 @@ pub mod main_input;
 pub mod menu;
 pub mod message;
 pub mod nav;
+pub mod preview;
 pub mod quick_start;
 pub mod search;
 pub mod settings;

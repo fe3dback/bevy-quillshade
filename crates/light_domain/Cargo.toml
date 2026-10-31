@@ -9,12 +9,13 @@ license = { workspace = true }
 # The editor half (design §9.2): `LightDomain`. The CLI backend (`light_domain::backend`) is Bevy-free and depends on
 # the crate without it.
 default = ["editor"]
-editor = ["dep:bevy", "dep:editor_core", "dep:icon-rs", "texture_kit/editor"]
+editor = ["dep:bevy", "dep:editor_core", "dep:icon-rs", "curve_kit/editor", "texture_kit/editor"]
 # Not a default (constraints: like the kits, it leaves it to the root package's `dynamic_linking`).
 dynamic_linking = ["bevy?/dynamic_linking"]
 
 [dependencies]
 project_core = { workspace = true }
+curve_kit = { workspace = true }
 texture_kit = { workspace = true }
 serde = { workspace = true }
 ron = { workspace = true }

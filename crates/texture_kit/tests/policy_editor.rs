@@ -373,3 +373,79 @@ fn texture_edit_for_other_domain_is_dropped() {
     e.apply(Action::from(TextureEdit::<Cube>::new(TextureAction::SetSettings(custom.clone()))));
     assert_eq!(active::<Cube>(&e).unwrap().asset.settings, custom);
 }
+
+/// Both `Plain` (2D policy, like Material) and `Cube` (CubeMap policy, like Light) share `CubeMapPreview` for 6-face
+/// cube maps, supporting `Sphere` (`3D`) and `Strip2d` (`2D` 6-face strip).
+#[test]
+fn shared_cubemap_preview_across_domains() {
+    use bevy::pbr::StandardMaterial;
+    use texture_kit::editor::{CubeMapPreview, CubeMapPreviewSessions, CubeMapViewMode, PreviewCubeMode, PreviewPic};
+
+    assert_eq!(CubeMapViewMode::ALL.map(|m| m.label()), ["3D", "2D"]);
+
+    let (dir, editor) = project(domains());
+    // Write a 6-face 4x4 RGBA8 KTX2 cube map to `assets/textures/sky.ktx2`.
+    let face = 4 * 4 * 4;
+    let mut ktx = vec![0xAB, b'K', b'T', b'X', b' ', b'2', b'0', 0xBB, b'\r', b'\n', 0x1A, b'\n'];
+    for v in [37u32, 1, 4, 4, 0, 0, 6, 1, 0, 104, 4, 0, 0] {
+        ktx.extend(u32::to_le_bytes(v));
+    }
+    ktx.extend([0u8; 16]);
+    for v in [108u64, 6 * face as u64, 6 * face as u64] {
+        ktx.extend(u64::to_le_bytes(v));
+    }
+    ktx.extend(u32::to_le_bytes(4));
+    for i in 0..6u8 {
+        ktx.extend(std::iter::repeat_n(i * 40, face));
+    }
+    std::fs::write(dir.path().join("assets/textures/sky.ktx2"), ktx).unwrap();
+    let p = Project::open(dir.path()).unwrap();
+    texture_kit::editor::save(&p, &tex::<Plain>("sky"), &TextureAsset::new("textures/sky.ktx2")).unwrap();
+    texture_kit::editor::save(&p, &tex::<Cube>("sky"), &TextureAsset::new("textures/sky.ktx2")).unwrap();
+
+    let mut app = app(editor);
+    act(&mut app, Action::Rescan);
+
+    // 1. Open in `Plain` domain (Material policy) -> starts in 3D Sphere (`3D`) mode with all 6 faces in 2D strip.
+    act(&mut app, Action::OpenAsset(tex::<Plain>("sky")));
+    {
+        let w = app.world_mut();
+        let preview_display = w.query_filtered::<&Node, With<CubeMapPreview<Plain>>>().single(w).unwrap().display;
+        let (pic, pic_node) = w.query::<(&PreviewPic<Plain>, &Node)>().single(w).unwrap();
+        assert_eq!(preview_display, Display::Flex);
+        assert_eq!(pic_node.display, Display::None);
+        assert_eq!(pic.0, UVec2::new(4, 24), "all 6 faces stacked in 2D");
+    }
+
+    // 2. Open in `Cube` domain (Light policy) -> also uses `CubeMapPreview` with all 6 faces in 2D strip.
+    act(&mut app, Action::OpenAsset(tex::<Cube>("sky")));
+    let id = active::<Cube>(app.world().resource::<Editor>()).unwrap().preview.id();
+    let (cam_entity, sphere_entity, mat_handle) = {
+        let sess = app.world().resource::<CubeMapPreviewSessions>().sessions.get(&id).expect("session spawned");
+        (sess.camera, sess.sphere, sess.sphere_material.clone().expect("sphere material"))
+    };
+    {
+        let w = app.world_mut();
+        let preview_display = w.query_filtered::<&Node, With<CubeMapPreview<Cube>>>().single(w).unwrap().display;
+        let (pic, pic_node) = w.query::<(&PreviewPic<Cube>, &Node)>().single(w).unwrap();
+        assert_eq!(preview_display, Display::Flex);
+        assert_eq!(pic_node.display, Display::None);
+        assert_eq!(pic.0, UVec2::new(4, 24), "all 6 faces stacked in Cube domain too");
+        assert_eq!(*w.entity(sphere_entity).get::<Visibility>().unwrap(), Visibility::Inherited);
+        assert!(w.entity(cam_entity).get::<Transform>().unwrap().translation.length() > 1.0);
+        let mat = w.resource::<Assets<StandardMaterial>>().get(&mat_handle).expect("sphere StandardMaterial");
+        assert_eq!(mat.base_color, Color::srgb(0.5, 0.5, 0.5));
+        assert_eq!(mat.metallic, 0.25);
+        assert_eq!(mat.perceptual_roughness, 0.5);
+    }
+
+    // Switch `Cube` to `Strip2d` (`2D`: 6-face strip)
+    act(&mut app, PreviewCubeMode::<Cube>::new(CubeMapViewMode::Strip2d));
+    {
+        let w = app.world_mut();
+        let preview_display = w.query_filtered::<&Node, With<CubeMapPreview<Cube>>>().single(w).unwrap().display;
+        let (_, pic_node) = w.query::<(&PreviewPic<Cube>, &Node)>().single(w).unwrap();
+        assert_eq!(preview_display, Display::None);
+        assert_eq!(pic_node.display, Display::Flex);
+    }
+}

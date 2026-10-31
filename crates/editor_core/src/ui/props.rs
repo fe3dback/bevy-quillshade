@@ -5,8 +5,9 @@
 //! there (a graph domain: an inline editor on a canvas node ends with `CommitInline`); core knows no such place.
 
 use bevy::feathers::controls::{
-    FeathersCheckbox, FeathersNumberInput, FeathersSelect, FeathersTextInput, FeathersTextInputContainer, HardLimit,
-    NumberInputPrecision, NumberInputRange, NumberInputValue, OptionIndex, SoftLimit, list_rows_from_strings,
+    FeathersCheckbox, FeathersMenuButton, FeathersNumberInput, FeathersSelect, FeathersTextInput,
+    FeathersTextInputContainer, HardLimit, NumberInputPrecision, NumberInputRange, NumberInputValue, OptionIndex,
+    SoftLimit, list_rows_from_strings,
 };
 use bevy::feathers::display::caption;
 use bevy::feathers::tokens;
@@ -53,7 +54,7 @@ pub struct PropWidgetsPlugin;
 
 impl Plugin for PropWidgetsPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, (init_text, show_placeholders))
+        app.add_systems(Update, (init_text, show_placeholders, style_select_widgets))
             .add_observer(select)
             .add_observer(text_changed)
             .add_observer(number_f32)
@@ -76,6 +77,28 @@ fn init_text(mut q: Query<(&InitText, &mut EditableText), Added<InitText>>) {
     for (init, mut t) in &mut q {
         t.queue_edit(TextEdit::SelectAll);
         t.queue_edit(TextEdit::Insert(init.0.as_str().into()));
+    }
+}
+
+/// Ensures newly spawned [`FeathersSelect`] widgets keep single-line captions/rows (`LineBreak::NoWrap`) and a gap
+/// before the chevron inside [`FeathersMenuButton`].
+fn style_select_widgets(
+    q_select: Query<Entity, Added<FeathersSelect>>,
+    q_children: Query<&Children>,
+    q_text: Query<(), With<Text>>,
+    mut q_btn: Query<&mut Node, With<FeathersMenuButton>>,
+    mut commands: Commands,
+) {
+    for select_ent in &q_select {
+        for desc in q_children.iter_descendants(select_ent) {
+            if q_text.contains(desc) {
+                commands.entity(desc).insert(TextLayout::linebreak(LineBreak::NoWrap));
+            }
+            if let Ok(mut node) = q_btn.get_mut(desc) {
+                node.column_gap = px(6);
+                node.overflow = Overflow::clip();
+            }
+        }
     }
 }
 

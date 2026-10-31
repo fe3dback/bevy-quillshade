@@ -43,6 +43,17 @@ impl FileStamp {
 /// A preview's channel: 0 / 1 / 2 (R / G / B) shown alone in grey, `None` the whole image.
 pub type Channel = Option<usize>;
 
+/// A decoded game image in [`GameImageCache`]: its 2D [`Image`] handle (with layers stacked top to bottom), whether
+/// a single channel was rewritten to grey pixels, whether the source image is a 6-face square cube map, and its
+/// `TextureViewDimension::Cube` [`Image`] handle for the 3D sphere / skybox preview.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CachedImage {
+    pub handle: Handle<Image>,
+    pub grey: bool,
+    pub is_cubemap: bool,
+    pub cube_handle: Option<Handle<Image>>,
+}
+
 /// `D`'s decoded game images by (path under `assets/`, settings). An entry is decoded again when the file's
 /// [`FileStamp`] changed (checked on every [`GameImageCache::get`]), and dropped by
 /// [`GameImageCache::free_unused`] once nobody but the cache holds its handle (run every frame by
@@ -75,9 +86,11 @@ struct Entry {
     /// The image reduced to this channel in grey ([`GameImageCache::get_channel`]).
     channel: Option<usize>,
     stamp: Option<FileStamp>,
-    result: Result<Handle<Image>, String>,
-    /// `channel` is shown in grey (`false`: the format has no per-pixel bytes to rewrite, the image is unchanged).
-    grey: bool,
+    result: Result<CachedImage, String>,
+}
+
+fn handle_in_use(h: &Handle<Image>) -> bool {
+    matches!(h, Handle::Strong(s) if Arc::strong_count(s) > 1)
 }
 
 impl<D: TextureDomain> GameImageCache<D> {
@@ -95,7 +108,7 @@ impl<D: TextureDomain> GameImageCache<D> {
         settings: &TextureSettings,
         images: &mut Assets<Image>,
     ) -> Result<Handle<Image>, String> {
-        self.get_channel(project, path, settings, None, images).map(|(h, _)| h)
+        self.get_cached(project, path, settings, None, images).map(|c| c.handle)
     }
 
     /// [`GameImageCache::get`], with channel `channel` (0 / 1 / 2 = R / G / B) copied into R, G and B (opaque), so it
@@ -110,6 +123,19 @@ impl<D: TextureDomain> GameImageCache<D> {
         channel: Channel,
         images: &mut Assets<Image>,
     ) -> Result<(Handle<Image>, bool), String> {
+        self.get_cached(project, path, settings, channel, images).map(|c| (c.handle, c.grey))
+    }
+
+    /// [`GameImageCache::get_channel`], returning the full [`CachedImage`] (including `is_cubemap` and `cube_handle`
+    /// with `TextureViewDimension::Cube` when the source image is a 6-face square cube map).
+    pub fn get_cached(
+        &mut self,
+        project: &Project,
+        path: &str,
+        settings: &TextureSettings,
+        channel: Channel,
+        images: &mut Assets<Image>,
+    ) -> Result<CachedImage, String> {
         if let Some(Err(e)) = settings.sampler.map(|s| s.check()) {
             return Err(format!("E013 invalid sampler settings: {e}"));
         }
@@ -125,26 +151,34 @@ impl<D: TextureDomain> GameImageCache<D> {
         let stamp = if internal.is_some() { None } else { FileStamp::of(&file) };
         let same = |e: &Entry| e.path == path && e.settings == *settings && e.channel == channel;
         if let Some(e) = self.entries.iter().find(|e| same(e) && e.stamp == stamp) {
-            return e.result.clone().map(|h| (h, e.grey));
+            return e.result.clone();
         }
         self.entries.retain(|e| !same(e));
         let shown = previewable(settings, self.clamp_to_border).0;
         let first = D::PREVIEW_FIRST_LAYER;
         let decoded = match (internal, stamp) {
-            (Some(t), _) => decode_layers(t.bytes, &internal_path::<D>(t), &shown, self.formats, first),
+            (Some(t), _) => decode_entry(t.bytes, &internal_path::<D>(t), &shown, self.formats, first),
             (None, None) => Err(format!("assets/{path} does not exist")),
             (None, Some(_)) => std::fs::read(&file)
                 .map_err(|e| format!("cannot read assets/{path}: {e}"))
-                .and_then(|bytes| decode_layers(&bytes, path, &shown, self.formats, first)),
+                .and_then(|bytes| decode_entry(&bytes, path, &shown, self.formats, first)),
         };
-        let mut grey = false;
-        let result = decoded.map(|mut image| {
-            grey = channel.is_some_and(|c| grey_channel(&mut image, c));
-            images.add(image)
+        let result = decoded.map(|(mut image, mut cube)| {
+            let mut grey = false;
+            if let Some(c) = channel {
+                grey = grey_channel(&mut image, c);
+                if let Some(cube_img) = &mut cube {
+                    grey_channel(cube_img, c);
+                }
+            }
+            let is_cubemap = cube.is_some();
+            let cube_handle = cube.map(|c| images.add(c));
+            let handle = images.add(image);
+            CachedImage { handle, grey, is_cubemap, cube_handle }
         });
         let (path, settings) = (path.to_string(), settings.clone());
-        self.entries.push(Entry { path, settings, channel, stamp, result: result.clone(), grey });
-        result.map(|h| (h, grey))
+        self.entries.push(Entry { path, settings, channel, stamp, result: result.clone() });
+        result
     }
 }
 
@@ -153,8 +187,8 @@ impl<D> GameImageCache<D> {
     /// file changes).
     pub fn free_unused(&mut self) {
         self.entries.retain(|e| match &e.result {
-            Ok(Handle::Strong(h)) => Arc::strong_count(h) > 1,
-            _ => true,
+            Ok(cached) => handle_in_use(&cached.handle) || cached.cube_handle.as_ref().is_some_and(handle_in_use),
+            Err(_) => true,
         });
     }
 
@@ -188,6 +222,19 @@ pub fn decode_layers(
     formats: CompressedImageFormats,
     first_layer: bool,
 ) -> Result<Image, String> {
+    decode_entry(bytes, path, settings, formats, first_layer).map(|(image, _)| image)
+}
+
+/// Decodes `bytes` into the 2D stacked [`Image`] plus an optional 6-layer `TextureViewDimension::Cube` [`Image`] when
+/// the source texture is a 6-face square cube map and `!first_layer`.
+fn decode_entry(
+    bytes: &[u8],
+    path: &str,
+    settings: &TextureSettings,
+    formats: CompressedImageFormats,
+    first_layer: bool,
+) -> Result<(Image, Option<Image>), String> {
+    use bevy::render::render_resource::{TextureDimension, TextureViewDescriptor, TextureViewDimension};
     let ext = Path::new(path).extension().and_then(|e| e.to_str()).unwrap_or_default();
     let mut image = Image::from_buffer(
         bytes,
@@ -198,12 +245,22 @@ pub fn decode_layers(
         RenderAssetUsages::RENDER_WORLD,
     )
     .map_err(|e| format!("cannot decode assets/{path}: {e}"))?;
+    let is_cubemap = !first_layer
+        && image.texture_descriptor.dimension == TextureDimension::D2
+        && image.texture_descriptor.array_layer_count() == 6
+        && image.width() == image.height();
+    let cube = is_cubemap.then(|| {
+        let mut cube = image.clone();
+        cube.texture_view_descriptor =
+            Some(TextureViewDescriptor { dimension: Some(TextureViewDimension::Cube), ..default() });
+        cube
+    });
     if first_layer {
         // The first face / layer / slice is the first bytes of mip 0 in either data order: the stacking keeps it.
         image.texture_descriptor.size.depth_or_array_layers = 1;
     }
     stack_layers(&mut image).map_err(|e| format!("cannot show assets/{path}: {e}"))?;
-    Ok(image)
+    Ok((image, cube))
 }
 
 /// Turns a cube map, an array or a 3D (or 1D) image into one 2D image, mip 0 only: its faces / layers / slices
@@ -626,8 +683,17 @@ mod tests {
         let settings = TextureSettings::default();
         let first = GameImageCache::<FirstLayer>::default().get(&p, "textures/sky.ktx2", &settings, &mut images);
         assert_eq!(images.get(&first.unwrap()).unwrap().size(), UVec2::new(4, 4));
-        let strip = Cache::default().get(&p, "textures/sky.ktx2", &settings, &mut images).unwrap();
-        assert_eq!(images.get(&strip).unwrap().size(), UVec2::new(4, 24));
+        let mut cache = Cache::default();
+        let cached = cache.get_cached(&p, "textures/sky.ktx2", &settings, None, &mut images).unwrap();
+        assert!(cached.is_cubemap);
+        assert_eq!(images.get(&cached.handle).unwrap().size(), UVec2::new(4, 24), "all 6 faces stacked in 2D");
+        let cube_img = images.get(cached.cube_handle.as_ref().unwrap()).unwrap();
+        assert_eq!(cube_img.size(), UVec2::new(4, 4));
+        assert_eq!(cube_img.texture_descriptor.array_layer_count(), 6);
+        assert_eq!(
+            cube_img.texture_view_descriptor.as_ref().and_then(|v| v.dimension),
+            Some(bevy::render::render_resource::TextureViewDimension::Cube)
+        );
     }
 
     /// [`TestTexture`] previewing only the first layer.

@@ -137,6 +137,7 @@ pub fn bar_row() -> impl Scene {
             flex_wrap: FlexWrap::Wrap,
             align_items: AlignItems::Center,
             column_gap: px(8),
+            row_gap: px(4),
             padding: UiRect::axes(px(10), px(2)),
         }
     }

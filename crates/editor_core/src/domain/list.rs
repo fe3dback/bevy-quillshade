@@ -5,6 +5,7 @@ use std::fmt;
 
 use crate::editors::EditorKinds;
 use crate::menu::MainMenu;
+use crate::preview::PreviewCallbacks;
 use crate::tab::TabKey;
 use bevy::prelude::Resource;
 use project_core::DomainId;
@@ -61,6 +62,7 @@ impl DomainList {
             list.domains.push(def);
         }
         list.kind_defs(); // panics on two different editor kinds with one view id
+        list.previews(); // panics on two domains sharing one preview kind id
         list
     }
 
@@ -187,5 +189,23 @@ impl DomainList {
             states.insert(state);
         }
         states
+    }
+
+    /// Every domain's registered preview callbacks, in registration order; a preview kind two domains register with
+    /// the same callbacks (a kit's) is listed once. Panics if two domains register the same
+    /// [`crate::preview::PreviewKindId`] with different callbacks.
+    pub fn previews(&self) -> Vec<PreviewCallbacks> {
+        let mut out: Vec<PreviewCallbacks> = Vec::new();
+        for p in self.domains.iter().flat_map(|d| &d.previews) {
+            match out.iter().find(|first| first.kind == p.kind) {
+                None => out.push(*p),
+                Some(first) => assert!(
+                    std::ptr::fn_addr_eq(first.start, p.start) && std::ptr::fn_addr_eq(first.clean, p.clean),
+                    "two domains share the preview kind `{}`: namespace it (`<domain>.<kind>`)",
+                    p.kind
+                ),
+            }
+        }
+        out
     }
 }

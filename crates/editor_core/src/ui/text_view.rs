@@ -18,11 +18,11 @@ use super::shell::{VIEW_BG, clipped_text};
 use crate::action::{Action, TabAction};
 use crate::editors::ViewOf;
 use crate::editors::text::TEXT as TEXT_VIEW;
-use crate::highlight::{highlight, style_color};
+use crate::highlight::{Style, highlight, style_color};
 use crate::keys::mods;
 use crate::state::editor::Editor;
-use crate::tab::TextDoc;
-use crate::theme::{TEXT, TEXT_DIM};
+use crate::tab::{TextDoc, format_highlights};
+use crate::theme::{ACCENT2, TEXT, TEXT_DIM};
 
 const FONT_SIZE: f32 = 13.0;
 
@@ -33,6 +33,15 @@ pub(crate) struct TextViewBar;
 /// Scroll area holding the code.
 #[derive(Component, Default, Clone)]
 pub struct TextViewCode;
+
+/// A contiguous run of lines `start..=end` (1-based, inclusive) in [`TextViewCode`], tagged with whether its lines
+/// are highlighted (`BackgroundColor(ACCENT2)`).
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextViewLine {
+    pub start: usize,
+    pub end: usize,
+    pub highlighted: bool,
+}
 
 pub struct TextViewPlugin;
 
@@ -60,9 +69,10 @@ pub fn text_view() -> impl Scene {
             Node {
                 flex_grow: 1.0,
                 min_height: px(0),
+                flex_direction: FlexDirection::Column,
                 overflow: Overflow::scroll(),
                 padding: UiRect::new(px(4), px(16), px(8), px(48)),
-                align_items: AlignItems::Start,
+                align_items: AlignItems::Stretch,
             }
         ]
     }
@@ -123,6 +133,10 @@ fn redraw(
     commands.spawn_scene(
         bsn! { @clipped_text("read-only, generated", TEXT_DIM, 12.0) Node { flex_shrink: 100.0 } ChildOf(bar) },
     );
+    if !t.highlights.is_empty() {
+        let spec = format_highlights(&t.highlights);
+        commands.spawn_scene(bsn! { @clipped_text(spec, TEXT_DIM, 12.0) Node { flex_shrink: 100.0 } ChildOf(bar) });
+    }
     commands.spawn_scene(bsn! { Node { flex_grow: 1.0 } ChildOf(bar) });
     let buttons: [Box<dyn Scene>; 3] = [
         Box::new(icon_tool_button(IconId::Copy, "Copy", Action::Tab(TabAction::Copy), "Copy the whole file (Ctrl+C)")),
@@ -143,21 +157,77 @@ fn redraw(
         commands.spawn((Text::new("The file does not exist (yet)."), font, TextColor(TEXT_DIM), ChildOf(code)));
         return;
     };
-    let lines = src.lines().count().max(1);
-    let numbers: String = (1..=lines).map(|n| format!("{n}\n")).collect();
-    let row = commands
-        .spawn((Node { flex_direction: FlexDirection::Row, column_gap: px(14), ..default() }, ChildOf(code)))
-        .id();
-    commands.spawn((
-        Text::new(numbers.trim_end()),
-        font.clone(),
-        TextColor(TEXT_DIM.with_alpha(0.6)),
-        TextLayout::new(Justify::Right, LineBreak::NoWrap),
-        Node { min_width: px(FONT_SIZE * 0.6 * lines.to_string().len() as f32 + 12.0), ..default() },
-        ChildOf(row),
-    ));
-    let text = commands.spawn((Text::default(), font.clone(), TextLayout::no_wrap(), ChildOf(row))).id();
-    for (style, piece) in highlight(&editor.domain_list, src.trim_end(), t.lang) {
-        commands.spawn((TextSpan::new(piece), font.clone(), TextColor(style_color(style)), ChildOf(text)));
+    let trimmed = src.trim_end();
+    let mut per_line: Vec<Vec<(Style, String)>> = vec![Vec::new()];
+    for (style, piece) in highlight(&editor.domain_list, trimmed, t.lang) {
+        let mut parts = piece.split('\n');
+        if let Some(first) = parts.next()
+            && !first.is_empty()
+        {
+            per_line.last_mut().unwrap().push((style, first.to_string()));
+        }
+        for next_line in parts {
+            per_line.push(Vec::new());
+            if !next_line.is_empty() {
+                per_line.last_mut().unwrap().push((style, next_line.to_string()));
+            }
+        }
+    }
+    let total_lines = per_line.len().max(1);
+    let mut runs: Vec<(usize, usize, bool)> = Vec::new();
+    for line_no in 1..=total_lines {
+        let hl = t.highlights.contains(&line_no);
+        if let Some(last) = runs.last_mut()
+            && last.2 == hl
+        {
+            last.1 = line_no;
+        } else {
+            runs.push((line_no, line_no, hl));
+        }
+    }
+    let num_w = FONT_SIZE * 0.6 * total_lines.to_string().len() as f32 + 12.0;
+    for (start_line, end_line, highlighted) in runs {
+        let numbers: String = (start_line..=end_line).map(|n| n.to_string()).collect::<Vec<_>>().join("\n");
+        let row = commands
+            .spawn((
+                TextViewLine { start: start_line, end: end_line, highlighted },
+                Node {
+                    width: percent(100),
+                    flex_direction: FlexDirection::Row,
+                    column_gap: px(14),
+                    padding: UiRect::axes(px(4), px(0)),
+                    border_radius: BorderRadius::all(px(2)),
+                    ..default()
+                },
+                BackgroundColor(if highlighted { ACCENT2 } else { Color::NONE }),
+                ChildOf(code),
+            ))
+            .id();
+        commands.spawn((
+            Text::new(numbers),
+            font.clone(),
+            TextColor(if highlighted { TEXT } else { TEXT_DIM.with_alpha(0.6) }),
+            TextLayout::new(Justify::Right, LineBreak::NoWrap),
+            Node { min_width: px(num_w), ..default() },
+            ChildOf(row),
+        ));
+        let text_entity = commands.spawn((Text::default(), font.clone(), TextLayout::no_wrap(), ChildOf(row))).id();
+        for (offset, line_spans) in per_line[(start_line - 1)..end_line].iter().enumerate() {
+            if offset > 0 {
+                commands.spawn((TextSpan::new("\n"), font.clone(), TextColor(TEXT), ChildOf(text_entity)));
+            }
+            if line_spans.is_empty() {
+                commands.spawn((TextSpan::new(" "), font.clone(), TextColor(TEXT), ChildOf(text_entity)));
+            } else {
+                for (style, piece) in line_spans {
+                    commands.spawn((
+                        TextSpan::new(piece.clone()),
+                        font.clone(),
+                        TextColor(style_color(*style)),
+                        ChildOf(text_entity),
+                    ));
+                }
+            }
+        }
     }
 }

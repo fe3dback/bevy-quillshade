@@ -51,6 +51,7 @@ macro_rules! marker {
 }
 
 mod cache;
+mod cubemap;
 pub(crate) mod doc;
 mod form;
 mod image_tab;
@@ -58,8 +59,12 @@ mod ops;
 mod preview;
 
 pub use cache::{
-    Channel, FileStamp, GameImageCache, GameImagePlugin, decode, decode_layers, describe, grey_channel, previewable,
-    sampler, stack_layers,
+    CachedImage, Channel, FileStamp, GameImageCache, GameImagePlugin, decode, decode_layers, describe, grey_channel,
+    previewable, sampler, stack_layers,
+};
+pub use cubemap::{
+    CUBEMAP_PREVIEW_KIND, CubeMapPreview, CubeMapPreviewCaption, CubeMapPreviewImage, CubeMapPreviewSession,
+    CubeMapPreviewSessions, CubeMapViewMode, clean_cubemap_preview, start_cubemap_preview,
 };
 pub use doc::{
     FilterPreset, MAX_ANISOTROPY, TextureDoc, TextureField, address_label, effective_sampler, filter_label, fits_easy,
@@ -72,11 +77,12 @@ pub use image_tab::{
     GAME_KEY_PREFIX, ImageDoc, ImageEditor, ImageSidebarBody, ImageViewBar, ImageViewPlugin, image_view,
 };
 pub use ops::{
-    CreateTextureForFile, PreviewChannel, TextureAction, TextureEdit, TextureProp, path_problem, texture_key,
+    CreateTextureForFile, PreviewChannel, PreviewCubeMode, TextureAction, TextureEdit, TextureProp, path_problem,
+    texture_key,
 };
 pub use preview::{
-    ImagePreviewPlugin, PREVIEW_HOTKEYS, PreviewArea, PreviewDoc, PreviewInfoText, PreviewPic, PreviewZoomText,
-    preview_area, preview_controls,
+    ImagePreviewPlugin, PREVIEW_HOTKEYS, PreviewArea, PreviewCubeControls, PreviewDoc, PreviewInfoText, PreviewPic,
+    PreviewZoomText, preview_area, preview_controls,
 };
 
 /// The icon of Texture assets (secondbar, Project tree, the Internal folder's rows); game images keep the image icon.
@@ -102,9 +108,8 @@ pub trait TextureDomain: Sized + Send + Sync + 'static {
     /// form then points at a game file (Light, design §9.2). Off by default: Material makes Texture assets from game
     /// images only ("Create Texture Asset").
     const NEW_TEMPLATE: bool = false;
-    /// The preview (Texture and image tabs) shows only the first face / layer / slice of a cube map, an array or a
-    /// 3D image (Light's cube maps, design §7.2). Off by default: every layer, stacked top to bottom
-    /// ([`stack_layers`]).
+    /// The 2D preview (Texture and image tabs) shows only the first face / layer / slice of an array or 3D image.
+    /// Off by default: every layer, stacked top to bottom ([`stack_layers`]).
     const PREVIEW_FIRST_LAYER: bool = false;
     /// How the settings reach the game, under a Texture tab's description in the right sidebar. By default
     /// Material's: the baked manifest.
@@ -178,6 +183,8 @@ pub fn register<D: TextureDomain>(r: &mut DomainRegistrar) {
     })
     .editor_kind::<ImageEditor<D>>()
     .editor_kind::<TextureEditor<D>>()
+    .preview(cubemap::preview_callbacks())
+    .logic(cubemap::setup_cubemap_logic)
     .game_assets(GameAssetsDef { extensions: D::POLICY.extensions, open: open_image::<D>, menu: game_file_menu::<D> })
     .steps(ops::steps::<D>)
     .parse_tab(parse_key::<D>)

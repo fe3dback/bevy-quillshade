@@ -14,6 +14,7 @@ use crate::clipboard::Clipboards;
 use crate::domain::ToolId;
 use crate::dynval::{DynPayload, Payload, PropKey, PropValue};
 use crate::message::Message;
+use crate::preview::PreviewHandle;
 use crate::tab::ViewKindId;
 use crate::ui::icons::IconRef;
 
@@ -74,6 +75,12 @@ pub trait TabDoc: Any + Send + Sync {
     }
     /// The value a property widget editing `key` shows; `None` (the default) for a key the kind does not know.
     fn current_value(&self, _key: &PropKey, _ctx: &StatusCtx) -> Option<PropValue> {
+        None
+    }
+    /// Active RAII preview session owned by this document (`None` by default). [`crate::preview::sync_previews`]
+    /// keeps the preview spawned while this handle is alive and cleans it up when the tab closes or the handle is
+    /// cleaned.
+    fn preview_handle(&self) -> Option<&PreviewHandle> {
         None
     }
 }

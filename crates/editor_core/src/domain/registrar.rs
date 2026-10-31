@@ -7,6 +7,7 @@ use crate::action::Handled;
 use crate::dynval::Payload;
 use crate::editors::{EditorAreas, KindDef};
 use crate::menu::{MainMenu, MenuEntry};
+use crate::preview::PreviewCallbacks;
 use crate::tab::Tab;
 use crate::ui::icons::IconRef;
 use bevy::prelude::{App, Scene};
@@ -150,6 +151,7 @@ pub struct DomainDef {
     pub doc_overlays: Vec<SceneFn>,
     pub quick_start: Option<QuickStartDef>,
     pub tools: Vec<ToolDef>,
+    pub previews: Vec<PreviewCallbacks>,
 }
 
 /// Collects one domain's registrations (design §6.1); [`super::DomainList`] keeps them per domain.
@@ -181,6 +183,7 @@ impl DomainRegistrar {
                 doc_overlays: Vec::new(),
                 quick_start: None,
                 tools: Vec::new(),
+                previews: Vec::new(),
             },
         }
     }
@@ -313,6 +316,15 @@ impl DomainRegistrar {
         let (id, domain) = (def.id, self.def.id);
         assert!(self.def.tools.iter().all(|t| t.id != id), "tool `{id}` registered twice by `{domain}`");
         self.def.tools.push(def);
+        self
+    }
+
+    /// Registers start and cleanup callbacks for a preview kind ([`crate::preview::PreviewCallbacks`]). Panics if the
+    /// same [`crate::preview::PreviewKindId`] is registered twice by the domain.
+    pub fn preview(&mut self, callbacks: PreviewCallbacks) -> &mut Self {
+        let (kind, domain) = (callbacks.kind, self.def.id);
+        assert!(self.def.previews.iter().all(|p| p.kind != kind), "preview `{kind}` registered twice by `{domain}`");
+        self.def.previews.push(callbacks);
         self
     }
 }

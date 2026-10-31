@@ -14,18 +14,26 @@ use bevy::input::mouse::MouseScrollPixelsPerLine;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::ui::ui_transform::UiGlobalTransform;
+use editor_core::preview::PreviewHandle;
 use editor_core::state::editor::Editor;
 use editor_core::tab::{Tab, ViewKindId};
 use editor_core::theme::{TEXT_DIM, text};
 use editor_core::ui::props::checkbox;
 use editor_core::ui::widgets::{Caption, GroupButton, button_group};
 
-use super::{Channel, GameImageCache, PreviewChannel, TextureDomain, TextureProp, describe, preview, texture_key};
-use crate::TextureSettings;
+use super::cubemap::{
+    active_3d_cubemap, cubemap_double_click, cubemap_drag, cubemap_preview_scene, cubemap_scroll, setup_cubemap_logic,
+    update_cubemap_preview,
+};
+use super::{
+    Channel, CubeMapViewMode, GameImageCache, PreviewChannel, PreviewCubeMode, TextureDomain, TextureProp, describe,
+    preview, texture_key,
+};
+use crate::{TextureSettings, TextureShape};
 
 /// A tab kind with the shared image preview (design §6.2: image and Texture tabs): the image it shows and the
-/// preview's view state (channel, tiling), which is editor-only: not saved, not undoable. [`super::preview`] gives it
-/// for any tab of `D` that has one.
+/// preview's view state (channel, tiling, cube-map mode), which is editor-only: not saved, not undoable.
+/// [`super::preview`] gives it for any tab of `D` that has one.
 pub trait PreviewDoc {
     /// What [`GameImageCache::get_channel`] decodes (a path under `assets/` or an `@internal/…` id) and the settings
     /// to decode it with.
@@ -36,6 +44,15 @@ pub trait PreviewDoc {
     /// The preview repeats the image 3x3, so the address modes show.
     fn tiled(&self) -> bool;
     fn set_tiled(&mut self, tiled: bool);
+    /// How a cube-map image is shown (3D sphere or 2D 6-face strip).
+    fn cube_mode(&self) -> CubeMapViewMode {
+        CubeMapViewMode::Sphere
+    }
+    fn set_cube_mode(&mut self, _mode: CubeMapViewMode) {}
+    /// Active RAII 3D preview handle owned by the document.
+    fn preview_handle(&self) -> Option<&PreviewHandle> {
+        None
+    }
 }
 
 /// Space kept around the fitted image (logical px).
@@ -79,6 +96,12 @@ marker! {
     /// The image info (`WxH | format | mips` or `n/a`), wherever one of `D`'s kinds shows it; kept current by the
     /// preview.
     PreviewInfoText
+}
+
+marker! {
+    /// The cube-map mode toggle button group (`3D` / `2D`) in
+    /// [`preview_controls`]; shown when the active texture is a cube map.
+    PreviewCubeControls
 }
 
 /// 2×2 checkerboard tiled behind the image.
@@ -162,9 +185,19 @@ impl<D> Default for ImagePreviewPlugin<D> {
 
 impl<D: TextureDomain> Plugin for ImagePreviewPlugin<D> {
     fn build(&self, app: &mut App) {
+        setup_cubemap_logic(app);
         app.init_resource::<Checker<D>>()
             .init_resource::<Cameras<D>>()
-            .add_systems(Update, (redraw::<D>, place::<D>).chain().after(editor_core::apply_actions))
+            .init_resource::<ShownState<D>>()
+            .add_systems(
+                Update,
+                (redraw::<D>, ApplyDeferred, place::<D>, update_cubemap_preview::<D>)
+                    .chain()
+                    .after(editor_core::apply_actions),
+            )
+            .add_observer(cubemap_drag::<D>)
+            .add_observer(cubemap_scroll::<D>)
+            .add_observer(cubemap_double_click::<D>)
             .add_observer(zoom::<D>)
             .add_observer(pan::<D>)
             .add_observer(fit_on_double_click::<D>);
@@ -187,8 +220,20 @@ pub fn preview_area<D: TextureDomain>(kind: ViewKindId) -> impl Scene {
     }
 }
 
-/// The preview's editor topbar controls: R | G | B | All, Tile 3x3 and the zoom.
+/// The preview's editor topbar controls: cube-map mode toggle (`3D` / `2D`),
+/// R | G | B | All, Tile 3x3 and the zoom.
 pub fn preview_controls<D: TextureDomain>(p: &dyn PreviewDoc) -> Vec<Box<dyn Scene>> {
+    let cube_modes = CubeMapViewMode::ALL.map(|mode| GroupButton {
+        caption: Caption::Text(mode.label().into()),
+        action: PreviewCubeMode::<D>::new(mode).into(),
+        selected: p.cube_mode() == mode,
+        disabled: false,
+        tip: mode.tip().into(),
+    });
+    let cube_controls = PreviewCubeControls::<D>::default();
+    let cube_display = if D::POLICY.shape == TextureShape::CubeMap { Display::Flex } else { Display::None };
+    let cube_group: Box<dyn Scene> = Box::new(button_group(cube_modes.into()));
+
     let channels = [(Some(0), "R"), (Some(1), "G"), (Some(2), "B"), (None, "All")].map(|(c, label)| {
         let tip = match c {
             Some(_) => format!("Preview only the {label} channel, in grey"),
@@ -199,6 +244,11 @@ pub fn preview_controls<D: TextureDomain>(p: &dyn PreviewDoc) -> Vec<Box<dyn Sce
     });
     let zoom = PreviewZoomText::<D>::default();
     vec![
+        Box::new(bsn! {
+            cube_controls
+            Node { display: (cube_display), align_items: AlignItems::Center }
+            Children [ @{cube_group} ]
+        }),
         Box::new(button_group(channels.into())),
         checkbox("Tile 3x3", texture_key::<D>(TextureProp::PreviewTiled), p.tiled()),
         Box::new(bsn! { @text("", TEXT_DIM, 12.0) zoom Node { min_width: px(48) } }),
@@ -208,7 +258,7 @@ pub fn preview_controls<D: TextureDomain>(p: &dyn PreviewDoc) -> Vec<Box<dyn Sce
 /// What the preview shows: the tab and preview state that determine the decoded image, plus the info line for any
 /// newly spawned [`PreviewInfoText`].
 #[derive(PartialEq)]
-struct ShownKey {
+pub(super) struct ShownKey {
     kind: ViewKindId,
     root: std::path::PathBuf,
     image: String,
@@ -220,9 +270,20 @@ struct ShownKey {
     clamp_to_border: bool,
 }
 
-struct Shown {
+pub(super) struct Shown {
     key: ShownKey,
     line: String,
+    pub(super) is_cubemap: bool,
+    pub(super) cube_handle: Option<Handle<Image>>,
+}
+
+#[derive(Resource)]
+pub(super) struct ShownState<D>(pub(super) Option<Shown>, PhantomData<fn() -> D>);
+
+impl<D> Default for ShownState<D> {
+    fn default() -> Self {
+        ShownState(None, PhantomData)
+    }
 }
 
 /// Decodes the active tab's image when the tab or preview state changes and rebuilds the preview; drops the image once
@@ -232,7 +293,7 @@ fn redraw<D: TextureDomain>(
     (mut cache, mut images, checker): (ResMut<GameImageCache<D>>, ResMut<Assets<Image>>, Res<Checker<D>>),
     (areas, mut info): (Query<(Entity, &PreviewArea<D>)>, Query<&mut Text, With<PreviewInfoText<D>>>),
     mut cams: ResMut<Cameras<D>>,
-    mut last: Local<Option<Shown>>,
+    mut last: ResMut<ShownState<D>>,
     mut commands: Commands,
 ) {
     let clear = |commands: &mut Commands| {
@@ -241,14 +302,14 @@ fn redraw<D: TextureDomain>(
         }
     };
     let (Some(tab), Some(project)) = (editor.tab(), &editor.project) else {
-        if last.take().is_some() {
+        if last.0.take().is_some() {
             clear(&mut commands);
         }
         return;
     };
     let kind = tab.doc().view();
     let (Some(p), Some((area, _))) = (preview::<D>(tab), areas.iter().find(|(_, a)| a.0 == kind)) else {
-        if last.take().is_some() {
+        if last.0.take().is_some() {
             clear(&mut commands);
         }
         return;
@@ -268,7 +329,7 @@ fn redraw<D: TextureDomain>(
         formats: cache.formats,
         clamp_to_border: cache.clamp_to_border,
     };
-    if let Some(shown) = last.as_ref().filter(|s| s.key == key) {
+    if let Some(shown) = last.0.as_ref().filter(|s| s.key == key) {
         for mut text in &mut info {
             if text.0 != shown.line {
                 text.0 = shown.line.clone();
@@ -276,9 +337,9 @@ fn redraw<D: TextureDomain>(
         }
         return;
     }
-    let result = cache.get_channel(project, &key.image, &key.settings, key.channel, &mut images);
+    let result = cache.get_cached(project, &key.image, &key.settings, key.channel, &mut images);
     let line = match &result {
-        Ok((h, _)) => images.get(h).map_or_else(|| "n/a".to_string(), describe),
+        Ok(c) => images.get(&c.handle).map_or_else(|| "n/a".to_string(), describe),
         Err(_) => "n/a".to_string(),
     };
     for mut text in &mut info {
@@ -286,27 +347,39 @@ fn redraw<D: TextureDomain>(
             text.0 = line.clone();
         }
     }
-    *last = Some(Shown { key, line });
+    let (is_cubemap, cube_handle) = match &result {
+        Ok(c) => (c.is_cubemap, c.cube_handle.clone()),
+        Err(_) => (false, None),
+    };
+    last.0 = Some(Shown { key, line, is_cubemap, cube_handle });
     clear(&mut commands);
     match result {
-        Ok((handle, grey)) => {
-            let Some(size) = images.get(&handle).map(Image::size) else { return };
+        Ok(cached) => {
+            let Some(size) = images.get(&cached.handle).map(Image::size) else { return };
+            let show_3d =
+                cached.is_cubemap && p.cube_mode() != CubeMapViewMode::Strip2d && cached.cube_handle.is_some();
             let tiled = NodeImageMode::Tiled { tile_x: true, tile_y: true, stretch_value: 6.0 };
             let frame = commands
                 .spawn((
                     ImageNode::new(checker.0.clone()).with_mode(tiled),
                     PreviewPic::<D>(size, PhantomData),
-                    Node { position_type: PositionType::Absolute, ..default() },
+                    Node {
+                        position_type: PositionType::Absolute,
+                        display: if show_3d { Display::None } else { Display::Flex },
+                        ..default()
+                    },
                     Pickable::IGNORE,
                     ChildOf(area),
                 ))
                 .id();
             // A channel the cache could not turn grey (compressed formats) is shown tinted instead.
             let tint = match p.channel() {
-                Some(c) if !grey => Color::srgb((c == 0) as u8 as f32, (c == 1) as u8 as f32, (c == 2) as u8 as f32),
+                Some(c) if !cached.grey => {
+                    Color::srgb((c == 0) as u8 as f32, (c == 1) as u8 as f32, (c == 2) as u8 as f32)
+                }
                 _ => Color::WHITE,
             };
-            let mut image = ImageNode::new(handle).with_color(tint);
+            let mut image = ImageNode::new(cached.handle).with_color(tint);
             if p.tiled() {
                 // UVs -1..2: the sampler's address modes decide what lies around the image.
                 let s = size.as_vec2();
@@ -318,6 +391,9 @@ fn redraw<D: TextureDomain>(
                 Pickable::IGNORE,
                 ChildOf(frame),
             ));
+            let cube_scene =
+                cubemap_preview_scene::<D>(p.cube_mode(), if show_3d { Display::Flex } else { Display::None });
+            commands.spawn_scene(bsn! { @{cube_scene} ChildOf(area) });
         }
         Err(e) => {
             commands.spawn_scene(bsn! { @text(e, ERROR, 14.0) Node { margin: UiRect::all(px(PAD)) } ChildOf(area) });
@@ -378,9 +454,14 @@ fn place<D: TextureDomain>(
 fn zoom<D: TextureDomain>(
     mut ev: On<PointerScroll>,
     areas: Query<(&ComputedNode, &UiGlobalTransform), With<PreviewArea<D>>>,
+    editor: Res<Editor>,
+    shown: Res<ShownState<D>>,
     ratio: Res<MouseScrollPixelsPerLine>,
     mut cams: ResMut<Cameras<D>>,
 ) {
+    if active_3d_cubemap::<D>(&editor, &shown).is_some() {
+        return;
+    }
     let Ok((node, transform)) = areas.get(ev.entity) else { return };
     ev.propagate(false);
     let notches = ev.to_lines(&ratio).y;
@@ -400,9 +481,11 @@ fn zoom<D: TextureDomain>(
 fn pan<D: TextureDomain>(
     mut ev: On<PointerDrag>,
     areas: Query<(), With<PreviewArea<D>>>,
+    editor: Res<Editor>,
+    shown: Res<ShownState<D>>,
     mut cams: ResMut<Cameras<D>>,
 ) {
-    if !areas.contains(ev.entity) {
+    if active_3d_cubemap::<D>(&editor, &shown).is_some() || !areas.contains(ev.entity) {
         return;
     }
     ev.propagate(false);
@@ -416,8 +499,13 @@ fn pan<D: TextureDomain>(
 fn fit_on_double_click<D: TextureDomain>(
     ev: On<PointerClick>,
     areas: Query<(), With<PreviewArea<D>>>,
+    editor: Res<Editor>,
+    shown: Res<ShownState<D>>,
     mut cams: ResMut<Cameras<D>>,
 ) {
+    if active_3d_cubemap::<D>(&editor, &shown).is_some() {
+        return;
+    }
     if areas.contains(ev.entity) && ev.button == PointerButton::Primary && ev.count >= 2 {
         cams.cam.scale = None;
         cams.cam.offset = Vec2::ZERO;

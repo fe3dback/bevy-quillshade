@@ -1,6 +1,7 @@
 //! Writes the sample game's Light assets (design §9.2): the cube map `assets/textures/sky_cube.ktx2`, its Light
-//! Texture asset `quillshade/light/sky.texture.ron` and the environment `quillshade/light/day.environment.ron`
-//! showing it. Then regenerate with the CLI, which knows every domain (the umbrella crate lists them all):
+//! Texture asset `quillshade/light/sky.texture.ron`, the environments `quillshade/light/day.environment.ron` and
+//! `quillshade/light/night.environment.ron`, and the transition curve `quillshade/light/smooth.curve.ron`.
+//! Then regenerate with the CLI, which knows every domain (the umbrella crate lists them all):
 //!
 //! ```sh
 //! cargo run -p light_domain --example make_sample -- examples/sample_game
@@ -11,7 +12,11 @@
 //! (`VK_FORMAT_R8G8B8A8_SRGB`), 6 faces of 4x4, one mip level, no array layers, no supercompression. The faces form a
 //! simple sky: a blue zenith, sides fading from blue to a pale horizon, a dark ground.
 
-use light_domain::backend::{Environment, LightBackend, environment_ref, save_environment, texture_ref};
+use curve_kit::Curve;
+use light_domain::backend::{
+    DirectionalLightDef, Environment, FogDef, FogFalloffDef, LightBackend, curve_ref, environment_ref, save_curve,
+    save_environment, texture_ref,
+};
 use project_core::Project;
 use project_core::regen::DomainBackend;
 use texture_kit::TextureAsset;
@@ -31,8 +36,12 @@ const SIDE: u32 = 4;
 const CUBE_FILE: &str = "textures/sky_cube.ktx2";
 /// The Light Texture asset of the cube map (domain-relative, no suffix).
 const TEXTURE: &str = "sky";
-/// The environment (domain-relative, no suffix).
+/// The day environment (domain-relative, no suffix).
 const ENVIRONMENT: &str = "day";
+/// The night environment (domain-relative, no suffix).
+const NIGHT_ENVIRONMENT: &str = "night";
+/// The smooth transition curve (domain-relative, no suffix).
+const SMOOTH_CURVE: &str = "smooth";
 
 fn main() {
     let dir = std::env::args().nth(1).unwrap_or_else(|| "examples/sample_game".into());
@@ -42,14 +51,67 @@ fn main() {
     std::fs::write(&cube, sky_cube()).expect("write the cube map");
     texture_kit::save(&project.root.join(texture_ref(TEXTURE).source_rel()), &TextureAsset::new(CUBE_FILE))
         .expect("write the Texture asset");
-    let env = Environment { cubemap: Some(TEXTURE.into()), ..Environment::default() };
-    save_environment(&project.root.join(environment_ref(ENVIRONMENT).source_rel()), &env)
-        .expect("write the environment");
+    save_environment(&project.root.join(environment_ref(ENVIRONMENT).source_rel()), &day_environment())
+        .expect("write the day environment");
+    save_environment(&project.root.join(environment_ref(NIGHT_ENVIRONMENT).source_rel()), &night_environment())
+        .expect("write the night environment");
+    save_curve(&project.root.join(curve_ref(SMOOTH_CURVE).source_rel()), &smooth_curve())
+        .expect("write the smooth curve");
     let plan = LightBackend.plan(&project, false);
     for d in &plan.diagnostics {
         eprintln!("{d}");
     }
     println!("Light assets written ({} diagnostic(s)); now run `cargo run -- regen {dir}`", plan.diagnostics.len());
+}
+
+fn day_environment() -> Environment {
+    Environment { cubemap: Some(TEXTURE.into()), ..Environment::default() }
+}
+
+fn night_environment() -> Environment {
+    Environment {
+        clear_color: [0.02, 0.03, 0.06, 1.0],
+        cubemap: Some(TEXTURE.into()),
+        skybox_brightness: 150.0,
+        skybox_rotation: 180.0,
+        env_intensity: 200.0,
+        env_rotation: 180.0,
+        sky_top_color: [0.05, 0.08, 0.18, 1.0],
+        sky_horizon_color: [0.10, 0.14, 0.25, 1.0],
+        ground_color: [0.02, 0.02, 0.04, 1.0],
+        ambient_color: [0.6, 0.7, 1.0, 1.0],
+        ambient_brightness: 40.0,
+        lights: vec![
+            DirectionalLightDef {
+                name: "Moon".into(),
+                color: [0.65, 0.78, 1.0, 1.0],
+                illuminance: 1_200.0,
+                azimuth_deg: -45.0,
+                elevation_deg: 35.0,
+                ..DirectionalLightDef::default()
+            },
+            DirectionalLightDef {
+                name: "Sky".into(),
+                color: [0.4, 0.5, 0.8, 1.0],
+                illuminance: 300.0,
+                azimuth_deg: 180.0,
+                elevation_deg: 80.0,
+                ..DirectionalLightDef::default()
+            },
+        ],
+        ev100: 11.0,
+        fog: FogDef {
+            enabled: true,
+            color: [0.02, 0.03, 0.06, 1.0],
+            falloff: FogFalloffDef::Linear { start: 30.0, end: 220.0 },
+            ..FogDef::default()
+        },
+        ..Environment::default()
+    }
+}
+
+fn smooth_curve() -> Curve {
+    Curve::new(SMOOTH_CURVE, vec![(0.0, 0.0), (0.25, 0.15), (0.75, 0.85), (1.0, 1.0)])
 }
 
 /// The sky's six faces in KTX2 order (+X, -X, +Y, -Y, +Z, -Z), each `SIDE` rows top to bottom of `SIDE` RGBA8 texels.
@@ -228,7 +290,12 @@ mod tests {
         assert!(std::fs::read(p.assets_dir().join(CUBE_FILE)).unwrap() == sky_cube(), "{CUBE_FILE} is {stale}");
         let texture = texture_kit::load(&p.root.join(texture_ref(TEXTURE).source_rel())).unwrap();
         assert_eq!(texture, TextureAsset::new(CUBE_FILE), "{stale}");
-        let env = light_domain::backend::load_environment(&p.root.join(environment_ref(ENVIRONMENT).source_rel()));
-        assert_eq!(env.unwrap(), Environment { cubemap: Some(TEXTURE.into()), ..Environment::default() }, "{stale}");
+        let day = light_domain::backend::load_environment(&p.root.join(environment_ref(ENVIRONMENT).source_rel()));
+        assert_eq!(day.unwrap(), day_environment(), "{stale}");
+        let night =
+            light_domain::backend::load_environment(&p.root.join(environment_ref(NIGHT_ENVIRONMENT).source_rel()));
+        assert_eq!(night.unwrap(), night_environment(), "{stale}");
+        let smooth = light_domain::backend::load_curve(&p.root.join(curve_ref(SMOOTH_CURVE).source_rel()));
+        assert_eq!(smooth.unwrap(), smooth_curve(), "{stale}");
     }
 }

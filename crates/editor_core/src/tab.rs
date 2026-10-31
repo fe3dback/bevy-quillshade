@@ -3,6 +3,7 @@
 //! bottom-right corner). See decision 0014.
 
 use std::any::Any;
+use std::collections::BTreeSet;
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -63,11 +64,67 @@ impl fmt::Display for TabKey {
     }
 }
 
+/// Parses a line highlight specification (`"highlight=[1,16,25,47,50-58]"`, `"[1, 16, 50-58]"`, `"1,16,50-58"`, or
+/// `"line 16"`) into a sorted set of 1-based line numbers.
+pub fn parse_highlights(spec: &str) -> BTreeSet<usize> {
+    let mut s = spec.trim();
+    if let Some(rest) = s.strip_prefix("highlight=") {
+        s = rest.trim();
+    }
+    if let Some(rest) = s.strip_prefix('[').and_then(|r| r.strip_suffix(']')) {
+        s = rest.trim();
+    }
+    let mut out = BTreeSet::new();
+    for raw in s.split([',', ';']) {
+        let mut token = raw.trim();
+        if let Some(rest) = token.strip_prefix("lines ").or_else(|| token.strip_prefix("line ")) {
+            token = rest.trim();
+        }
+        if token.is_empty() {
+            continue;
+        }
+        if let Some((a, b)) = token.split_once('-') {
+            if let (Ok(a), Ok(b)) = (a.trim().parse::<usize>(), b.trim().parse::<usize>())
+                && a >= 1
+                && b >= 1
+            {
+                out.extend(a.min(b)..=a.max(b));
+            }
+        } else if let Ok(n) = token.parse::<usize>()
+            && n >= 1
+        {
+            out.insert(n);
+        }
+    }
+    out
+}
+
+/// Formats a sorted set of 1-based line numbers into compact range notation (`"highlight=[1,16,25,47,50-58]"`), or an
+/// empty string when `lines` is empty.
+pub fn format_highlights(lines: &BTreeSet<usize>) -> String {
+    if lines.is_empty() {
+        return String::new();
+    }
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    for &n in lines {
+        if let Some(last) = ranges.last_mut()
+            && n == last.1 + 1
+        {
+            last.1 = n;
+        } else {
+            ranges.push((n, n));
+        }
+    }
+    let parts: Vec<String> =
+        ranges.into_iter().map(|(a, b)| if a == b { a.to_string() } else { format!("{a}-{b}") }).collect();
+    format!("highlight=[{}]", parts.join(","))
+}
+
 /// A hook a domain gives a [`TextDoc`]: called with the domain's state after the file was re-read.
 pub type TextReloaded = fn(&mut dyn Any, &TextDoc);
 
-/// Read-only view of a text file generated from an asset ("Show generated WESL / Rust"), highlighted by the
-/// highlighter registered for [`TextDoc::lang`] (design §6.2). The domain says which file it is.
+/// Read-only view of a text file generated from an asset ("Show generated WESL / Rust") or a game source file,
+/// highlighted by the highlighter registered for [`TextDoc::lang`] (design §6.2). The domain says which file it is.
 #[derive(Debug, Clone)]
 pub struct TextDoc {
     /// The asset the file is generated from (the tab's owner).
@@ -79,7 +136,9 @@ pub struct TextDoc {
     pub rel: String,
     /// File contents; `None` while the file does not exist.
     pub text: Option<String>,
-    /// Set to a fresh value whenever `text` changes; the view rebuilds when it differs.
+    /// Highlighted 1-based line numbers (`BackgroundColor(ACCENT2)` in [`crate::ui::text_view`]).
+    pub highlights: BTreeSet<usize>,
+    /// Set to a fresh value whenever `text` or `highlights` changes; the view rebuilds when it differs.
     pub revision: u64,
     on_reload: Option<TextReloaded>,
 }
@@ -94,7 +153,16 @@ impl TextDoc {
 
     /// The tab of `path` (generated from `source`, in language `lang`), read now.
     pub fn open(project: &Project, source: AssetRef, lang: &'static str, path: PathBuf) -> TextDoc {
-        let mut doc = TextDoc { source, lang, rel: project.rel(&path), path, text: None, revision: 0, on_reload: None };
+        let mut doc = TextDoc {
+            source,
+            lang,
+            rel: project.rel(&path),
+            path,
+            text: None,
+            highlights: BTreeSet::new(),
+            revision: 0,
+            on_reload: None,
+        };
         doc.reload();
         doc
     }
@@ -103,6 +171,31 @@ impl TextDoc {
     pub fn with_reload_hook(mut self, hook: TextReloaded) -> TextDoc {
         self.on_reload = Some(hook);
         self
+    }
+
+    /// Sets the highlighted 1-based line numbers (`>= 1`).
+    pub fn with_highlights(mut self, lines: impl IntoIterator<Item = usize>) -> Self {
+        self.highlights = lines.into_iter().filter(|&n| n >= 1).collect();
+        self
+    }
+
+    /// Parses `spec` with [`parse_highlights`] and sets the highlighted 1-based line numbers.
+    pub fn with_highlight_spec(self, spec: &str) -> Self {
+        self.with_highlights(parse_highlights(spec))
+    }
+
+    /// Updates the highlighted 1-based line numbers (`>= 1`), bumping `revision` when the set changes.
+    pub fn set_highlights(&mut self, lines: impl IntoIterator<Item = usize>) {
+        let new_set: BTreeSet<usize> = lines.into_iter().filter(|&n| n >= 1).collect();
+        if new_set != self.highlights {
+            self.highlights = new_set;
+            self.revision = Self::next_revision();
+        }
+    }
+
+    /// Updates the highlighted 1-based line numbers from `spec` ([`parse_highlights`]).
+    pub fn set_highlight_spec(&mut self, spec: &str) {
+        self.set_highlights(parse_highlights(spec));
     }
 
     /// Re-reads the file; returns whether the contents changed.
@@ -316,5 +409,17 @@ pub(crate) mod tests {
             Tab::new(DomainId::new("test"), TestDoc("env/grass.material")),
         ];
         assert_eq!(labels(&tabs), ["env/rock.material", "props/rock.material", "grass"]);
+    }
+
+    #[test]
+    fn parse_and_format_highlights_roundtrip() {
+        let expected = BTreeSet::from([1, 16, 25, 47, 50, 51, 52, 53, 54, 55, 56, 57, 58]);
+        assert_eq!(parse_highlights("highlight=[1,16,25,47,50-58]"), expected);
+        assert_eq!(parse_highlights("[1, 16, 25, 47, 50-58]"), expected);
+        assert_eq!(parse_highlights("1,16,25,47,50-58"), expected);
+        assert_eq!(format_highlights(&expected), "highlight=[1,16,25,47,50-58]");
+        assert_eq!(parse_highlights("line 16"), BTreeSet::from([16]));
+        assert_eq!(parse_highlights("line 16, lines 50-52"), BTreeSet::from([16, 50, 51, 52]));
+        assert_eq!(format_highlights(&BTreeSet::new()), "");
     }
 }

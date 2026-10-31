@@ -7,10 +7,10 @@ use project_core::{AssetRef, Project};
 
 use super::{EditorAreas, EditorInput, SidebarKey, fill_sidebar_with};
 use crate::action::{Handled, TabAction};
-use crate::doc_kind::{DocCtx, TabDoc};
+use crate::doc_kind::{DocCtx, StatusCtx, StatusInfo, TabDoc};
 use crate::main_input::{EditCopy, add_kind, ctrl, hotkey};
 use crate::state::editor::Editor;
-use crate::tab::{TextDoc, ViewKindId};
+use crate::tab::{TextDoc, ViewKindId, format_highlights};
 use crate::theme::{TEXT as TEXT_COLOR, TEXT_DIM, text};
 use crate::ui::icons::{IconId, IconRef};
 use crate::ui::text_view::TextViewBar;
@@ -85,6 +85,9 @@ fn text_rows(t: &TextDoc) -> Vec<Box<dyn Scene>> {
     out.push(Box::new(text(format!("Source: {}", t.source.source_rel()), TEXT_DIM, 12.0)));
     if let Some(src) = &t.text {
         out.push(Box::new(text(plural(src.lines().count(), "line", "lines"), TEXT_DIM, 12.0)));
+    }
+    if !t.highlights.is_empty() {
+        out.push(Box::new(text(format_highlights(&t.highlights), TEXT_DIM, 12.0)));
     }
     vec![subpane_box("File", out)]
 }
@@ -171,6 +174,18 @@ impl TabDoc for TextDoc {
     /// `AssetRef::source_rel` of the source plus `#<lang>` (`…ron#wesl`).
     fn config_key(&self) -> Option<String> {
         Some(format!("{}#{}", self.source.source_rel(), self.lang))
+    }
+
+    fn status(&self, ctx: &StatusCtx) -> Option<StatusInfo> {
+        if self.highlights.is_empty() {
+            return None;
+        }
+        let mut counts = Vec::new();
+        if let Some(src) = &self.text {
+            counts.push(plural(src.lines().count(), "line", "lines"));
+        }
+        counts.push(format_highlights(&self.highlights));
+        Some(StatusInfo::new(false, ctx, counts))
     }
 }
 

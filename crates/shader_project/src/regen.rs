@@ -293,11 +293,28 @@ pub fn regenerate(project: &Project, opts: &RegenOptions) -> std::io::Result<Reg
     regenerate_set(project, &set, opts)
 }
 
+const LIGHT_BEVY_FEATURES: &[&str] = &[
+    "std",
+    "bevy_asset",
+    "bevy_color",
+    "bevy_core_pipeline",
+    "bevy_curve",
+    "bevy_image",
+    "bevy_light",
+    "bevy_log",
+    "bevy_pbr",
+    "bevy_render",
+    "bevy_shader",
+    "bevy_state",
+    "ktx2",
+    "zstd_rust",
+];
+
 const LIGHT_CRATE: CrateContribution = CrateContribution {
     domain: project_core::DomainId::new("light"),
     plugin: "QuillshadeLightInternalPlugin",
-    bevy_features: &[],
-    dependencies: &[],
+    bevy_features: LIGHT_BEVY_FEATURES,
+    dependencies: &[("serde", r#"{ version = "1", features = ["derive"] }"#), ("ron", r#""0.12""#)],
 };
 
 /// [`plan_set`], then [`commit`] of its output and the umbrella crate files; blocked files (E008) are reported at

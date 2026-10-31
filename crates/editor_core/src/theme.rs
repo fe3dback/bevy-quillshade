@@ -36,9 +36,12 @@ pub const PANEL_BG: Color = Color::srgb_u8(32, 34, 39);
 pub const TOPBAR_BG: Color = Color::srgb_u8(30, 32, 37);
 /// Background of an inactive asset tab in the secondbar (design §14.3).
 pub const TAB_BG: Color = Color::srgb_u8(48, 50, 57);
+/// Secondary UI accent (dark blue): tool tabs ([`TOOL_TAB_BG`]) and highlighted lines in the code view
+/// ([`crate::ui::text_view::TextViewLine`]).
+pub const ACCENT2: Color = Color::srgb_u8(34, 48, 78);
 /// Background of an inactive tool tab (design §14.1, §14.3): a dark blue, apart from the asset tabs and the orange
 /// [`ACCENT`].
-pub const TOOL_TAB_BG: Color = Color::srgb_u8(34, 48, 78);
+pub const TOOL_TAB_BG: Color = ACCENT2;
 /// Background of the active tool tab.
 pub const TOOL_TAB_ACTIVE_BG: Color = Color::srgb_u8(46, 68, 112);
 /// Text and icon of a greyed tab: one of a real domain other than the active one (design §14.3). [`TEXT_DIM`] made

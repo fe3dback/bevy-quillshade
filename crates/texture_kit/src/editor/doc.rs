@@ -10,17 +10,21 @@
 
 use std::fmt;
 use std::marker::PhantomData;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use editor_core::action::{Handled, TabAction};
 use editor_core::doc_kind::{DocCtx, StatusCtx, TabDoc};
 use editor_core::dynval::{PropKey, PropValue};
 use editor_core::history::{History, MergeKey};
+use editor_core::preview::{PreviewHandle, start_preview};
 use editor_core::tab::ViewKindId;
 use editor_core::ui::icons::IconRef;
 use project_core::{AssetRef, Project};
 
-use super::{Channel, PreviewDoc, TEXTURE_ICON, TextureDomain, internal_path, load, save};
+use super::{
+    CUBEMAP_PREVIEW_KIND, Channel, CubeMapViewMode, PreviewDoc, TEXTURE_ICON, TextureDomain, internal_path, load, save,
+};
 use crate::{AddressMode, FilterMode, InternalTexture, SamplerSettings, TextureAsset, TextureSettings};
 
 /// A fresh value for [`TextureDoc::layout`], unique across documents.
@@ -51,6 +55,10 @@ pub struct TextureDoc<D> {
     pub easy: bool,
     /// The preview shows only channel 0 / 1 / 2 (R / G / B) as a grey image; `None` = the image (editor-only).
     pub channel: Option<usize>,
+    /// How a cube-map image is shown in the preview (3D sphere or 2D strip; editor-only).
+    pub cube_mode: CubeMapViewMode,
+    /// RAII 3D cube-map preview session handle (`editor_core::preview::start_preview`).
+    pub preview: Arc<PreviewHandle>,
     /// Bumped on every change of the asset.
     pub revision: u64,
     /// Changes when the form must be rebuilt: any edit except a dragged number field, undo/redo, reload, a refused
@@ -70,6 +78,8 @@ impl<D> Clone for TextureDoc<D> {
             tiled: self.tiled,
             easy: self.easy,
             channel: self.channel,
+            cube_mode: self.cube_mode,
+            preview: Arc::clone(&self.preview),
             revision: self.revision,
             layout: self.layout,
             domain: PhantomData,
@@ -84,6 +94,7 @@ impl<D> fmt::Debug for TextureDoc<D> {
             .field("asset", &self.asset)
             .field("internal", &self.internal)
             .field("easy", &self.easy)
+            .field("cube_mode", &self.cube_mode)
             .field("revision", &self.revision)
             .finish_non_exhaustive()
     }
@@ -101,6 +112,8 @@ impl<D: TextureDomain> TextureDoc<D> {
             internal: false,
             tiled: false,
             channel: None,
+            cube_mode: CubeMapViewMode::Sphere,
+            preview: Arc::new(start_preview(CUBEMAP_PREVIEW_KIND)),
             revision: 1,
             layout: next_layout(),
             domain: PhantomData,
@@ -242,6 +255,21 @@ impl<D: TextureDomain> PreviewDoc for TextureDoc<D> {
     fn set_tiled(&mut self, tiled: bool) {
         self.tiled = tiled;
     }
+
+    fn cube_mode(&self) -> CubeMapViewMode {
+        self.cube_mode
+    }
+
+    fn set_cube_mode(&mut self, mode: CubeMapViewMode) {
+        if self.cube_mode != mode {
+            self.cube_mode = mode;
+            self.relayout();
+        }
+    }
+
+    fn preview_handle(&self) -> Option<&PreviewHandle> {
+        Some(&self.preview)
+    }
 }
 
 impl<D: TextureDomain> TabDoc for TextureDoc<D> {
@@ -334,6 +362,10 @@ impl<D: TextureDomain> TabDoc for TextureDoc<D> {
     /// `quillshade/<domain>/….texture.ron`, or the `@internal/…` id of a built-in texture.
     fn config_key(&self) -> Option<String> {
         Some(if self.is_internal() { self.aref.path.clone() } else { self.aref.source_rel() })
+    }
+
+    fn preview_handle(&self) -> Option<&PreviewHandle> {
+        Some(&self.preview)
     }
 }
 

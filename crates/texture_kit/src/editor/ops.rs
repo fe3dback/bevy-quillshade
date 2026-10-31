@@ -17,7 +17,9 @@ use editor_core::history::MergeKey;
 use editor_core::state::editor::Editor;
 use project_core::AssetRef;
 
-use super::{Channel, PreviewDoc, TextureDoc, TextureDomain, active, active_mut, create_for_file, texture_owner};
+use super::{
+    Channel, CubeMapViewMode, PreviewDoc, TextureDoc, TextureDomain, active, active_mut, create_for_file, texture_owner,
+};
 use super::{FilterPreset, TextureField, fits_easy};
 use crate::{TextureAsset, TextureSettings};
 
@@ -54,6 +56,10 @@ pub enum TextureAction {
 /// image; editor-only, also on a built-in texture (design §6.2). A channel past B shows the image. Only a tab of `D`
 /// applies it (design §14.4).
 pub struct PreviewChannel<D>(pub Channel, PhantomData<fn() -> D>);
+
+/// How `D`'s image or Texture tab previews a cube-map image: 3D sphere (`3D`) or 2D 6-face
+/// strip (`2D`); editor-only, not undoable.
+pub struct PreviewCubeMode<D>(pub CubeMapViewMode, PhantomData<fn() -> D>);
 
 /// A [`TextureAction`] for `D`'s Texture tab (design §14.4): only a [`TextureDoc`] of `D` applies it, so an edit
 /// queued for another domain's Texture tab is dropped when it reaches this one. Every sender in the kit builds this
@@ -100,7 +106,7 @@ macro_rules! doc_edit {
         }
     )*};
 }
-doc_edit!(TextureEdit(TextureAction), PreviewChannel(Channel));
+doc_edit!(TextureEdit(TextureAction), PreviewChannel(Channel), PreviewCubeMode(CubeMapViewMode));
 
 /// The property key of `target` on `D`'s Texture or image tab (design §14.4).
 pub fn texture_key<D: 'static>(target: TextureProp) -> PropKey {
@@ -139,7 +145,11 @@ impl<D: TextureDomain> TextureDoc<D> {
                     self.end_merge();
                 }
             }
-            TabAction::Doc(p) if p.downcast::<PreviewChannel<D>>().is_some() => return preview_edit::<D>(self, action),
+            TabAction::Doc(p)
+                if p.downcast::<PreviewChannel<D>>().is_some() || p.downcast::<PreviewCubeMode<D>>().is_some() =>
+            {
+                return preview_edit::<D>(self, action);
+            }
             TabAction::Doc(p) => {
                 let Some(TextureEdit(a, _)) = p.downcast::<TextureEdit<D>>() else { return Handled::No };
                 match a {
@@ -204,7 +214,7 @@ impl<D: TextureDomain> TextureDoc<D> {
 }
 
 /// The preview's view state on a tab with the shared image preview (image, Texture; editor-only, design §6.2):
-/// [`TextureProp::PreviewTiled`] and [`PreviewChannel`] of `D`.
+/// [`TextureProp::PreviewTiled`], [`PreviewChannel`] and [`PreviewCubeMode`] of `D`.
 pub(super) fn preview_edit<D: 'static>(p: &mut dyn PreviewDoc, action: &TabAction) -> Handled {
     match action {
         TabAction::SetValue { key, value, .. } if prop_of_key::<D>(key) == Some(&TextureProp::PreviewTiled) => {
@@ -213,13 +223,17 @@ pub(super) fn preview_edit<D: 'static>(p: &mut dyn PreviewDoc, action: &TabActio
             }
             Handled::Yes
         }
-        TabAction::Doc(payload) => match payload.downcast::<PreviewChannel<D>>() {
-            Some(PreviewChannel(c, _)) => {
+        TabAction::Doc(payload) => {
+            if let Some(PreviewChannel(c, _)) = payload.downcast::<PreviewChannel<D>>() {
                 p.set_channel(c.filter(|c| *c < 3));
-                Handled::Yes
+                return Handled::Yes;
             }
-            None => Handled::No,
-        },
+            if let Some(PreviewCubeMode(mode, _)) = payload.downcast::<PreviewCubeMode<D>>() {
+                p.set_cube_mode(*mode);
+                return Handled::Yes;
+            }
+            Handled::No
+        }
         _ => Handled::No,
     }
 }

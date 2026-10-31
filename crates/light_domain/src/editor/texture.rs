@@ -1,6 +1,7 @@
 //! Light's cube-map Texture assets (design §9.2, §7.2): `texture_kit`'s texture editor for
 //! `quillshade/light/**/*.texture.ron` under [`LIGHT_TEXTURES`] (`.ktx2` cube maps, the plain settings form), with a
-//! "New Texture..." template and a preview of the cube map's first face.
+//! "New Texture..." template and the shared cube-map preview (`CubeMapPreview`: 3D sphere, 3D skybox, and 6-face 2D
+//! strip).
 
 use editor_core::state::editor::Editor;
 use editor_core::tab::ViewKindId;
@@ -28,11 +29,9 @@ impl TextureDomain for LightTexture {
     const POLICY: TexturePolicy = LIGHT_TEXTURES;
     /// The Assets menu has "New Texture..." (design §9.2): the form then picks the `.ktx2` file.
     const NEW_TEMPLATE: bool = true;
-    /// The cube map's first face (design §7.2: a cross layout is future work).
-    const PREVIEW_FIRST_LAYER: bool = true;
-    /// Light's module lists the environments only (design §9.2): nothing applies these settings yet.
-    const SETTINGS_NOTE: &'static str = "Loader and sampler settings of the cube map, saved with the asset; Light's \
-                                         generated module does not apply them yet.";
+    /// Loader and sampler settings are baked into `assets/quillshade/light/autogen/baked.ron`.
+    const SETTINGS_NOTE: &'static str = "Loader and sampler settings of the cube map, saved with the asset and baked \
+                                         into assets/quillshade/light/autogen/baked.ron for the runtime loader.";
 
     /// From Light's last scan (what validation sees too).
     fn disk_owners(editor: &Editor, file: &str) -> Vec<AssetRef> {

@@ -297,6 +297,7 @@ impl Editor {
                 self.save_all_and_follow();
             }
             Action::RegenAll => self.generate(),
+            Action::Rescan => self.rescan(),
             Action::Tab(a) => self.apply_tab(a),
             Action::Domain(id, payload) => self.domain_step(id, &payload),
             Action::NewAssetDialog { kind, template } => self.new_asset_dialog(kind, template),

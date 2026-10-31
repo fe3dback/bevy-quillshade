@@ -68,7 +68,9 @@ pub fn menu_entries(menu: MainMenu, editor: &Editor) -> Vec<MenuEntry> {
         }
         _ if !tools.is_empty() => {
             entries.extend(tools);
-            entries.push(menu_separator().into());
+            if !core.is_empty() {
+                entries.push(menu_separator().into());
+            }
         }
         _ => {}
     }
@@ -82,6 +84,14 @@ pub fn menu_entries(menu: MainMenu, editor: &Editor) -> Vec<MenuEntry> {
         }
     }
     entries.extend(core);
+    if menu == MainMenu::Tools && entries.is_empty() {
+        entries.push(MenuEntry {
+            icon: None,
+            label: "No tools".into(),
+            action: Action::None,
+            disabled: Some("The active domain has no tools".into()),
+        });
+    }
     for entry in &mut entries {
         entry.disabled = match entry.action {
             Action::NavBack if !back => Some("Nothing to go back to".into()),
@@ -129,6 +139,7 @@ pub fn menu_items(menu: MainMenu, config: &UserConfig) -> Vec<(Option<IconRef>, 
         ],
         // The active domain's items and New folder come first ([`menu_entries`]); Generate regenerates every domain.
         MainMenu::Assets => vec![(Some(IconId::Regenerate.into()), "Generate".into(), Action::RegenAll)],
+        MainMenu::Tools => Vec::new(),
         // Quick Start: core's steps, then every domain's (design §8.2).
         MainMenu::Help => vec![
             (Some(IconId::Help.into()), "Quick Start".into(), Action::QuickStart(0)),

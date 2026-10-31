@@ -228,6 +228,8 @@ pub enum Action {
     SaveAll,
     /// Generate (Assets menu): every domain regenerates from what is saved.
     RegenAll,
+    /// Re-scans the open project's files and refreshes every domain's state.
+    Rescan,
     /// An edit for the active tab's document (design §6.2): the shared edit verbs, property writes and
     /// kind-specific edits.
     Tab(TabAction),
