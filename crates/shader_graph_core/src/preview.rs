@@ -171,14 +171,24 @@ mod tests {
         assert_eq!(albedo_expr("v", PinType::Float).as_deref(), Some("vec3<f32>(v)"));
         assert_eq!(albedo_expr("v", PinType::Float3).as_deref(), Some("v"));
         assert_eq!(albedo_expr("c", PinType::Color).as_deref(), Some("(c).rgb"));
-        assert_eq!(albedo_expr("b", PinType::Bool), None);
+        assert_eq!(albedo_expr("b", PinType::RuntimeBool), None);
+        assert_eq!(albedo_expr("b", PinType::CompileBool), None);
         assert_eq!(albedo_expr("t", PinType::Texture2D), None);
-        assert!(converts_to_albedo(PinType::Int) && !converts_to_albedo(PinType::Bool));
+        assert!(
+            converts_to_albedo(PinType::Int)
+                && !converts_to_albedo(PinType::RuntimeBool)
+                && !converts_to_albedo(PinType::CompileBool)
+        );
     }
 
     #[test]
     fn preview_main_output_of_non_color_types_is_empty() {
-        assert!(ShaderOutputDto::main_output(&outputs(&[("b", PinType::Bool), ("f", PinType::Float)])).is_empty());
+        assert!(
+            ShaderOutputDto::main_output(&outputs(&[("b", PinType::RuntimeBool), ("f", PinType::Float)])).is_empty()
+        );
+        assert!(
+            ShaderOutputDto::main_output(&outputs(&[("b", PinType::CompileBool), ("f", PinType::Float)])).is_empty()
+        );
         assert!(ShaderOutputDto::main_output(&outputs(&[("t", PinType::Texture2D)])).is_empty());
         assert!(ShaderOutputDto::main_output(&outputs(&[])).is_empty());
     }

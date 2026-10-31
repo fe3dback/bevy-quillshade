@@ -341,7 +341,13 @@ fn short(v: &Value) -> String {
 pub fn has_label(kind: &str) -> bool {
     matches!(
         kind,
-        "stdlib::Constant" | "stdlib::Constant2Vector" | "stdlib::Constant3Vector" | "stdlib::Constant4Vector"
+        "stdlib::Constant"
+            | "stdlib::Constant2Vector"
+            | "stdlib::Constant3Vector"
+            | "stdlib::Constant4Vector"
+            | "stdlib::Toggle"
+            | "stdlib::RuntimeBool"
+            | "stdlib::CompileBool"
     )
 }
 
@@ -435,6 +441,7 @@ pub fn node_signature(
         consts: &NoConsts,
         textures: &NoTextures,
         gradients: &NoGradients,
+        compile_overrides: &BTreeMap::new(),
     };
     Some(def.signature(&SigCtx {
         node_id: id,
@@ -488,6 +495,7 @@ fn output_type(
         consts: &NoConsts,
         textures: &NoTextures,
         gradients: &NoGradients,
+        compile_overrides: &BTreeMap::new(),
     };
     let sig = def.signature(&SigCtx {
         node_id: node,
@@ -766,7 +774,7 @@ mod tests {
 
     const MAKE: &str = "stdlib::MakeMaterialAttributesPbr";
 
-    /// Decision 0023: attributes connect to Lerp `a`/`b` only; Add and If refuse them.
+    /// Decision 0023: attributes connect to Lerp `a`/`b` and If / RuntimeIf `true_value`/`false_value`; Add and RuntimeCompareIf refuse them.
     #[test]
     fn attributes_connect_to_lerp_only() {
         let reg = shader_stdlib::registry();
@@ -774,15 +782,23 @@ mod tests {
         let make = d.add_node(MAKE, (0.0, 0.0));
         let lerp = d.add_node("stdlib::Lerp", (100.0, 0.0));
         let add = d.add_node("stdlib::Add", (100.0, 0.0));
+        let cmp_if = d.add_node("stdlib::RuntimeCompareIf", (100.0, 0.0));
         let iff = d.add_node("stdlib::If", (100.0, 0.0));
+        let runtime_if = d.add_node("stdlib::RuntimeIf", (100.0, 0.0));
         let err =
             |d: &Doc, to: (&str, &str)| connection_error(&d.asset, (&make, "attributes"), to, &reg, &NoFunctions, "m");
         assert_eq!(err(&d, (&lerp, "a")), None);
         assert_eq!(err(&d, (&lerp, "b")), None);
         assert!(err(&d, (&lerp, "alpha")).unwrap().contains("E003"));
         assert!(err(&d, (&add, "a")).unwrap().contains("E003"));
-        assert!(err(&d, (&iff, "gt")).unwrap().contains("E003"));
-        assert!(err(&d, (&iff, "a")).unwrap().contains("E003"));
+        assert!(err(&d, (&cmp_if, "gt")).unwrap().contains("E003"));
+        assert!(err(&d, (&cmp_if, "a")).unwrap().contains("E003"));
+        assert_eq!(err(&d, (&iff, "true_value")), None);
+        assert_eq!(err(&d, (&iff, "false_value")), None);
+        assert!(err(&d, (&iff, "cond")).unwrap().contains("E003"));
+        assert_eq!(err(&d, (&runtime_if, "true_value")), None);
+        assert_eq!(err(&d, (&runtime_if, "false_value")), None);
+        assert!(err(&d, (&runtime_if, "cond")).unwrap().contains("E003"));
     }
 
     #[test]

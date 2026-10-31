@@ -67,7 +67,7 @@ fn consts_rows(c: &ConstsDoc) -> Vec<Box<dyn Scene>> {
     let usage = [
         "Read a constant with the Global* nodes (Constants category); names are unique project-wide.",
         "Values are copied into the generated WESL as literals: saving the table regenerates the shaders reading it.",
-        "bool reads as 1.0 / 0.0; compileFlag is a real bool for logic nodes (If (Bool), And, Or, Not).",
+        "toggle reads as f32 1.0 / 0.0 (GlobalToggle); runtimeBool is a shader bool for RuntimeIf, And, Or, Not (GlobalRuntimeBool); compileBool is an editor-only compile-time flag that prunes inactive If branches from WESL (GlobalCompileBool).",
         "Changing a type or deleting a constant clears the references of the nodes reading it (after a confirmation).",
     ]
     .map(|line| -> Box<dyn Scene> { Box::new(text(line, TEXT_DIM, 12.0)) });

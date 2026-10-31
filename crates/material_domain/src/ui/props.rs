@@ -228,7 +228,7 @@ pub(crate) fn pin_kind(t: PinType) -> Option<ParamKind> {
         PinType::Float3 => ParamKind::Float3,
         PinType::Float4 => ParamKind::Float4,
         PinType::Color => ParamKind::Color,
-        PinType::Bool => ParamKind::Bool,
+        PinType::RuntimeBool | PinType::CompileBool => ParamKind::Bool,
         PinType::Int => ParamKind::Int { min: None, max: None },
         PinType::Texture2D | PinType::MaterialAttributesPbr | PinType::Any => return None,
     })

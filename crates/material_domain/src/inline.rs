@@ -45,7 +45,7 @@ pub fn inline_for_pin(ty: PinType, range: Option<(f32, f32)>) -> Option<Inline> 
         PinType::Float2 => Inline::Vector(2),
         PinType::Float3 => Inline::Color(3),
         PinType::Float4 | PinType::Color => Inline::Color(4),
-        PinType::Bool => Inline::Check,
+        PinType::RuntimeBool | PinType::CompileBool => Inline::Check,
         PinType::Texture2D | PinType::MaterialAttributesPbr | PinType::Any => return None,
     })
 }
@@ -58,6 +58,7 @@ pub fn inline_for_param(kind: &str, params: &BTreeMap<String, Value>) -> Option<
         "param::Vector" => ("default", params.get("type").and_then(Value::as_type).unwrap_or(PinType::Float3)),
         _ if kind.starts_with("param::") => ("default", params.get("default")?.pin_type()?),
         _ if kind.starts_with("stdlib::Constant") => ("value", params.get("value")?.pin_type()?),
+        "stdlib::Toggle" | "stdlib::RuntimeBool" | "stdlib::CompileBool" => ("value", PinType::RuntimeBool),
         _ => return None,
     };
     Some((key.into(), inline_for_pin(ty, None)?))
@@ -111,7 +112,8 @@ mod tests {
         assert_eq!(inline_for_pin(PinType::Float3, None), Some(Inline::Color(3)));
         assert_eq!(inline_for_pin(PinType::Float4, None), Some(Inline::Color(4)));
         assert_eq!(inline_for_pin(PinType::Color, None), Some(Inline::Color(4)));
-        assert_eq!(inline_for_pin(PinType::Bool, None), Some(Inline::Check));
+        assert_eq!(inline_for_pin(PinType::RuntimeBool, None), Some(Inline::Check));
+        assert_eq!(inline_for_pin(PinType::CompileBool, None), Some(Inline::Check));
         assert_eq!(inline_for_pin(PinType::Texture2D, None), None);
         assert_eq!(inline_for_pin(PinType::Any, None), None);
     }
@@ -141,7 +143,13 @@ mod tests {
         let color = p("default", Value::Color([1.0; 4]));
         assert_eq!(inline_for_param("param::Color", &color), Some(("default".to_string(), Inline::Color(4))));
         let check = p("default", Value::Bool(false));
-        assert_eq!(inline_for_param("param::Bool", &check), Some(("default".to_string(), Inline::Check)));
+        assert_eq!(inline_for_param("param::Toggle", &check), Some(("default".to_string(), Inline::Check)));
+        assert_eq!(inline_for_param("param::RuntimeBool", &check), Some(("default".to_string(), Inline::Check)));
+        assert_eq!(inline_for_param("param::CompileBool", &check), Some(("default".to_string(), Inline::Check)));
+        let bval = p("value", Value::Bool(true));
+        assert_eq!(inline_for_param("stdlib::Toggle", &bval), Some(("value".to_string(), Inline::Check)));
+        assert_eq!(inline_for_param("stdlib::RuntimeBool", &bval), Some(("value".to_string(), Inline::Check)));
+        assert_eq!(inline_for_param("stdlib::CompileBool", &bval), Some(("value".to_string(), Inline::Check)));
         let c3 = p("value", Value::Float3([0.1, 0.2, 0.3]));
         assert_eq!(inline_for_param("stdlib::Constant3Vector", &c3), Some(("value".to_string(), Inline::Color(3))));
         let c1 = p("value", Value::Float(2.0));

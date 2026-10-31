@@ -180,3 +180,36 @@ fn consts_tabs_are_restored_and_follow_renames() {
     next.open_project(dir.path()).unwrap();
     assert_eq!(next.consts_doc().map(|c| &c.id), Some(&moved));
 }
+
+#[test]
+fn boolean_const_types_and_compile_bool_pruning() {
+    let (dir, mut e) = project();
+    e.apply(Action::OpenAsset(tuning().to_ref()));
+    for (name, label, ty) in [
+        ("my_toggle", "toggle", ConstType::Toggle),
+        ("my_runtime", "runtimeBool", ConstType::RuntimeBool),
+        ("my_compile", "compileBool", ConstType::CompileBool),
+    ] {
+        set(&mut e, ConstsProp::DraftName, Value::Str(name.into()));
+        set(&mut e, ConstsProp::DraftType, Value::Str(label.into()));
+        e.apply(Action::from(ConstsAction::Add));
+        let c = e.consts_doc().unwrap().table.get(name).unwrap();
+        assert_eq!((c.ty, &c.value), (ty, &Value::Bool(true)));
+        let val = ConstsProp::Value(name.into());
+        set(&mut e, val.clone(), Value::Bool(false));
+        assert_eq!(shown(&e, &val), Some(Value::Bool(false)));
+    }
+
+    let stripes = ConstsProp::Value("fancy_stripes".into());
+    assert_eq!(shown(&e, &stripes), Some(Value::Bool(true)));
+    set(&mut e, stripes.clone(), Value::Bool(false));
+    e.apply(Action::Save);
+    let wesl_path = dir.path().join("assets/quillshade/material/autogen/dir_fx/mat_global_tint.wesl");
+    let wesl = std::fs::read_to_string(&wesl_path).unwrap();
+    assert!(!wesl.contains("fract("), "inactive branch pruned when compileBool is false:\n{wesl}");
+
+    set(&mut e, stripes, Value::Bool(true));
+    e.apply(Action::Save);
+    let wesl = std::fs::read_to_string(&wesl_path).unwrap();
+    assert!(wesl.contains("fract("), "active branch emitted when compileBool is true:\n{wesl}");
+}

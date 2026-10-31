@@ -62,8 +62,83 @@ fn fragment_only(c: &mut EmitCtx) {
 pub fn register(r: &mut Registry) {
     r.register(
         def("stdlib::If", "If", CAT)
-            .kw(&["if", "branch", "compare", "condition"])
-            .desc("Picks A>B, A==B or A<B by comparing scalars A and B.")
+            .kw(&["if", "compile if", "compileIf", "compileFlag", "compileBool", "static switch", "branch", "select"])
+            .desc(
+                "Compile-time conditional branch (`If`): evaluates `Condition` (`CompileBool`) during shader compilation, emits only the active branch (`True` or `False`), and completely strips the inactive branch (along with any parameters, textures, or functions used only there) from the generated WESL shader. Overriding its compile flag in a future Material Instance compiles a separate WESL shader variant.\n\nNote: Requires a `CompileBool` condition. For dynamic per-pixel or uniform branching evaluated on the GPU at runtime (which executes both branches and is not free), use `RuntimeIf` with a `RuntimeBool`.",
+            )
+            .role(NodeRole::CompileIf)
+            .build(
+                |c| {
+                    let attrs = PinType::MaterialAttributesPbr;
+                    if ["true_value", "false_value"].iter().any(|p| c.connected.get(*p) == Some(&attrs)) {
+                        let ins = vec![
+                            PinDef::new("cond", "Condition", PinType::CompileBool),
+                            PinDef::new("true_value", "True", attrs).poly().accepts_attributes(),
+                            PinDef::new("false_value", "False", attrs).poly().accepts_attributes(),
+                        ];
+                        return sig(ins, vec![poly_out("out", attrs)]);
+                    }
+                    let (vals, ty, _) = poly_ins(c, &[("true_value", "True", 1.0), ("false_value", "False", 0.0)]);
+                    let mut ins = vec![PinDef::new("cond", "Condition", PinType::CompileBool)];
+                    ins.extend(vals.into_iter().map(PinDef::accepts_attributes));
+                    sig(ins, vec![poly_out("out", ty)])
+                },
+                |c| {
+                    let branch = if c.compile_bool("cond") { "true_value" } else { "false_value" };
+                    let expr = c.input(branch);
+                    c.alias("out", Operand::Value(expr));
+                },
+            ),
+    );
+
+    r.register(
+        def("stdlib::RuntimeIf", "RuntimeIf", CAT)
+            .kw(&["runtime if", "runtimeIf", "select", "switch", "bool if", "ternary", "branch"])
+            .desc(
+                "Runtime GPU conditional (`RuntimeIf`): selects between `True` and `False` inside the shader using WGSL `select(false_value, true_value, cond)` with a `RuntimeBool` condition. Both input branches are evaluated on the GPU every frame (not free).\n\nNote: When the condition does not change per pixel or at runtime, prefer `If` with a `CompileBool` to strip the unused branch at compile time with zero GPU cost.",
+            )
+            .build(
+                |c| {
+                    let attrs = PinType::MaterialAttributesPbr;
+                    if ["true_value", "false_value"].iter().any(|p| c.connected.get(*p) == Some(&attrs)) {
+                        let ins = vec![
+                            PinDef::new("cond", "Condition", PinType::RuntimeBool),
+                            PinDef::new("true_value", "True", attrs).poly().accepts_attributes(),
+                            PinDef::new("false_value", "False", attrs).poly().accepts_attributes(),
+                        ];
+                        return sig(ins, vec![poly_out("out", attrs)]);
+                    }
+                    let (vals, ty, _) = poly_ins(c, &[("true_value", "True", 1.0), ("false_value", "False", 0.0)]);
+                    let mut ins = vec![PinDef::new("cond", "Condition", PinType::RuntimeBool)];
+                    ins.extend(vals.into_iter().map(PinDef::accepts_attributes));
+                    sig(ins, vec![poly_out("out", ty)])
+                },
+                |c| {
+                    let e = if c.out_type("out") == PinType::MaterialAttributesPbr {
+                        let f = c.stdlib(
+                            shader_graph_core::attributes::MODULE,
+                            shader_graph_core::attributes::LERP_FN,
+                        );
+                        format!(
+                            "{f}({}, {}, select(0.0f, 1.0f, {}))",
+                            c.input("false_value"),
+                            c.input("true_value"),
+                            c.input("cond")
+                        )
+                    } else {
+                        format!("select({}, {}, {})", c.input("false_value"), c.input("true_value"), c.input("cond"))
+                    };
+                    c.define("out", e);
+                },
+            ),
+    );
+
+    r.register(
+        def("stdlib::RuntimeCompareIf", "RuntimeCompareIf", CAT)
+            .kw(&["compare if", "runtime compare if", "three way", "threshold", "a vs b", "if"])
+            .desc(
+                "Runtime three-way scalar comparison (`RuntimeCompareIf`): compares floats `A` and `B` on the GPU (`|A - B| <= Threshold` selects `A == B`, otherwise `A > B` or `A < B`). All three branches are evaluated on the GPU at runtime (not free).\n\nNote: For boolean conditions use `RuntimeIf` (runtime GPU select with `RuntimeBool`) or `If` (compile-time branch pruning with `CompileBool`).",
+            )
             .param(ParamDef::new(
                 "threshold",
                 "Equals Threshold",
@@ -92,25 +167,82 @@ pub fn register(r: &mut Registry) {
             ),
     );
 
-    r.register(def("stdlib::BoolSelect", "If (Bool)", CAT).kw(&["select", "switch", "bool if", "ternary"]).build(
-        |c| {
-            let (vals, ty, _) = poly_ins(c, &[("true_value", "True", 1.0), ("false_value", "False", 0.0)]);
-            let mut ins = vec![PinDef::new("cond", "Condition", PinType::Bool)];
-            ins.extend(vals);
-            sig(ins, vec![poly_out("out", ty)])
-        },
-        |c| {
-            let e = format!("select({}, {}, {})", c.input("false_value"), c.input("true_value"), c.input("cond"));
-            c.define("out", e);
-        },
-    ));
+    r.register(
+        def("stdlib::CompileAnd", "CompileAnd", CAT)
+            .kw(&["compile and", "and", "logic", "compileBool", "&&"])
+            .desc(
+                "Compile-time logical AND (`A && B`) on `CompileBool` flags. Evaluated during shader compilation to drive `If` without emitting any WESL code.\n\nNote: For runtime GPU boolean logic on `RuntimeBool` values, use `And`.",
+            )
+            .build(
+                |_| {
+                    sig(
+                        vec![PinDef::new("a", "A", PinType::CompileBool), PinDef::new("b", "B", PinType::CompileBool)],
+                        vec![pin_out("out", "", PinType::CompileBool)],
+                    )
+                },
+                |c| {
+                    let v = c.compile_bool("a") && c.compile_bool("b");
+                    c.define_compile_bool("out", v);
+                },
+            ),
+    );
 
-    for (id, name, op) in [("And", "And", "&&"), ("Or", "Or", "||")] {
-        r.register(def(&format!("stdlib::{id}"), name, CAT).kw(&["logic", "bool", op]).build(
+    r.register(
+        def("stdlib::CompileOr", "CompileOr", CAT)
+            .kw(&["compile or", "or", "logic", "compileBool", "||"])
+            .desc(
+                "Compile-time logical OR (`A || B`) on `CompileBool` flags. Evaluated during shader compilation to drive `If` without emitting any WESL code.\n\nNote: For runtime GPU boolean logic on `RuntimeBool` values, use `Or`.",
+            )
+            .build(
+                |_| {
+                    sig(
+                        vec![PinDef::new("a", "A", PinType::CompileBool), PinDef::new("b", "B", PinType::CompileBool)],
+                        vec![pin_out("out", "", PinType::CompileBool)],
+                    )
+                },
+                |c| {
+                    let v = c.compile_bool("a") || c.compile_bool("b");
+                    c.define_compile_bool("out", v);
+                },
+            ),
+    );
+
+    r.register(
+        def("stdlib::CompileNot", "CompileNot", CAT)
+            .kw(&["compile not", "not", "invert", "logic", "compileBool", "!"])
+            .desc(
+                "Compile-time logical NOT (`!A`) on a `CompileBool` flag. Evaluated during shader compilation to drive `If` without emitting any WESL code.\n\nNote: For runtime GPU boolean inversion on a `RuntimeBool` value, use `Not`.",
+            )
+            .build(
+                |_| sig(vec![PinDef::new("a", "", PinType::CompileBool)], vec![pin_out("out", "", PinType::CompileBool)]),
+                |c| {
+                    let v = !c.compile_bool("a");
+                    c.define_compile_bool("out", v);
+                },
+            ),
+    );
+
+    for (id, name, op, kw, desc) in [
+        (
+            "And",
+            "And",
+            "&&",
+            &["logic", "bool", "runtimeBool", "runtime and", "&&"][..],
+            "Runtime GPU logical AND (`A && B`) on `RuntimeBool` values, emitted into WESL for use with `RuntimeIf`.\n\nNote: Cannot drive compile-time `If`. For compile-time flag combinations on `CompileBool`, use `CompileAnd`.",
+        ),
+        (
+            "Or",
+            "Or",
+            "||",
+            &["logic", "bool", "runtimeBool", "runtime or", "||"][..],
+            "Runtime GPU logical OR (`A || B`) on `RuntimeBool` values, emitted into WESL for use with `RuntimeIf`.\n\nNote: Cannot drive compile-time `If`. For compile-time flag combinations on `CompileBool`, use `CompileOr`.",
+        ),
+    ] {
+        r.register(def(&format!("stdlib::{id}"), name, CAT).kw(kw).desc(desc).build(
             |_| {
                 sig(
-                    vec![PinDef::new("a", "A", PinType::Bool), PinDef::new("b", "B", PinType::Bool)],
-                    vec![pin_out("out", "", PinType::Bool)],
+                    vec![PinDef::new("a", "A", PinType::RuntimeBool), PinDef::new("b", "B", PinType::RuntimeBool)],
+                    vec![pin_out("out", "", PinType::RuntimeBool)],
                 )
             },
             move |c| {
@@ -119,23 +251,33 @@ pub fn register(r: &mut Registry) {
             },
         ));
     }
-    r.register(def("stdlib::Not", "Not", CAT).kw(&["logic", "bool", "!", "invert"]).build(
-        |_| sig(vec![PinDef::new("a", "", PinType::Bool)], vec![pin_out("out", "", PinType::Bool)]),
-        |c| {
-            let e = format!("!({})", c.input("a"));
-            c.define("out", e);
-        },
-    ));
+    r.register(
+        def("stdlib::Not", "Not", CAT)
+            .kw(&["logic", "bool", "runtimeBool", "runtime not", "!", "invert"])
+            .desc(
+                "Runtime GPU logical NOT (`!A`) on a `RuntimeBool` value, emitted into WESL for use with `RuntimeIf`.\n\nNote: Cannot drive compile-time `If`. For compile-time flag inversion on `CompileBool`, use `CompileNot`.",
+            )
+            .build(
+                |_| sig(vec![PinDef::new("a", "", PinType::RuntimeBool)], vec![pin_out("out", "", PinType::RuntimeBool)]),
+                |c| {
+                    let e = format!("!({})", c.input("a"));
+                    c.define("out", e);
+                },
+            ),
+    );
     let ops: Vec<String> = [">", ">=", "<", "<=", "==", "!="].iter().map(|s| s.to_string()).collect();
     r.register(
         def("stdlib::Compare", "Compare", CAT)
-            .kw(&["logic", "greater", "less", "equal", ">", "<"])
+            .kw(&["logic", "greater", "less", "equal", ">", "<", "runtimeBool"])
+            .desc(
+                "Runtime GPU scalar comparison (`>`, `>=`, `<`, `<=`, `==`, `!=`) producing a `RuntimeBool` for `RuntimeIf`, `And`, `Or`, `Not`.\n\nNote: Evaluated per pixel on the GPU and outputs `RuntimeBool`. It cannot drive compile-time `If` (which requires a `CompileBool` known at compile time).",
+            )
             .param(ParamDef::new("op", "Operation", ParamKind::Enum(ops), Value::Str(">".into())))
             .build(
                 |_| {
                     sig(
                         vec![pin_in("a", "A", PinType::Float, 0.0), pin_in("b", "B", PinType::Float, 0.0)],
-                        vec![pin_out("out", "", PinType::Bool)],
+                        vec![pin_out("out", "", PinType::RuntimeBool)],
                     )
                 },
                 |c| {
@@ -456,6 +598,10 @@ pub fn register(r: &mut Registry) {
             .build(function_call_sig, function_call_emit),
     );
 
+    let custom_types: Vec<PinType> = PinType::ALL_CONCRETE
+        .into_iter()
+        .filter(|t| !matches!(t, PinType::Texture2D | PinType::MaterialAttributesPbr | PinType::CompileBool))
+        .collect();
     r.register(
         def("stdlib::Custom", "Custom", CAT)
             .kw(&["custom", "code", "hlsl", "wesl", "wgsl"])
@@ -464,15 +610,7 @@ pub fn register(r: &mut Registry) {
             .param(ParamDef::new(
                 "output_type",
                 "Output Type",
-                ParamKind::PinType(vec![
-                    PinType::Float,
-                    PinType::Float2,
-                    PinType::Float3,
-                    PinType::Float4,
-                    PinType::Color,
-                    PinType::Bool,
-                    PinType::Int,
-                ]),
+                ParamKind::PinType(custom_types),
                 Value::Type(PinType::Float3),
             ))
             .param(ParamDef::new("code", "Code", ParamKind::Code, Value::Str("return a * b;".into())))
@@ -597,6 +735,11 @@ fn pass_through_sig(c: &SigCtx) -> Signature {
 }
 
 fn pass_through(c: &mut EmitCtx) {
+    if c.out_type("out") == PinType::CompileBool {
+        let v = c.compile_bool("in");
+        c.define_compile_bool("out", v);
+        return;
+    }
     let op = match c.input_texture("in") {
         Some((tex, sampler)) => Operand::Texture { tex, sampler },
         None => Operand::Value(c.input("in")),
@@ -611,13 +754,18 @@ pub fn parse_custom_inputs(spec: &str) -> Result<Vec<(String, PinType)>, String>
         let (name, ty) = part.split_once(':').ok_or_else(|| format!("expected `name: Type`, got `{part}`"))?;
         let name = name.trim().to_string();
         shader_graph_core::ident::check_code_ident(&name).map_err(|e| format!("custom input: {e}"))?;
-        let ty = PinType::ALL_CONCRETE
-            .into_iter()
-            .filter(|t| *t != PinType::MaterialAttributesPbr)
-            .find(|t| t.label().eq_ignore_ascii_case(ty.trim()))
-            .ok_or_else(|| {
-                format!("unknown type `{}` (use Float, Float2, Float3, Float4, Color, Bool, Int, Texture2D)", ty.trim())
-            })?;
+        let trimmed = ty.trim();
+        let ty = if trimmed.eq_ignore_ascii_case("Bool") {
+            Some(PinType::RuntimeBool)
+        } else {
+            PinType::ALL_CONCRETE
+                .into_iter()
+                .filter(|t| !matches!(t, PinType::MaterialAttributesPbr | PinType::CompileBool))
+                .find(|t| t.label().eq_ignore_ascii_case(trimmed))
+        }
+        .ok_or_else(|| {
+            format!("unknown type `{trimmed}` (use Float, Float2, Float3, Float4, Color, RuntimeBool, Int, Texture2D)")
+        })?;
         if out.iter().any(|(n, _)| *n == name) {
             return Err(format!("duplicate custom input `{name}`"));
         }

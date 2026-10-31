@@ -10,9 +10,9 @@ use crate::ident::{check_ident, input_ident};
 use crate::model::{Asset, AssetKind, Edge, MaterialKind, NodeId, PbrOutputMode, PreviewMode};
 use crate::preview::{PreviewSlot, PreviewSource, albedo_expr};
 use crate::registry::{
-    Builtin, CurveLookup, EmitCtx, EmitSink, Env, FnPort, FunctionLookup, FunctionSig, GradientLookup, HiddenTexture,
-    IrLine, MaterialParam, NodeDef, NodeRole, Operand, ParamType, ROUTE_PARAM, Registry, SceneTexture, SigCtx,
-    Signature, Stage, TextureLookup, fixed_texture_ident, gradient_ident,
+    Builtin, CompileFlagParam, CurveLookup, EmitCtx, EmitSink, Env, FnPort, FunctionLookup, FunctionSig,
+    GradientLookup, HiddenTexture, IrLine, MaterialParam, NodeDef, NodeRole, Operand, ParamType, ROUTE_PARAM, Registry,
+    SceneTexture, SigCtx, Signature, Stage, TextureLookup, fixed_texture_ident, gradient_ident,
 };
 use crate::types::{PinType, conversion};
 use crate::value::Value;
@@ -191,6 +191,8 @@ pub struct Ir {
     pub vertex: Option<IrStage>,
     /// Material parameters sorted by name (ties: node id; decision 0027): constructor and binding order.
     pub params: Vec<MaterialParam>,
+    /// Named compile-time boolean parameters (`param::CompileBool`) active in the graph (name → resolved bool value).
+    pub compile_flags: BTreeMap<String, bool>,
     pub uniform: UniformLayout,
     /// Texture bindings of a material: parameters first (by name), then fixed textures sorted by
     /// `(origin, node)`, then gradient collections sorted by id; numbered `101/102`, `103/104`, … Empty for
@@ -250,6 +252,9 @@ impl Ir {
         key.push_str(&format!("size={};", self.uniform.size));
         for t in &self.textures {
             key.push_str(&format!("tex@{};", t.binding));
+        }
+        for (k, v) in &self.compile_flags {
+            key.push_str(&format!("cf:{k}={v};"));
         }
         // FNV-1a (32 bit): stable across Rust versions, unlike `DefaultHasher`.
         let hash = key.bytes().fold(0x811c_9dc5_u32, |h, b| (h ^ u32::from(b)).wrapping_mul(0x0100_0193));
@@ -358,11 +363,36 @@ pub fn build_ir(
     textures: &dyn TextureLookup,
     gradients: &dyn GradientLookup,
 ) -> IrResult {
+    build_ir_with_overrides(asset, path, registry, functions, curves, consts, textures, gradients, &BTreeMap::new())
+}
+
+/// Builds the IR of `asset` with explicit compile-time boolean flag overrides (`compile_overrides`).
+#[allow(clippy::too_many_arguments)]
+pub fn build_ir_with_overrides(
+    asset: &Asset,
+    path: &str,
+    registry: &Registry,
+    functions: &dyn FunctionLookup,
+    curves: &dyn CurveLookup,
+    consts: &dyn ConstLookup,
+    textures: &dyn TextureLookup,
+    gradients: &dyn GradientLookup,
+    compile_overrides: &BTreeMap<String, bool>,
+) -> IrResult {
     let original = asset;
     let routed = with_routes(asset, registry);
     let asset = routed.as_ref();
     let mut diags = Diagnostics::default();
-    let env = Env { asset_kind: asset.kind, asset_path: path, functions, curves, consts, textures, gradients };
+    let env = Env {
+        asset_kind: asset.kind,
+        asset_path: path,
+        functions,
+        curves,
+        consts,
+        textures,
+        gradients,
+        compile_overrides,
+    };
 
     if let Err(e) = check_ident(&asset.name) {
         diags.push(Diagnostic::new(Code::E005, format!("asset name: {e}")));
@@ -525,13 +555,98 @@ pub fn build_ir(
         return IrResult { ir: None, diagnostics: diags.into_vec() };
     }
 
-    // 5. Live sets per stage (inactive output pins are not traversed).
+    // 4b. Pre-pass: resolve signatures and output types across the full graph in topological order, and evaluate
+    // compile-time boolean (`CompileBool`) expressions and `NodeRole::CompileIf` conditions before pruning branches.
+    let all_node_ids: BTreeSet<&str> = nodes.keys().copied().collect();
+    let full_order = topo_order(&all_node_ids, &edges);
+    let mut full_types: HashMap<(&str, String), PinType> = HashMap::new();
+    let mut full_sigs: HashMap<&str, Signature> = HashMap::new();
+    let mut compile_sink = EmitSink::default();
+    let mut compile_if_cond: HashMap<&str, bool> = HashMap::new();
+    for id in &full_order {
+        let id = *id;
+        let n = &nodes[id];
+        let node = &asset.nodes[id];
+        let mut connected = BTreeMap::new();
+        for pin in &n.sig0.inputs {
+            if let Some(e) = edge_into.get(&(id, pin.id.as_str()))
+                && let Some(t) = full_types.get(&(e.from.0.as_str(), e.from.1.clone()))
+            {
+                connected.insert(pin.id.clone(), *t);
+            }
+        }
+        let sig = n.def.signature(&SigCtx {
+            node_id: id,
+            kind: &node.kind,
+            params: &n.params,
+            connected: &connected,
+            input_values: &node.inputs,
+            env: &env,
+        });
+        for out in &sig.outputs {
+            full_types.insert((id, out.id.clone()), out.ty);
+        }
+        if sig.outputs.iter().any(|o| o.ty == PinType::CompileBool) {
+            let mut inputs = BTreeMap::new();
+            let mut connected_pins = BTreeSet::new();
+            for pin in &sig.inputs {
+                if let Some(e) = edge_into.get(&(id, pin.id.as_str())) {
+                    let key = (e.from.0.clone(), e.from.1.clone());
+                    if let (Some(op), Some(from_ty)) =
+                        (compile_sink.operands.get(&key), full_types.get(&(e.from.0.as_str(), e.from.1.clone())))
+                        && conversion(*from_ty, pin.ty).is_some()
+                    {
+                        inputs.insert(pin.id.clone(), op.clone());
+                        connected_pins.insert(pin.id.clone());
+                    }
+                } else if pin.ty == PinType::CompileBool {
+                    let b = node.inputs.get(&pin.id).unwrap_or(&pin.default).as_bool();
+                    inputs.insert(pin.id.clone(), Operand::CompileBool(b));
+                } else {
+                    let v = node.inputs.get(&pin.id).unwrap_or(&pin.default);
+                    inputs.insert(pin.id.clone(), Operand::Value(v.wesl_literal(pin.ty)));
+                }
+            }
+            let mut ctx = EmitCtx {
+                node_id: id,
+                kind: &node.kind,
+                params: &n.params,
+                sig: &sig,
+                stage: Stage::Fragment,
+                env: &env,
+                inputs,
+                connected: connected_pins,
+                sink: &mut compile_sink,
+            };
+            n.def.emit(&mut ctx);
+        }
+        if n.def.role() == NodeRole::CompileIf {
+            let cond = if let Some(e) = edge_into.get(&(id, "cond")) {
+                match compile_sink.operands.get(&(e.from.0.clone(), e.from.1.clone())) {
+                    Some(Operand::CompileBool(b)) => *b,
+                    Some(Operand::Value(s)) => s == "true",
+                    _ => false,
+                }
+            } else {
+                compile_overrides
+                    .get(id)
+                    .copied()
+                    .unwrap_or_else(|| node.inputs.get("cond").map(Value::as_bool).unwrap_or(false))
+            };
+            compile_if_cond.insert(id, cond);
+        }
+        full_sigs.insert(id, sig);
+    }
+
+    // 5. Live sets per stage (inactive output pins and inactive CompileIf branches are not traversed for codegen,
+    // while `all_reachable` traverses both branches of connected CompileIf nodes for W101 and diagnostic checks).
     let pin_stage = |pin: &str| if pin == WPO_PIN { Stage::Vertex } else { Stage::Fragment };
     let mut live: BTreeMap<Stage, BTreeSet<&str>> = BTreeMap::new();
+    let mut all_reachable: BTreeSet<&str> = BTreeSet::new();
     for (stage, root) in &roots {
         let mut set = BTreeSet::new();
         let root_node = &nodes[root];
-        let mut stack: Vec<&str> = Vec::new();
+        let mut seeds: Vec<&str> = Vec::new();
         for pin in &root_node.sig0.inputs {
             let in_stage = match stage {
                 Stage::Function => true,
@@ -549,20 +664,43 @@ pub fn build_ir(
                     );
                     continue;
                 }
-                stack.push(e.from.0.as_str());
+                seeds.push(e.from.0.as_str());
             }
         }
-        if stack.is_empty() && *stage == Stage::Vertex {
+        if seeds.is_empty() && *stage == Stage::Vertex {
             continue;
         }
-        set.insert(*root);
-        while let Some(n) = stack.pop() {
-            if !set.insert(n) {
+        all_reachable.insert(*root);
+        let mut reach_stack = seeds.clone();
+        while let Some(n) = reach_stack.pop() {
+            if !all_reachable.insert(n) {
                 continue;
             }
             for e in &edges {
                 if e.to.0 == n {
-                    stack.push(e.from.0.as_str());
+                    reach_stack.push(e.from.0.as_str());
+                }
+            }
+        }
+        set.insert(*root);
+        let mut stack = seeds;
+        while let Some(n) = stack.pop() {
+            if !set.insert(n) {
+                continue;
+            }
+            if nodes[n].def.role() == NodeRole::CompileIf {
+                let cond = compile_if_cond.get(n).copied().unwrap_or(false);
+                let active_branch = if cond { "true_value" } else { "false_value" };
+                for e in &edges {
+                    if e.to.0 == n && (e.to.1 == "cond" || e.to.1 == active_branch) {
+                        stack.push(e.from.0.as_str());
+                    }
+                }
+            } else {
+                for e in &edges {
+                    if e.to.0 == n {
+                        stack.push(e.from.0.as_str());
+                    }
                 }
             }
         }
@@ -571,21 +709,79 @@ pub fn build_ir(
     // The previewed node and its upstream join the normal Fragment set, so parameters, textures and the
     // vertex stage are still collected and the generated Rust stays the same (decision 0022).
     if let Some(p) = &preview {
+        let mut reach_stack = vec![*p];
+        while let Some(n) = reach_stack.pop() {
+            if !all_reachable.insert(n) {
+                continue;
+            }
+            reach_stack.extend(edges.iter().filter(|e| e.to.0 == n).map(|e| e.from.0.as_str()));
+        }
         let set = live.entry(Stage::Fragment).or_default();
         let mut stack = vec![*p];
         while let Some(n) = stack.pop() {
             if !set.insert(n) {
                 continue;
             }
-            stack.extend(edges.iter().filter(|e| e.to.0 == n).map(|e| e.from.0.as_str()));
+            if nodes[n].def.role() == NodeRole::CompileIf {
+                let cond = compile_if_cond.get(n).copied().unwrap_or(false);
+                let active_branch = if cond { "true_value" } else { "false_value" };
+                stack.extend(
+                    edges
+                        .iter()
+                        .filter(|e| e.to.0 == n && (e.to.1 == "cond" || e.to.1 == active_branch))
+                        .map(|e| e.from.0.as_str()),
+                );
+            } else {
+                stack.extend(edges.iter().filter(|e| e.to.0 == n).map(|e| e.from.0.as_str()));
+            }
         }
     }
     let all_live: BTreeSet<&str> = live.values().flatten().copied().collect();
     for (id, n) in &nodes {
         let exempt =
             matches!(n.def.role(), NodeRole::FunctionInput | NodeRole::MaterialOutput | NodeRole::FunctionOutput);
-        if !exempt && !all_live.contains(id) {
+        if !exempt && !all_reachable.contains(id) {
             diags.push(Diagnostic::new(Code::W101, "node does not affect any output").at_node(*id));
+        }
+    }
+    // Validate input edges (E003, W104) and required pins (E004) on reachable nodes pruned by CompileIf.
+    for id in full_order.iter().copied().filter(|id| all_reachable.contains(id) && !all_live.contains(id)) {
+        let sig = &full_sigs[id];
+        for pin in &sig.inputs {
+            match edge_into.get(&(id, pin.id.as_str())) {
+                Some(e) => {
+                    let Some(from_ty) = full_types.get(&(e.from.0.as_str(), e.from.1.clone())) else {
+                        continue;
+                    };
+                    match conversion(*from_ty, pin.ty) {
+                        None => diags.push(
+                            Diagnostic::new(
+                                Code::E003,
+                                format!(
+                                    "cannot connect {} to {} input `{}`",
+                                    from_ty.label(),
+                                    pin.ty.label(),
+                                    pin.label
+                                ),
+                            )
+                            .at_node(id)
+                            .at_pin(&pin.id),
+                        ),
+                        Some(conv) if conv.is_lossy(*from_ty, pin.ty) => diags.push(
+                            Diagnostic::new(Code::W104, format!("{} truncated to {}", from_ty.label(), pin.ty.label()))
+                                .at_node(id)
+                                .at_pin(&pin.id),
+                        ),
+                        Some(_) => {}
+                    }
+                }
+                None if pin.required => diags.push(
+                    Diagnostic::new(Code::E004, format!("required input `{}` is not connected", pin.label))
+                        .at_node(id)
+                        .at_pin(&pin.id),
+                ),
+                None => {}
+            }
         }
     }
 
@@ -600,27 +796,54 @@ pub fn build_ir(
         for id in order {
             let n = &nodes[id];
             let node = &asset.nodes[id];
-            let mut connected = BTreeMap::new();
-            for pin in &n.sig0.inputs {
-                if let Some(e) = edge_into.get(&(id, pin.id.as_str()))
-                    && let Some(t) = types.get(&(e.from.0.as_str(), e.from.1.clone()))
-                {
-                    connected.insert(pin.id.clone(), *t);
-                }
-            }
-            let sig = n.def.signature(&SigCtx {
-                node_id: id,
-                kind: &node.kind,
-                params: &n.params,
-                connected: &connected,
-                input_values: &node.inputs,
-                env: &env,
-            });
+            let sig = full_sigs[id].clone();
             let is_root = matches!(n.def.role(), NodeRole::MaterialOutput);
+            let is_compile_if = n.def.role() == NodeRole::CompileIf;
+            let inactive_if_pin = is_compile_if
+                .then(|| if compile_if_cond.get(id).copied().unwrap_or(false) { "false_value" } else { "true_value" });
             let mut inputs = BTreeMap::new();
             let mut connected_pins = BTreeSet::new();
             for pin in &sig.inputs {
                 if is_root && *stage != Stage::Function && pin_stage(&pin.id) != *stage {
+                    continue;
+                }
+                if inactive_if_pin == Some(pin.id.as_str()) {
+                    match edge_into.get(&(id, pin.id.as_str())) {
+                        Some(e) => {
+                            if let Some(from_ty) = full_types.get(&(e.from.0.as_str(), e.from.1.clone())) {
+                                match conversion(*from_ty, pin.ty) {
+                                    None => diags.push(
+                                        Diagnostic::new(
+                                            Code::E003,
+                                            format!(
+                                                "cannot connect {} to {} input `{}`",
+                                                from_ty.label(),
+                                                pin.ty.label(),
+                                                pin.label
+                                            ),
+                                        )
+                                        .at_node(id)
+                                        .at_pin(&pin.id),
+                                    ),
+                                    Some(conv) if conv.is_lossy(*from_ty, pin.ty) => diags.push(
+                                        Diagnostic::new(
+                                            Code::W104,
+                                            format!("{} truncated to {}", from_ty.label(), pin.ty.label()),
+                                        )
+                                        .at_node(id)
+                                        .at_pin(&pin.id),
+                                    ),
+                                    Some(_) => {}
+                                }
+                            }
+                        }
+                        None if pin.required => diags.push(
+                            Diagnostic::new(Code::E004, format!("required input `{}` is not connected", pin.label))
+                                .at_node(id)
+                                .at_pin(&pin.id),
+                        ),
+                        None => {}
+                    }
                     continue;
                 }
                 match edge_into.get(&(id, pin.id.as_str())) {
@@ -658,7 +881,7 @@ pub fn build_ir(
                                     );
                                 }
                                 let operand = match op {
-                                    Operand::Texture { .. } => op.clone(),
+                                    Operand::Texture { .. } | Operand::CompileBool(_) => op.clone(),
                                     Operand::Value(expr) => Operand::Value(conv.apply(expr, *from_ty, pin.ty)),
                                 };
                                 inputs.insert(pin.id.clone(), operand);
@@ -672,6 +895,17 @@ pub fn build_ir(
                             .at_pin(&pin.id),
                     ),
                     None if pin.ty == PinType::Texture2D => {}
+                    None if pin.ty == PinType::CompileBool => {
+                        let b = if is_compile_if && pin.id == "cond" {
+                            compile_overrides
+                                .get(id)
+                                .copied()
+                                .unwrap_or_else(|| node.inputs.get(&pin.id).unwrap_or(&pin.default).as_bool())
+                        } else {
+                            node.inputs.get(&pin.id).unwrap_or(&pin.default).as_bool()
+                        };
+                        inputs.insert(pin.id.clone(), Operand::CompileBool(b));
+                    }
                     None if pin.ty == PinType::MaterialAttributesPbr => {
                         // The default constructor names the struct (decision 0023).
                         sink.stdlib.insert(crate::attributes::import());
@@ -715,6 +949,7 @@ pub fn build_ir(
     let mut curves_used = BTreeSet::new();
     let mut custom_fns = BTreeMap::new();
     let mut params_by_node: BTreeMap<NodeId, MaterialParam> = BTreeMap::new();
+    let mut compile_flags_by_node: BTreeMap<NodeId, CompileFlagParam> = BTreeMap::new();
     let mut fixed_textures: BTreeMap<(Option<String>, NodeId), String> = BTreeMap::new();
     let mut gradients_used: BTreeSet<String> = BTreeSet::new();
     let mut scene: BTreeSet<SceneTexture> = BTreeSet::new();
@@ -727,6 +962,7 @@ pub fn build_ir(
         curves_used.extend(sink.curves.iter().cloned());
         custom_fns.extend(sink.custom_fns.iter().map(|(k, v)| (k.clone(), v.clone())));
         params_by_node.extend(sink.params.iter().map(|(k, v)| (k.clone(), v.clone())));
+        compile_flags_by_node.extend(sink.compile_flags.iter().map(|(k, v)| (k.clone(), v.clone())));
     }
     // A function's own signature may name the struct (argument / return type), decision 0023.
     if asset.kind.is_function() {
@@ -751,6 +987,19 @@ pub fn build_ir(
                 Diagnostic::new(Code::E005, format!("`{}_sampler` clashes with a texture sampler name", p.name))
                     .at_node(&p.node),
             );
+        }
+    }
+    let mut compile_flag_params: Vec<CompileFlagParam> = compile_flags_by_node.into_values().collect();
+    compile_flag_params.sort_by(|a, b| (&a.name, &a.node).cmp(&(&b.name, &b.node)));
+    let mut compile_flags: BTreeMap<String, bool> = BTreeMap::new();
+    for cf in &compile_flag_params {
+        if let Err(e) = check_ident(&cf.name) {
+            diags.push(Diagnostic::new(Code::E005, format!("parameter name: {e}")).at_node(&cf.node));
+        } else if !names.insert(cf.name.clone()) {
+            diags
+                .push(Diagnostic::new(Code::E005, format!("duplicate parameter name `{}`", cf.name)).at_node(&cf.node));
+        } else {
+            compile_flags.insert(cf.name.clone(), cf.value);
         }
     }
     for c in &gradients_used {
@@ -807,7 +1056,17 @@ pub fn build_ir(
             // Not previewable after all: build the normal IR, so the extra upstream leaves no trace.
             let mut normal = original.clone();
             normal.preview.node = None;
-            let mut r = build_ir(&normal, path, registry, functions, curves, consts, textures, gradients);
+            let mut r = build_ir_with_overrides(
+                &normal,
+                path,
+                registry,
+                functions,
+                curves,
+                consts,
+                textures,
+                gradients,
+                compile_overrides,
+            );
             let msg = format!("preview ignored: `{}` has no output that converts to a color", n.def.info().name);
             r.diagnostics.push(Diagnostic::new(Code::W107, msg).at_node(p));
             return r;
@@ -886,6 +1145,15 @@ pub fn build_ir(
                     let code = if dir == "out" { Code::E001 } else { Code::E005 };
                     diags.push(Diagnostic::new(code, format!("duplicate function {dir}put `{name}`")).at_node(*id));
                 }
+                if n.params.get("type").and_then(Value::as_type) == Some(PinType::CompileBool) {
+                    diags.push(
+                        Diagnostic::new(
+                            Code::E003,
+                            "CompileBool is compile-time only and is not supported in function inputs or outputs",
+                        )
+                        .at_node(*id),
+                    );
+                }
                 if n.def.role() == NodeRole::FunctionInput
                     && n.params.get("type").and_then(Value::as_type) == Some(PinType::Texture2D)
                     && input_names.contains(format!("{name}_sampler").as_str())
@@ -930,6 +1198,7 @@ pub fn build_ir(
             main,
             vertex,
             params,
+            compile_flags,
             uniform,
             textures,
             stdlib,
@@ -1257,5 +1526,136 @@ mod tests {
             "{:?}",
             res.diagnostics
         );
+    }
+
+    struct TestCompileFlagParam(NodeInfo);
+    impl NodeDef for TestCompileFlagParam {
+        fn info(&self) -> &NodeInfo {
+            &self.0
+        }
+        fn role(&self) -> NodeRole {
+            NodeRole::Parameter
+        }
+        fn params(&self) -> Vec<ParamDef> {
+            vec![
+                ParamDef::new("name", "Name", ParamKind::Str, Value::Str("flag".into())),
+                ParamDef::new("default", "Default", ParamKind::Bool, Value::Bool(false)),
+            ]
+        }
+        fn signature(&self, _ctx: &SigCtx) -> Signature {
+            Signature { inputs: vec![], outputs: vec![PinDef::new("out", "Out", PinType::CompileBool)] }
+        }
+        fn emit(&self, ctx: &mut EmitCtx) {
+            let name = ctx.params.get("name").map(|v| v.as_str().to_string()).unwrap_or_default();
+            let default = ctx.params.get("default").map(Value::as_bool).unwrap_or(false);
+            ctx.declare_compile_flag(name, default);
+        }
+    }
+
+    struct TestCompileIf(NodeInfo);
+    impl NodeDef for TestCompileIf {
+        fn info(&self) -> &NodeInfo {
+            &self.0
+        }
+        fn role(&self) -> NodeRole {
+            NodeRole::CompileIf
+        }
+        fn signature(&self, _ctx: &SigCtx) -> Signature {
+            Signature {
+                inputs: vec![
+                    PinDef::new("cond", "Condition", PinType::CompileBool).default(Value::Bool(false)),
+                    PinDef::new("true_value", "True", PinType::Float).default(Value::Float(1.0)),
+                    PinDef::new("false_value", "False", PinType::Float).default(Value::Float(0.0)),
+                ],
+                outputs: vec![PinDef::new("out", "Out", PinType::Float)],
+            }
+        }
+        fn emit(&self, ctx: &mut EmitCtx) {
+            let branch = if ctx.compile_bool("cond") { "true_value" } else { "false_value" };
+            let expr = ctx.input(branch);
+            ctx.alias("out", Operand::Value(expr));
+        }
+    }
+
+    #[test]
+    fn compile_if_prunes_inactive_branch_and_overrides_flip_branch() {
+        let mut reg = test_registry();
+        reg.register(TestCompileFlagParam(NodeInfo::new("param::CompileBool", "CompileBoolParameter", "Params")));
+        reg.register(TestCompileIf(NodeInfo::new("stdlib::If", "If", "Utility")));
+
+        let mut asset = Asset::new("mat", AssetKind::Material(MaterialKind::Unlit3d(UnlitSettings::default())));
+        let mut flag = Node::new("param::CompileBool", (0.0, 0.0));
+        flag.params.insert("name".into(), Value::Str("use_tex".into()));
+        flag.params.insert("default".into(), Value::Bool(false));
+        let mut t_param = Node::new("param::Tex", (0.0, 0.0));
+        t_param.params.insert("name".into(), Value::Str("albedo".into()));
+        asset.nodes.insert("flag".into(), flag);
+        asset.nodes.insert("tex".into(), t_param);
+        asset.nodes.insert("add".into(), Node::new("test::Add", (0.0, 0.0)));
+        asset.nodes.insert("dead".into(), Node::new("test::Add", (0.0, 0.0)));
+        asset.nodes.insert("ifnode".into(), Node::new("stdlib::If", (0.0, 0.0)));
+        asset.nodes.insert("out".into(), Node::new("output::Unlit3d", (0.0, 0.0)));
+        asset.connect(("flag", "out"), ("ifnode", "cond"));
+        asset.connect(("tex", "out"), ("ifnode", "true_value"));
+        asset.connect(("add", "out"), ("ifnode", "false_value"));
+        asset.connect(("ifnode", "out"), ("out", "color"));
+
+        // Default is false: `tex` is in the inactive branch and pruned from IR, while only `dead` gets W101.
+        let res_false =
+            build_ir(&asset, "test/mat", &reg, &NoFunctions, &NoCurves, &NoConsts, &NoTextures, &NoGradients);
+        let ir_false = res_false.ir.expect("ir_false");
+        assert!(ir_false.params.is_empty(), "pruned texture param must not appear in IR");
+        assert_eq!(ir_false.compile_flags.get("use_tex"), Some(&false));
+        assert_eq!(ir_false.main.lines.len(), 1);
+        assert_eq!(ir_false.main.lines[0].node, "add");
+        let w101_nodes: Vec<_> =
+            res_false.diagnostics.iter().filter(|d| d.code == Code::W101).filter_map(|d| d.node.as_deref()).collect();
+        assert_eq!(w101_nodes, ["dead"]);
+
+        // Override `use_tex = true`: `tex` becomes live and `add` is pruned.
+        let overrides = BTreeMap::from([("use_tex".to_string(), true)]);
+        let res_true = build_ir_with_overrides(
+            &asset,
+            "test/mat",
+            &reg,
+            &NoFunctions,
+            &NoCurves,
+            &NoConsts,
+            &NoTextures,
+            &NoGradients,
+            &overrides,
+        );
+        let ir_true = res_true.ir.expect("ir_true");
+        assert_eq!(ir_true.params.len(), 1);
+        assert_eq!(ir_true.params[0].name, "albedo");
+        assert_eq!(ir_true.compile_flags.get("use_tex"), Some(&true));
+        assert_ne!(ir_false.layout_feature(), ir_true.layout_feature());
+    }
+
+    #[test]
+    fn function_compile_bool_port_is_e003() {
+        let reg = test_registry();
+        let mut asset = Asset::new("fn", AssetKind::Function);
+        let mut inp = Node::new("output::FunctionInput", (0.0, 0.0));
+        inp.params.insert("name".into(), Value::Str("flag".into()));
+        inp.params.insert("type".into(), Value::Type(PinType::CompileBool));
+        let mut out = Node::new("output::FunctionOutput", (0.0, 0.0));
+        out.params.insert("name".into(), Value::Str("res".into()));
+        out.params.insert("type".into(), Value::Type(PinType::CompileBool));
+        asset.nodes.insert("in1".into(), inp);
+        asset.nodes.insert("out".into(), out);
+        asset.connect(("in1", "out"), ("out", "in"));
+
+        let res = build_ir(&asset, "test/fn", &reg, &NoFunctions, &NoCurves, &NoConsts, &NoTextures, &NoGradients);
+        let e003: Vec<_> = res
+            .diagnostics
+            .iter()
+            .filter(|d| {
+                d.code == Code::E003
+                    && d.message
+                        == "CompileBool is compile-time only and is not supported in function inputs or outputs"
+            })
+            .collect();
+        assert_eq!(e003.len(), 2, "{:?}", res.diagnostics);
     }
 }

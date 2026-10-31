@@ -308,6 +308,7 @@ mod tests {
             vertex: None,
             uniform: shader_graph_core::ir::UniformLayout::compute(&params),
             params,
+            compile_flags: Default::default(),
             textures,
             stdlib: Default::default(),
             functions: Default::default(),

@@ -24,12 +24,12 @@ GlobalConsts(
     ),
     GlobalConst(
       name: "use_stripes",
-      ty: Bool,
+      ty: Toggle,
       value: Bool(true),
     ),
     GlobalConst(
       name: "fancy_stripes",
-      ty: CompileFlag,
+      ty: CompileBool,
       value: Bool(true),
     ),
   ],

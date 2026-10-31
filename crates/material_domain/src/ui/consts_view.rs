@@ -149,7 +149,7 @@ fn value_editor(c: &GlobalConst) -> Box<dyn Scene> {
                 Children [ {items} ]
             })
         }
-        ConstType::Bool | ConstType::CompileFlag => checkbox_w(target, c.value.as_bool()),
+        ConstType::Toggle | ConstType::RuntimeBool | ConstType::CompileBool => checkbox_w(target, c.value.as_bool()),
     }
 }
 

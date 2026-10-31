@@ -11,27 +11,34 @@ pub enum PinType {
     Float4,
     /// Linear color, `vec4<f32>` in WESL.
     Color,
-    Bool,
+    /// Runtime GPU boolean (`bool` in WESL), used with `RuntimeIf`, `And`, `Or`, `Not`, `Compare`.
+    #[serde(alias = "Bool")]
+    RuntimeBool,
+    /// Editor-only compile-time boolean flag, evaluated during shader compilation to prune `If` branches.
+    CompileBool,
     Int,
     Texture2D,
-    /// Struct of PBR material attributes (decision 0023); only `Lerp` and Make/Break accept it.
+    /// Struct of PBR material attributes (decision 0023); only `Lerp`, `If`, `RuntimeIf` and Make/Break accept it.
     MaterialAttributesPbr,
     /// Polymorphic pin; only used for display, signatures always resolve to a concrete type.
     Any,
 }
 
 impl PinType {
-    pub const ALL_CONCRETE: [PinType; 9] = [
+    pub const ALL_CONCRETE: [PinType; 10] = [
         PinType::Float,
         PinType::Float2,
         PinType::Float3,
         PinType::Float4,
         PinType::Color,
-        PinType::Bool,
+        PinType::RuntimeBool,
+        PinType::CompileBool,
         PinType::Int,
         PinType::Texture2D,
         PinType::MaterialAttributesPbr,
     ];
+
+    pub const ALL: [PinType; 10] = Self::ALL_CONCRETE;
 
     /// WESL type name. Texture2D has no value type (it is a texture + sampler pair).
     pub fn wesl(self) -> &'static str {
@@ -40,7 +47,7 @@ impl PinType {
             PinType::Float2 => "vec2<f32>",
             PinType::Float3 => "vec3<f32>",
             PinType::Float4 | PinType::Color => "vec4<f32>",
-            PinType::Bool => "bool",
+            PinType::RuntimeBool | PinType::CompileBool => "bool",
             PinType::Int => "i32",
             PinType::Texture2D => "texture_2d<f32>",
             PinType::MaterialAttributesPbr => crate::attributes::PBR_STRUCT,
@@ -75,6 +82,9 @@ impl PinType {
 
     /// The concrete type labelled `s` ([`PinType::label`]).
     pub fn from_label(s: &str) -> Option<PinType> {
+        if s == "Bool" {
+            return Some(PinType::RuntimeBool);
+        }
         PinType::ALL_CONCRETE.into_iter().find(|t| t.label() == s)
     }
 
@@ -85,7 +95,8 @@ impl PinType {
             PinType::Float3 => "Float3",
             PinType::Float4 => "Float4",
             PinType::Color => "Color",
-            PinType::Bool => "Bool",
+            PinType::RuntimeBool => "RuntimeBool",
+            PinType::CompileBool => "CompileBool",
             PinType::Int => "Int",
             PinType::Texture2D => "Texture2D",
             PinType::MaterialAttributesPbr => "MaterialAttributes (PBR)",
@@ -101,7 +112,8 @@ impl PinType {
             PinType::Float3 => [0.92, 0.85, 0.25],
             PinType::Float4 => [0.95, 0.45, 0.75],
             PinType::Color => [0.98, 0.55, 0.80],
-            PinType::Bool => [0.90, 0.25, 0.25],
+            PinType::RuntimeBool => [0.90, 0.25, 0.25],
+            PinType::CompileBool => [0.95, 0.55, 0.20],
             PinType::Int => [0.40, 0.85, 0.95],
             PinType::Texture2D => [0.30, 0.45, 0.95],
             PinType::MaterialAttributesPbr => [0.55, 0.35, 0.95],
@@ -177,7 +189,8 @@ pub fn conversion(from: PinType, to: PinType) -> Option<Conversion> {
         (Any, _) | (_, Any) => None,
         (Texture2D, _) | (_, Texture2D) => None,
         (MaterialAttributesPbr, _) | (_, MaterialAttributesPbr) => None,
-        (Bool, _) | (_, Bool) => None,
+        (RuntimeBool, _) | (_, RuntimeBool) => None,
+        (CompileBool, _) | (_, CompileBool) => None,
         (Int, Int) => Some(Conversion::Identity),
         (Int, t) if t.dim().is_some() => Some(Conversion::IntToFloat),
         (_, Int) => None,
@@ -207,8 +220,15 @@ mod tests {
         assert_eq!(conversion(Float3, Color), Some(Conversion::ExtendAlpha));
         assert_eq!(conversion(Int, Float), Some(Conversion::IntToFloat));
         assert_eq!(conversion(Float, Int), None);
-        assert_eq!(conversion(Bool, Float), None);
-        assert_eq!(conversion(Bool, Bool), Some(Conversion::Identity));
+        assert_eq!(conversion(RuntimeBool, Float), None);
+        assert_eq!(conversion(CompileBool, Float), None);
+        assert_eq!(conversion(RuntimeBool, RuntimeBool), Some(Conversion::Identity));
+        assert_eq!(conversion(CompileBool, CompileBool), Some(Conversion::Identity));
+        assert_eq!(conversion(RuntimeBool, CompileBool), None);
+        assert_eq!(conversion(CompileBool, RuntimeBool), None);
+        assert_eq!(PinType::from_label("Bool"), Some(RuntimeBool));
+        assert_eq!(PinType::from_label("RuntimeBool"), Some(RuntimeBool));
+        assert_eq!(PinType::from_label("CompileBool"), Some(CompileBool));
         assert_eq!(conversion(Texture2D, Texture2D), Some(Conversion::Identity));
         assert_eq!(conversion(Texture2D, Float4), None);
         assert_eq!(conversion(MaterialAttributesPbr, MaterialAttributesPbr), Some(Conversion::Identity));

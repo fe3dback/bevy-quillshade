@@ -25,9 +25,8 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let n_n11_out: f32 = fract(n_n10_x);
     let n_n13_out: f32 = mix(1.0f, n_n11_out, 1.0f);
     let n_n14_out: vec3<f32> = (n_n06_out * vec3<f32>(n_n13_out));
-    let n_n16_out: vec3<f32> = select(n_n06_out, n_n14_out, true);
     // --- outputs ---
-    let color: vec3<f32> = n_n16_out;
+    let color: vec3<f32> = n_n14_out;
     let alpha: f32 = 1.0;
     return vec4<f32>(color, alpha);
 }

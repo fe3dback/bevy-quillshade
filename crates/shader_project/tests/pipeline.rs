@@ -362,7 +362,8 @@ fn a_curve_named_like_a_broken_function_is_not_that_function() {
 fn global_consts_are_inlined_and_their_users_follow() {
     use shader_graph_core::{ConstType, GlobalConst, Value};
     let (_d, p) = temp_project();
-    let r = regenerate(&p, &RegenOptions::default()).unwrap();
+    let bevy = BevySources::discover();
+    let r = regenerate(&p, &RegenOptions { compile_check: bevy.as_ref(), ..Default::default() }).unwrap();
     assert!(!r.has_errors(), "{:?}", r.diagnostics().collect::<Vec<_>>());
     assert!(r.diagnostics().all(|d| d.code != Code::W106), "every node of the fixture has a constant");
     let tint = p.root.join("assets/quillshade/material/autogen/dir_fx/mat_global_tint.wesl");
@@ -370,13 +371,26 @@ fn global_consts_are_inlined_and_their_users_follow() {
     // Values are literals: no module for the table, no uniform.
     assert!(wesl.contains("vec3<f32>(0.05, 0.1, 0.3)"), "{wesl}");
     assert!(wesl.contains("0.35f"), "{wesl}");
-    assert!(wesl.contains("1.0f"), "GlobalBool reads 1.0: {wesl}");
-    assert!(wesl.contains(", true)"), "GlobalCompileFlag is a bool literal: {wesl}");
+    assert!(wesl.contains("1.0f"), "GlobalToggle reads 1.0: {wesl}");
+    assert!(!wesl.contains("select("), "GlobalCompileBool + If resolves at compile time: {wesl}");
+    assert!(wesl.contains("fract("), "active striped branch is emitted: {wesl}");
     assert!(!p.root.join("assets/quillshade/material/autogen/dir_common").exists());
 
-    // Editing the table rewrites the materials reading it, also in an affected-only run.
+    // Flipping `fancy_stripes` to `false` prunes the entire `striped` branch (`fract(`, `uv0`, `use_stripes`).
     let id = AssetId::new(AssetType::Consts, "common/tuning");
     let mut table = shader_project::assets::load_consts(&p, &id).unwrap();
+    table.get_mut("fancy_stripes").unwrap().value = Value::Bool(false);
+    ops::save_consts(&p, &id, &table).unwrap();
+    let scope = shader_project::Scope::Affected([id.clone()].into());
+    let r = regenerate(&p, &RegenOptions { scope, compile_check: bevy.as_ref(), ..Default::default() }).unwrap();
+    assert!(!r.has_errors(), "{:?}", r.diagnostics().collect::<Vec<_>>());
+    let pruned = read(&tint);
+    assert!(!pruned.contains("fract("), "{pruned}");
+    assert!(!pruned.contains("uv0"), "{pruned}");
+    assert!(!pruned.contains("select("), "{pruned}");
+
+    // Editing the table rewrites the materials reading it, also in an affected-only run.
+    table.get_mut("fancy_stripes").unwrap().value = Value::Bool(true);
     table.get_mut("glow_amount").unwrap().value = Value::Float(0.75);
     ops::save_consts(&p, &id, &table).unwrap();
     let scope = shader_project::Scope::Affected([id.clone()].into());
@@ -415,19 +429,23 @@ fn global_consts_are_inlined_and_their_users_follow() {
     assert_eq!(codes(&r), vec![Code::W106]);
     std::fs::remove_file(id.file(&p)).unwrap();
     let r = regenerate(&p, &RegenOptions { dry_run: true, ..Default::default() }).unwrap();
-    assert_eq!(r.diagnostics().filter(|d| d.code == Code::E006).count(), 5, "every other node lost its constant");
+    assert_eq!(
+        r.diagnostics().filter(|d| d.code == Code::E006).count(),
+        3,
+        "base_color, glow_color, and fancy_stripes report E006 (the striped branch is pruned while fancy_stripes is unresolved)"
+    );
 
     // Every node without a constant outputs 1.0 / true, and the shader still compiles.
     for name in ["base_color", "glow_color", "stripe_scale", "use_stripes", "fancy_stripes"] {
         ops::clear_const_refs(&mut a, &registry, name);
     }
     ops::save(&p, &mat, &a).unwrap();
-    let bevy = BevySources::discover();
     let r = regenerate(&p, &RegenOptions { compile_check: bevy.as_ref(), ..Default::default() }).unwrap();
     assert_eq!(codes(&r), vec![Code::W106; 6], "{:?}", r.assets[&mat].diagnostics);
     let wesl = read(&tint);
     assert!(wesl.contains("mix(vec3<f32>(1.0, 1.0, 1.0), n_n04_out, 1.0f)"), "{wesl}");
-    assert!(wesl.contains(", true)"), "{wesl}");
+    assert!(wesl.contains("fract("), "{wesl}");
+    assert!(!wesl.contains("select("), "{wesl}");
 }
 
 #[test]

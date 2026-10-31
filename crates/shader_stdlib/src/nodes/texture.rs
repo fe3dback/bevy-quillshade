@@ -122,7 +122,7 @@ fn texture_or_property(c: &mut EmitCtx) -> Option<(String, String)> {
     let id = resolve_texture(c, &id)?;
     match c.fixed_texture(&id) {
         Operand::Texture { tex, sampler } => Some((tex, sampler)),
-        Operand::Value(_) => None,
+        Operand::Value(_) | Operand::CompileBool(_) => None,
     }
 }
 

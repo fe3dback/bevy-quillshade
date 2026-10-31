@@ -68,8 +68,8 @@ fn preview_replaces_outputs() {
 fn preview_of_bool_or_missing_node_is_ignored() {
     let mut a = Asset::new("mat", AssetKind::Material(MaterialKind::Pbr3d(PbrSettings::default())));
     let out = node(&mut a, "out", "output::Pbr3d", &[]);
-    let flag = node(&mut a, "flag", "param::Bool", &[("name", Value::Str("flag".into()))]);
-    let sel = node(&mut a, "sel", "stdlib::BoolSelect", &[]);
+    let flag = node(&mut a, "flag", "param::RuntimeBool", &[("name", Value::Str("flag".into()))]);
+    let sel = node(&mut a, "sel", "stdlib::RuntimeIf", &[]);
     a.connect((&flag, "out"), (&sel, "cond"));
     a.connect((&sel, "out"), (&out, "base_color"));
     let (normal, _) = build(&a);

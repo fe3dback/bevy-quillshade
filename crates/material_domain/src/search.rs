@@ -144,6 +144,7 @@ pub fn fresh_pins(
         consts: &NoConsts,
         textures: &NoTextures,
         gradients: &NoGradients,
+        compile_overrides: &BTreeMap::new(),
     };
     let sig = def.signature(&SigCtx {
         node_id: "new",
@@ -269,7 +270,9 @@ mod tests {
         let from = WireEnd::FromOutput(PinType::MaterialAttributesPbr);
         assert_eq!(compatible_pin(&reg, &NoFunctions, k, "stdlib::Lerp", from).as_deref(), Some("a"));
         assert_eq!(compatible_pin(&reg, &NoFunctions, k, "stdlib::Add", from), None);
-        assert_eq!(compatible_pin(&reg, &NoFunctions, k, "stdlib::If", from), None);
+        assert_eq!(compatible_pin(&reg, &NoFunctions, k, "stdlib::RuntimeCompareIf", from), None);
+        assert_eq!(compatible_pin(&reg, &NoFunctions, k, "stdlib::If", from).as_deref(), Some("true_value"));
+        assert_eq!(compatible_pin(&reg, &NoFunctions, k, "stdlib::RuntimeIf", from).as_deref(), Some("true_value"));
         assert_eq!(
             compatible_pin(&reg, &NoFunctions, k, "stdlib::BreakMaterialAttributesPbr", from).as_deref(),
             Some("attributes")

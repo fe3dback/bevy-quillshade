@@ -60,11 +60,11 @@ impl UserNode {
             if p.ty == PinType::Any {
                 return Err("user node inputs must have concrete types".into());
             }
-            if p.ty == PinType::MaterialAttributesPbr {
+            if matches!(p.ty, PinType::MaterialAttributesPbr | PinType::CompileBool) {
                 return Err(format!("user node input `{}`: type {} is not supported", p.name, p.ty.label()));
             }
         }
-        if n.output == PinType::MaterialAttributesPbr {
+        if matches!(n.output, PinType::MaterialAttributesPbr | PinType::CompileBool) {
             return Err(format!("user node output: type {} is not supported", n.output.label()));
         }
         if matches!(n.output, PinType::Any | PinType::Texture2D) {
@@ -229,6 +229,13 @@ mod tests {
         assert!(e.contains("MaterialAttributes (PBR)"), "{e}");
         let e = crate::nodes::utility::parse_custom_inputs("a: MaterialAttributes (PBR)").unwrap_err();
         assert!(e.starts_with("unknown type") && e.ends_with("Int, Texture2D)"), "{e}");
+        let cb_in = "UserNode(id: \"soft\", name: \"Soft\", inputs: [UserPin(name: \"x\", ty: CompileBool)], \
+                     output: Float, template: \"1.0\")";
+        assert!(UserNode::from_ron(cb_in).unwrap_err().contains("CompileBool"));
+        let cb_out = "UserNode(id: \"soft\", name: \"Soft\", inputs: [], output: CompileBool, template: \"true\")";
+        assert!(UserNode::from_ron(cb_out).unwrap_err().contains("CompileBool"));
+        assert!(crate::nodes::utility::parse_custom_inputs("a: CompileBool").is_err());
+        assert!(crate::nodes::utility::parse_custom_inputs("a: RuntimeBool, b: Bool").is_ok());
     }
 
     #[test]

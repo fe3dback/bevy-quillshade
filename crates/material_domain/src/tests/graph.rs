@@ -363,6 +363,10 @@ fn rename_target_kinds() {
     assert_eq!(e.rename_target(&param), Some(GraphProp::Param { node: param.clone(), key: "name".into() }));
     let constant = add(&mut e, "stdlib::Constant");
     assert_eq!(e.rename_target(&constant), Some(GraphProp::NodeLabel(constant.clone())), "unlabelled Constant");
+    for kind in ["stdlib::Toggle", "stdlib::RuntimeBool", "stdlib::CompileBool"] {
+        let bnode = add(&mut e, kind);
+        assert_eq!(e.rename_target(&bnode), Some(GraphProp::NodeLabel(bnode.clone())), "{kind}");
+    }
     let lerp = node_of(&e, "stdlib::Lerp");
     assert_eq!(e.rename_target(&lerp), None);
     let call = node_of(&e, "function::common/wet_mask");

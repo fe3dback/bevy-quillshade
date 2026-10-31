@@ -75,7 +75,7 @@ Asset(
       params: {},
     ),
     "n12": Node(
-      kind: "stdlib::GlobalBool",
+      kind: "stdlib::GlobalToggle",
       pos: (630.0, 675.0),
       params: {
         "const": Str("use_stripes"),
@@ -95,14 +95,14 @@ Asset(
       params: {},
     ),
     "n15": Node(
-      kind: "stdlib::GlobalCompileFlag",
+      kind: "stdlib::GlobalCompileBool",
       pos: (1050.0, 67.5),
       params: {
         "const": Str("fancy_stripes"),
       },
     ),
     "n16": Node(
-      kind: "stdlib::BoolSelect",
+      kind: "stdlib::If",
       pos: (1260.0, 135.0),
       params: {},
     ),

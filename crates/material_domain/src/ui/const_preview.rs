@@ -1,5 +1,5 @@
 //! Read-only value of the global constant a `Global*` node reads (decision 0017), shown under the node's title:
-//! `f32` as a number, `vecN` as a colour square, `bool` / `compileFlag` as a 32×32 square with `0` / `1` and a check
+//! `f32` as a number, `vecN` as a colour square, `toggle` / `runtimeBool` / `compileBool` as a 32×32 square with `0` / `1` and a check
 //! mark (green when on, grey when off), "n/a" without a constant of the node's type.
 //!
 //! Updated from the model whenever it changes (an open table tab's unsaved values first), so it follows a table
@@ -83,7 +83,7 @@ impl NodePreview for ConstPreview {
                 BorderColor::all(Color::srgba(1.0, 1.0, 1.0, 0.25))
                 Pickable::IGNORE
             }),
-            ConstType::Bool | ConstType::CompileFlag => Box::new(bsn! {
+            ConstType::Toggle | ConstType::RuntimeBool | ConstType::CompileBool => Box::new(bsn! {
                 ConstPart::Flag
                 Node {
                     width: px(SQUARE),

@@ -21,15 +21,26 @@ pub enum ConstType {
     Vec2,
     Vec3,
     Vec4,
-    /// Stored as a bool, read as `1.0` / `0.0` (`GlobalBool`).
-    Bool,
-    /// A real `bool`, for logic nodes only (`GlobalCompileFlag`).
-    CompileFlag,
+    /// Stored as a bool, read as `1.0` / `0.0` (`GlobalToggle`).
+    #[serde(alias = "Bool")]
+    Toggle,
+    /// A runtime `bool` (`true` / `false`) emitted into WESL (`GlobalRuntimeBool`).
+    RuntimeBool,
+    /// An editor-only compile-time `bool` flag for `If` (`GlobalCompileBool`).
+    #[serde(alias = "CompileFlag")]
+    CompileBool,
 }
 
 impl ConstType {
-    pub const ALL: [ConstType; 6] =
-        [ConstType::F32, ConstType::Vec2, ConstType::Vec3, ConstType::Vec4, ConstType::Bool, ConstType::CompileFlag];
+    pub const ALL: [ConstType; 7] = [
+        ConstType::F32,
+        ConstType::Vec2,
+        ConstType::Vec3,
+        ConstType::Vec4,
+        ConstType::Toggle,
+        ConstType::RuntimeBool,
+        ConstType::CompileBool,
+    ];
 
     /// Label in the table's type select.
     pub fn label(self) -> &'static str {
@@ -38,8 +49,9 @@ impl ConstType {
             ConstType::Vec2 => "vec2",
             ConstType::Vec3 => "vec3",
             ConstType::Vec4 => "vec4",
-            ConstType::Bool => "bool",
-            ConstType::CompileFlag => "compileFlag",
+            ConstType::Toggle => "toggle",
+            ConstType::RuntimeBool => "runtimeBool",
+            ConstType::CompileBool => "compileBool",
         }
     }
 
@@ -47,21 +59,28 @@ impl ConstType {
         ConstType::ALL.into_iter().find(|t| t.label() == s)
     }
 
-    /// Type of the stored value (`Bool` for both flags).
+    /// Type of the stored value (`RuntimeBool` for boolean constants).
     pub fn value_type(self) -> PinType {
         match self {
             ConstType::F32 => PinType::Float,
             ConstType::Vec2 => PinType::Float2,
             ConstType::Vec3 => PinType::Float3,
             ConstType::Vec4 => PinType::Float4,
-            ConstType::Bool | ConstType::CompileFlag => PinType::Bool,
+            ConstType::Toggle | ConstType::RuntimeBool | ConstType::CompileBool => PinType::RuntimeBool,
         }
+    }
+
+    /// Alias for [`ConstType::value_type`]: underlying storage type of the constant.
+    pub fn storage_type(self) -> PinType {
+        self.value_type()
     }
 
     /// Output pin type of the node reading a constant of this type.
     pub fn pin_type(self) -> PinType {
         match self {
-            ConstType::Bool => PinType::Float,
+            ConstType::Toggle => PinType::Float,
+            ConstType::RuntimeBool => PinType::RuntimeBool,
+            ConstType::CompileBool => PinType::CompileBool,
             t => t.value_type(),
         }
     }
@@ -71,11 +90,11 @@ impl ConstType {
         value.coerce(self.value_type())
     }
 
-    /// WESL literal the node emits for `value` (`GlobalBool` reads `1.0f` / `0.0f`).
+    /// WESL literal the node emits for `value` (`GlobalToggle` reads `1.0f` / `0.0f`).
     pub fn wesl_literal(self, value: &Value) -> String {
         let v = self.normalize(value);
         match self {
-            ConstType::Bool => Value::Float(v.as_f32()).wesl_literal(PinType::Float),
+            ConstType::Toggle => Value::Float(v.as_f32()).wesl_literal(PinType::Float),
             t => v.wesl_literal(t.value_type()),
         }
     }
@@ -180,13 +199,13 @@ mod tests {
             vec![
                 GlobalConst::new("wind", ConstType::F32, Value::Float(0.5)),
                 GlobalConst { name: "tint".into(), ty: ConstType::Vec3, value: Value::Float(1.0) },
-                GlobalConst::new("fancy", ConstType::CompileFlag, Value::Bool(true)),
+                GlobalConst::new("fancy", ConstType::CompileBool, Value::Bool(true)),
             ],
         );
         assert_eq!(t.get("tint").unwrap().value, Value::Float3([1.0; 3]));
         let text = t.to_ron();
         assert!(text.starts_with("GlobalConsts("), "{text}");
-        assert!(text.contains("ty: CompileFlag"), "{text}");
+        assert!(text.contains("ty: CompileBool"), "{text}");
         assert_eq!(GlobalConsts::from_ron(&text).unwrap(), t);
         let too_new = "GlobalConsts(format_version: 9, name: \"x\")";
         assert!(matches!(GlobalConsts::from_ron(too_new), Err(LoadError::TooNew { .. })));
@@ -194,16 +213,25 @@ mod tests {
 
     #[test]
     fn literals_and_pins() {
-        assert_eq!(ConstType::Bool.wesl_literal(&Value::Bool(true)), "1.0f");
-        assert_eq!(ConstType::Bool.wesl_literal(&Value::Bool(false)), "0.0f");
-        assert_eq!(ConstType::CompileFlag.wesl_literal(&Value::Bool(true)), "true");
+        assert_eq!(ConstType::Toggle.wesl_literal(&Value::Bool(true)), "1.0f");
+        assert_eq!(ConstType::Toggle.wesl_literal(&Value::Bool(false)), "0.0f");
+        assert_eq!(ConstType::RuntimeBool.wesl_literal(&Value::Bool(true)), "true");
+        assert_eq!(ConstType::RuntimeBool.wesl_literal(&Value::Bool(false)), "false");
+        assert_eq!(ConstType::CompileBool.wesl_literal(&Value::Bool(true)), "true");
+        assert_eq!(ConstType::CompileBool.wesl_literal(&Value::Bool(false)), "false");
         assert_eq!(ConstType::F32.wesl_literal(&Value::Float(0.25)), "0.25f");
         assert_eq!(ConstType::Vec2.wesl_literal(&Value::Float2([1.0, 2.0])), "vec2<f32>(1.0, 2.0)");
-        assert_eq!(ConstType::Bool.pin_type(), PinType::Float);
-        assert_eq!(ConstType::CompileFlag.pin_type(), PinType::Bool);
+        assert_eq!(ConstType::Toggle.pin_type(), PinType::Float);
+        assert_eq!(ConstType::RuntimeBool.pin_type(), PinType::RuntimeBool);
+        assert_eq!(ConstType::CompileBool.pin_type(), PinType::CompileBool);
+        assert_eq!(ConstType::Toggle.storage_type(), PinType::RuntimeBool);
+        assert_eq!(ConstType::RuntimeBool.storage_type(), PinType::RuntimeBool);
+        assert_eq!(ConstType::CompileBool.storage_type(), PinType::RuntimeBool);
         // A type change converts the value: vec3 → f32 keeps x, f32 → bool is "not zero".
         assert_eq!(ConstType::F32.normalize(&Value::Float3([0.3, 0.6, 0.9])), Value::Float(0.3));
-        assert_eq!(ConstType::Bool.normalize(&Value::Float(0.3)), Value::Bool(true));
-        assert_eq!(ConstType::from_label("compileFlag"), Some(ConstType::CompileFlag));
+        assert_eq!(ConstType::Toggle.normalize(&Value::Float(0.3)), Value::Bool(true));
+        assert_eq!(ConstType::from_label("toggle"), Some(ConstType::Toggle));
+        assert_eq!(ConstType::from_label("runtimeBool"), Some(ConstType::RuntimeBool));
+        assert_eq!(ConstType::from_label("compileBool"), Some(ConstType::CompileBool));
     }
 }

@@ -446,7 +446,7 @@ pub fn coords() -> Asset {
     let remap = g.node("stdlib::Remap", (550.0, 640.0));
     g.link((&depth, "out"), (&remap, "x"));
     g.input(&remap, "in_max", f(50.0));
-    let iff = g.node("stdlib::If", (700.0, 500.0));
+    let iff = g.node("stdlib::RuntimeCompareIf", (700.0, 500.0));
     g.link((&d1, "out"), (&iff, "a"));
     g.link((&len, "out"), (&iff, "b"));
     g.link((&remap, "out"), (&iff, "gt"));
@@ -499,7 +499,8 @@ pub fn curve_bands() -> Asset {
 }
 
 /// Unlit gradient driven by the global constants of `common/tuning` (decision 0017): the base and glow colors,
-/// the glow amount, stripes scaled by a vec2 and faded in by a bool, the striped branch picked by a compile flag.
+/// the glow amount, stripes scaled by a vec2 and faded in by a toggle (`GlobalToggle`), the striped branch picked by a
+/// compileBool (`GlobalCompileBool` + `If`).
 pub fn global_tint() -> Asset {
     let kind = AssetKind::Material(MaterialKind::Unlit3d(UnlitSettings::default()));
     let mut g = GraphBuilder::new("global_tint", kind);
@@ -527,7 +528,7 @@ pub fn global_tint() -> Asset {
     g.link((&scaled, "out"), (&br, "v"));
     let frac = g.node("stdlib::Frac", (450.0, 400.0));
     g.link((&br, "x"), (&frac, "x"));
-    let on = g.node_p("stdlib::GlobalBool", (450.0, 500.0), &global("use_stripes"));
+    let on = g.node_p("stdlib::GlobalToggle", (450.0, 500.0), &global("use_stripes"));
     let fade = g.node("stdlib::Lerp", (600.0, 400.0));
     g.input(&fade, "a", f(1.0));
     g.link((&frac, "out"), (&fade, "b"));
@@ -535,8 +536,8 @@ pub fn global_tint() -> Asset {
     let striped = g.node("stdlib::Multiply", (750.0, 200.0));
     g.link((&color, "out"), (&striped, "a"));
     g.link((&fade, "out"), (&striped, "b"));
-    let flag = g.node_p("stdlib::GlobalCompileFlag", (750.0, 50.0), &global("fancy_stripes"));
-    let pick = g.node("stdlib::BoolSelect", (900.0, 100.0));
+    let flag = g.node_p("stdlib::GlobalCompileBool", (750.0, 50.0), &global("fancy_stripes"));
+    let pick = g.node("stdlib::If", (900.0, 100.0));
     g.link((&flag, "out"), (&pick, "cond"));
     g.link((&striped, "out"), (&pick, "true_value"));
     g.link((&color, "out"), (&pick, "false_value"));
@@ -754,8 +755,8 @@ pub fn const_tables() -> Vec<(&'static str, GlobalConsts)> {
                 c("glow_color", ConstType::Vec4, Value::Float4([1.0, 0.5, 0.1, 1.0])),
                 c("glow_amount", ConstType::F32, Value::Float(0.35)),
                 c("stripe_scale", ConstType::Vec2, Value::Float2([8.0, 1.0])),
-                c("use_stripes", ConstType::Bool, Value::Bool(true)),
-                c("fancy_stripes", ConstType::CompileFlag, Value::Bool(true)),
+                c("use_stripes", ConstType::Toggle, Value::Bool(true)),
+                c("fancy_stripes", ConstType::CompileBool, Value::Bool(true)),
             ],
         ),
     )]

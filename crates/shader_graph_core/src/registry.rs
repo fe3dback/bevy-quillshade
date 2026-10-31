@@ -200,6 +200,8 @@ pub enum NodeRole {
     /// Named route usage: `out` carries the input of the declaration whose node id is in [`ROUTE_PARAM`].
     /// Its `in` pin is fed by an implicit edge ([`crate::ir::route_edges`]), never by a stored one.
     RouteUsage,
+    /// Compile-time conditional branch (`stdlib::If`): evaluates `cond` at compile time and prunes the inactive branch.
+    CompileIf,
 }
 
 /// Parameter of a [`NodeRole::RouteUsage`] node: the node id of its declaration (decision 0011).
@@ -547,6 +549,7 @@ pub struct Env<'a> {
     pub consts: &'a dyn ConstLookup,
     pub textures: &'a dyn TextureLookup,
     pub gradients: &'a dyn GradientLookup,
+    pub compile_overrides: &'a BTreeMap<String, bool>,
 }
 
 /// Inputs for computing a node signature.
@@ -633,6 +636,8 @@ pub fn gradient_ident(collection: &str) -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Operand {
     Value(String),
+    /// Compile-time boolean value (`CompileBool`), never emitted as a WESL `let`.
+    CompileBool(bool),
     /// Texture + sampler identifiers.
     Texture {
         tex: String,
@@ -644,6 +649,13 @@ impl Operand {
     pub fn expr(&self) -> &str {
         match self {
             Operand::Value(s) => s,
+            Operand::CompileBool(b) => {
+                if *b {
+                    "true"
+                } else {
+                    "false"
+                }
+            }
             Operand::Texture { tex, .. } => tex,
         }
     }
@@ -669,7 +681,7 @@ impl ParamType {
             ParamType::Vec3 => PinType::Float3,
             ParamType::Vec4 => PinType::Float4,
             ParamType::Color => PinType::Color,
-            ParamType::Bool => PinType::Bool,
+            ParamType::Bool => PinType::RuntimeBool,
             ParamType::Texture => PinType::Texture2D,
         }
     }
@@ -686,6 +698,15 @@ pub struct MaterialParam {
     pub group: String,
     pub min: Option<f32>,
     pub max: Option<f32>,
+    pub node: NodeId,
+}
+
+/// Named compile-time boolean parameter (`param::CompileBool`), evaluated at compile time to prune `If` branches.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompileFlagParam {
+    pub name: String,
+    pub default: bool,
+    pub value: bool,
     pub node: NodeId,
 }
 
@@ -710,6 +731,7 @@ pub struct EmitSink {
     pub curves: BTreeSet<(String, Interp)>,
     pub custom_fns: BTreeMap<String, String>,
     pub params: BTreeMap<NodeId, MaterialParam>,
+    pub compile_flags: BTreeMap<NodeId, CompileFlagParam>,
     /// Fixed textures (design §1.3): `(origin function path, node id)` → Texture asset id. Origin `None` = a node of
     /// the material being built ([`EmitCtx::fixed_texture`]); `Some(fn)` = a node inside function `fn` (the function
     /// being built, or one it calls: [`EmitCtx::hidden_texture`]). One entry per node, however often it is used.
@@ -800,6 +822,31 @@ impl EmitCtx<'_> {
     /// Makes output `pin` refer to an existing operand without emitting a line.
     pub fn alias(&mut self, pin: &str, op: Operand) {
         self.sink.operands.insert((self.node_id.into(), pin.into()), op);
+    }
+
+    /// Defines compile-time boolean output `pin` (`CompileBool`) without emitting any WESL line.
+    pub fn define_compile_bool(&mut self, pin: &str, val: bool) {
+        self.sink.operands.insert((self.node_id.into(), pin.into()), Operand::CompileBool(val));
+    }
+
+    /// Reads the compile-time boolean value of input `pin` (`CompileBool`).
+    pub fn compile_bool(&self, pin: &str) -> bool {
+        match self.inputs.get(pin) {
+            Some(Operand::CompileBool(b)) => *b,
+            Some(Operand::Value(s)) => s == "true",
+            _ => false,
+        }
+    }
+
+    /// Declares a compile-time boolean flag parameter (`param::CompileBool`), resolves overrides from
+    /// [`Env::compile_overrides`], defines output `"out"`, and returns the resolved boolean value.
+    pub fn declare_compile_flag(&mut self, name: String, default: bool) -> bool {
+        let value = self.env.compile_overrides.get(&name).copied().unwrap_or(default);
+        self.sink
+            .compile_flags
+            .insert(self.node_id.into(), CompileFlagParam { name, default, value, node: self.node_id.into() });
+        self.define_compile_bool("out", value);
+        value
     }
 
     /// Uses a stdlib function and returns its callable name.

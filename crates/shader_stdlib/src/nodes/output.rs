@@ -152,7 +152,7 @@ pub fn register(r: &mut Registry) {
             ),
     );
 
-    let all_types: Vec<PinType> = PinType::ALL_CONCRETE.to_vec();
+    let all_types: Vec<PinType> = PinType::ALL_CONCRETE.into_iter().filter(|t| *t != PinType::CompileBool).collect();
     r.register(
         def("output::FunctionInput", "FunctionInput", CAT)
             .kw(&["input", "argument", "parameter"])

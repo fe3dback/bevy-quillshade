@@ -98,7 +98,7 @@ Asset(
       },
     ),
     "n16": Node(
-      kind: "stdlib::If",
+      kind: "stdlib::RuntimeCompareIf",
       pos: (980.0, 675.0),
       params: {},
       inputs: {

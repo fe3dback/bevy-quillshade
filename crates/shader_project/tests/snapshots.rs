@@ -27,7 +27,7 @@ fn node_material(kind: &str) -> Option<(String, Asset)> {
     if kind == FUNCTION_CALL_KIND
         || kind == "stdlib::SampleCurve"
         || kind.starts_with("stdlib::Global")
-        || !matches!(def.role(), NodeRole::Normal | NodeRole::Parameter | NodeRole::Reroute)
+        || !matches!(def.role(), NodeRole::Normal | NodeRole::CompileIf | NodeRole::Parameter | NodeRole::Reroute)
     {
         return None;
     }
@@ -53,6 +53,7 @@ fn node_material(kind: &str) -> Option<(String, Asset)> {
         consts: &NoConsts,
         textures: &NoTextures,
         gradients: &NoGradients,
+        compile_overrides: &BTreeMap::new(),
     };
     let sig = def.signature(&SigCtx {
         node_id: &n,
@@ -77,8 +78,13 @@ fn node_material(kind: &str) -> Option<(String, Asset)> {
             g.link((&n, &first.id), (&s, "tex"));
             g.link((&s, "rgb"), (&out, color));
         }
-        PinType::Bool => {
-            let s = g.node("stdlib::BoolSelect", (400.0, 0.0));
+        PinType::RuntimeBool => {
+            let s = g.node("stdlib::RuntimeIf", (400.0, 0.0));
+            g.link((&n, &first.id), (&s, "cond"));
+            g.link((&s, "out"), (&out, color));
+        }
+        PinType::CompileBool => {
+            let s = g.node("stdlib::If", (400.0, 0.0));
             g.link((&n, &first.id), (&s, "cond"));
             g.link((&s, "out"), (&out, color));
         }

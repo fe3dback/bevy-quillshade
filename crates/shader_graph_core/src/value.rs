@@ -26,10 +26,14 @@ impl Value {
             PinType::Float3 => Value::Float3([0.0; 3]),
             PinType::Float4 => Value::Float4([0.0; 4]),
             PinType::Color => Value::Color([0.0, 0.0, 0.0, 1.0]),
-            PinType::Bool => Value::Bool(false),
+            PinType::RuntimeBool | PinType::CompileBool => Value::Bool(false),
             PinType::Int => Value::Int(0),
             PinType::Texture2D | PinType::MaterialAttributesPbr => Value::Str(String::new()),
         }
+    }
+
+    pub fn default_for(ty: PinType) -> Value {
+        Self::zero(ty)
     }
 
     pub fn pin_type(&self) -> Option<PinType> {
@@ -39,7 +43,7 @@ impl Value {
             Value::Float3(_) => PinType::Float3,
             Value::Float4(_) => PinType::Float4,
             Value::Color(_) => PinType::Color,
-            Value::Bool(_) => PinType::Bool,
+            Value::Bool(_) => PinType::RuntimeBool,
             Value::Int(_) => PinType::Int,
             Value::Str(_) | Value::Type(_) => return None,
         })
@@ -106,7 +110,7 @@ impl Value {
                 let a = if f.len() == 4 { f[3] } else { 1.0 };
                 Value::Color([at(0), at(1), at(2), a])
             }
-            PinType::Bool => Value::Bool(self.as_bool()),
+            PinType::RuntimeBool | PinType::CompileBool => Value::Bool(self.as_bool()),
             PinType::Int => Value::Int(self.as_i32()),
             PinType::Texture2D | PinType::MaterialAttributesPbr => Value::Str(String::new()),
         }
@@ -167,6 +171,11 @@ mod tests {
         assert_eq!(Value::Float(0.5).wesl_literal(PinType::Float), "0.5f");
         assert_eq!(Value::Float3([1.0, 0.5, 0.0]).wesl_literal(PinType::Color), "vec4<f32>(1.0, 0.5, 0.0, 1.0)");
         assert_eq!(Value::Int(3).wesl_literal(PinType::Int), "3i");
+        assert_eq!(Value::Bool(true).pin_type(), Some(PinType::RuntimeBool));
+        assert_eq!(Value::Bool(true).wesl_literal(PinType::RuntimeBool), "true");
+        assert_eq!(Value::Bool(false).wesl_literal(PinType::CompileBool), "false");
+        assert_eq!(Value::zero(PinType::RuntimeBool), Value::Bool(false));
+        assert_eq!(Value::zero(PinType::CompileBool), Value::Bool(false));
         let attrs = Value::zero(PinType::MaterialAttributesPbr);
         assert_eq!(attrs, Value::Str(String::new()));
         assert_eq!(attrs.coerce(PinType::MaterialAttributesPbr), attrs);

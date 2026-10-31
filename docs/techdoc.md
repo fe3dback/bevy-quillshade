@@ -162,7 +162,8 @@ Pin types follow UE semantics: f32 scalar and vectors with implicit widening, pl
 | `Float3` | `vec3<f32>` | `Vec3` | yellow |
 | `Float4` | `vec4<f32>` | `Vec4` | pink |
 | `Color` | `vec4<f32>` (linear) | `LinearRgba` | pink with an outline |
-| `Bool` | `bool` | `bool` → `u32` in the uniform | red |
+| `RuntimeBool` | `bool` | `bool` → `u32` in the uniform | red |
+| `CompileBool` | editor-only compile-time flag, prunes inactive `If` branch | — | amber/orange |
 | `Int` | `i32` | `i32` | light blue |
 | `Texture2D` | `texture_2d<f32>` + `sampler` | `Handle<Image>` | blue |
 | `Any` (polymorphic) | inferred | — | white |
@@ -174,7 +175,8 @@ Pin types follow UE semantics: f32 scalar and vectors with implicit widening, pl
 - `FloatN` → `FloatM`, N < M: **forbidden**; the UI suggests inserting `AppendVector`/`MakeFloat4`.
 - `Color` ↔ `Float4`/`Float3`: automatic (`Float3` takes `.rgb`, in the other direction `a = 1.0`).
 - `Int` → `Float`: automatic (`f32(x)`); `Float` → `Int`: only through an explicit `Truncate`/`Round` node.
-- `Bool` connects only to `Bool` inputs (`If`, `BoolParameter`, logic).
+- `RuntimeBool` connects only to `RuntimeBool` inputs (`RuntimeIf`, `RuntimeBoolParameter`, runtime logic).
+- `CompileBool` connects only to `CompileBool` inputs (`If`, `CompileBoolParameter`, compile-time logic).
 - `Texture2D` connects only to `Texture2D` inputs (`TextureSample`, a `FunctionInput` of texture type).
 - Polymorphic nodes (`Add`, `Multiply`, `Lerp`, …) infer the type by the "maximum input dimension" rule; a scalar input is widened. An unconnected input takes its default value, editable right on the node.
 - Cycles are forbidden: checked in the bevy\_noodle `ConnectionCheck` observer before the edge is created. One input — at most one edge; one output — any number.
@@ -208,13 +210,13 @@ The set below is the minimum for v1 (MUST); names and categories follow UE5 so t
 
 | Category | Nodes |
 | --- | --- |
-| **Constants** | Constant, Constant2Vector, Constant3Vector, Constant4Vector, Time (`globals.time`), DeltaTime, Pi, TwoPi, ViewSize |
-| **Parameters** | ScalarParameter, VectorParameter (Float2/3/4), ColorParameter, TextureSampleParameter2D, TextureObjectParameter, BoolParameter. Fields: name (unique within the material), default value, group, min/max for the UI |
+| **Constants** | Constant, Constant2Vector, Constant3Vector, Constant4Vector, Toggle, RuntimeBool, CompileBool, GlobalConstF32, GlobalConstVec2, GlobalConstVec3, GlobalConstVec4, GlobalToggle, GlobalRuntimeBool, GlobalCompileBool, Time (`globals.time`), DeltaTime, Pi, TwoPi, ViewSize |
+| **Parameters** | ScalarParameter, VectorParameter (Float2/3/4), ColorParameter, TextureSampleParameter2D, TextureObjectParameter, RuntimeBoolParameter, CompileBoolParameter. Fields: name (unique within the material), default value, group, min/max for the UI |
 | **Math (scalar/per-component)** | Add, Subtract, Multiply, Divide, Power, Sqrt, Abs, Floor, Ceil, Round, Truncate, Frac, Fmod, Sign, Min, Max, Clamp, Saturate, OneMinus, Lerp, Step, SmoothStep, Exp, Exp2, Log, Log2, Sin, Cos, Tan, ArcSin, ArcCos, ArcTan, ArcTan2, Remap (ValueRange→TargetRange), DDX, DDY |
 | **Vector** | Normalize, NormalStrength (tangent-space normal: XY × strength, renormalized), Length, Distance, DotProduct, CrossProduct, Reflect, Refract, AppendVector, ComponentMask (xyzw checkboxes), BreakOutFloat2/3/4, MakeFloat2/3/4, Swizzle, TransformVector (Tangent/Local/World/View) |
 | **Coordinates** | TextureCoordinate (uv0/uv1, tiling), WorldPosition, ObjectPosition, VertexNormalWS, VertexTangentWS, VertexColor, CameraPositionWS, CameraVectorWS, ScreenPosition, PixelDepth, ObjectScale, Panner, Rotator, ScaleUVsByCenter |
 | **Texture** | TextureSample (tex, uv, bias/level → rgb, r, g, b, a, rgba), TextureSize, TexelSize, FlipBook (atlas animation), NormalFromHeightmap (SHOULD) |
-| **Utility** | If (A, B, A>B, A==B, A\<B), Fresnel, Desaturation, Blend (Overlay/Screen/Multiply/SoftLight), BlackBody (SHOULD), Noise (simple value/perlin, SHOULD), FunctionCall (any project function), Custom (hand-written WESL fragment: inputs by name, output type), Reroute, Comment (frame) |
+| **Utility** | If (compile-time), RuntimeIf, RuntimeCompareIf (A, B, A>B, A==B, A\<B), CompileAnd, CompileOr, CompileNot, And, Or, Not, Compare, Fresnel, Desaturation, Blend (Overlay/Screen/Multiply/SoftLight), BlackBody (SHOULD), Noise (simple value/perlin, SHOULD), FunctionCall (any project function), Custom (hand-written WESL fragment: inputs by name, output type), Reroute, Comment (frame) |
 | **Output** | MaterialOutput (per asset type), FunctionInput, FunctionOutput |
 
 Requirements:
