@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version 0.2" src="https://img.shields.io/badge/version-0.2-blue">
+  <img alt="Version 0.3" src="https://img.shields.io/badge/version-0.3-blue">
   <img alt="Bevy 0.20" src="https://img.shields.io/badge/bevy-0.20-232326">
   <img alt="Status: alpha" src="https://img.shields.io/badge/status-alpha-orange">
   <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-green">
@@ -70,7 +70,7 @@ cargo build --release --no-default-features
 
 ### 1. Project
 
-**File → New Project…** on your game crate (the directory with its `Cargo.toml`).
+**File → New Project…** on your game crate (the directory with its `Cargo.toml`); domains can be toggled in **File → Project Settings…**.
 
 ```text
 my_game/
@@ -84,17 +84,6 @@ my_game/
   assets/quillshade/light/autogen/       # generated light baked.ron (do not edit)
   crates/quillshade/         # generated Rust crate, one module per domain (do not edit)
 ```
-
-Sources live in `quillshade/<domain>/` (`material`, `light`); `quillshade/project.ron` can switch a domain off
-(`domains: { "material": (enabled: false) }`, a missing entry means enabled). Without the file every default applies;
-a `project.ron` that does not parse is an error — the CLI exits with code 2 and the editor refuses to open the project,
-naming the file — rather than being replaced by defaults. The editor re-reads the file when it changes on disk.
-In the editor, File → Project Settings... edits it: the
-header date and each domain's "Used in game" (enabled by default). Saving writes the file and rewrites
-`crates/quillshade/Cargo.toml` and `src/lib.rs` (unchecking a domain deletes its generated `crates/quillshade/src/<domain>/`
-module, removes its plugin from `QuillshadePlugin`, and disables the domain in the editor while keeping its
-`quillshade/<domain>/` source files); an outside edit reloads a clean Project Settings tab and asks Keep mine / Reload
-for one with unsaved changes.
 
 ### 2. Cargo.toml
 
@@ -119,29 +108,8 @@ use bevy::prelude::*;
 fn main() {
     App::new()
         .add_plugins((DefaultPlugins, quillshade::QuillshadePlugin))
-        .add_systems(Startup, spawn)
         .run();
 }
-```
-
-### 4. Spawn
-
-Every material is a field of `BakedMaterials`, by its path under `quillshade/material/`:
-
-```rust
-use quillshade::material::BakedMaterials;
-
-fn spawn(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, baked: Res<BakedMaterials>) {
-    // Pbr3d needs tangents for a Normal input.
-    let sphere = Sphere::new(1.0).mesh().uv(48, 24).with_generated_tangents().unwrap();
-    commands.spawn((Mesh3d(meshes.add(sphere)), MeshMaterial3d(baked.env.rock_wet.clone())));
-    commands.spawn((Camera3d::default(), Transform::from_xyz(0.0, 1.0, 4.0)));
-}
-
-// Unlit3d: MeshMaterial3d(baked.fx.hologram.clone()) as well.
-// Sprite2d: (Sprite::from_image(image), SpriteMaterial(baked.ui.dissolve.clone())).
-// By id, e.g. from your own asset data (None for an unknown id or another type):
-// baked.get::<RockWetMaterial>("env/rock_wet"), tex.get("textures/rock_albedo").
 ```
 
 ## Features
@@ -191,73 +159,61 @@ regenerates WESL shaders and a typed Rust crate that the game hot-reloads.
   </tr>
 </table>
 
+Every material is a field of `BakedMaterials`, by its path under `quillshade/material/`:
+
+```rust
+use quillshade::material::BakedMaterials;
+
+fn spawn(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, baked: Res<BakedMaterials>) {
+    // Pbr3d needs tangents for a Normal input.
+    let sphere = Sphere::new(1.0).mesh().uv(48, 24).with_generated_tangents().unwrap();
+    commands.spawn((Mesh3d(meshes.add(sphere)), MeshMaterial3d(baked.env.rock_wet.clone())));
+    commands.spawn((Camera3d::default(), Transform::from_xyz(0.0, 1.0, 4.0)));
+}
+
+// Unlit3d: MeshMaterial3d(baked.fx.hologram.clone()) as well.
+// Sprite2d: (Sprite::from_image(image), SpriteMaterial(baked.ui.dissolve.clone())).
+// By id, e.g. from your own asset data (None for an unknown id or another type):
+// baked.get::<RockWetMaterial>("env/rock_wet"), tex.get("textures/rock_albedo").
+```
+
 #### Planned
 
 - **Instanced materials**: material instances that share draw calls (draw-call optimization).
 
 ### Light
 
-Author complete lighting, skybox, fog, and camera post-processing environments (`quillshade/light/*.environment.ron`),
-transition curves (`quillshade/light/*.curve.ron`), and cube-map Texture assets (`quillshade/light/*.texture.ron`,
-KTX2 cube maps), and switch or transition smoothly between presets at runtime.
+Set up the whole scene lighting environment in one editor with a live 3D preview: skybox and IBL cube maps (or a
+procedural sky gradient), ambient and directional lights with shadows, distance fog, camera exposure, tonemapping and
+color grading. Environments are generated as typed presets that the game can apply immediately or blend between smoothly
+at runtime using custom transition curves, cross-fading skybox cube maps on the GPU and hot-reloading changes on the
+fly.
 
-- **Environment presets (`*.environment.ron`)**:
-  - **Sky & IBL**: camera `ClearColor`, optional `.ktx2` cube-map skybox (brightness in cd/m², yaw rotation), and
-    `EnvironmentMapLight` (intensity, yaw rotation, procedural hemispherical gradient `sky_top` / `sky_horizon` /
-    `ground` colors when no cube map is set, or the cube map).
-  - **Ambient & Directional Lights**: `GlobalAmbientLight` (color, brightness) and any number of `DirectionalLight`
-    slots (name, color, illuminance in lux, azimuth/elevation angles, cascade shadows, contact shadows, shadow biases).
-  - **Camera Exposure, Tonemapping & Color Grading**: `Hdr`, `Exposure` (`ev100`), `Tonemapping`, `DebandDither`, and
-    full 4-section `ColorGrading` (`global`, `shadows`, `midtones`, `highlights`).
-  - **Distance Fog**: `DistanceFog` with `Linear`, `Exponential`, `ExponentialSquared`, or `Atmospheric` falloff and
-    smooth cross-mode interpolation.
-- **Transition curves (`*.curve.ron`)**: authored with the curve editor (`curve_kit`), evaluated with Catmull-Rom
-  cubic Hermite interpolation at runtime, and implementing `bevy::math::curve::Curve<f32>`.
-- **Typed runtime API (`quillshade::light`)**:
-  - Autogenerated `Preset`, `Curve`, and `State` (`#[derive(States)]`) enums (`State::None`, `State::Transitioning`,
-    and one variant per preset, supporting nested subdirectories such as `outdoor/day` → `OutdoorDay`).
-  - `Light` (`SystemParam`): `light.set_immediate(Preset::Day)`,
-    `light.transition_to(Preset::Night, Curve::Smooth, Duration::from_secs(3))`,
-    `light.transition_linear_to(Preset::Night, Duration::from_secs(3))`, plus `prev_preset()`, `next_preset()`,
-    `current_preset()`, `progress()`, `sampled_progress()`, `is_transitioning()`, and `current_values()`.
-  - State hooks & messages: `OnExit(State::Day)` fires immediately when a transition begins (`t = 0.0`);
-    `OnEnter(State::Night)` fires when the transition finishes (`t = 1.0`), alongside `LightTransitionStarted` and
-    `LightTransitionFinished` messages.
-  - **Mid-transition interruption & virtual time**: calling `transition_to` while a transition is in flight smoothly
-    interpolates from the current mid-transition snapshot toward the new target preset while preserving `prev_preset()`.
-    Transitions advance on `Time<Virtual>`, respecting game pause and time scaling.
-  - **GPU dual-cubemap blended skybox**: custom `BlendedSkyboxPlugin` (`blended_skybox.wesl`) cross-fades two skybox
-    cube maps on the GPU (and alpha-fades against `ClearColor` when transitioning to or from `cubemap: None`).
-  - **Hot-reload**: `assets/quillshade/light/autogen/baked.ron` hot-reloads environment values, curves, and cube-map
-    texture settings while the game is running without recompiling Rust.
-- **Validation (`LE*` / `LW*`) & Game Code Conflict Scanner (`LW102`)**: validates environments, curves, and cube maps
-  (`LE001`–`LE003`, `LE009`, `LE011`–`LE014`, `LW101`–`LW103`, `LW109`), including scanning game `.rs` files for manual
-  `DirectionalLight`, `Skybox`, `DistanceFog`, `Exposure`, `Tonemapping`, `ColorGrading`, or `ClearColor` usages
-  (`LW102`, clickable in the editor console to open the offending source file).
+<table>
+  <tr>
+    <td width="50%"><img src="docs/images/ui_light_editor.png" alt="Light environment editor"><p align="center">Environments</p></td>
+    <td width="50%"><img src="docs/images/ui_cubemaps.png" alt="Cube map preview"><p align="center">Cube maps</p></td>
+  </tr>
+</table>
+
+Switch or transition between presets with the `Light` system parameter:
+
+```rust
+use std::time::Duration;
+use quillshade::light::{Curve, Light, Preset};
+
+fn setup(mut light: Light) {
+    light.set_immediate(Preset::Day);
+}
+
+fn toggle_light(keys: Res<ButtonInput<KeyCode>>, mut light: Light) {
+    if keys.just_pressed(KeyCode::Space) {
+        light.transition_to(Preset::Night, Curve::Smooth, Duration::from_secs(3));
+    }
+}
+```
 
 ### Animation Graph
 
 > [!NOTE]
 > **Planned for a future release.**
-
-## Workspace crates
-
-- `project_core` — domain-neutral backend: project layout, `project.ron`, atomic writer, regen driver, the umbrella
-  `crates/quillshade`. `curve_kit` and `texture_kit` — models shared by domains (curves, texture assets), without
-  Bevy; their `editor` feature (default on, off for generator backends) adds the curve editor every domain with
-  curves registers (`CurveDomain`) and the Texture / game image tabs every domain with Texture assets registers
-  (`TextureDomain`, its `TexturePolicy` decides the image formats, the built-in textures and the Easy presets).
-- `shader_graph_core` → `shader_stdlib` → `shader_codegen_wesl` → `shader_codegen_rust` → `shader_project` — the
-  Material domain's backend (model, node library, WESL and Rust codegen, regeneration), without Bevy.
-- `editor_core` — the editor shell (Bevy UI + Feathers): window layout (the mainbar with the domain tabs, the
-  secondbar with Back / Forward and the tabs), menus, trees, the console filtered by the active domain, dialogs, user
-  config, undo history, property widgets, the generated-file viewer, tools (singleton tabs such as Project Settings,
-  in the built-in Project domain) and the domain API (`EditorDomain`, `DomainRegistrar`, `DomainState`). It knows no
-  domain.
-- `node_graph_base` — the node graph UI every graph domain shares: the canvas over the `vendor/bevy_noodle` fork,
-  its gestures, the palette, the minimap, in-node previews and the graph editor tools, behind `GraphDomain`.
-- `light_domain` — the Light domain: environments, transition curves (`curve_kit`), and cube-map Texture assets
-  (`texture_kit`); its backend is Bevy-free, its `editor` feature (default on) adds `LightDomain`.
-- `material_domain` — the Material domain of the editor: material and function graphs, curves and Texture assets
-  (through the kits), constant tables, gradient collections and their editors. `src/main.rs` lists the domains (one
-  line each) for the GUI and the CLI. See decision 0044 (`docs/decisions/`).
