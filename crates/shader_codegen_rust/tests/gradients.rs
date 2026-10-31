@@ -49,8 +49,9 @@ fn material_ir(collection: &str) -> Ir {
 fn gradient_field_and_new() {
     let rs = shader_codegen_rust::material_module(&material_ir(TERRAIN), "quillshade/material/test/mat.material.ron");
     for l in [
-        "    /// Gradient collection `common/terrain`; `new` sets `Handle::default()` (Bevy's white image).\n    \
-         #[allow(non_snake_case)]\n    #[texture(101)]\n    #[sampler(102)]\n    pub gc_common__terrain: Handle<Image>,",
+        "#[allow(non_snake_case)]\npub struct MatMaterial {\n    \
+         /// Gradient collection `common/terrain`; `new` sets `Handle::default()` (Bevy's white image).\n    \
+         #[texture(101)]\n    #[sampler(102)]\n    pub gc_common__terrain: Handle<Image>,",
         "            gc_common__terrain: Handle::default(),",
     ] {
         assert!(rs.contains(l), "{l}\n{rs}");

@@ -249,6 +249,9 @@ pub fn material_module(ir: &Ir, source_file: &str) -> String {
     } else {
         line(&mut o, "#[derive(Asset, AsBindGroup, Reflect, Debug, Clone)]");
     }
+    if ir.textures.iter().any(|t| t.ident.contains("__")) {
+        line(&mut o, "#[allow(non_snake_case)]");
+    }
     line(&mut o, &format!("pub struct {} {{", names.main));
     if has_uniform {
         line(&mut o, "    #[uniform(100)]");
@@ -268,9 +271,6 @@ pub fn material_module(ir: &Ir, source_file: &str) -> String {
         };
         if let Some(of) = of {
             line(&mut o, &format!("    /// {of}; `new` sets `Handle::default()` (Bevy's white image)."));
-        }
-        if t.ident.contains("__") {
-            line(&mut o, "    #[allow(non_snake_case)]");
         }
         line(&mut o, &format!("    #[texture({})]", t.binding));
         line(&mut o, &format!("    #[sampler({})]", t.binding + 1));

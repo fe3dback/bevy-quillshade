@@ -4029,7 +4029,7 @@ fn open_recent_from_dialog_switches_project_without_despawn_panic() {
     use material_domain::ui::dialog::DialogRoot;
     use material_domain::ui::welcome::WelcomePlugin;
 
-    let (dir_a, mut app) = app_with(|app| {
+    let (_dir_a, mut app) = app_with(|app| {
         app.add_plugins((
             material_domain::ui::dialog::DialogPlugin,
             bevy::ui_widgets::DialogPlugin,
@@ -4037,22 +4037,23 @@ fn open_recent_from_dialog_switches_project_without_despawn_panic() {
             WelcomePlugin,
         ));
     });
+    let root_a = app.world().resource::<Editor>().project.as_ref().unwrap().root.clone();
     let dir_b = tempfile::tempdir().unwrap();
     std::fs::write(dir_b.path().join("Cargo.toml"), "[package]\nname = \"g2\"\n").unwrap();
     std::fs::create_dir_all(dir_b.path().join("assets")).unwrap();
-    fixtures::save_all(&Project::open(dir_b.path()).unwrap()).unwrap();
+    let proj_b = Project::open(dir_b.path()).unwrap();
+    fixtures::save_all(&proj_b).unwrap();
 
-    app.world_mut().resource_mut::<Editor>().config.recent_projects =
-        vec![dir_a.path().to_path_buf(), dir_b.path().to_path_buf()];
+    app.world_mut().resource_mut::<Editor>().config.recent_projects = vec![root_a, proj_b.root.clone()];
     act(&mut app, Action::OpenProjectDialog);
     app.update();
     assert!(app.world_mut().query_filtered::<Entity, With<DialogRoot>>().single(app.world()).is_ok());
 
-    act(&mut app, Action::OpenProject(dir_b.path().to_path_buf()));
+    act(&mut app, Action::OpenProject(proj_b.root.clone()));
     let editor = app.world().resource::<Editor>();
     assert!(editor.dialog.is_none());
-    assert_eq!(editor.project.as_ref().map(|p| p.root.as_path()), Some(dir_b.path()));
-    assert_eq!(editor.config.recent_projects.first().map(|p| p.as_path()), Some(dir_b.path()));
+    assert_eq!(editor.project.as_ref().map(|p| p.root.as_path()), Some(proj_b.root.as_path()));
+    assert_eq!(editor.config.recent_projects.first().map(|p| p.as_path()), Some(proj_b.root.as_path()));
     assert!(app.world_mut().query_filtered::<Entity, With<DialogRoot>>().single(app.world()).is_err());
 }
 

@@ -22,9 +22,9 @@ pub const LAYOUT_FEATURE: &str = "SG_LAYOUT_7fbb96d1";
 
 /// Extension of `StandardMaterial`; use [`TerrainLayersMaterial`] as the asset type.
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone, Default)]
+#[allow(non_snake_case)]
 pub struct TerrainLayersExt {
     /// Gradient collection `common/terrain`; `new` sets `Handle::default()` (Bevy's white image).
-    #[allow(non_snake_case)]
     #[texture(101)]
     #[sampler(102)]
     pub gc_common__terrain: Handle<Image>,
