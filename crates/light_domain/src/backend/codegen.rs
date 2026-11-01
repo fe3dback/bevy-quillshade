@@ -393,13 +393,12 @@ fn emit_env_literal(e: &Environment) -> String {
         TonemappingMode::BlenderFilmic => "TonemappingMode::BlenderFilmic",
     };
     format!(
-        "EnvironmentValues {{ format_version: {}, clear_color: {}, cubemap: {cubemap}, skybox_brightness: {}, skybox_rotation: {}, env_intensity: {}, env_rotation: {}, sky_top_color: {}, sky_horizon_color: {}, ground_color: {}, env_affects_lightmapped: {}, ambient_color: {}, ambient_brightness: {}, ambient_affects_lightmapped: {}, lights: vec![{}], ev100: {}, tonemapping: {tm}, deband_dither: {}, color_grading: {}, fog: {}, skybox_blend: None }}",
+        "EnvironmentValues {{ format_version: {}, clear_color: {}, cubemap: {cubemap}, skybox_brightness: {}, skybox_rotation: {}, env_intensity: {}, sky_top_color: {}, sky_horizon_color: {}, ground_color: {}, env_affects_lightmapped: {}, ambient_color: {}, ambient_brightness: {}, ambient_affects_lightmapped: {}, lights: vec![{}], ev100: {}, tonemapping: {tm}, deband_dither: {}, color_grading: {}, fog: {}, skybox_blend: None }}",
         e.format_version,
         fmt_arr4(e.clear_color),
         fmt_f32(e.skybox_brightness),
         fmt_f32(e.skybox_rotation),
         fmt_f32(e.env_intensity),
-        fmt_f32(e.env_rotation),
         fmt_arr4(e.sky_top_color),
         fmt_arr4(e.sky_horizon_color),
         fmt_arr4(e.ground_color),

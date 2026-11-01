@@ -32,7 +32,8 @@ const CONFLICT_TYPES: &[&str] = &[
 
 /// Every diagnostic of the loaded Light assets, each `in_domain(LIGHT)` at the asset's source path: the load errors
 /// (`LE009`), then the Texture assets' problems (`LE013` sampler, `LE012` path, `LE011` one game file shared by
-/// several assets, `LW109` file missing, `LE014` not a cube map), then the environments' (`LW101` no cube map,
+/// several assets, `LW109` file missing, `LE014` not a cube map, `LW104` faces Bevy cannot filter for image-based
+/// lighting), then the environments' (`LW101` no cube map,
 /// `LE001` a cube map that names no Light Texture asset file, `LE002` PascalCase enum variant collision), then the
 /// curves' (`LE002` PascalCase collision, `LE003` invalid range, `LW103` non-unit endpoints), and finally `LW102`
 /// manual lighting/camera conflicts in game `.rs` files.
@@ -59,7 +60,30 @@ pub fn validate_texture(project: &Project, path: &str, tex: &TextureAsset, other
             };
             d.in_domain(LIGHT).in_asset(at.clone())
         })
+        .chain(
+            texture_kit::read_ktx2_header(&assets_dir.join(&tex.path))
+                .and_then(|h| ibl_problem(&h))
+                .map(|msg| Diagnostic::warning("LW104", msg).in_domain(LIGHT).in_asset(at.clone())),
+        )
         .collect()
+}
+
+/// `LW104`: a 6-face KTX2 cube map whose faces are not square power-of-two (at most 8192) shows as a skybox, but
+/// Bevy's `GeneratedEnvironmentMapLight` cannot filter it, so the runtime lights the scene with the environment's
+/// procedural sky colors instead. `None` for other headers (`LE014` reports a wrong shape).
+fn ibl_problem(header: &[u8]) -> Option<String> {
+    if header.len() < texture_kit::KTX2_HEADER_LEN {
+        return None;
+    }
+    let field = |at: usize| u32::from_le_bytes([header[at], header[at + 1], header[at + 2], header[at + 3]]);
+    let (width, height, faces) = (field(20), field(24), field(36));
+    if faces != 6 || (width == height && width.is_power_of_two() && width <= 8192) {
+        return None;
+    }
+    Some(format!(
+        "cube map faces are {width}x{height}: image-based lighting needs square power-of-two faces (at most 8192), \
+         so environments using it are lit by their procedural sky colors"
+    ))
 }
 
 /// Validates all `textures` against `project`, returning per-texture diagnostics keyed by texture path.

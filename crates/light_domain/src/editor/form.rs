@@ -242,8 +242,9 @@ fn form(doc: &EnvironmentDoc, textures: &[String]) -> Vec<Box<dyn Scene>> {
         color_row(doc, "Clear color", EnvironmentProp::ClearColor, &env.clear_color),
         labeled_prop(doc, "Cube map", EnvironmentProp::Cubemap, picker),
         hint(
-            "Optional Light Texture asset (.ktx2 cube map). When None, a procedural 6-face hemispherical gradient \
-             cube map is generated from Sky top / Sky horizon / Ground colors.",
+            "Optional Light Texture asset (.ktx2 cube map): the skybox and the source of the IBL reflections. When \
+             None (or its faces are not square power-of-two), the IBL uses a procedural gradient from Sky top / Sky \
+             horizon / Ground colors.",
         ),
         labeled_prop(
             doc,
@@ -260,6 +261,7 @@ fn form(doc: &EnvironmentDoc, textures: &[String]) -> Vec<Box<dyn Scene>> {
             EnvironmentProp::SkyboxRotation,
             number_ranged(EnvironmentProp::SkyboxRotation, 0, env.skybox_rotation, Some(YAW_RANGE), None),
         ));
+        sky_rows.push(hint("Yaw of the skybox in degrees; the IBL reflections turn with it."));
     }
     sky_rows.push(labeled_prop(
         doc,
@@ -267,15 +269,7 @@ fn form(doc: &EnvironmentDoc, textures: &[String]) -> Vec<Box<dyn Scene>> {
         EnvironmentProp::EnvIntensity,
         number_ranged(EnvironmentProp::EnvIntensity, 0, env.env_intensity, Some(INTENSITY_RANGE), None),
     ));
-    sky_rows.push(hint("Scale of the diffuse/specular IBL light (Bevy's EnvironmentMapLight::intensity)."));
-    if advanced {
-        sky_rows.push(labeled_prop(
-            doc,
-            "Env rotation",
-            EnvironmentProp::EnvRotation,
-            number_ranged(EnvironmentProp::EnvRotation, 0, env.env_rotation, Some(YAW_RANGE), None),
-        ));
-    }
+    sky_rows.push(hint("Scale of the diffuse/specular IBL light (Bevy's GeneratedEnvironmentMapLight::intensity)."));
     sky_rows.push(color_row(doc, "Sky top color", EnvironmentProp::SkyTopColor, &env.sky_top_color));
     sky_rows.push(color_row(doc, "Sky horizon", EnvironmentProp::SkyHorizonColor, &env.sky_horizon_color));
     sky_rows.push(color_row(doc, "Ground color", EnvironmentProp::GroundColor, &env.ground_color));

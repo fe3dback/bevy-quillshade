@@ -148,6 +148,34 @@ fn plain_2d_ktx2_is_le014() {
 }
 
 #[test]
+fn non_power_of_two_cube_map_is_lw104() {
+    let (_d, p) = project();
+    let mut bytes = ktx2(0, 0, 6);
+    bytes[20..24].copy_from_slice(&48u32.to_le_bytes());
+    bytes[24..28].copy_from_slice(&48u32.to_le_bytes());
+    game_file(&p, "textures/odd.ktx2", &bytes);
+    texture(&p, "textures/odd", &TextureAsset::new("textures/odd.ktx2"));
+    sky(&p);
+    let all = diagnostics(&p);
+    let lw104 = with_code(&all, "LW104");
+    assert_eq!(lw104.len(), 1, "only the 48x48 cube map, not the 64x64 one: {all:?}");
+    assert_eq!(lw104[0].asset.as_deref(), Some("quillshade/light/textures/odd.texture.ron"));
+    assert_eq!((lw104[0].level, lw104[0].domain), (Level::Warning, Some(LIGHT)));
+    assert!(lw104[0].message.contains("48x48"), "{}", lw104[0].message);
+}
+
+/// `env_rotation` was merged into `skybox_rotation` (the IBL turns with the skybox): older files still load.
+#[test]
+fn environment_with_legacy_env_rotation_loads() {
+    let (_d, p) = project();
+    let path = file(&p, environment_ref("old").source_rel());
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, "Environment(format_version: 1, skybox_rotation: 90.0, env_rotation: 180.0)").unwrap();
+    let env = load_environment(&path).unwrap();
+    assert_eq!(env.skybox_rotation, 90.0);
+}
+
+#[test]
 fn png_is_le012() {
     let (_d, p) = project();
     game_file(&p, "textures/sky.png", b"\x89PNG\r\n\x1a\n");

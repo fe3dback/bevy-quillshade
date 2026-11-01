@@ -645,7 +645,7 @@ fn inspect_game_tool_in_tools_menu_scans_and_focuses_conflicts() {
     let (dir, mut e) = project();
     e.apply(Action::SwitchDomain(LIGHT));
     let entries = menu_entries(MainMenu::Tools, &e);
-    assert_eq!(labels(&entries), ["Inspect Game...", "Light Transition Preview..."]);
+    assert_eq!(labels(&entries), ["Inspect Game...", "Light Transition Preview...", "HDR Converter..."]);
     assert_eq!(entries[0].action, Action::OpenTool { domain: LIGHT, id: INSPECT_GAME_TOOL, arg: None });
     assert_eq!(entries[1].action, Action::OpenTool { domain: LIGHT, id: LIGHT_PREVIEW_TOOL, arg: None });
 
@@ -954,13 +954,15 @@ fn light_preview_sky_color_to_cubemap_blending() {
 
     let id = app.world().resource::<Editor>().active_doc::<LightPreviewDoc>().unwrap().preview.id();
     let cam_entity = app.world().resource::<LightPreviewSessions>().sessions.get(&id).unwrap().camera;
-    let ibl_id_before = app
-        .world()
-        .entity(cam_entity)
-        .get::<bevy::light::EnvironmentMapLight>()
-        .expect("EnvironmentMapLight on preview camera")
-        .diffuse_map
-        .id();
+    let ibl_source = |app: &App| {
+        app.world()
+            .entity(cam_entity)
+            .get::<bevy::light::GeneratedEnvironmentMapLight>()
+            .expect("GeneratedEnvironmentMapLight on preview camera")
+            .environment_map
+            .id()
+    };
+    let ibl_id_before = ibl_source(&app);
     let skybox = app.world().entity(cam_entity).get::<BlendedSkybox>().expect("BlendedSkybox on preview camera");
     assert!(skybox.cubemap_a.is_none());
     assert!(skybox.cubemap_b.is_some());
@@ -969,22 +971,24 @@ fn light_preview_sky_color_to_cubemap_blending() {
     assert!((skybox.blend - 0.3).abs() < 1e-5);
     assert!((skybox.alpha - 1.0).abs() < 1e-5);
 
-    // Scrub `t` to 0.6 -> procedural IBL updates in-place on the exact same `AssetId<Image>` (zero 1-frame flicker).
-    app.world_mut().resource_mut::<Actions>().push(Action::Tab(TabAction::SetComponent {
-        key: PropKey::new(LightPreviewProp::T),
-        comp: 0,
-        value: 0.6,
-        is_final: true,
-    }));
-    app.update();
-    let ibl_id_after = app
-        .world()
-        .entity(cam_entity)
-        .get::<bevy::light::EnvironmentMapLight>()
-        .expect("EnvironmentMapLight on preview camera")
-        .diffuse_map
-        .id();
-    assert_eq!(ibl_id_before, ibl_id_after, "procedural IBL updates in-place without reallocating AssetId<Image>");
+    // `night` has no cube map, so below the blend midpoint the IBL is filtered from the procedural sky colors; scrubbing
+    // to 0.45 updates that image in place on the exact same `AssetId<Image>` (zero 1-frame flicker).
+    let scrub = |app: &mut App, t: f32| {
+        app.world_mut().resource_mut::<Actions>().push(Action::Tab(TabAction::SetComponent {
+            key: PropKey::new(LightPreviewProp::T),
+            comp: 0,
+            value: t,
+            is_final: true,
+        }));
+        app.update();
+    };
+    scrub(&mut app, 0.45);
+    assert_eq!(ibl_id_before, ibl_source(&app), "procedural IBL updates in-place without reallocating AssetId<Image>");
+
+    // Past the midpoint `day`'s cube map dominates the skybox blend and becomes the IBL source.
+    scrub(&mut app, 0.6);
+    let cubemap_b = app.world().entity(cam_entity).get::<BlendedSkybox>().unwrap().cubemap_b.clone().unwrap();
+    assert_eq!(ibl_source(&app), cubemap_b.id(), "the dominant cube map is filtered for the IBL");
 }
 
 /// Opening a cube-map Texture asset (`sky.texture.ron`) in Light (and Material) uses the shared `CubeMapPreview` with
@@ -1084,7 +1088,6 @@ fn environment_easy_advanced_mode_and_reset_prop() {
     e.apply(EnvironmentAction::SetEasy(false));
     assert!(!active_env(&e).easy);
     set_number(&mut e, EnvironmentProp::SkyboxRotation, 45.0);
-    set_number(&mut e, EnvironmentProp::EnvRotation, -30.0);
     set_number(&mut e, EnvironmentProp::LightShadowDepthBias(0), 0.12);
     e.apply(Action::Tab(TabAction::SetValue {
         key: key(EnvironmentProp::Tonemapping),
@@ -1103,7 +1106,6 @@ fn environment_easy_advanced_mode_and_reset_prop() {
     assert!(active_env(&e).easy);
     assert!(light_domain::fits_easy(&active_env(&e).env));
     assert_eq!(active_env(&e).env.skybox_rotation, 0.0);
-    assert_eq!(active_env(&e).env.env_rotation, 0.0);
     assert_eq!(active_env(&e).env.lights[0].shadow_depth_bias, 0.02);
     assert_eq!(active_env(&e).env.tonemapping, TonemappingMode::TonyMcMapface);
     assert!(active_env(&e).env.deband_dither);
@@ -1113,4 +1115,192 @@ fn environment_easy_advanced_mode_and_reset_prop() {
     assert!(!active_env(&e).easy);
     assert_eq!(active_env(&e).env.skybox_rotation, 45.0);
     assert_eq!(active_env(&e).env.tonemapping, TonemappingMode::AgX);
+}
+
+/// The `HDR Converter` tool (`Tools -> HDR Converter...`) imports a Radiance `.hdr` panorama, renders both the 2D
+/// equirectangular preview and the 3D cubemap / 2D 6-face strip preview, updates conversion settings live, exports a
+/// valid Bevy `.ktx2` cubemap without creating any `.texture.ron` asset, and cleans up its RAII 3D preview studio on
+/// tab close.
+#[test]
+fn hdr_converter_tool_imports_previews_and_exports_ktx2_without_creating_texture_asset() {
+    use bevy::asset::RenderAssetUsages;
+    use bevy::core_pipeline::Skybox;
+    use bevy::image::{CompressedImageFormats, Image, ImageSampler, ImageType};
+    use bevy::light::EnvironmentMapLight;
+    use bevy::render::render_resource::{TextureFormat, TextureViewDimension};
+    use editor_core::preview::{PreviewEntity, PreviewTracker};
+    use light_domain::backend::{CubemapFormat, encode_radiance_hdr};
+    use light_domain::{
+        HDR_CONVERTER_TOOL, Hdr2dPreviewImage, HdrConverterAction, HdrConverterDoc, HdrConverterProp,
+        HdrCubePreviewImage, HdrCubeStripImage, demo_sky_hdr,
+    };
+    use texture_kit::editor::{CubeMapPreviewSessions, CubeMapViewMode};
+    use texture_kit::shape_problem;
+
+    let (dir, mut editor) = project();
+    editor.apply(Action::SwitchDomain(LIGHT));
+    let entries = menu_entries(MainMenu::Tools, &editor);
+    assert_eq!(labels(&entries), ["Inspect Game...", "Light Transition Preview...", "HDR Converter..."]);
+    assert_eq!(entries[2].action, Action::OpenTool { domain: LIGHT, id: HDR_CONVERTER_TOOL, arg: None });
+
+    // Write a synthetic HDR panorama to disk.
+    let hdr_src = demo_sky_hdr(32, 16);
+    let hdr_path = dir.path().join("sunset_test.hdr");
+    std::fs::write(&hdr_path, encode_radiance_hdr(hdr_src.width, hdr_src.height, &hdr_src.pixels)).unwrap();
+
+    let mut app = app(editor);
+
+    // 1. Open HDR Converter tool.
+    app.world_mut().resource_mut::<Actions>().push(Action::OpenTool {
+        domain: LIGHT,
+        id: HDR_CONVERTER_TOOL,
+        arg: None,
+    });
+    app.update();
+
+    let id = {
+        let ed = app.world().resource::<Editor>();
+        let doc = ed.active_doc::<HdrConverterDoc>().expect("HDR Converter tab active");
+        assert!(doc.hdr.is_none());
+        assert_eq!(doc.output_summary(), "6x 512x512 | RGBA16Float (HDR) | 10 mips");
+        doc.preview.id()
+    };
+    assert!(id > 0);
+    assert!(app.world().resource::<PreviewTracker>().is_spawned(id));
+
+    // 2. Import the `.hdr` file via `HdrConverterAction::ImportPath`.
+    app.world_mut().resource_mut::<Actions>().push(HdrConverterAction::ImportPath(hdr_path.clone()));
+    app.update();
+
+    let cam_entity =
+        app.world().resource::<CubeMapPreviewSessions>().sessions.get(&id).expect("session spawned").camera;
+    {
+        let w = app.world_mut();
+        let doc = w.resource::<Editor>().active_doc::<HdrConverterDoc>().unwrap();
+        assert_eq!(doc.source_path.as_deref(), Some(hdr_path.as_path()));
+        assert_eq!(doc.hdr.as_ref().map(|h| (h.width, h.height)), Some((32, 16)));
+        assert_eq!(doc.source_summary(), "sunset_test.hdr (32x16)");
+
+        // Verify 2D equirectangular preview ImageNode is populated.
+        let img_2d = w.query_filtered::<&ImageNode, With<Hdr2dPreviewImage>>().single(w).expect("2D preview ImageNode");
+        let tex_2d = w.resource::<Assets<Image>>().get(&img_2d.image).expect("2D preview Image asset");
+        assert_eq!(tex_2d.size(), UVec2::new(32, 16));
+
+        // Verify 3D cubemap preview camera is active and has Skybox + EnvironmentMapLight bound.
+        assert!(w.entity(cam_entity).get::<Camera>().unwrap().is_active);
+        let skybox = w.entity(cam_entity).get::<Skybox>().expect("Skybox on cubemap preview camera");
+        assert!(skybox.image.is_some());
+        assert!(w.entity(cam_entity).get::<EnvironmentMapLight>().is_some());
+        let img_3d =
+            w.query_filtered::<&ImageNode, With<HdrCubePreviewImage>>().single(w).expect("3D preview ImageNode");
+        assert!(w.resource::<Assets<Image>>().get(&img_3d.image).is_some());
+    }
+
+    // 3. Switch to 2D strip mode (`CubeMapViewMode::Strip2d`) and back to `Sphere`.
+    app.world_mut().resource_mut::<Actions>().push(HdrConverterAction::SetCubeMode(CubeMapViewMode::Strip2d));
+    app.update();
+    {
+        let w = app.world_mut();
+        assert!(!w.entity(cam_entity).get::<Camera>().unwrap().is_active, "3D camera deactivated in Strip2d mode");
+        let strip_node =
+            w.query_filtered::<&ImageNode, With<HdrCubeStripImage>>().single(w).expect("2D strip ImageNode");
+        let strip_img = w.resource::<Assets<Image>>().get(&strip_node.image).expect("2D strip Image asset");
+        assert_eq!(strip_img.width() * 6, strip_img.height(), "6 cube faces stacked vertically");
+    }
+    app.world_mut().resource_mut::<Actions>().push(HdrConverterAction::SetCubeMode(CubeMapViewMode::Sphere));
+    app.update();
+    assert!(app.world().entity(cam_entity).get::<Camera>().unwrap().is_active);
+
+    // 4. Modify FaceSize (to 256), Brightness, ExposureEv, Format, Mipmaps, and Zstd.
+    app.world_mut().resource_mut::<Actions>().push(Action::Tab(TabAction::SetValue {
+        key: PropKey::new(HdrConverterProp::FaceSize),
+        value: PropValue::Str("256".into()),
+        merge: false,
+    }));
+    app.world_mut().resource_mut::<Actions>().push(Action::Tab(TabAction::SetComponent {
+        key: PropKey::new(HdrConverterProp::Brightness),
+        comp: 0,
+        value: 1.5,
+        is_final: true,
+    }));
+    app.world_mut().resource_mut::<Actions>().push(Action::Tab(TabAction::SetComponent {
+        key: PropKey::new(HdrConverterProp::ExposureEv),
+        comp: 0,
+        value: -0.5,
+        is_final: true,
+    }));
+    app.world_mut().resource_mut::<Actions>().push(Action::Tab(TabAction::SetValue {
+        key: PropKey::new(HdrConverterProp::Format),
+        value: PropValue::Str(CubemapFormat::Rgba8Srgb.label().into()),
+        merge: false,
+    }));
+    app.world_mut().resource_mut::<Actions>().push(Action::Tab(TabAction::SetValue {
+        key: PropKey::new(HdrConverterProp::Mipmaps),
+        value: PropValue::Bool(false),
+        merge: false,
+    }));
+    app.world_mut().resource_mut::<Actions>().push(Action::Tab(TabAction::SetValue {
+        key: PropKey::new(HdrConverterProp::Zstd),
+        value: PropValue::Bool(true),
+        merge: false,
+    }));
+    app.update();
+
+    {
+        let doc = app.world().resource::<Editor>().active_doc::<HdrConverterDoc>().unwrap();
+        assert_eq!(doc.settings.face_size, 256);
+        assert_eq!(doc.settings.brightness, 1.5);
+        assert_eq!(doc.settings.exposure_ev, -0.5);
+        assert_eq!(doc.settings.format, CubemapFormat::Rgba8Srgb);
+        assert!(!doc.settings.mipmaps);
+        assert!(doc.settings.zstd);
+        assert_eq!(doc.output_summary(), "6x 256x256 | RGBA8 (sRGB) | 1 mip | Zstd");
+    }
+
+    // 5. Export to `assets/textures/converted_sky.ktx2` and verify NO `.texture.ron` asset is created.
+    let ktx2_path = dir.path().join("assets/textures/converted_sky.ktx2");
+    let light_textures_before: Vec<String> =
+        app.world().resource::<Editor>().domains.get::<LightState>().unwrap().assets.textures.keys().cloned().collect();
+
+    app.world_mut().resource_mut::<Actions>().push(HdrConverterAction::ExportPath(ktx2_path.clone()));
+    app.update();
+
+    assert!(ktx2_path.is_file(), "exported .ktx2 file exists on disk");
+    let ktx2_bytes = std::fs::read(&ktx2_path).unwrap();
+    assert_eq!(shape_problem(&ktx2_bytes, TextureShape::CubeMap), None);
+    let decoded = Image::from_buffer(
+        &ktx2_bytes,
+        ImageType::Extension("ktx2"),
+        CompressedImageFormats::NONE,
+        true,
+        ImageSampler::Default,
+        RenderAssetUsages::default(),
+    )
+    .expect("Bevy decodes exported KTX2 cubemap");
+    assert_eq!(
+        (
+            decoded.texture_descriptor.size.width,
+            decoded.texture_descriptor.size.height,
+            decoded.texture_descriptor.size.depth_or_array_layers,
+        ),
+        (256, 256, 6)
+    );
+    assert_eq!(decoded.texture_descriptor.mip_level_count, 1);
+    assert_eq!(decoded.texture_descriptor.format, TextureFormat::Rgba8UnormSrgb);
+    assert_eq!(decoded.texture_view_descriptor.as_ref().and_then(|v| v.dimension), Some(TextureViewDimension::Cube));
+
+    // Verify no `.texture.ron` file was created for `converted_sky.ktx2`.
+    app.world_mut().resource_mut::<Editor>().rescan();
+    let light_textures_after: Vec<String> =
+        app.world().resource::<Editor>().domains.get::<LightState>().unwrap().assets.textures.keys().cloned().collect();
+    assert_eq!(light_textures_before, light_textures_after, "no .texture.ron asset created by HDR Converter");
+    assert!(!dir.path().join("quillshade/light/textures/converted_sky.texture.ron").exists());
+    assert!(!dir.path().join("quillshade/light/converted_sky.texture.ron").exists());
+
+    // 6. Close the tab -> RAII handle drops and cleans up CubeMapPreviewSession and PreviewEntitys.
+    app.world_mut().resource_mut::<Actions>().push(Action::DiscardTab(0));
+    app.update();
+    assert!(!app.world().resource::<PreviewTracker>().is_spawned(id));
+    assert!(!app.world().resource::<CubeMapPreviewSessions>().sessions.contains_key(&id));
+    assert_eq!(app.world_mut().query::<&PreviewEntity>().iter(app.world()).filter(|e| e.0 == id).count(), 0);
 }

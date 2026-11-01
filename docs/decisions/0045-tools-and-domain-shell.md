@@ -153,7 +153,8 @@ the tab, with a warning.
   false }`.
 - **Codes** (decision 0043, `L` prefix): `LE001` unknown cube map texture, `LW101` no cube map, `LE009` file does not
   load, and the texture kit's rules under Light's codes — `LE011` one file shared, `LE012` path, `LE013` sampler,
-  `LE014` not a cube map, `LW109` file missing.
+  `LE014` not a cube map, `LW109` file missing; `LW104` a cube map whose faces are not square power-of-two (Bevy's
+  `GeneratedEnvironmentMapLight` cannot filter it, the IBL falls back to the procedural sky colors).
 - **Codegen.** `LightBackend` writes one file, `crates/quillshade/src/light/mod.rs`: `ENVIRONMENTS` (the asset paths
   of the environments without errors, sorted) and an empty `QuillshadeLightInternalPlugin`. It owns
   `assets/quillshade/light/` for the orphan scan but writes nothing there yet.

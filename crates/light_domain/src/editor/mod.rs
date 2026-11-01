@@ -9,8 +9,10 @@
 mod curve;
 mod environment;
 mod form;
+pub mod hdr_converter;
 mod inspect;
 pub mod preview;
+mod preview_terrain;
 pub mod preview_tool;
 mod state;
 mod texture;
@@ -32,6 +34,12 @@ pub use environment::{
 pub use form::{
     EnvironmentEditor, EnvironmentForm, EnvironmentResetIcon, EnvironmentSidebarBody, EnvironmentSwatch,
     EnvironmentViewBar, LightSwatchOf,
+};
+pub use hdr_converter::{
+    HDR_CONVERTER_TOOL, HDR_CONVERTER_VIEW, Hdr2dPreviewBox, Hdr2dPreviewImage, HdrConverterAction, HdrConverterBar,
+    HdrConverterDoc, HdrConverterEditor, HdrConverterPreviewCache, HdrConverterProp, HdrConverterSidebarBody,
+    HdrConverterSummaryText, HdrCubePreviewImage, HdrCubePreviewViewport, HdrCubeStripImage, HdrLeftPane, HdrRightPane,
+    demo_sky_hdr, hdr_converter_view, update_hdr_converter_preview,
 };
 pub use inspect::{
     INSPECT_GAME_TOOL, INSPECT_GAME_VIEW, InspectGameBar, InspectGameBody, InspectGameDoc, InspectGameEditor,
@@ -117,6 +125,14 @@ impl EditorDomain for LightDomain {
         })
         .editor_kind::<LightPreviewEditor>()
         .doc_view(|| Box::new(preview_tool::light_preview_view()));
+        r.tool(ToolDef {
+            id: HDR_CONVERTER_TOOL,
+            title: "HDR Converter",
+            open: hdr_converter::open,
+            menu: Some(MainMenu::Tools),
+        })
+        .editor_kind::<HdrConverterEditor>()
+        .doc_view(|| Box::new(hdr_converter::hdr_converter_view()));
     }
 }
 

@@ -55,7 +55,6 @@ pub enum EnvironmentAction {
 /// Returns `true` when all advanced fields of `env` are at their default values.
 pub fn fits_easy(env: &Environment) -> bool {
     env.skybox_rotation == 0.0
-        && env.env_rotation == 0.0
         && env.env_affects_lightmapped
         && env.ambient_affects_lightmapped
         && env
@@ -71,7 +70,6 @@ pub fn fits_easy(env: &Environment) -> bool {
 /// Resets all advanced fields of `env` to their default values.
 pub fn apply_easy_defaults(env: &mut Environment) {
     env.skybox_rotation = 0.0;
-    env.env_rotation = 0.0;
     env.env_affects_lightmapped = true;
     env.ambient_affects_lightmapped = true;
     for l in &mut env.lights {
@@ -109,7 +107,6 @@ pub enum EnvironmentProp {
     SkyboxRotation,
     /// [`Environment::env_intensity`] ([`PropValue::Float`]).
     EnvIntensity,
-    EnvRotation,
     SkyTopColor,
     SkyHorizonColor,
     GroundColor,
@@ -243,7 +240,6 @@ impl EnvironmentDoc {
             EnvironmentProp::SkyboxBrightness => self.env.skybox_brightness = value.as_f32().max(0.0),
             EnvironmentProp::SkyboxRotation => self.env.skybox_rotation = value.as_f32(),
             EnvironmentProp::EnvIntensity => self.env.env_intensity = value.as_f32().max(0.0),
-            EnvironmentProp::EnvRotation => self.env.env_rotation = value.as_f32(),
             EnvironmentProp::SkyTopColor => self.env.sky_top_color = as_vec4(value),
             EnvironmentProp::SkyHorizonColor => self.env.sky_horizon_color = as_vec4(value),
             EnvironmentProp::GroundColor => self.env.ground_color = as_vec4(value),
@@ -411,7 +407,6 @@ impl EnvironmentDoc {
             EnvironmentProp::SkyboxBrightness => PropValue::Float(self.env.skybox_brightness),
             EnvironmentProp::SkyboxRotation => PropValue::Float(self.env.skybox_rotation),
             EnvironmentProp::EnvIntensity => PropValue::Float(self.env.env_intensity),
-            EnvironmentProp::EnvRotation => PropValue::Float(self.env.env_rotation),
             EnvironmentProp::SkyTopColor => PropValue::Float4(self.env.sky_top_color),
             EnvironmentProp::SkyHorizonColor => PropValue::Float4(self.env.sky_horizon_color),
             EnvironmentProp::GroundColor => PropValue::Float4(self.env.ground_color),
@@ -514,7 +509,6 @@ impl EnvironmentDoc {
             EnvironmentProp::SkyboxBrightness => PropValue::Float(def.skybox_brightness),
             EnvironmentProp::SkyboxRotation => PropValue::Float(def.skybox_rotation),
             EnvironmentProp::EnvIntensity => PropValue::Float(def.env_intensity),
-            EnvironmentProp::EnvRotation => PropValue::Float(def.env_rotation),
             EnvironmentProp::SkyTopColor => PropValue::Float4(def.sky_top_color),
             EnvironmentProp::SkyHorizonColor => PropValue::Float4(def.sky_horizon_color),
             EnvironmentProp::GroundColor => PropValue::Float4(def.ground_color),

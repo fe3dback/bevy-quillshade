@@ -187,7 +187,9 @@ Set up the whole scene lighting environment in one editor with a live 3D preview
 procedural sky gradient), ambient and directional lights with shadows, distance fog, camera exposure, tonemapping and
 color grading. Environments are generated as typed presets that the game can apply immediately or blend between smoothly
 at runtime using custom transition curves, cross-fading skybox cube maps on the GPU and hot-reloading changes on the
-fly.
+fly. Includes a built-in **HDR Converter** tool (**Tools → HDR Converter…**) to convert equirectangular `.hdr`
+panoramas into Bevy-ready `.ktx2` cube maps (`RGBA16Float` or `RGBA8 sRGB`, optional mipmaps and Zstd compression) with
+live 2D and 3D previews.
 
 <table>
   <tr>

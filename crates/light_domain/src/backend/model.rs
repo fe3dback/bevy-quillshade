@@ -332,22 +332,23 @@ pub struct Environment {
     /// Brightness of the skybox (Bevy's `Skybox::brightness`, cd/m²).
     #[serde(default = "default_skybox_brightness")]
     pub skybox_brightness: f32,
-    /// Yaw rotation of the skybox in degrees (`Skybox::rotation`).
+    /// Yaw rotation of the skybox in degrees (`Skybox::rotation`); the IBL filtered from `cubemap` turns with it
+    /// (`GeneratedEnvironmentMapLight::rotation`). Files written before it replaced `env_rotation` still load: the old
+    /// field is ignored.
     #[serde(default)]
     pub skybox_rotation: f32,
-    /// Scale of the environment light (Bevy's `EnvironmentMapLight::intensity`, cd/m²).
+    /// Scale of the environment light (Bevy's `GeneratedEnvironmentMapLight::intensity`, cd/m²). The light is filtered
+    /// from `cubemap` when it has square power-of-two faces (`LW104` otherwise), else from the procedural sky colors.
     #[serde(default = "default_env_intensity")]
     pub env_intensity: f32,
-    /// Yaw rotation of the environment light in degrees (`EnvironmentMapLight::rotation`).
-    #[serde(default)]
-    pub env_rotation: f32,
-    /// Procedural hemispherical IBL zenith color in linear RGBA (used when `cubemap` is `None`).
+    /// Procedural hemispherical IBL zenith color in linear RGBA (used when `cubemap` is `None` or cannot be filtered).
     #[serde(default = "default_sky_top_color")]
     pub sky_top_color: [f32; 4],
-    /// Procedural hemispherical IBL horizon color in linear RGBA (used when `cubemap` is `None`).
+    /// Procedural hemispherical IBL horizon color in linear RGBA (used when `cubemap` is `None` or cannot be filtered).
     #[serde(default = "default_sky_horizon_color")]
     pub sky_horizon_color: [f32; 4],
-    /// Procedural hemispherical IBL nadir/ground color in linear RGBA (used when `cubemap` is `None`).
+    /// Procedural hemispherical IBL nadir/ground color in linear RGBA (used when `cubemap` is `None` or cannot be
+    /// filtered).
     #[serde(default = "default_ground_color")]
     pub ground_color: [f32; 4],
     /// Whether the environment map light affects lightmapped mesh diffuse (`EnvironmentMapLight::affects_lightmapped_mesh_diffuse`).
@@ -491,7 +492,6 @@ impl Default for Environment {
             skybox_brightness: default_skybox_brightness(),
             skybox_rotation: 0.0,
             env_intensity: default_env_intensity(),
-            env_rotation: 0.0,
             sky_top_color: default_sky_top_color(),
             sky_horizon_color: default_sky_horizon_color(),
             ground_color: default_ground_color(),

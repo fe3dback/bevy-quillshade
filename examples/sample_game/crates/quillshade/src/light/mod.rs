@@ -11,7 +11,7 @@ use bevy::color::LinearRgba;
 use bevy::core_pipeline::tonemapping::{DebandDither, Tonemapping};
 use bevy::ecs::system::SystemParam;
 use bevy::image::{ImageAddressMode, ImageFilterMode, ImageLoaderSettings, ImageSampler, ImageSamplerDescriptor};
-use bevy::light::{DirectionalLight, EnvironmentMapLight, GlobalAmbientLight};
+use bevy::light::{DirectionalLight, EnvironmentMapLight, GeneratedEnvironmentMapLight, GlobalAmbientLight};
 use bevy::pbr::{DistanceFog, FogFalloff};
 use bevy::prelude::*;
 use bevy::render::render_resource::{
@@ -637,8 +637,6 @@ pub struct EnvironmentValues {
     pub skybox_rotation: f32,
     #[serde(default = "default_env_intensity")]
     pub env_intensity: f32,
-    #[serde(default)]
-    pub env_rotation: f32,
     #[serde(default = "default_sky_top_color")]
     pub sky_top_color: [f32; 4],
     #[serde(default = "default_sky_horizon_color")]
@@ -678,7 +676,6 @@ impl Default for EnvironmentValues {
             skybox_brightness: default_skybox_brightness(),
             skybox_rotation: 0.0,
             env_intensity: default_env_intensity(),
-            env_rotation: 0.0,
             sky_top_color: default_sky_top_color(),
             sky_horizon_color: default_sky_horizon_color(),
             ground_color: default_ground_color(),
@@ -774,7 +771,6 @@ impl EnvironmentValues {
             skybox_brightness: lerp_f32(from.skybox_brightness, to.skybox_brightness, s),
             skybox_rotation: lerp_angle_deg(from.skybox_rotation, to.skybox_rotation, s),
             env_intensity: lerp_f32(from.env_intensity, to.env_intensity, s),
-            env_rotation: lerp_angle_deg(from.env_rotation, to.env_rotation, s),
             sky_top_color: lerp_rgba(from.sky_top_color, to.sky_top_color, s),
             sky_horizon_color: lerp_rgba(from.sky_horizon_color, to.sky_horizon_color, s),
             ground_color: lerp_rgba(from.ground_color, to.ground_color, s),
@@ -980,6 +976,12 @@ pub struct LightRuntime {
     transition: Option<ActiveTransition>,
     procedural_ibl_key: Option<([u32; 4], [u32; 4], [u32; 4])>,
     procedural_ibl_handle: Option<Handle<Image>>,
+    /// Source image of the cameras' `GeneratedEnvironmentMapLight` and its size when it was chosen.
+    ibl_source: Option<(AssetId<Image>, Option<UVec2>)>,
+    /// Cube map waiting to load before it replaces the procedural IBL source.
+    ibl_pending: Option<AssetId<Image>>,
+    /// Cube map already reported as unusable for IBL (warned once).
+    ibl_rejected: Option<AssetId<Image>>,
     dirty: bool,
     manifest_started: bool,
 }
@@ -1006,6 +1008,9 @@ impl Default for LightRuntime {
             transition: None,
             procedural_ibl_key: None,
             procedural_ibl_handle: None,
+            ibl_source: None,
+            ibl_pending: None,
+            ibl_rejected: None,
             dirty: false,
             manifest_started: false,
         };
@@ -1360,7 +1365,7 @@ fn apply_light_to_world(
     mut commands: Commands,
     mut runtime: ResMut<LightRuntime>,
     mut images: Option<ResMut<Assets<Image>>>,
-    cameras: Query<Entity, With<Camera3d>>,
+    mut cameras: Query<(Entity, Option<&mut EnvironmentMapLight>), With<Camera3d>>,
     added_cameras: Query<Entity, Added<Camera3d>>,
     mut managed_lights: Query<
         (Entity, &ManagedDirectionalLight, &mut DirectionalLight, &mut Transform),
@@ -1370,6 +1375,17 @@ fn apply_light_to_world(
     let Some(values) = runtime.current_values.clone() else {
         return;
     };
+    // Re-apply once a pending cube map has loaded, or when a hot reload resized the IBL source image.
+    if let Some(images) = images.as_deref() {
+        if runtime.ibl_pending.is_some_and(|id| images.contains(id)) {
+            runtime.dirty = true;
+        }
+        if let Some((id, size)) = runtime.ibl_source
+            && images.get(id).map(Image::size) != size
+        {
+            runtime.dirty = true;
+        }
+    }
     if !runtime.dirty && added_cameras.is_empty() {
         return;
     }
@@ -1382,6 +1398,7 @@ fn apply_light_to_world(
         affects_lightmapped_meshes: values.ambient_affects_lightmapped,
     });
 
+    let sky_blend = values.effective_skybox_blend();
     let env_map_light = if let Some(images) = images.as_deref_mut() {
         let key = (
             values.sky_top_color.map(f32::to_bits),
@@ -1412,19 +1429,58 @@ fn apply_light_to_world(
             }
             runtime.procedural_ibl_key = Some(key);
         }
-        let handle = runtime.procedural_ibl_handle.clone().unwrap_or_default();
-        Some(EnvironmentMapLight {
-            diffuse_map: handle.clone(),
-            specular_map: handle,
-            intensity: values.env_intensity,
-            rotation: Quat::from_rotation_y(values.env_rotation.to_radians()),
-            affects_lightmapped_mesh_diffuse: values.env_affects_lightmapped,
-        })
+
+        // The IBL follows the skybox cube map that dominates the blend; the procedural sky colors light the scene
+        // while there is none, while it loads, or when Bevy cannot filter it (faces not square power-of-two).
+        let (wanted, rotation) = if sky_blend.blend < 0.5 {
+            (&sky_blend.cubemap_a, sky_blend.rotation_a)
+        } else {
+            (&sky_blend.cubemap_b, sky_blend.rotation_b)
+        };
+        runtime.ibl_pending = None;
+        let cube = match wanted.as_deref().and_then(|id| runtime.texture_handle(id)) {
+            Some(handle) => match images.get(&handle) {
+                None => {
+                    runtime.ibl_pending = Some(handle.id());
+                    None
+                }
+                Some(img) if is_ibl_source(img) => Some(handle),
+                Some(img) => {
+                    if runtime.ibl_rejected != Some(handle.id()) {
+                        runtime.ibl_rejected = Some(handle.id());
+                        let s = img.texture_descriptor.size;
+                        warn!(
+                            "quillshade::light: cube map `{}` ({}x{}, {} layers) cannot be filtered for image-based \
+                             lighting (needs 6 square power-of-two faces); using the procedural sky colors",
+                            wanted.as_deref().unwrap_or_default(),
+                            s.width,
+                            s.height,
+                            s.depth_or_array_layers
+                        );
+                    }
+                    None
+                }
+            },
+            None => None,
+        };
+        let source = cube.or_else(|| runtime.procedural_ibl_handle.clone()).unwrap_or_default();
+        let size = images.get(&source).map(Image::size);
+        let regenerate = runtime.ibl_source != Some((source.id(), size));
+        runtime.ibl_source = Some((source.id(), size));
+        Some((
+            GeneratedEnvironmentMapLight {
+                environment_map: source,
+                intensity: values.env_intensity,
+                // Turns with the skybox so reflections match the visible sky.
+                rotation: Quat::from_rotation_y(rotation.to_radians()),
+                affects_lightmapped_mesh_diffuse: values.env_affects_lightmapped,
+            },
+            regenerate,
+        ))
     } else {
         None
     };
 
-    let sky_blend = values.effective_skybox_blend();
     let blended_skybox = skybox::BlendedSkybox {
         cubemap_a: sky_blend.cubemap_a.as_deref().and_then(|id| runtime.texture_handle(id)),
         cubemap_b: sky_blend.cubemap_b.as_deref().and_then(|id| runtime.texture_handle(id)),
@@ -1443,7 +1499,7 @@ fn apply_light_to_world(
     let tonemapping = values.tonemapping.to_bevy();
     let exposure = Exposure { ev100: values.ev100 };
 
-    for cam in &cameras {
+    for (cam, generated) in &mut cameras {
         let mut entity_cmds = commands.entity(cam);
         entity_cmds.remove::<bevy::light::Skybox>();
         entity_cmds.insert((
@@ -1454,7 +1510,20 @@ fn apply_light_to_world(
             color_grading.clone(),
             blended_skybox.clone(),
         ));
-        if let Some(ibl) = &env_map_light {
+        if let Some((ibl, regenerate)) = &env_map_light {
+            // Bevy fills `EnvironmentMapLight` from `GeneratedEnvironmentMapLight` only while it is absent, sized to
+            // the source: a new source needs it removed; otherwise intensity and rotation are updated in place.
+            match generated {
+                Some(_) if *regenerate => {
+                    entity_cmds.remove::<EnvironmentMapLight>();
+                }
+                Some(mut light) => {
+                    light.intensity = ibl.intensity;
+                    light.rotation = ibl.rotation;
+                    light.affects_lightmapped_mesh_diffuse = ibl.affects_lightmapped_mesh_diffuse;
+                }
+                None => {}
+            }
             entity_cmds.insert(ibl.clone());
         }
         if values.fog.enabled {
@@ -1521,19 +1590,44 @@ fn f32_to_f16_bits(v: f32) -> u16 {
     sign | ((half_exp as u16) << 10) | ((rounded >> 13) as u16)
 }
 
+/// Face size of the procedural IBL sky cube map (a power of two, as `GeneratedEnvironmentMapLight` requires).
+const PROCEDURAL_SKY_SIZE: u32 = 32;
+
+/// Rgba16Float texels of a procedural sky cube map (faces in `+X, -X, +Y, -Y, +Z, -Z` order): `mid` at the horizon
+/// blending smoothly to `top` at the zenith and to `bottom` at the nadir.
 fn hemispherical_gradient_bytes(top: [f32; 4], mid: [f32; 4], bottom: [f32; 4]) -> Vec<u8> {
-    let mut data = Vec::with_capacity(48);
-    for color in [mid, mid, top, bottom, mid, mid] {
-        for c in color {
-            data.extend_from_slice(&f32_to_f16_bits(c).to_le_bytes());
+    let n = PROCEDURAL_SKY_SIZE;
+    let mut data = Vec::with_capacity((n * n * 6 * 8) as usize);
+    for face in 0..6 {
+        for y in 0..n {
+            for x in 0..n {
+                let u = (x as f32 + 0.5) / n as f32 * 2.0 - 1.0;
+                let v = (y as f32 + 0.5) / n as f32 * 2.0 - 1.0;
+                // Only the up component matters: +Y is the zenith face, -Y the nadir face, the side faces run top-down.
+                let up = match face {
+                    2 => 1.0,
+                    3 => -1.0,
+                    _ => -v,
+                } / (1.0 + u * u + v * v).sqrt();
+                let (to, t) = if up >= 0.0 { (top, up.sqrt()) } else { (bottom, (-up).sqrt()) };
+                for (m, e) in mid.into_iter().zip(to) {
+                    data.extend_from_slice(&f32_to_f16_bits(m + (e - m) * t).to_le_bytes());
+                }
+            }
         }
     }
     data
 }
 
+/// Whether `img` can be the source of a `GeneratedEnvironmentMapLight` (Bevy panics on anything else).
+fn is_ibl_source(img: &Image) -> bool {
+    let s = img.texture_descriptor.size;
+    s.depth_or_array_layers == 6 && s.width == s.height && s.width.is_power_of_two() && s.width <= 8192
+}
+
 fn hemispherical_gradient_image(top: [f32; 4], mid: [f32; 4], bottom: [f32; 4]) -> Image {
     let mut img = Image::new(
-        Extent3d { width: 1, height: 1, depth_or_array_layers: 6 },
+        Extent3d { width: PROCEDURAL_SKY_SIZE, height: PROCEDURAL_SKY_SIZE, depth_or_array_layers: 6 },
         TextureDimension::D2,
         hemispherical_gradient_bytes(top, mid, bottom),
         TextureFormat::Rgba16Float,
@@ -2042,7 +2136,7 @@ pub const CURVES: &[&str] = &[
 ];
 
 /// Compiled snapshot of `assets/quillshade/light/autogen/baked.ron`.
-pub const COMPILED_MANIFEST: &str = "// AUTOGENERATED by shader-editor v1 — do not edit\nBakedLightManifest(\n  format_version: 1,\n  textures: {\n    \"sky\": (\n      path: \"textures/sky_cube.ktx2\",\n      settings: (),\n    ),\n  },\n  environments: {\n    \"day\": (\n      format_version: 1,\n      clear_color: (0.571125, 0.603827, 0.672443, 1.0),\n      cubemap: Some(\"sky\"),\n      skybox_brightness: 2500.0,\n      skybox_rotation: 0.0,\n      env_intensity: 2500.0,\n      env_rotation: 0.0,\n      sky_top_color: (1.0, 1.0, 1.0, 1.0),\n      sky_horizon_color: (0.9, 0.9, 0.9, 1.0),\n      ground_color: (0.35, 0.35, 0.35, 1.0),\n      env_affects_lightmapped: true,\n      ambient_color: (1.0, 1.0, 1.0, 1.0),\n      ambient_brightness: 300.0,\n      ambient_affects_lightmapped: true,\n      lights: [\n        (\n          name: \"Sun\",\n          color: (1.0, 1.0, 1.0, 1.0),\n          illuminance: 15000.0,\n          azimuth_deg: 35.0,\n          elevation_deg: 50.0,\n          shadow_maps_enabled: false,\n          contact_shadows_enabled: false,\n          shadow_depth_bias: 0.02,\n          shadow_normal_bias: 1.8,\n          affects_lightmapped_mesh_diffuse: true,\n        ),\n        (\n          name: \"Sky\",\n          color: (1.0, 1.0, 1.0, 1.0),\n          illuminance: 3000.0,\n          azimuth_deg: 180.0,\n          elevation_deg: 80.0,\n          shadow_maps_enabled: false,\n          contact_shadows_enabled: false,\n          shadow_depth_bias: 0.02,\n          shadow_normal_bias: 1.8,\n          affects_lightmapped_mesh_diffuse: true,\n        ),\n        (\n          name: \"Back\",\n          color: (1.0, 1.0, 1.0, 1.0),\n          illuminance: 2500.0,\n          azimuth_deg: 215.0,\n          elevation_deg: 25.0,\n          shadow_maps_enabled: false,\n          contact_shadows_enabled: false,\n          shadow_depth_bias: 0.02,\n          shadow_normal_bias: 1.8,\n          affects_lightmapped_mesh_diffuse: true,\n        ),\n      ],\n      ev100: 13.0,\n      tonemapping: TonyMcMapface,\n      deband_dither: true,\n      color_grading: (\n        global: (\n          exposure: 0.0,\n          temperature: 0.0,\n          tint: 0.0,\n          hue: 0.0,\n          post_saturation: 1.0,\n          midtones_range: (0.2, 0.7),\n        ),\n        shadows: (\n          saturation: 1.0,\n          contrast: 1.0,\n          gamma: 1.0,\n          gain: 1.0,\n          lift: 0.0,\n        ),\n        midtones: (\n          saturation: 1.0,\n          contrast: 1.0,\n          gamma: 1.0,\n          gain: 1.0,\n          lift: 0.0,\n        ),\n        highlights: (\n          saturation: 1.0,\n          contrast: 1.0,\n          gamma: 1.0,\n          gain: 1.0,\n          lift: 0.0,\n        ),\n      ),\n      fog: (\n        enabled: true,\n        color: (0.571125, 0.603827, 0.672443, 1.0),\n        directional_light_color: (0.0, 0.0, 0.0, 0.0),\n        directional_light_exponent: 8.0,\n        falloff: Linear(\n          start: 60.0,\n          end: 400.0,\n        ),\n      ),\n    ),\n    \"night\": (\n      format_version: 1,\n      clear_color: (0.02, 0.03, 0.06, 1.0),\n      cubemap: Some(\"sky\"),\n      skybox_brightness: 150.0,\n      skybox_rotation: 180.0,\n      env_intensity: 200.0,\n      env_rotation: 180.0,\n      sky_top_color: (0.05, 0.08, 0.18, 1.0),\n      sky_horizon_color: (0.1, 0.14, 0.25, 1.0),\n      ground_color: (0.02, 0.02, 0.04, 1.0),\n      env_affects_lightmapped: true,\n      ambient_color: (0.6, 0.7, 1.0, 1.0),\n      ambient_brightness: 40.0,\n      ambient_affects_lightmapped: true,\n      lights: [\n        (\n          name: \"Moon\",\n          color: (0.65, 0.78, 1.0, 1.0),\n          illuminance: 1200.0,\n          azimuth_deg: -45.0,\n          elevation_deg: 35.0,\n          shadow_maps_enabled: false,\n          contact_shadows_enabled: false,\n          shadow_depth_bias: 0.02,\n          shadow_normal_bias: 1.8,\n          affects_lightmapped_mesh_diffuse: true,\n        ),\n        (\n          name: \"Sky\",\n          color: (0.4, 0.5, 0.8, 1.0),\n          illuminance: 300.0,\n          azimuth_deg: 180.0,\n          elevation_deg: 80.0,\n          shadow_maps_enabled: false,\n          contact_shadows_enabled: false,\n          shadow_depth_bias: 0.02,\n          shadow_normal_bias: 1.8,\n          affects_lightmapped_mesh_diffuse: true,\n        ),\n      ],\n      ev100: 11.0,\n      tonemapping: TonyMcMapface,\n      deband_dither: true,\n      color_grading: (\n        global: (\n          exposure: 0.0,\n          temperature: 0.0,\n          tint: 0.0,\n          hue: 0.0,\n          post_saturation: 1.0,\n          midtones_range: (0.2, 0.7),\n        ),\n        shadows: (\n          saturation: 1.0,\n          contrast: 1.0,\n          gamma: 1.0,\n          gain: 1.0,\n          lift: 0.0,\n        ),\n        midtones: (\n          saturation: 1.0,\n          contrast: 1.0,\n          gamma: 1.0,\n          gain: 1.0,\n          lift: 0.0,\n        ),\n        highlights: (\n          saturation: 1.0,\n          contrast: 1.0,\n          gamma: 1.0,\n          gain: 1.0,\n          lift: 0.0,\n        ),\n      ),\n      fog: (\n        enabled: true,\n        color: (0.02, 0.03, 0.06, 1.0),\n        directional_light_color: (0.0, 0.0, 0.0, 0.0),\n        directional_light_exponent: 8.0,\n        falloff: Linear(\n          start: 30.0,\n          end: 220.0,\n        ),\n      ),\n    ),\n  },\n  curves: {\n    \"smooth\": (\n      min: 0.0,\n      max: 1.0,\n      points: [\n        (0.0, 0.0),\n        (0.25, 0.15),\n        (0.75, 0.85),\n        (1.0, 1.0),\n      ],\n    ),\n  },\n)\n";
+pub const COMPILED_MANIFEST: &str = "// AUTOGENERATED by shader-editor v1 — do not edit\nBakedLightManifest(\n  format_version: 1,\n  textures: {\n    \"sky\": (\n      path: \"textures/sky_cube.ktx2\",\n      settings: (),\n    ),\n  },\n  environments: {\n    \"day\": (\n      format_version: 1,\n      clear_color: (0.571125, 0.603827, 0.672443, 1.0),\n      cubemap: Some(\"sky\"),\n      skybox_brightness: 2500.0,\n      skybox_rotation: 0.0,\n      env_intensity: 2500.0,\n      sky_top_color: (1.0, 1.0, 1.0, 1.0),\n      sky_horizon_color: (0.9, 0.9, 0.9, 1.0),\n      ground_color: (0.35, 0.35, 0.35, 1.0),\n      env_affects_lightmapped: true,\n      ambient_color: (1.0, 1.0, 1.0, 1.0),\n      ambient_brightness: 300.0,\n      ambient_affects_lightmapped: true,\n      lights: [\n        (\n          name: \"Sun\",\n          color: (1.0, 1.0, 1.0, 1.0),\n          illuminance: 15000.0,\n          azimuth_deg: 35.0,\n          elevation_deg: 50.0,\n          shadow_maps_enabled: false,\n          contact_shadows_enabled: false,\n          shadow_depth_bias: 0.02,\n          shadow_normal_bias: 1.8,\n          affects_lightmapped_mesh_diffuse: true,\n        ),\n        (\n          name: \"Sky\",\n          color: (1.0, 1.0, 1.0, 1.0),\n          illuminance: 3000.0,\n          azimuth_deg: 180.0,\n          elevation_deg: 80.0,\n          shadow_maps_enabled: false,\n          contact_shadows_enabled: false,\n          shadow_depth_bias: 0.02,\n          shadow_normal_bias: 1.8,\n          affects_lightmapped_mesh_diffuse: true,\n        ),\n        (\n          name: \"Back\",\n          color: (1.0, 1.0, 1.0, 1.0),\n          illuminance: 2500.0,\n          azimuth_deg: 215.0,\n          elevation_deg: 25.0,\n          shadow_maps_enabled: false,\n          contact_shadows_enabled: false,\n          shadow_depth_bias: 0.02,\n          shadow_normal_bias: 1.8,\n          affects_lightmapped_mesh_diffuse: true,\n        ),\n      ],\n      ev100: 13.0,\n      tonemapping: TonyMcMapface,\n      deband_dither: true,\n      color_grading: (\n        global: (\n          exposure: 0.0,\n          temperature: 0.0,\n          tint: 0.0,\n          hue: 0.0,\n          post_saturation: 1.0,\n          midtones_range: (0.2, 0.7),\n        ),\n        shadows: (\n          saturation: 1.0,\n          contrast: 1.0,\n          gamma: 1.0,\n          gain: 1.0,\n          lift: 0.0,\n        ),\n        midtones: (\n          saturation: 1.0,\n          contrast: 1.0,\n          gamma: 1.0,\n          gain: 1.0,\n          lift: 0.0,\n        ),\n        highlights: (\n          saturation: 1.0,\n          contrast: 1.0,\n          gamma: 1.0,\n          gain: 1.0,\n          lift: 0.0,\n        ),\n      ),\n      fog: (\n        enabled: true,\n        color: (0.571125, 0.603827, 0.672443, 1.0),\n        directional_light_color: (0.0, 0.0, 0.0, 0.0),\n        directional_light_exponent: 8.0,\n        falloff: Linear(\n          start: 60.0,\n          end: 400.0,\n        ),\n      ),\n    ),\n    \"night\": (\n      format_version: 1,\n      clear_color: (0.02, 0.03, 0.06, 1.0),\n      cubemap: Some(\"sky\"),\n      skybox_brightness: 150.0,\n      skybox_rotation: 180.0,\n      env_intensity: 200.0,\n      sky_top_color: (0.05, 0.08, 0.18, 1.0),\n      sky_horizon_color: (0.1, 0.14, 0.25, 1.0),\n      ground_color: (0.02, 0.02, 0.04, 1.0),\n      env_affects_lightmapped: true,\n      ambient_color: (0.6, 0.7, 1.0, 1.0),\n      ambient_brightness: 40.0,\n      ambient_affects_lightmapped: true,\n      lights: [\n        (\n          name: \"Moon\",\n          color: (0.65, 0.78, 1.0, 1.0),\n          illuminance: 1200.0,\n          azimuth_deg: -45.0,\n          elevation_deg: 35.0,\n          shadow_maps_enabled: false,\n          contact_shadows_enabled: false,\n          shadow_depth_bias: 0.02,\n          shadow_normal_bias: 1.8,\n          affects_lightmapped_mesh_diffuse: true,\n        ),\n        (\n          name: \"Sky\",\n          color: (0.4, 0.5, 0.8, 1.0),\n          illuminance: 300.0,\n          azimuth_deg: 180.0,\n          elevation_deg: 80.0,\n          shadow_maps_enabled: false,\n          contact_shadows_enabled: false,\n          shadow_depth_bias: 0.02,\n          shadow_normal_bias: 1.8,\n          affects_lightmapped_mesh_diffuse: true,\n        ),\n      ],\n      ev100: 11.0,\n      tonemapping: TonyMcMapface,\n      deband_dither: true,\n      color_grading: (\n        global: (\n          exposure: 0.0,\n          temperature: 0.0,\n          tint: 0.0,\n          hue: 0.0,\n          post_saturation: 1.0,\n          midtones_range: (0.2, 0.7),\n        ),\n        shadows: (\n          saturation: 1.0,\n          contrast: 1.0,\n          gamma: 1.0,\n          gain: 1.0,\n          lift: 0.0,\n        ),\n        midtones: (\n          saturation: 1.0,\n          contrast: 1.0,\n          gamma: 1.0,\n          gain: 1.0,\n          lift: 0.0,\n        ),\n        highlights: (\n          saturation: 1.0,\n          contrast: 1.0,\n          gamma: 1.0,\n          gain: 1.0,\n          lift: 0.0,\n        ),\n      ),\n      fog: (\n        enabled: true,\n        color: (0.02, 0.03, 0.06, 1.0),\n        directional_light_color: (0.0, 0.0, 0.0, 0.0),\n        directional_light_exponent: 8.0,\n        falloff: Linear(\n          start: 30.0,\n          end: 220.0,\n        ),\n      ),\n    ),\n  },\n  curves: {\n    \"smooth\": (\n      min: 0.0,\n      max: 1.0,\n      points: [\n        (0.0, 0.0),\n        (0.25, 0.15),\n        (0.75, 0.85),\n        (1.0, 1.0),\n      ],\n    ),\n  },\n)\n";
 
 /// Lighting environment presets authored in `quillshade/light/*.environment.ron`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize)]
@@ -2090,8 +2184,8 @@ impl Preset {
     /// Compiled default [`EnvironmentValues`] for this preset.
     pub fn default_values(self) -> EnvironmentValues {
         match self {
-            Self::Day => EnvironmentValues { format_version: 1, clear_color: [0.571125, 0.603827, 0.672443, 1.0], cubemap: Some("sky".to_string()), skybox_brightness: 2500.0, skybox_rotation: 0.0, env_intensity: 2500.0, env_rotation: 0.0, sky_top_color: [1.0, 1.0, 1.0, 1.0], sky_horizon_color: [0.9, 0.9, 0.9, 1.0], ground_color: [0.35, 0.35, 0.35, 1.0], env_affects_lightmapped: true, ambient_color: [1.0, 1.0, 1.0, 1.0], ambient_brightness: 300.0, ambient_affects_lightmapped: true, lights: vec![DirectionalLightDef { name: "Sun".to_string(), color: [1.0, 1.0, 1.0, 1.0], illuminance: 15000.0, azimuth_deg: 35.0, elevation_deg: 50.0, shadow_maps_enabled: false, contact_shadows_enabled: false, shadow_depth_bias: 0.02, shadow_normal_bias: 1.8, affects_lightmapped_mesh_diffuse: true }, DirectionalLightDef { name: "Sky".to_string(), color: [1.0, 1.0, 1.0, 1.0], illuminance: 3000.0, azimuth_deg: 180.0, elevation_deg: 80.0, shadow_maps_enabled: false, contact_shadows_enabled: false, shadow_depth_bias: 0.02, shadow_normal_bias: 1.8, affects_lightmapped_mesh_diffuse: true }, DirectionalLightDef { name: "Back".to_string(), color: [1.0, 1.0, 1.0, 1.0], illuminance: 2500.0, azimuth_deg: 215.0, elevation_deg: 25.0, shadow_maps_enabled: false, contact_shadows_enabled: false, shadow_depth_bias: 0.02, shadow_normal_bias: 1.8, affects_lightmapped_mesh_diffuse: true }], ev100: 13.0, tonemapping: TonemappingMode::TonyMcMapface, deband_dither: true, color_grading: ColorGradingDef { global: ColorGradingGlobalDef { exposure: 0.0, temperature: 0.0, tint: 0.0, hue: 0.0, post_saturation: 1.0, midtones_range: [0.2, 0.7] }, shadows: ColorGradingSectionDef { saturation: 1.0, contrast: 1.0, gamma: 1.0, gain: 1.0, lift: 0.0 }, midtones: ColorGradingSectionDef { saturation: 1.0, contrast: 1.0, gamma: 1.0, gain: 1.0, lift: 0.0 }, highlights: ColorGradingSectionDef { saturation: 1.0, contrast: 1.0, gamma: 1.0, gain: 1.0, lift: 0.0 } }, fog: FogDef { enabled: true, color: [0.571125, 0.603827, 0.672443, 1.0], directional_light_color: [0.0, 0.0, 0.0, 0.0], directional_light_exponent: 8.0, falloff: FogFalloffDef::Linear { start: 60.0, end: 400.0 } }, skybox_blend: None },
-            Self::Night => EnvironmentValues { format_version: 1, clear_color: [0.02, 0.03, 0.06, 1.0], cubemap: Some("sky".to_string()), skybox_brightness: 150.0, skybox_rotation: 180.0, env_intensity: 200.0, env_rotation: 180.0, sky_top_color: [0.05, 0.08, 0.18, 1.0], sky_horizon_color: [0.1, 0.14, 0.25, 1.0], ground_color: [0.02, 0.02, 0.04, 1.0], env_affects_lightmapped: true, ambient_color: [0.6, 0.7, 1.0, 1.0], ambient_brightness: 40.0, ambient_affects_lightmapped: true, lights: vec![DirectionalLightDef { name: "Moon".to_string(), color: [0.65, 0.78, 1.0, 1.0], illuminance: 1200.0, azimuth_deg: -45.0, elevation_deg: 35.0, shadow_maps_enabled: false, contact_shadows_enabled: false, shadow_depth_bias: 0.02, shadow_normal_bias: 1.8, affects_lightmapped_mesh_diffuse: true }, DirectionalLightDef { name: "Sky".to_string(), color: [0.4, 0.5, 0.8, 1.0], illuminance: 300.0, azimuth_deg: 180.0, elevation_deg: 80.0, shadow_maps_enabled: false, contact_shadows_enabled: false, shadow_depth_bias: 0.02, shadow_normal_bias: 1.8, affects_lightmapped_mesh_diffuse: true }], ev100: 11.0, tonemapping: TonemappingMode::TonyMcMapface, deband_dither: true, color_grading: ColorGradingDef { global: ColorGradingGlobalDef { exposure: 0.0, temperature: 0.0, tint: 0.0, hue: 0.0, post_saturation: 1.0, midtones_range: [0.2, 0.7] }, shadows: ColorGradingSectionDef { saturation: 1.0, contrast: 1.0, gamma: 1.0, gain: 1.0, lift: 0.0 }, midtones: ColorGradingSectionDef { saturation: 1.0, contrast: 1.0, gamma: 1.0, gain: 1.0, lift: 0.0 }, highlights: ColorGradingSectionDef { saturation: 1.0, contrast: 1.0, gamma: 1.0, gain: 1.0, lift: 0.0 } }, fog: FogDef { enabled: true, color: [0.02, 0.03, 0.06, 1.0], directional_light_color: [0.0, 0.0, 0.0, 0.0], directional_light_exponent: 8.0, falloff: FogFalloffDef::Linear { start: 30.0, end: 220.0 } }, skybox_blend: None },
+            Self::Day => EnvironmentValues { format_version: 1, clear_color: [0.571125, 0.603827, 0.672443, 1.0], cubemap: Some("sky".to_string()), skybox_brightness: 2500.0, skybox_rotation: 0.0, env_intensity: 2500.0, sky_top_color: [1.0, 1.0, 1.0, 1.0], sky_horizon_color: [0.9, 0.9, 0.9, 1.0], ground_color: [0.35, 0.35, 0.35, 1.0], env_affects_lightmapped: true, ambient_color: [1.0, 1.0, 1.0, 1.0], ambient_brightness: 300.0, ambient_affects_lightmapped: true, lights: vec![DirectionalLightDef { name: "Sun".to_string(), color: [1.0, 1.0, 1.0, 1.0], illuminance: 15000.0, azimuth_deg: 35.0, elevation_deg: 50.0, shadow_maps_enabled: false, contact_shadows_enabled: false, shadow_depth_bias: 0.02, shadow_normal_bias: 1.8, affects_lightmapped_mesh_diffuse: true }, DirectionalLightDef { name: "Sky".to_string(), color: [1.0, 1.0, 1.0, 1.0], illuminance: 3000.0, azimuth_deg: 180.0, elevation_deg: 80.0, shadow_maps_enabled: false, contact_shadows_enabled: false, shadow_depth_bias: 0.02, shadow_normal_bias: 1.8, affects_lightmapped_mesh_diffuse: true }, DirectionalLightDef { name: "Back".to_string(), color: [1.0, 1.0, 1.0, 1.0], illuminance: 2500.0, azimuth_deg: 215.0, elevation_deg: 25.0, shadow_maps_enabled: false, contact_shadows_enabled: false, shadow_depth_bias: 0.02, shadow_normal_bias: 1.8, affects_lightmapped_mesh_diffuse: true }], ev100: 13.0, tonemapping: TonemappingMode::TonyMcMapface, deband_dither: true, color_grading: ColorGradingDef { global: ColorGradingGlobalDef { exposure: 0.0, temperature: 0.0, tint: 0.0, hue: 0.0, post_saturation: 1.0, midtones_range: [0.2, 0.7] }, shadows: ColorGradingSectionDef { saturation: 1.0, contrast: 1.0, gamma: 1.0, gain: 1.0, lift: 0.0 }, midtones: ColorGradingSectionDef { saturation: 1.0, contrast: 1.0, gamma: 1.0, gain: 1.0, lift: 0.0 }, highlights: ColorGradingSectionDef { saturation: 1.0, contrast: 1.0, gamma: 1.0, gain: 1.0, lift: 0.0 } }, fog: FogDef { enabled: true, color: [0.571125, 0.603827, 0.672443, 1.0], directional_light_color: [0.0, 0.0, 0.0, 0.0], directional_light_exponent: 8.0, falloff: FogFalloffDef::Linear { start: 60.0, end: 400.0 } }, skybox_blend: None },
+            Self::Night => EnvironmentValues { format_version: 1, clear_color: [0.02, 0.03, 0.06, 1.0], cubemap: Some("sky".to_string()), skybox_brightness: 150.0, skybox_rotation: 180.0, env_intensity: 200.0, sky_top_color: [0.05, 0.08, 0.18, 1.0], sky_horizon_color: [0.1, 0.14, 0.25, 1.0], ground_color: [0.02, 0.02, 0.04, 1.0], env_affects_lightmapped: true, ambient_color: [0.6, 0.7, 1.0, 1.0], ambient_brightness: 40.0, ambient_affects_lightmapped: true, lights: vec![DirectionalLightDef { name: "Moon".to_string(), color: [0.65, 0.78, 1.0, 1.0], illuminance: 1200.0, azimuth_deg: -45.0, elevation_deg: 35.0, shadow_maps_enabled: false, contact_shadows_enabled: false, shadow_depth_bias: 0.02, shadow_normal_bias: 1.8, affects_lightmapped_mesh_diffuse: true }, DirectionalLightDef { name: "Sky".to_string(), color: [0.4, 0.5, 0.8, 1.0], illuminance: 300.0, azimuth_deg: 180.0, elevation_deg: 80.0, shadow_maps_enabled: false, contact_shadows_enabled: false, shadow_depth_bias: 0.02, shadow_normal_bias: 1.8, affects_lightmapped_mesh_diffuse: true }], ev100: 11.0, tonemapping: TonemappingMode::TonyMcMapface, deband_dither: true, color_grading: ColorGradingDef { global: ColorGradingGlobalDef { exposure: 0.0, temperature: 0.0, tint: 0.0, hue: 0.0, post_saturation: 1.0, midtones_range: [0.2, 0.7] }, shadows: ColorGradingSectionDef { saturation: 1.0, contrast: 1.0, gamma: 1.0, gain: 1.0, lift: 0.0 }, midtones: ColorGradingSectionDef { saturation: 1.0, contrast: 1.0, gamma: 1.0, gain: 1.0, lift: 0.0 }, highlights: ColorGradingSectionDef { saturation: 1.0, contrast: 1.0, gamma: 1.0, gain: 1.0, lift: 0.0 } }, fog: FogDef { enabled: true, color: [0.02, 0.03, 0.06, 1.0], directional_light_color: [0.0, 0.0, 0.0, 0.0], directional_light_exponent: 8.0, falloff: FogFalloffDef::Linear { start: 30.0, end: 220.0 } }, skybox_blend: None },
         }
     }
 }

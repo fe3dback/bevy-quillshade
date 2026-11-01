@@ -2,8 +2,9 @@
 //!
 //! Managed via `editor_core::preview`'s RAII [`PreviewHandle`] (`start_preview`, `clean_preview`): opening an
 //! [`EnvironmentDoc`] (or a future transition preview) starts an isolated 3D preview session on its own
-//! [`RenderLayers`] layer with a calibrated PBR demo scene (matte ground plane, dielectric/chrome/glossy spheres,
-//! and depth-cue boxes for fog and shadow evaluation) rendered to an offscreen [`Image`] target. Closing the tab or
+//! [`RenderLayers`] layer with a calibrated PBR demo scene (matte 1 km landscape with a flat studio floor, mountains
+//! and lowlands from [`super::preview_terrain`], dielectric/chrome/glossy spheres, and depth-cue boxes for fog and
+//! shadow evaluation) rendered to an offscreen [`Image`] target. Closing the tab or
 //! cleaning the handle tears down the camera, directional lights, demo meshes, materials, and RTT texture.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -18,7 +19,9 @@ use bevy::core_pipeline::Skybox;
 use bevy::core_pipeline::tonemapping::{DebandDither, Tonemapping};
 use bevy::image::{CompressedImageFormatSupport, CompressedImageFormats, ImageType};
 use bevy::input::mouse::MouseScrollPixelsPerLine;
-use bevy::light::{DirectionalLight, EnvironmentMapLight, GlobalAmbientLight};
+use bevy::light::{
+    DirectionalLight, EnvironmentMapLight, GeneratedEnvironmentMapLight, GlobalAmbientLight, NotShadowCaster,
+};
 use bevy::pbr::{DistanceFog, FogFalloff, MeshMaterial3d, StandardMaterial};
 use bevy::prelude::*;
 use bevy::render::render_resource::{
@@ -53,6 +56,7 @@ const MAX_DISTANCE: f32 = 25.0;
 const MIN_PITCH: f32 = -0.15;
 const MAX_PITCH: f32 = 1.45;
 const ORBIT_TARGET: Vec3 = Vec3::new(0.0, -0.15, 0.0);
+const SMALL_SPHERE_RADIUS: f32 = 0.22;
 
 /// Returns the [`PreviewCallbacks`] registered with `editor_core` for [`LIGHT_PREVIEW_KIND`].
 pub fn preview_callbacks() -> PreviewCallbacks {
@@ -81,7 +85,7 @@ pub fn setup_preview_logic(app: &mut App) {
 
 /// Registers pointer orbit/zoom/reset observers for the 3D preview viewport and the `SHADER_EDITOR_SCREENSHOT` hook.
 pub fn setup_preview_ui(app: &mut App) {
-    app.add_observer(orbit_on_drag).add_observer(zoom_on_scroll).add_observer(reset_on_double_click);
+    app.add_observer(orbit_on_drag).add_observer(zoom_on_scroll);
     if std::env::var_os("SHADER_EDITOR_SCREENSHOT").is_some() {
         app.add_systems(Update, light_debug_screenshot.after(editor_core::apply_actions));
     }
@@ -93,12 +97,26 @@ fn light_debug_screenshot(mut frames: Local<u32>, mut actions: ResMut<editor_cor
         && let Ok(open) = std::env::var("SHADER_EDITOR_OPEN")
     {
         if let Some(tool) = open.strip_prefix("@tool/") {
-            let id: &'static str = match tool {
+            let (tool_name, demo_arg) = tool.split_once(':').map_or((tool, None), |(t, a)| (t, Some(a)));
+            let id: &'static str = match tool_name {
                 "light_preview" => super::LIGHT_PREVIEW_TOOL,
                 "inspect_game" => super::INSPECT_GAME_TOOL,
+                "hdr_converter" => super::HDR_CONVERTER_TOOL,
                 _ => return,
             };
             actions.push(editor_core::action::Action::OpenTool { domain: crate::backend::LIGHT, id, arg: None });
+            if id == super::HDR_CONVERTER_TOOL {
+                if let Ok(hdr_file) = std::env::var("SHADER_EDITOR_HDR") {
+                    actions.push(super::HdrConverterAction::ImportPath(PathBuf::from(hdr_file)));
+                } else if demo_arg == Some("demo") {
+                    let demo_path = std::env::temp_dir().join("sunset_panorama.hdr");
+                    let demo = super::demo_sky_hdr(256, 128);
+                    let bytes = crate::backend::encode_radiance_hdr(demo.width, demo.height, &demo.pixels);
+                    if std::fs::write(&demo_path, bytes).is_ok() {
+                        actions.push(super::HdrConverterAction::ImportPath(demo_path));
+                    }
+                }
+            }
         } else {
             let rel = if open.starts_with("quillshade/light/") { open } else { format!("quillshade/light/{open}") };
             if let Some(r) = project_core::asset_ref::parse(
@@ -141,6 +159,8 @@ pub struct LightPreviewSession {
     pub materials: Vec<Handle<StandardMaterial>>,
     pub lights: Vec<Entity>,
     pub procedural_ibl: Option<([u32; 12], Handle<Image>)>,
+    /// Source image of the camera's [`GeneratedEnvironmentMapLight`] (the dominant cube map or `procedural_ibl`).
+    pub ibl_source: Option<AssetId<Image>>,
     pub yaw: f32,
     pub pitch: f32,
     pub distance: f32,
@@ -290,7 +310,7 @@ pub fn preview_viewport(view: ViewKindId) -> impl Scene {
                 }
                 Pickable::IGNORE
                 Children [
-                    @text("3D Preview (drag: orbit, wheel: zoom, double-click: reset)", TEXT_DIM, 11.0)
+                    @text("3D Preview (drag: orbit, wheel: zoom)", TEXT_DIM, 11.0)
                 ]
             ]
         ]
@@ -329,7 +349,7 @@ pub fn start_light_preview(world: &mut World, id: u64) {
         let (ground_mesh, center_mesh, side_mesh, box_mesh) = {
             let mut meshes = world.resource_mut::<Assets<Mesh>>();
             (
-                meshes.add(Plane3d::default().mesh().size(80.0, 80.0).build()),
+                meshes.add(super::preview_terrain::terrain_mesh()),
                 meshes.add(Sphere::new(0.85).mesh().ico(5).unwrap()),
                 meshes.add(Sphere::new(0.7).mesh().ico(5).unwrap()),
                 meshes.add(Cuboid::new(1.2, 1.8, 1.2)),
@@ -380,13 +400,15 @@ pub fn start_light_preview(world: &mut World, id: u64) {
             box_mat.clone(),
         ]);
 
-        // 1. Ground plane
+        // 1. Landscape: flat studio floor, mountains behind the depth boxes, lowlands behind the camera. It does not
+        // cast shadows so distant peaks never darken the calibrated spheres.
         world.spawn((
             PreviewEntity(id),
             render_layer.clone(),
             Mesh3d(ground_mesh),
             MeshMaterial3d(ground_mat),
             Transform::from_xyz(0.0, -1.0, 0.0),
+            NotShadowCaster,
         ));
         // 2. Center neutral dielectric sphere
         world.spawn((
@@ -422,6 +444,54 @@ pub fn start_light_preview(world: &mut World, id: u64) {
                 Transform::from_translation(pos),
             ));
         }
+        // 6. Front row of small spheres resting on the floor: a metal roughness ramp (1.0 fully rough -> 0.0 mirror,
+        // 20% steps), then gold and iron; base colors are measured linear F0 (Real-Time Rendering 4th ed., table 9.2).
+        let small_mesh =
+            world.resource_mut::<Assets<Mesh>>().add(Sphere::new(SMALL_SPHERE_RADIUS).mesh().ico(4).unwrap());
+        meshes_out.push(small_mesh.clone());
+        // Aluminum (neutral F0) so only the roughness changes: 1.0 blurs the sky away, 0.0 is a mirror.
+        let ramp = [1.0, 0.8, 0.6, 0.4, 0.2, 0.0].map(|roughness| StandardMaterial {
+            base_color: Color::LinearRgba(LinearRgba::rgb(0.913, 0.922, 0.924)),
+            perceptual_roughness: roughness,
+            metallic: 1.0,
+            ..default()
+        });
+        let metals = [
+            // Gold
+            StandardMaterial {
+                base_color: Color::LinearRgba(LinearRgba::rgb(1.0, 0.766, 0.336)),
+                perceptual_roughness: 0.25,
+                metallic: 1.0,
+                ..default()
+            },
+            // Iron
+            StandardMaterial {
+                base_color: Color::LinearRgba(LinearRgba::rgb(0.562, 0.565, 0.578)),
+                perceptual_roughness: 0.4,
+                metallic: 1.0,
+                ..default()
+            },
+        ];
+        // The row faces the default camera: centered between it and the orbit target, perpendicular to its yaw.
+        let toward_camera = Vec3::new(DEFAULT_YAW.sin(), 0.0, DEFAULT_YAW.cos());
+        let along = Vec3::new(DEFAULT_YAW.cos(), 0.0, -DEFAULT_YAW.sin());
+        let center = Vec3::new(0.0, -1.0 + SMALL_SPHERE_RADIUS, 0.0) + toward_camera * 1.6;
+        let mats: Vec<_> = {
+            let mut materials = world.resource_mut::<Assets<StandardMaterial>>();
+            ramp.into_iter().chain(metals).map(|mat| materials.add(mat)).collect()
+        };
+        for (i, mat) in mats.into_iter().enumerate() {
+            // Leave a wider gap between the dielectric ramp and the metals.
+            let offset = (i as f32 - 3.5) * 0.55 + if i >= 6 { 0.15 } else { -0.15 };
+            materials_out.push(mat.clone());
+            world.spawn((
+                PreviewEntity(id),
+                render_layer.clone(),
+                Mesh3d(small_mesh.clone()),
+                MeshMaterial3d(mat),
+                Transform::from_translation(center + along * offset),
+            ));
+        }
     }
 
     let cam = Camera { order: -1, is_active: false, ..default() };
@@ -445,6 +515,7 @@ pub fn start_light_preview(world: &mut World, id: u64) {
         materials: materials_out,
         lights: Vec::new(),
         procedural_ibl: procedural_ibl.clone(),
+        ibl_source: procedural_ibl.as_ref().map(|(_, h)| h.id()),
         yaw: DEFAULT_YAW,
         pitch: DEFAULT_PITCH,
         distance: DEFAULT_DISTANCE,
@@ -466,11 +537,10 @@ pub fn start_light_preview(world: &mut World, id: u64) {
         cam_transform,
     ));
     if let Some((_, ibl_handle)) = procedural_ibl {
-        cam_cmd.insert(EnvironmentMapLight {
-            diffuse_map: ibl_handle.clone(),
-            specular_map: ibl_handle,
+        cam_cmd.insert(GeneratedEnvironmentMapLight {
+            environment_map: ibl_handle,
             intensity: def_env.env_intensity,
-            rotation: Quat::from_rotation_y(def_env.env_rotation.to_radians()),
+            rotation: Quat::from_rotation_y(def_env.skybox_rotation.to_radians()),
             affects_lightmapped_mesh_diffuse: def_env.env_affects_lightmapped,
         });
     }
@@ -745,7 +815,7 @@ pub fn apply_environment_with_skybox_to_session(
     // AssetId<Image> never changes across frames (preventing a 1-frame IBL drop in Bevy's light probe extractor).
     let ibl_key = ibl_color_key(env);
     let mut new_ibl_pair = existing_ibl;
-    let env_map_light = if let Some(mut images) = world.get_resource_mut::<Assets<Image>>() {
+    let procedural = if let Some(mut images) = world.get_resource_mut::<Assets<Image>>() {
         match &mut new_ibl_pair {
             Some((k, h)) if images.contains(h.id()) => {
                 if *k != ibl_key {
@@ -768,13 +838,7 @@ pub fn apply_environment_with_skybox_to_session(
                 new_ibl_pair = Some((ibl_key, handle));
             }
         }
-        new_ibl_pair.as_ref().map(|(_, h)| EnvironmentMapLight {
-            diffuse_map: h.clone(),
-            specular_map: h.clone(),
-            intensity: env.env_intensity,
-            rotation: Quat::from_rotation_y(env.env_rotation.to_radians()),
-            affects_lightmapped_mesh_diffuse: env.env_affects_lightmapped,
-        })
+        new_ibl_pair.as_ref().map(|(_, h)| h.clone())
     } else {
         None
     };
@@ -811,6 +875,26 @@ pub fn apply_environment_with_skybox_to_session(
         blend: skybox_blend.blend,
         alpha: skybox_blend.alpha,
     };
+
+    // The IBL follows the skybox cube map that dominates the blend (the generated runtime's rule); the procedural sky
+    // colors light the scene without one or when Bevy cannot filter it (faces not square power-of-two).
+    let (dominant, rotation) = if skybox_blend.blend < 0.5 {
+        (&blended_skybox.cubemap_a, blended_skybox.rotation_a)
+    } else {
+        (&blended_skybox.cubemap_b, blended_skybox.rotation_b)
+    };
+    let env_map_light = world.get_resource::<Assets<Image>>().and_then(|images| {
+        let cube = dominant.clone().filter(|h| images.get(h).is_some_and(is_ibl_source));
+        cube.or(procedural).map(|environment_map| GeneratedEnvironmentMapLight {
+            environment_map,
+            intensity: env.env_intensity,
+            // Turns with the skybox so reflections match the visible sky.
+            rotation,
+            affects_lightmapped_mesh_diffuse: env.env_affects_lightmapped,
+        })
+    });
+    let last_ibl_source = world.resource::<LightPreviewSessions>().sessions.get(&id).and_then(|s| s.ibl_source);
+    let ibl_source = env_map_light.as_ref().map(|ibl| ibl.environment_map.id()).or(last_ibl_source);
 
     if let Ok(mut cam_ent) = world.get_entity_mut(camera_entity) {
         if prev.is_none_or(|p| p.clear_color != env.clear_color)
@@ -851,16 +935,26 @@ pub fn apply_environment_with_skybox_to_session(
             }
         }
         if let Some(ibl) = env_map_light {
-            if let Some(mut existing) = cam_ent.get_mut::<EnvironmentMapLight>() {
-                if existing.diffuse_map != ibl.diffuse_map
-                    || existing.specular_map != ibl.specular_map
-                    || existing.intensity != ibl.intensity
+            // Bevy fills `EnvironmentMapLight` from `GeneratedEnvironmentMapLight` only while it is absent, sized to
+            // the source: a new source needs it removed; otherwise intensity and rotation are updated in place.
+            if last_ibl_source != Some(ibl.environment_map.id()) {
+                cam_ent.remove::<EnvironmentMapLight>();
+            } else if let Some(mut existing) = cam_ent.get_mut::<EnvironmentMapLight>()
+                && (existing.intensity != ibl.intensity
                     || existing.rotation != ibl.rotation
-                    || existing.affects_lightmapped_mesh_diffuse != ibl.affects_lightmapped_mesh_diffuse
-                {
-                    *existing = ibl;
-                }
-            } else {
+                    || existing.affects_lightmapped_mesh_diffuse != ibl.affects_lightmapped_mesh_diffuse)
+            {
+                existing.intensity = ibl.intensity;
+                existing.rotation = ibl.rotation;
+                existing.affects_lightmapped_mesh_diffuse = ibl.affects_lightmapped_mesh_diffuse;
+            }
+            let unchanged = cam_ent.get::<GeneratedEnvironmentMapLight>().is_some_and(|g| {
+                g.environment_map == ibl.environment_map
+                    && g.intensity == ibl.intensity
+                    && g.rotation == ibl.rotation
+                    && g.affects_lightmapped_mesh_diffuse == ibl.affects_lightmapped_mesh_diffuse
+            });
+            if !unchanged {
                 cam_ent.insert(ibl);
             }
         }
@@ -941,6 +1035,7 @@ pub fn apply_environment_with_skybox_to_session(
         && let Some(s) = sessions.sessions.get_mut(&id)
     {
         s.procedural_ibl = new_ibl_pair;
+        s.ibl_source = ibl_source;
         s.lights = updated_lights;
         s.applied_key = Some(key);
         s.last_env = Some(env.clone());
@@ -1121,7 +1216,6 @@ pub fn interpolate_environments(from: &Environment, to: &Environment, raw_t: f32
         skybox_brightness,
         skybox_rotation,
         env_intensity: lerp_f32(from.env_intensity, to.env_intensity, s),
-        env_rotation: lerp_angle_deg(from.env_rotation, to.env_rotation, s),
         sky_top_color: lerp_rgba(from.sky_top_color, to.sky_top_color, s),
         sky_horizon_color: lerp_rgba(from.sky_horizon_color, to.sky_horizon_color, s),
         ground_color: lerp_rgba(from.ground_color, to.ground_color, s),
@@ -1340,23 +1434,6 @@ fn zoom_on_scroll(
     }
 }
 
-fn reset_on_double_click(
-    ev: On<PointerClick>,
-    viewports: Query<&LightPreviewViewport>,
-    editor: Res<Editor>,
-    mut sessions: ResMut<LightPreviewSessions>,
-) {
-    let Ok(vp) = viewports.get(ev.entity) else { return };
-    if ev.button != PointerButton::Primary || ev.count < 2 {
-        return;
-    }
-    let Some(id) = active_session_id(&editor, vp.0) else { return };
-    let Some(sess) = sessions.sessions.get_mut(&id) else { return };
-    sess.yaw = DEFAULT_YAW;
-    sess.pitch = DEFAULT_PITCH;
-    sess.distance = DEFAULT_DISTANCE;
-}
-
 fn linear_rgba(c: [f32; 4]) -> Color {
     Color::LinearRgba(LinearRgba::from_f32_array(c))
 }
@@ -1408,19 +1485,45 @@ fn f32_to_f16_bits(v: f32) -> u16 {
     sign | ((half_exp as u16) << 10) | ((rounded >> 13) as u16)
 }
 
+/// Face size of the procedural IBL sky cube map (a power of two, as [`GeneratedEnvironmentMapLight`] requires).
+const PROCEDURAL_SKY_SIZE: u32 = 32;
+
+/// Rgba16Float texels of a procedural sky cube map (faces in `+X, -X, +Y, -Y, +Z, -Z` order): `mid` at the horizon
+/// blending smoothly to `top` at the zenith and to `bottom` at the nadir. Mirrors the generated runtime's
+/// `hemispherical_gradient_bytes` (`backend/templates/light_mod.rs`).
 fn hemispherical_gradient_bytes(top: [f32; 4], mid: [f32; 4], bottom: [f32; 4]) -> Vec<u8> {
-    let mut data = Vec::with_capacity(48);
-    for color in [mid, mid, top, bottom, mid, mid] {
-        for c in color {
-            data.extend_from_slice(&f32_to_f16_bits(c).to_le_bytes());
+    let n = PROCEDURAL_SKY_SIZE;
+    let mut data = Vec::with_capacity((n * n * 6 * 8) as usize);
+    for face in 0..6 {
+        for y in 0..n {
+            for x in 0..n {
+                let u = (x as f32 + 0.5) / n as f32 * 2.0 - 1.0;
+                let v = (y as f32 + 0.5) / n as f32 * 2.0 - 1.0;
+                // Only the up component matters: +Y is the zenith face, -Y the nadir face, the side faces run top-down.
+                let up = match face {
+                    2 => 1.0,
+                    3 => -1.0,
+                    _ => -v,
+                } / (1.0 + u * u + v * v).sqrt();
+                let (to, t) = if up >= 0.0 { (top, up.sqrt()) } else { (bottom, (-up).sqrt()) };
+                for (m, e) in mid.into_iter().zip(to) {
+                    data.extend_from_slice(&f32_to_f16_bits(m + (e - m) * t).to_le_bytes());
+                }
+            }
         }
     }
     data
 }
 
+/// Whether `img` can be the source of a [`GeneratedEnvironmentMapLight`] (Bevy panics on anything else).
+fn is_ibl_source(img: &Image) -> bool {
+    let s = img.texture_descriptor.size;
+    s.depth_or_array_layers == 6 && s.width == s.height && s.width.is_power_of_two() && s.width <= 8192
+}
+
 fn hemispherical_gradient_image(top: [f32; 4], mid: [f32; 4], bottom: [f32; 4]) -> Image {
     let mut img = Image::new(
-        Extent3d { width: 1, height: 1, depth_or_array_layers: 6 },
+        Extent3d { width: PROCEDURAL_SKY_SIZE, height: PROCEDURAL_SKY_SIZE, depth_or_array_layers: 6 },
         TextureDimension::D2,
         hemispherical_gradient_bytes(top, mid, bottom),
         TextureFormat::Rgba16Float,
@@ -1543,14 +1646,7 @@ fn env_hash(
     }
     hash_f32_slice(
         &mut h,
-        &[
-            env.skybox_brightness,
-            env.skybox_rotation,
-            env.env_intensity,
-            env.env_rotation,
-            env.ambient_brightness,
-            env.ev100,
-        ],
+        &[env.skybox_brightness, env.skybox_rotation, env.env_intensity, env.ambient_brightness, env.ev100],
     );
     hash_f32_slice(&mut h, &env.sky_top_color);
     hash_f32_slice(&mut h, &env.sky_horizon_color);

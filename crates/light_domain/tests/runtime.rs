@@ -8,7 +8,7 @@ use bevy::core_pipeline::tonemapping::{DebandDither, Tonemapping};
 use bevy::curve::Curve as BevyCurve;
 use bevy::ecs::message::Messages;
 use bevy::ecs::system::RunSystemOnce;
-use bevy::light::{DirectionalLight, EnvironmentMapLight, GlobalAmbientLight};
+use bevy::light::{DirectionalLight, GeneratedEnvironmentMapLight, GlobalAmbientLight};
 use bevy::pbr::DistanceFog;
 use bevy::prelude::*;
 use bevy::render::view::ColorGrading;
@@ -71,7 +71,6 @@ mod generated_light {
                     skybox_brightness: 2500.0,
                     skybox_rotation: 10.0,
                     env_intensity: 2500.0,
-                    env_rotation: 10.0,
                     ambient_brightness: 300.0,
                     ev100: 13.0,
                     tonemapping: TonemappingMode::TonyMcMapface,
@@ -92,7 +91,6 @@ mod generated_light {
                     skybox_brightness: 100.0,
                     skybox_rotation: 350.0,
                     env_intensity: 150.0,
-                    env_rotation: 350.0,
                     ambient_brightness: 20.0,
                     ev100: 7.0,
                     tonemapping: TonemappingMode::AgX,
@@ -124,7 +122,6 @@ mod generated_light {
                     skybox_brightness: 1200.0,
                     skybox_rotation: 90.0,
                     env_intensity: 1200.0,
-                    env_rotation: 90.0,
                     ambient_brightness: 150.0,
                     ev100: 11.0,
                     tonemapping: TonemappingMode::AcesFitted,
@@ -568,7 +565,7 @@ fn headless_state_machine_and_world_synchronization() {
         &DebandDither,
         &ColorGrading,
         Option<&DistanceFog>,
-        &EnvironmentMapLight,
+        &GeneratedEnvironmentMapLight,
         &BlendedSkybox,
     ), (With<Camera3d>, With<Hdr>)>();
     let (exposure, tonemapping, deband, _cg, fog, ibl, skybox) = cam_q.single(app.world()).unwrap();
@@ -578,6 +575,7 @@ fn headless_state_machine_and_world_synchronization() {
     assert!(fog.is_some());
     assert_eq!(ibl.intensity, 2500.0);
     assert_eq!(skybox.brightness_a, 2500.0);
+    assert_eq!(ibl.rotation, skybox.rotation_a, "the IBL turns with the skybox");
 
     let light_count =
         app.world_mut().query::<(&ManagedDirectionalLight, &DirectionalLight)>().iter(app.world()).count();

@@ -35,6 +35,8 @@ rfd = "0.17"
 # Bevy 0.20's tree.
 png = "0.18"
 ktx2 = "0.5"
+image = { version = "0.25", default-features = false, features = ["hdr"] }
+ruzstd = "0.8"
 
 project_core = { path = "crates/project_core" }
 editor_core = { path = "crates/editor_core", default-features = false }

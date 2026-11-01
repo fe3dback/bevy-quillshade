@@ -9,8 +9,14 @@ use project_core::umbrella::CrateContribution;
 use project_core::{DomainId, Project};
 
 pub mod codegen;
+pub mod hdr;
 pub mod model;
 pub mod validate;
+
+pub use hdr::{
+    ConvertedCubemap, CubemapFormat, FACE_SIZES, HdrConvertSettings, HdrImage, convert_hdr_to_cubemap,
+    convert_hdr_to_ktx2, encode_radiance_hdr, f32_to_f16, linear_to_srgb_u8,
+};
 
 pub use model::{
     CURVE_SUFFIX, ColorGradingDef, ColorGradingGlobalDef, ColorGradingSectionDef, DEFAULT_CLEAR_COLOR,

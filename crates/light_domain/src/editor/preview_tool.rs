@@ -464,8 +464,7 @@ fn redraw_sidebar(
     fill_sidebar_with(&mut commands, &body, &mut key, SidebarKey::now(&editor), || sidebar_rows(&editor, doc));
 }
 
-const HOTKEYS: [(&str, &str); 3] =
-    [("Drag", "Orbit preview camera"), ("Wheel", "Zoom preview camera"), ("Double-click", "Reset camera")];
+const HOTKEYS: [(&str, &str); 2] = [("Drag", "Orbit preview camera"), ("Wheel", "Zoom preview camera")];
 
 fn sidebar_rows(editor: &Editor, doc: &LightPreviewDoc) -> Vec<Box<dyn Scene>> {
     let (env, s) = resolve_preview(editor, doc);
