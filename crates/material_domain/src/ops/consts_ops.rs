@@ -1,5 +1,12 @@
 use super::*;
 
+/// The values a reference param holds for the Material asset of type `ty` at `path`: the path (written by hand) and,
+/// when `index` resolves it to that asset, its UUID (ADR 0047 §4).
+pub(crate) fn ref_values(index: &AssetIndex, ty: AssetType, path: &str) -> Vec<String> {
+    let uuid = index.ref_id_of(&AssetId::new(ty, path).to_ref()).map(|id| id.to_string());
+    std::iter::once(path.to_string()).chain(uuid).collect()
+}
+
 /// Text of the confirmation before an edit breaking the readers of global constants `names`.
 pub(crate) fn usage_message(what: &str, names: &[String], usages: &[(AssetId, usize)]) -> String {
     let nodes: usize = usages.iter().map(|u| u.1).sum();
@@ -228,11 +235,12 @@ impl MaterialConsts for Editor {
         if ids.is_empty() {
             return out;
         }
+        let names = ref_values(&self.asset_index, AssetType::Consts, table);
         for (id, a) in &self.overridden_set().assets {
             let Ok(a) = a else { continue };
             let n = const_refs(a, &self.domains.material().registry)
                 .iter()
-                .filter(|r| r.2 == table && ids.contains(&r.3))
+                .filter(|r| names.contains(&r.2) && ids.contains(&r.3))
                 .count();
             if n > 0 {
                 out.push((id.clone(), n));
@@ -245,7 +253,15 @@ impl MaterialConsts for Editor {
         let Some(project) = self.project.clone() else { return };
         let registry = self.domains.material().registry.clone();
         let ids: Vec<u32> = consts.iter().map(|(id, _)| *id).collect();
-        let reads = |a: &Asset| const_refs(a, &registry).iter().any(|r| r.2 == table && ids.contains(&r.3));
+        let names = ref_values(&self.asset_index, AssetType::Consts, table);
+        let reads = |a: &Asset| const_refs(a, &registry).iter().any(|r| names.contains(&r.2) && ids.contains(&r.3));
+        let clear = |a: &mut Asset| {
+            for name in &names {
+                for &(cid, _) in consts {
+                    ops::clear_const_refs(a, &registry, name, cid);
+                }
+            }
+        };
         let mut cleared = Vec::new();
         for i in 0..self.tabs.len() {
             let Some(d) = self.tabs[i].get_mut::<Doc>() else { continue };
@@ -253,11 +269,7 @@ impl MaterialConsts for Editor {
                 continue;
             }
             let was_dirty = d.is_dirty();
-            d.edit(|a| {
-                for &(cid, _) in consts {
-                    ops::clear_const_refs(a, &registry, table, cid);
-                }
-            });
+            d.edit(clear);
             cleared.push(d.id.source_rel());
             if !was_dirty {
                 self.save(i);
@@ -270,10 +282,8 @@ impl MaterialConsts for Editor {
             if !reads(&a) {
                 continue;
             }
-            for &(cid, _) in consts {
-                ops::clear_const_refs(&mut a, &registry, table, cid);
-            }
-            if let Err(e) = ops::save(&project, &id, &a) {
+            clear(&mut a);
+            if let Err(e) = ops::save_annotated(&project, &id, &mut a, &self.asset_index) {
                 return self.io_error(&format!("Cannot save {}", id.source_rel()), e);
             }
             cleared.push(id.source_rel());

@@ -1,15 +1,16 @@
 //! The Light domain's backend (design §9.2, §6.5), Bevy-free: its files ([`model`]), their diagnostics
-//! ([`validate()`]), the module it contributes to the umbrella crate ([`codegen`]) and its [`DomainBackend`] for
-//! `project_core::regen::run`.
+//! ([`validate()`]), the module it contributes to the umbrella crate ([`codegen`]), its [`DomainBackend`] for
+//! `project_core::regen::run` and its steps of the Migration Tool ([`migrate`]).
 
 use std::collections::BTreeSet;
 
 use project_core::regen::{DomainBackend, DomainOutput, DomainPlan, OutFile, OutRoot};
 use project_core::umbrella::CrateContribution;
-use project_core::{DomainId, Project};
+use project_core::{AssetIndex, DomainId, DomainIndex, Project};
 
 pub mod codegen;
 pub mod hdr;
+pub mod migrate;
 pub mod model;
 pub mod validate;
 
@@ -21,9 +22,9 @@ pub use hdr::{
 pub use model::{
     CURVE_SUFFIX, ColorGradingDef, ColorGradingGlobalDef, ColorGradingSectionDef, DEFAULT_CLEAR_COLOR,
     DirectionalLightDef, ENVIRONMENT_FORMAT_VERSION, ENVIRONMENT_SUFFIX, Environment, FogDef, FogFalloffDef,
-    LIGHT_TEXTURES, LightAssets, TEXTURE_SUFFIX, TonemappingMode, curve_ref, default_lights, environment_ref,
-    load_curve, load_environment, rewrite_texture_refs, save_curve, save_environment, scan, texture_ref,
-    to_pascal_case,
+    LIGHT_TEXTURES, LightAssets, TEXTURE_SUFFIX, TonemappingMode, clear_texture_refs, curve_ref, default_lights,
+    environment_ref, load_curve, load_environment, resolve_texture, save_curve, save_environment, scan, scan_root,
+    set_asset_uuid, texture_ref, texture_ref_names, to_pascal_case,
 };
 pub use validate::{scan_game_conflicts, validate, validate_in_memory, validate_texture, validate_textures};
 
@@ -70,16 +71,23 @@ impl DomainBackend for LightBackend {
         LIGHT_CRATE
     }
 
-    /// Loads and validates `quillshade/light/`; generates the module and manifest for error-free assets. Nothing to
-    /// compile: `compile` is ignored.
-    fn plan(&self, project: &Project, _compile: bool) -> DomainPlan {
-        let assets = LightAssets::load(project);
+    /// [`LightAssets::index_part`] of the project's Light assets.
+    fn index(&self, project: &Project) -> DomainIndex {
+        LightAssets::load(project).index_part()
+    }
+
+    /// Loads `quillshade/light/`, resolves the cube map UUIDs against `index` ([`LightAssets::resolve`]), validates and
+    /// generates the module and manifest for error-free assets. Nothing to compile: `compile` is ignored.
+    fn plan(&self, project: &Project, index: &AssetIndex, _compile: bool) -> DomainPlan {
+        let mut assets = LightAssets::load(project);
+        assets.resolve(index);
         plan_assets(project, &assets)
     }
 }
 
-/// Validates `assets` and builds the Light domain's plan (`crates/quillshade/src/light/mod.rs` and
-/// `assets/quillshade/light/autogen/baked.ron` listing the environments, curves, and textures without an error).
+/// Validates `assets` (resolved: cube maps are paths, [`LightAssets::resolve`]) and builds the Light domain's plan
+/// (`crates/quillshade/src/light/mod.rs` and `assets/quillshade/light/autogen/baked.ron` listing the environments,
+/// curves, and textures without an error).
 pub fn plan_assets(project: &Project, assets: &LightAssets) -> DomainPlan {
     let diagnostics = validate(project, assets);
     let failed: BTreeSet<&str> =

@@ -153,7 +153,7 @@ mod tests {
         std::fs::create_dir(dir.path().join("quillshade")).unwrap();
         std::fs::write(
             dir.path().join("quillshade/project.ron"),
-            "(format_version: 1, domains: {\"light\": (enabled: false)})",
+            "(project_version: 3, domains: {\"light\": (enabled: false)})",
         )
         .unwrap();
         let p = Project::open(dir.path()).unwrap();

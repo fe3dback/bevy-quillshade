@@ -172,7 +172,8 @@ fn new_and_renamed_curves_follow_their_users() {
     assert!(dir.path().join("assets/quillshade/material/autogen/curves/dir_ramps/crv_fade.wesl").is_file());
     assert!(e.curve_paths().contains(&"ramps/fade".to_string()));
 
-    // A material using `common/pulse` is open; renaming the curve updates the node, the file and the tab.
+    // A material using `common/pulse` is open; renaming the curve moves the file and the tab, the node keeps its
+    // reference.
     let bands = AssetId::new(AssetType::Material, "fx/curve_bands");
     e.apply(Action::OpenAsset(bands.to_ref()));
     e.apply(Action::OpenAsset(pulse().to_ref()));
@@ -182,11 +183,13 @@ fn new_and_renamed_curves_follow_their_users() {
     assert!(e.curve_index(&moved).is_some());
     let d = e.tabs[e.doc_index(&bands).unwrap()].get::<Doc>().unwrap();
     assert!(!d.is_dirty());
-    let refs = shader_graph_core::registry::curve_refs(&d.asset, &e.domains.material().registry);
+    // The node stores the curve's UUID (ADR 0047 §4): its resolved view names the new path.
+    let view = e.view_of(d);
+    let refs = shader_graph_core::registry::curve_refs(&view, &e.domains.material().registry);
     assert!(refs.iter().any(|r| r.2 == "ramps/pulse"), "{refs:?}");
     let node = refs.iter().find(|r| r.2 == "ramps/pulse").unwrap().0.clone();
     assert_eq!(
-        crate::doc::node_title(&e.domains.material().registry, &e.domains.material().functions, &d.asset, &node),
+        crate::doc::node_title(&e.domains.material().registry, &e.domains.material().functions, &view, &node),
         "pulse (Sample Curve)"
     );
     e.validate();

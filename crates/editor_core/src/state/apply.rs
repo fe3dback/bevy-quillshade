@@ -6,14 +6,16 @@
 //! Opening and creating assets go through the registered asset kinds (design §6.1); renaming, moving and deleting
 //! them, folders, focusing a diagnostic and Generate are in `assets.rs`.
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use crate::action::{Action, Dialog, Handled, Submit, TabAction, Unsaved};
 use crate::doc_kind::{StatusCtx, StatusInfo};
 use crate::dynval::{PropKey, PropValue};
 use crate::message::{Level, Message};
-use project_core::{Diagnostic, DomainId, Project};
+use project_core::{AssetRef, Diagnostic, DomainId, OpenError, Project};
 
+use super::assets::UuidFix;
 use super::editor::Editor;
 use crate::domain::DomainHooks;
 #[cfg(doc)]
@@ -23,8 +25,20 @@ use crate::nav::NavDir;
 impl Editor {
     /// Applies an action, then lets the domain it reached follow up ([`DomainState::after_apply`]): the active
     /// tab's domain for an edit of its document, the addressed domain for a domain command or a tool's argument.
+    ///
+    /// While the Migration Tool is open ([`Editor::migration`], ADR 0046) the rest of the editor is unavailable: only
+    /// [`Action::Migration`] and quitting run, everything else (hotkeys, menus, other dialogs) is dropped. While its
+    /// migration runs, quitting is deferred until the run ends ([`Editor::defer_quit`]).
     pub fn apply(&mut self, action: impl Into<Action>) {
         let action = action.into();
+        if self.migration.is_some()
+            && !matches!(action, Action::Migration(_) | Action::None | Action::Quit | Action::ForceQuit)
+        {
+            return bevy::log::debug!("{action:?} ignored: the Migration Tool is open");
+        }
+        if matches!(action, Action::Quit | Action::ForceQuit) && self.defer_quit() {
+            return;
+        }
         let reached = match &action {
             Action::Tab(_) => self.tab().map(|t| t.domain),
             Action::Domain(id, _) => Some(*id),
@@ -76,8 +90,12 @@ impl Editor {
 
     /// One save operation wrote the tabs `saved`: each domain with a saved tab follows once
     /// ([`DomainState::after_save`] with its own tabs; Material regenerates). `every_domain`: the domains none of whose
-    /// tabs were saved follow too, with no tabs (Save All regenerates even when nothing was dirty, as before).
+    /// tabs were saved follow too, with no tabs (Save All regenerates even when nothing was dirty, as before). Then the
+    /// domains whose assets refer to the saved ones across a domain boundary regenerate them
+    /// ([`Editor::regenerate_affected_by`]).
     pub fn after_saves(&mut self, saved: &[usize], every_domain: bool) {
+        let assets: BTreeSet<AssetRef> =
+            saved.iter().filter_map(|&i| self.tabs.get(i)?.doc().asset().cloned()).collect();
         let ids: Vec<DomainId> = self.domains.ids().filter(|&id| self.domain_enabled(id)).collect();
         for id in ids {
             let tabs: Vec<usize> =
@@ -85,6 +103,9 @@ impl Editor {
             if every_domain || !tabs.is_empty() {
                 self.with_domain(id, |e, s| s.after_save(e, &tabs));
             }
+        }
+        if !assets.is_empty() {
+            self.regenerate_affected_by(&assets);
         }
     }
 
@@ -120,10 +141,11 @@ impl Editor {
         }
     }
 
-    /// Errors of every enabled domain (the mainbar's count).
+    /// Errors of every enabled domain, the asset index's included (the mainbar's count).
     pub fn error_count(&self) -> usize {
         let states = self.domains.ids().filter(|&id| self.domain_enabled(id)).filter_map(|id| self.domains.get_dyn(id));
-        states.map(|s| s.diagnostics().iter().filter(|d| d.is_error()).count()).sum()
+        let domains: usize = states.map(|s| s.diagnostics().iter().filter(|d| d.is_error()).count()).sum();
+        domains + self.index_diagnostics.iter().filter(|d| d.is_error()).count()
     }
 
     /// The one domain the console/logs is limited to (design §6.4, §14.2): the active real domain, unless "All
@@ -133,12 +155,24 @@ impl Editor {
     }
 
     /// The diagnostics as the console/logs lists them (design §6.4): domain by domain, each in its
-    /// [`DomainState::console_diagnostics`] order for the active tab's asset, limited by [`Editor::console_domain`].
+    /// [`DomainState::console_diagnostics`] order for the active tab's asset followed by the domain's asset index
+    /// diagnostics (ADR 0047 §10, the active asset's first), limited by [`Editor::console_domain`].
     pub fn console_diagnostics(&self) -> Vec<Diagnostic> {
         let active = self.tab().and_then(|t| t.doc().asset());
         let only = self.console_domain();
-        let ids = self.domains.ids().filter(|&id| self.domain_enabled(id) && only.is_none_or(|o| o == id));
-        ids.filter_map(|id| self.domains.get_dyn(id)).flat_map(|s| s.console_diagnostics(active)).collect()
+        let mut ids: Vec<DomainId> = self.domains.ids().collect();
+        for id in self.index_diagnostics.iter().filter_map(|d| d.domain) {
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+        let shown = ids.into_iter().filter(|&id| self.domain_enabled(id) && only.is_none_or(|o| o == id));
+        shown
+            .flat_map(|id| {
+                let own = self.domains.get_dyn(id).map(|s| s.console_diagnostics(active)).unwrap_or_default();
+                own.into_iter().chain(self.index_diagnostics_of(id, active))
+            })
+            .collect()
     }
 
     /// The console/logs lines: global ones, the project domain's (they concern every domain, design §14.2) and those
@@ -149,14 +183,15 @@ impl Editor {
         self.messages.iter().filter(move |m| m.domain.is_none_or(shown))
     }
 
-    /// The diagnostics of the active tab's asset, from its domain, in console/logs order (the editor statusbar).
+    /// The diagnostics of the active tab's asset, from its domain and then the asset index, in console/logs order
+    /// (the editor statusbar).
     pub fn active_diagnostics(&self) -> Vec<Diagnostic> {
         let Some(tab) = self.tab() else { return Vec::new() };
-        let (Some(asset), Some(state)) = (tab.doc().asset(), self.domains.get_dyn(tab.domain)) else {
-            return Vec::new();
-        };
+        let Some(asset) = tab.doc().asset() else { return Vec::new() };
         let rel = asset.source_rel();
-        state.diagnostics().into_iter().filter(|d| d.asset.as_deref() == Some(rel.as_str())).collect()
+        let own = self.domains.get_dyn(tab.domain).map(|s| s.diagnostics()).unwrap_or_default();
+        let index = self.index_diagnostics.iter().filter(|d| d.domain == Some(asset.domain)).cloned();
+        own.into_iter().chain(index).filter(|d| d.asset.as_deref() == Some(rel.as_str())).collect()
     }
 
     /// The editor statusbar's content: the active tab's [`TabDoc::status`](crate::doc_kind::TabDoc::status)
@@ -165,7 +200,7 @@ impl Editor {
         let tab = self.tab()?;
         let diagnostics = self.active_diagnostics();
         let domain = self.domains.get_dyn(tab.domain).map_or(&() as &dyn std::any::Any, |s| s as &dyn std::any::Any);
-        tab.doc().status(&StatusCtx { diagnostics: &diagnostics, domain })
+        tab.doc().status(&StatusCtx { diagnostics: &diagnostics, domain, index: &self.asset_index })
     }
 
     /// The first diagnostic of the active tab's asset, in console/logs order: what a click on the editor statusbar's
@@ -217,13 +252,18 @@ impl Editor {
                 self.apply(next);
             }
             Action::NewProject(p) => match Project::create(&p) {
-                Ok(_) => self.apply(Action::OpenProject(p)),
+                // An existing older project: opening it starts the Migration Tool (ADR 0046).
+                Ok(_) | Err(OpenError::NeedsMigration { .. }) => self.apply(Action::OpenProject(p)),
                 Err(e) => self.io_error("Cannot create project", e),
             },
             Action::About => self.dialog = Some(Dialog::About),
             Action::QuickStart(step) => self.dialog = Some(Dialog::QuickStart(step)),
             Action::OpenUrl(url) => self.external.push(PathBuf::from(url)),
-            Action::OpenAsset(r) => self.open_ref(&r),
+            // Also a dialog's button (the UUID quick fixes' Open, ADR 0047 §11).
+            Action::OpenAsset(r) => {
+                self.dialog = None;
+                self.open_ref(&r);
+            }
             Action::OpenFile(path) => match self.project.as_ref() {
                 Some(_) if path.exists() => self.external.push(path),
                 Some(p) => {
@@ -278,6 +318,10 @@ impl Editor {
             }
             Action::ToggleConsoleAll => {
                 self.console_all = !self.console_all;
+                self.ui.log += 1;
+            }
+            Action::ToggleConsoleInfo => {
+                self.console_info = !self.console_info;
                 self.ui.log += 1;
             }
             Action::ToggleZen => {
@@ -346,6 +390,8 @@ impl Editor {
                 self.ui.browser += 1;
             }
             Action::FocusDiagnostic(diag) => self.focus_diagnostic(&diag),
+            Action::RegenerateUuid(r) => self.set_uuid(&r, UuidFix::Regenerate),
+            Action::AssignUuid(r) => self.set_uuid(&r, UuidFix::Assign),
             Action::Reload(key) => {
                 self.dialog = None;
                 if let Some(i) = self.key_index(&key) {
@@ -405,6 +451,7 @@ impl Editor {
                     self.quit = true;
                 }
             }
+            Action::Migration(a) => self.apply_migration(a),
         }
     }
 
@@ -457,6 +504,6 @@ impl Editor {
     pub fn current_value(&self, key: &PropKey) -> Option<PropValue> {
         let tab = self.tab()?;
         let domain = self.domains.get_dyn(tab.domain).map_or(&() as &dyn std::any::Any, |s| s as &dyn std::any::Any);
-        tab.doc().current_value(key, &StatusCtx { diagnostics: &[], domain })
+        tab.doc().current_value(key, &StatusCtx { diagnostics: &[], domain, index: &self.asset_index })
     }
 }

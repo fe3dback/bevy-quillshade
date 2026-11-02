@@ -6,11 +6,13 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use editor_core::action::{Handled, TabAction};
 use editor_core::dynval::{Payload, PropKey, PropTarget, PropValue};
 use editor_core::history::MergeKey;
 use project_core::AssetRef;
+use project_core::asset_index::AssetIndex;
 use shader_graph_core::consts::{ConstType, GlobalConsts};
 use shader_graph_core::gradient::{GradientCollection, MAX_STOPS, Stop};
 use shader_graph_core::ir::declared_function_sig;
@@ -154,6 +156,26 @@ pub trait MaterialEditor {
 
     /// Kind of an asset (open document first, then disk).
     fn asset_kind(&self, id: &AssetId) -> Option<AssetKind>;
+
+    /// [`Doc::resolved`] against the editor's `AssetIndex` and registry (ADR 0047 §4): what every read of `d`'s
+    /// node kinds and reference values goes through.
+    fn view_of(&self, d: &Doc) -> Arc<Asset>;
+
+    /// The active graph document with its resolved view ([`Self::view_of`]).
+    fn doc_view(&self) -> Option<(&Doc, Arc<Asset>)>;
+
+    /// `asset` (an edited copy of a document's model) with its UUID references resolved, like [`Self::view_of`].
+    fn resolve(&self, asset: &Asset) -> Asset;
+
+    /// What a reference param stores for the Material asset of type `ty` at `path` (ADR 0047 §4, write side): the
+    /// target's UUID from the editor's `AssetIndex`; `None` while the target has none (AE004), so it cannot be
+    /// referenced; `@internal/*` and `""` stay ([`shader_project::resolve::ref_value`]).
+    fn stored_ref(&self, ty: AssetType, path: &str) -> Option<String>;
+
+    /// What a graph stores for a node of `kind` as the canvas shows it: `function::<uuid>` / `user::<uuid>`; `None`
+    /// for a function or user node without an id (AE004); any other kind itself
+    /// ([`shader_project::resolve::stored_kind`]).
+    fn stored_kind(&self, kind: &str) -> Option<String>;
 }
 
 impl MaterialEditor for Editor {
@@ -264,5 +286,25 @@ impl MaterialEditor for Editor {
 
     fn asset_kind(&self, id: &AssetId) -> Option<AssetKind> {
         self.docs().find(|d| d.id == *id).map(|d| d.asset.kind).or_else(|| kind_of(&self.domains.material().disk, id))
+    }
+
+    fn view_of(&self, d: &Doc) -> Arc<Asset> {
+        d.resolved(&self.asset_index, &self.domains.material().registry)
+    }
+
+    fn doc_view(&self) -> Option<(&Doc, Arc<Asset>)> {
+        self.doc().map(|d| (d, self.view_of(d)))
+    }
+
+    fn resolve(&self, asset: &Asset) -> Asset {
+        shader_project::resolve::resolve_asset(asset, &self.asset_index, &self.domains.material().registry)
+    }
+
+    fn stored_ref(&self, ty: AssetType, path: &str) -> Option<String> {
+        shader_project::resolve::ref_value(path, ty, &self.asset_index)
+    }
+
+    fn stored_kind(&self, kind: &str) -> Option<String> {
+        shader_project::resolve::stored_kind(kind, &self.asset_index, &self.domains.material().registry)
     }
 }

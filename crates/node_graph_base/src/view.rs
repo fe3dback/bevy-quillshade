@@ -135,6 +135,8 @@ pub struct PaletteEntry {
     pub description: String,
     /// Wins ties on the search score (the Named Route declaration after a wire from an output, design §6.4).
     pub lead: bool,
+    /// Why the entry cannot be picked (its row is dimmed and shows this as its tooltip); `None`: it can.
+    pub disabled: Option<String>,
     pub pick: PickFn,
 }
 
@@ -159,6 +161,7 @@ impl std::fmt::Debug for PaletteEntry {
             .field("id", &self.id)
             .field("name", &self.name)
             .field("category", &self.category)
+            .field("disabled", &self.disabled)
             .finish()
     }
 }

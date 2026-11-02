@@ -222,7 +222,8 @@ pub fn asset_icon(editor: &Editor, r: &AssetRef) -> IconRef {
     listed.or_else(kind).unwrap_or(IconId::File.into())
 }
 
-/// The RMB menu of a row (empty: no menu). Read-only rows get no create / rename / move / delete; an asset adds its
+/// The RMB menu of a row (empty: no menu). Read-only rows get no create / rename / move / delete; an asset adds
+/// Regenerate UUID when it is a duplicate loser (`AE001`), Assign UUID when it has no valid id (`AE004`), then its
 /// kind's items, a game file the active domain's items (design §14.4: two texture domains never both offer "Create
 /// Texture Asset").
 pub fn row_menu(editor: &Editor, row: &TreeRow) -> Vec<MenuEntry> {
@@ -246,6 +247,21 @@ pub fn row_menu(editor: &Editor, row: &TreeRow) -> Vec<MenuEntry> {
                 (Some(IconId::MoveToFolder.into()), "Move to...".into(), Action::MoveDialog(r.clone())),
                 (Some(IconId::Delete.into()), "Delete...".into(), Action::DeleteDialog(r.clone())),
             ]);
+            // The UUID quick fixes (ADR 0047 §11, §16).
+            if editor.duplicate_winner(r).is_some() {
+                menu.push(MenuEntry::from((
+                    Some(IconId::Regenerate.into()),
+                    "Regenerate UUID".to_string(),
+                    Action::RegenerateUuid(r.clone()),
+                )));
+            }
+            if editor.lacks_uuid(r) {
+                menu.push(MenuEntry::from((
+                    Some(IconId::Plus.into()),
+                    "Assign UUID".to_string(),
+                    Action::AssignUuid(r.clone()),
+                )));
+            }
             if let Some(kind) = editor.domain_list.asset_kind(r.domain, r.suffix) {
                 menu.extend((kind.row_menu)(editor, r));
             }

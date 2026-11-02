@@ -14,10 +14,11 @@ use editor_core::action::{Handled, TabAction};
 use editor_core::dynval::{PropKey, PropValue};
 use editor_core::tab::ViewKindId;
 use node_graph_base::input::NodePlaced;
-use project_core::AssetRef;
+use project_core::{AssetRef, Level};
 use shader_graph_core::model::{Asset, AssetKind, BlendMode, MaterialKind, PbrOutputMode, PreviewMode, Shading};
 use shader_graph_core::registry::{NodeRole, ParamDef, ParamKind};
 use shader_graph_core::{Hotkey, HotkeyKey, Value};
+use shader_project::resolve::ref_type;
 use shader_project::{AssetId, AssetType, Project, assets, ops};
 
 use super::{StatusCtx, StatusInfo};
@@ -271,7 +272,7 @@ pub(crate) fn asset_subpanes(editor: &Editor, d: &Doc) -> Vec<Box<dyn Scene>> {
                 crate::doc::node_title(
                     &editor.domains.material().registry,
                     &editor.domains.material().functions,
-                    &d.asset,
+                    &editor.view_of(d),
                     n
                 )
             )
@@ -307,12 +308,35 @@ fn gradient_slots(editor: &Editor, defs: &[ParamDef], params: &BTreeMap<String, 
     }
 }
 
+/// The picker of a reference param to a Material asset of type `ty` (ADR 0047 §4): `(stored value, label)` of every
+/// pickable target (curves, constant tables and gradient collections that load, Texture assets and the built-in
+/// textures) — the stored value is the target's UUID; a target without one (AE004) or sharing another file's (a
+/// copy, AE001) is not offered — and the stored form of `shown`, the value as the resolved view shows it (a path,
+/// `""`, or a dangling UUID). A current target that is not pickable (deleted, broken or without an id) is listed as missing, so the picker shows what the node stores.
+pub(crate) fn reference_choices(editor: &Editor, ty: AssetType, shown: &str) -> (Vec<(String, String)>, String) {
+    let targets = match ty {
+        AssetType::Curve => editor.curve_paths().into_iter().map(|p| (p.clone(), p)).collect(),
+        AssetType::Consts => editor.const_tables(),
+        AssetType::Texture => editor.texture_choices(),
+        AssetType::Gradients => editor.gradient_collections(),
+        AssetType::Material | AssetType::Function => Vec::new(),
+    };
+    let mut list: Vec<(String, String)> =
+        targets.into_iter().filter_map(|(path, label)| Some((editor.stored_ref(ty, &path)?, label))).collect();
+    let current = editor.stored_ref(ty, shown).unwrap_or_else(|| shown.to_string());
+    if !current.is_empty() && !list.iter().any(|c| c.0 == current) {
+        list.push((current.clone(), format!("{shown} (missing)")));
+    }
+    (list, current)
+}
+
 /// One selected node: what it is (title, kind, label, the asset it refers to), its parameters, input defaults and
 /// problems.
 pub(crate) fn node_subpanes(editor: &Editor, id: &str) -> Vec<Box<dyn Scene>> {
     let mut out = Vec::new();
-    let Some(d) = editor.doc() else { return out };
-    let Some(n) = d.asset.nodes.get(id) else { return out };
+    // Kinds and reference values as paths (ADR 0047 §4).
+    let Some((d, view)) = editor.doc_view() else { return out };
+    let Some(n) = view.nodes.get(id) else { return out };
     let Some(def) = editor.domains.material().registry.get(&n.kind) else {
         let unknown: Box<dyn Scene> = Box::new(text(format!("Unknown node kind {}", n.kind), TEXT, 13.0));
         out.push(subpane_box("Node", vec![unknown]));
@@ -321,7 +345,7 @@ pub(crate) fn node_subpanes(editor: &Editor, id: &str) -> Vec<Box<dyn Scene>> {
     let info = def.info();
     let mut node: Vec<Box<dyn Scene>> = Vec::new();
     node.push(Box::new(text(
-        crate::doc::node_title(&editor.domains.material().registry, &editor.domains.material().functions, &d.asset, id),
+        crate::doc::node_title(&editor.domains.material().registry, &editor.domains.material().functions, &view, id),
         TEXT,
         15.0,
     )));
@@ -353,34 +377,29 @@ pub(crate) fn node_subpanes(editor: &Editor, id: &str) -> Vec<Box<dyn Scene>> {
     out.push(subpane_box("Node", node));
     let params = editor.domains.material().registry.resolved_params(&n.kind, &n.params);
     let choices = Choices {
-        routes: route_declarations(&d.asset, &editor.domains.material().registry),
-        curves: editor.curve_paths().into_iter().map(|p| (p.clone(), p)).collect(),
-        const_tables: editor.const_tables(),
-        consts: Vec::new(),
-        textures: editor.texture_choices(),
-        gradients: editor.gradient_collections(),
+        routes: route_declarations(&view, &editor.domains.material().registry),
         slots: gradient_slots(editor, &def.params(), &params),
+        ..Choices::default()
     };
     let inline = inline_for_param(&n.kind, &params);
     let mut rows: Vec<Box<dyn Scene>> = Vec::new();
     // Params that only apply to other settings (FunctionInput `min` / `max` of a non-Float input) are hidden.
     for p in def.params().iter().filter(|p| p.visible(&params)) {
-        let v = params.get(&p.id).cloned().unwrap_or_else(|| p.default.clone());
+        let mut v = params.get(&p.id).cloned().unwrap_or_else(|| p.default.clone());
         let target = GraphProp::Param { node: id.to_string(), key: p.id.clone() };
-        // A deleted or broken curve stays visible as the current choice (the node reports E006).
         let mut choices_here = None;
-        if p.kind == ParamKind::Curve && !v.as_str().is_empty() && !choices.curves.iter().any(|c| c.0 == v.as_str()) {
+        // A reference picks the target's stored form (ADR 0047 §4); a deleted or broken target stays visible as the
+        // current choice (the node reports E006).
+        if let Some(ty) = ref_type(&p.kind) {
+            let (list, current) = reference_choices(editor, ty, v.as_str());
             let mut c = choices.clone();
-            c.curves.push((v.as_str().to_string(), format!("{} (missing)", v.as_str())));
-            choices_here = Some(c);
-        }
-        // A deleted or broken constant table stays visible as the current choice (the node reports E006).
-        if p.kind == ParamKind::GlobalConsts
-            && !v.as_str().is_empty()
-            && !choices.const_tables.iter().any(|c| c.0 == v.as_str())
-        {
-            let mut c = choices.clone();
-            c.const_tables.push((v.as_str().to_string(), format!("{} (missing)", v.as_str())));
+            match ty {
+                AssetType::Curve => c.curves = list,
+                AssetType::Consts => c.const_tables = list,
+                AssetType::Texture => c.textures = list,
+                _ => c.gradients = list,
+            }
+            v = Value::Str(current);
             choices_here = Some(c);
         }
         // Constants of the node's type in the selected table; a missing one or one of another type stays visible
@@ -408,22 +427,6 @@ pub(crate) fn node_subpanes(editor: &Editor, id: &str) -> Vec<Box<dyn Scene>> {
             }
             choices_here = Some(c);
         }
-        // A deleted or broken collection stays visible as the current choice (the node reports E006).
-        if p.kind == ParamKind::GradientCollection
-            && !v.as_str().is_empty()
-            && !choices.gradients.iter().any(|c| c.0 == v.as_str())
-        {
-            let mut c = choices.clone();
-            c.gradients.push((v.as_str().to_string(), format!("{} (missing)", v.as_str())));
-            choices_here = Some(c);
-        }
-        // A deleted Texture asset stays visible as the current choice (the node reports E006).
-        if p.kind == ParamKind::Texture && !v.as_str().is_empty() && !choices.textures.iter().any(|c| c.0 == v.as_str())
-        {
-            let mut c = choices.clone();
-            c.textures.push((v.as_str().to_string(), format!("{} (missing)", v.as_str())));
-            choices_here = Some(c);
-        }
         let choices = choices_here.as_ref().unwrap_or(&choices);
         let on_node = inline.as_ref().filter(|i| i.0 == p.id).map(|i| i.1);
         rows.push(value_row(p.label.clone(), target, &ranged(&p.kind, on_node), &v, choices));
@@ -431,18 +434,14 @@ pub(crate) fn node_subpanes(editor: &Editor, id: &str) -> Vec<Box<dyn Scene>> {
     if !rows.is_empty() {
         out.push(subpane_box("Parameters", rows));
     }
-    if let Some(sig) = node_signature(
-        &d.asset,
-        id,
-        &editor.domains.material().registry,
-        &editor.domains.material().functions,
-        &d.id.path,
-    ) {
+    if let Some(sig) =
+        node_signature(&view, id, &editor.domains.material().registry, &editor.domains.material().functions, &d.id.path)
+    {
         let mut rows: Vec<Box<dyn Scene>> = Vec::new();
         // A usage's input is the declaration's, never a value of its own.
         let inputs = if def.role() == NodeRole::RouteUsage { &[][..] } else { &sig.inputs[..] };
         for pin in inputs {
-            if d.asset.edge_into(id, &pin.id).is_some() || pin.implicit.is_some() {
+            if view.edge_into(id, &pin.id).is_some() || pin.implicit.is_some() {
                 continue;
             }
             let Some(kind) = pin_kind(pin.ty) else { continue };
@@ -458,8 +457,15 @@ pub(crate) fn node_subpanes(editor: &Editor, id: &str) -> Vec<Box<dyn Scene>> {
         }
     }
     if let Some(list) = editor.node_diags().get(id) {
+        // Errors, then warnings, then dimmed infos (spec §13).
+        let mut list = list.clone();
+        list.sort_by_key(|d| d.code.level());
         let rows = list.iter().map(|diag| -> Box<dyn Scene> {
-            let c = if diag.is_error() { Color::srgb(0.95, 0.42, 0.42) } else { Color::srgb(0.95, 0.78, 0.35) };
+            let c = match diag.code.level() {
+                Level::Error => Color::srgb(0.95, 0.42, 0.42),
+                Level::Warning => Color::srgb(0.95, 0.78, 0.35),
+                Level::Info => TEXT_DIM,
+            };
             Box::new(text(format!("{}: {}", diag.code, diag.message), c, 12.0))
         });
         out.push(subpane_box("Problems", rows.collect()));
@@ -474,7 +480,7 @@ impl TabDoc for Doc {
 
     fn current_value(&self, key: &PropKey, ctx: &StatusCtx) -> Option<PropValue> {
         let m = ctx.domain::<MaterialState>()?;
-        self.prop_of(key.downcast()?, m).map(|v| prop_value(&v))
+        self.prop_of(key.downcast()?, m, ctx.index).map(|v| prop_value(&v))
     }
 
     fn asset(&self) -> Option<&AssetRef> {
@@ -523,9 +529,11 @@ impl TabDoc for Doc {
         self.revision
     }
 
+    /// Writes the graph with the D27 path comment after each UUID reference (ADR 0047 §5), labelled by the editor's
+    /// `AssetIndex`; a graph without an id gets one first, kept by the model (§6).
     fn save(&mut self, ctx: &mut DocCtx) -> std::io::Result<()> {
         let project = project_of(ctx)?;
-        ops::save(project, &self.id, &self.asset).map_err(io_error)?;
+        ops::save_annotated(project, &self.id, &mut self.asset, ctx.index).map_err(io_error)?;
         self.mark_saved();
         Ok(())
     }

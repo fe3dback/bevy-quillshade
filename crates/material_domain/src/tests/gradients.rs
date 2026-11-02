@@ -56,7 +56,7 @@ fn gradients_create_open_save_reload() {
     // Changed outside the editor: a clean tab reloads.
     let mut changed = on_disk.clone();
     changed.slots[1].name = "sky".into();
-    ops::save_gradients(e.project.as_ref().unwrap(), &id, &changed).unwrap();
+    ops::save_gradients(e.project.as_ref().unwrap(), &id, &mut changed).unwrap();
     let i = e.asset_index(&id).unwrap();
     assert!(e.tabs[i].doc().changed_on_disk(e.project.as_ref().unwrap()));
     e.apply(Action::Reload(asset_key(&id)));
@@ -223,20 +223,23 @@ fn gradients_tab_restored_from_config_key() {
     assert_eq!(next.gradients_doc().map(|d| &d.id), Some(&id));
 }
 
-/// Open graphs follow a renamed / deleted collection (gradient design §6), as for curves and textures: a clean
-/// document reloads the rewritten file, a dirty one gets the change as an unsaved edit; delete also zeroes the slot.
+/// ADR 0047 §13: a renamed collection rewrites nothing — the open graph stores its UUID, stays as clean or dirty as
+/// it was and shows the new path; deleting it clears the reference, matched by UUID (gradient design §6: the slot
+/// is zeroed too), on disk and as an unsaved edit of a dirty document.
 #[test]
-fn gradients_rename_and_delete_follow_open_graphs() {
+fn gradients_rename_keeps_and_delete_clears_open_graphs() {
     use shader_graph_core::registry::gradient_refs;
     use shader_stdlib::nodes::color::{GRADIENT_COLLECTION_PARAM, GRADIENT_SLOT_PARAM, SAMPLE_GRADIENT_KIND};
-    let (_dir, mut e, id) = gradients_project();
+    let (dir, mut e, id) = gradients_project();
     let slot_id = gdoc(&e).collection.slots[3].id as i32;
+    let uuid = e.asset_index.id_of(&id.to_ref()).expect("the collection has an id").to_string();
     let rock = AssetId::new(AssetType::Material, "env/rock_wet");
     open_rock_wet(&mut e);
     let node = add(&mut e, SAMPLE_GRADIENT_KIND);
     let set =
         |key: &str, value: Value| set_value(GraphProp::Param { node: node.clone(), key: key.into() }, value, false);
-    e.apply(set(GRADIENT_COLLECTION_PARAM, Value::Str("common/ramps".into())));
+    // What the collection picker stores.
+    e.apply(set(GRADIENT_COLLECTION_PARAM, Value::Str(uuid.clone())));
     e.apply(set(GRADIENT_SLOT_PARAM, Value::Int(slot_id)));
     e.apply(Action::Save);
     let doc = |e: &Editor| e.tabs[e.doc_index(&rock).unwrap()].get::<Doc>().unwrap().clone();
@@ -247,29 +250,36 @@ fn gradients_rename_and_delete_follow_open_graphs() {
         let n = &doc(e).asset.nodes[&node];
         (n.params[GRADIENT_COLLECTION_PARAM].clone(), n.params[GRADIENT_SLOT_PARAM].clone())
     };
+    let shown = |e: &Editor| e.view_of(&doc(e)).nodes[&node].params[GRADIENT_COLLECTION_PARAM].clone();
+    let source = || std::fs::read(dir.path().join(rock.source_rel())).unwrap();
 
-    // Clean: the rewritten file is reloaded.
+    // Clean: nothing is rewritten.
+    let before = source();
     e.apply(Action::RenameDialog(id.to_ref()));
     e.apply(Action::Submit("env/terrain".into()));
     let moved = AssetId::new(AssetType::Gradients, "env/terrain");
     assert!(e.asset_index(&moved).is_some(), "the gradients tab follows");
-    assert_eq!(refs(&e), vec!["env/terrain"]);
+    assert_eq!(source(), before, "the referring file is untouched");
+    assert_eq!(refs(&e), std::slice::from_ref(&uuid));
+    assert_eq!(shown(&e), Value::Str("env/terrain".into()));
     assert!(!doc(&e).is_dirty());
 
-    // Dirty: the open material gets the new id as an unsaved edit, the slot is kept.
+    // Dirty: the unsaved edit stays, the reference too.
     let i = e.doc_index(&rock).unwrap();
     e.tabs[i].get_mut::<Doc>().unwrap().edit(|a| a.nodes.get_mut(&node).unwrap().pos.0 += 10.0);
     e.apply(Action::RenameDialog(moved.to_ref()));
     e.apply(Action::Submit("env/ground".into()));
     let moved = AssetId::new(AssetType::Gradients, "env/ground");
     assert!(doc(&e).is_dirty(), "unsaved edits stay unsaved");
-    assert_eq!(params(&e), (Value::Str("env/ground".into()), Value::Int(slot_id)));
+    assert_eq!(params(&e), (Value::Str(uuid.clone()), Value::Int(slot_id)));
+    assert_eq!(shown(&e), Value::Str("env/ground".into()));
 
     e.apply(Action::Delete(moved.to_ref()));
     assert!(e.asset_index(&moved).is_none());
     assert!(refs(&e).is_empty());
     assert!(doc(&e).is_dirty(), "unsaved edits stay unsaved");
     assert_eq!(params(&e), (Value::Str(String::new()), Value::Int(0)));
+    assert!(!String::from_utf8(source()).unwrap().contains(&uuid), "the file is cleared too");
 }
 
 /// Gradient design §6: picking another collection resets the slot (its ids mean nothing there) in the same undo
@@ -421,7 +431,7 @@ fn gradient_preview_key_follows_open_tab() {
 #[test]
 fn route_declaration_pastes_as_usage() {
     let (_dir, mut e) = project();
-    e.apply(Action::OpenAsset(AssetId::new(AssetType::Material, "env/rock_wet").to_ref()));
+    e.apply(Action::OpenAsset(AssetId::new(AssetType::Material, "env/water").to_ref()));
     let decl = add(&mut e, "stdlib::NamedRoute");
     let kinds = |e: &Editor, kind: &str| e.doc().unwrap().asset.nodes.values().filter(|n| n.kind == kind).count();
     let selected_route = |e: &Editor| {

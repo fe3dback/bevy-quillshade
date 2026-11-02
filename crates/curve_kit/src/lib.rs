@@ -7,13 +7,14 @@
 
 use serde::{Deserialize, Serialize};
 
-use project_core::{LoadError, probe_version};
+use project_core::{AssetUuid, LoadError, check_version, probe_version};
 
 #[cfg(feature = "editor")]
 pub mod editor;
 
-/// Current curve file format version.
-pub const CURVE_FORMAT_VERSION: u32 = 1;
+/// Current curve file format version: 2 carries the asset `id` (ADR 0047 §2, written by the v3 migration); older
+/// files are upgraded by the Migration Tool (`shader-editor migrate`), never by the loader.
+pub const CURVE_FORMAT_VERSION: u32 = 2;
 
 /// Smallest segment length used as a divisor (points with equal `t` make a step).
 const MIN_SPAN: f32 = 1e-6;
@@ -21,6 +22,9 @@ const MIN_SPAN: f32 = 1e-6;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Curve {
     pub format_version: u32,
+    /// The asset's UUID (ADR 0047 §2); nil (omitted from the file) until the asset is first saved.
+    #[serde(default, skip_serializing_if = "AssetUuid::is_nil")]
+    pub id: AssetUuid,
     pub name: String,
     /// Output of a point value of 0 (decision 0038); omitted from the file at its default.
     #[serde(default, skip_serializing_if = "is_default_min")]
@@ -89,6 +93,7 @@ impl Curve {
     pub fn new(name: impl Into<String>, points: Vec<(f32, f32)>) -> Self {
         let mut c = Curve {
             format_version: CURVE_FORMAT_VERSION,
+            id: AssetUuid::NIL,
             name: name.into(),
             min: DEFAULT_MIN,
             max: DEFAULT_MAX,
@@ -103,21 +108,20 @@ impl Curve {
         Curve::new(name, vec![(0.0, 0.0), (1.0, 1.0)])
     }
 
-    /// Parses a curve file (older format versions would migrate here).
+    /// Parses a curve file of the current format ([`CURVE_FORMAT_VERSION`]); any other is refused.
     pub fn from_ron(text: &str) -> Result<Curve, LoadError> {
-        match probe_version(text)? {
-            v if v > CURVE_FORMAT_VERSION => Err(LoadError::TooNew { found: v, supported: CURVE_FORMAT_VERSION }),
-            CURVE_FORMAT_VERSION => {
-                let mut c: Curve =
-                    ron::Options::default().from_str(text).map_err(|e| LoadError::Parse(e.to_string()))?;
-                if let Some(e) = range_error(c.min, c.max) {
-                    return Err(LoadError::Parse(e));
-                }
-                c.normalize();
-                Ok(c)
-            }
-            v => Err(LoadError::Unsupported(v)),
+        check_version(probe_version(text)?, CURVE_FORMAT_VERSION)?;
+        let mut c: Curve = ron::Options::default().from_str(text).map_err(|e| LoadError::Parse(e.to_string()))?;
+        if let Some(e) = range_error(c.min, c.max) {
+            return Err(LoadError::Parse(e));
         }
+        c.normalize();
+        Ok(c)
+    }
+
+    /// Mints the asset's UUID when it has none (ADR 0047 §6); returns it.
+    pub fn ensure_id(&mut self) -> AssetUuid {
+        self.id.ensure()
     }
 
     pub fn to_ron(&self) -> String {
@@ -234,6 +238,20 @@ mod tests {
         assert_eq!(Curve::from_ron(&text).unwrap(), c);
         let too_new = "Curve(format_version: 9, name: \"x\")";
         assert!(matches!(Curve::from_ron(too_new), Err(LoadError::TooNew { .. })));
+        let older = "Curve(format_version: 1, name: \"x\")";
+        assert!(matches!(Curve::from_ron(older), Err(LoadError::TooOld { found: 1, current: 2 })));
+    }
+
+    #[test]
+    fn saved_curve_keeps_its_id() {
+        let mut c = Curve::ramp("r");
+        assert!(!c.to_ron().contains("id:"), "a nil id is not written");
+        let id = c.ensure_id();
+        assert!(id.is_v7());
+        assert_eq!(c.ensure_id(), id, "an id is minted once");
+        let text = c.to_ron();
+        assert!(text.starts_with(&format!("Curve(\n  format_version: 2,\n  id: \"{id}\",\n")), "{text}");
+        assert_eq!(Curve::from_ron(&text).unwrap(), c);
     }
 
     #[test]
@@ -268,7 +286,7 @@ mod tests {
         let text = c.to_ron();
         assert!(!text.contains("min") && !text.contains("max"), "{text}");
         let old =
-            "Curve(\n  format_version: 1,\n  name: \"r\",\n  points: [\n    (0.0, 0.25),\n    (1.0, 1.0),\n  ],\n)\n";
+            "Curve(\n  format_version: 2,\n  name: \"r\",\n  points: [\n    (0.0, 0.25),\n    (1.0, 1.0),\n  ],\n)\n";
         assert_eq!(text, old, "a file without a range re-saves byte-identically");
         assert_eq!(Curve::from_ron(old).unwrap(), c);
 
@@ -282,7 +300,7 @@ mod tests {
 
     #[test]
     fn invalid_ranges_fail_to_load() {
-        let file = |range: &str| format!("Curve(format_version: 1, name: \"r\", {range} points: [(0.0, 0.5)])");
+        let file = |range: &str| format!("Curve(format_version: 2, name: \"r\", {range} points: [(0.0, 0.5)])");
         for range in ["min: 1.0,", "min: 2.0, max: 2.0,", "min: 3.0, max: -1.0,", "max: NaN,", "min: -inf,"] {
             match Curve::from_ron(&file(range)) {
                 Err(LoadError::Parse(e)) => assert!(e.starts_with("curve range"), "{range}: {e}"),

@@ -6,8 +6,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::value::Value;
 
-/// Current asset file format version.
-pub const FORMAT_VERSION: u32 = 1;
+/// Current asset file format version: 2 carries the asset `id` and references other assets by UUID (ADR 0047 §2–3,
+/// written by the v3 migration); older files are upgraded by the Migration Tool (`shader-editor migrate`), never by
+/// the loader.
+pub const FORMAT_VERSION: u32 = 2;
 
 pub type NodeId = String;
 
@@ -19,6 +21,9 @@ pub fn new_node_id() -> NodeId {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Asset {
     pub format_version: u32,
+    /// The asset's UUID (ADR 0047 §2); nil (omitted from the file) until the asset is first saved.
+    #[serde(default, skip_serializing_if = "AssetUuid::is_nil")]
+    pub id: AssetUuid,
     pub kind: AssetKind,
     pub name: String,
     #[serde(default)]
@@ -328,12 +333,13 @@ impl Preview {
 }
 
 pub use project_core::LoadError;
-use project_core::probe_version;
+use project_core::{AssetUuid, check_version, probe_version};
 
 impl Asset {
     pub fn new(name: impl Into<String>, kind: AssetKind) -> Self {
         Asset {
             format_version: FORMAT_VERSION,
+            id: AssetUuid::NIL,
             kind,
             name: name.into(),
             nodes: BTreeMap::new(),
@@ -344,19 +350,17 @@ impl Asset {
         }
     }
 
-    /// Parses an asset file, migrating older format versions.
+    /// Parses an asset file of the current format ([`FORMAT_VERSION`]); any other is refused.
     pub fn from_ron(text: &str) -> Result<Asset, LoadError> {
-        match probe_version(text)? {
-            v if v > FORMAT_VERSION => Err(LoadError::TooNew { found: v, supported: FORMAT_VERSION }),
-            FORMAT_VERSION => {
-                let mut asset: Asset =
-                    ron::Options::default().from_str(text).map_err(|e| LoadError::Parse(e.to_string()))?;
-                asset.normalize();
-                Ok(asset)
-            }
-            // Migrations from older versions go here: parse the legacy struct, convert, recurse.
-            v => Err(LoadError::Unsupported(v)),
-        }
+        check_version(probe_version(text)?, FORMAT_VERSION)?;
+        let mut asset: Asset = ron::Options::default().from_str(text).map_err(|e| LoadError::Parse(e.to_string()))?;
+        asset.normalize();
+        Ok(asset)
+    }
+
+    /// Mints the asset's UUID when it has none (ADR 0047 §6); returns it.
+    pub fn ensure_id(&mut self) -> AssetUuid {
+        self.id.ensure()
     }
 
     /// Serializes with sorted keys and fixed field order for readable VCS diffs.
@@ -550,7 +554,7 @@ mod tests {
         let text = a.to_ron();
         assert!(text.contains("output: Wrapped"), "{text}");
         assert_eq!(Asset::from_ron(&text).unwrap(), a);
-        let legacy = "Asset(format_version: 1, kind: Material(Pbr3d(PbrSettings(blend: Opaque, two_sided: false, \
+        let legacy = "Asset(format_version: 2, kind: Material(Pbr3d(PbrSettings(blend: Opaque, two_sided: false, \
                       shading: Lit))), name: \"x\")";
         let b = Asset::from_ron(legacy).unwrap();
         assert!(matches!(b.kind, AssetKind::Material(MaterialKind::Pbr3d(s)) if s.output == PbrOutputMode::Default));
@@ -560,5 +564,39 @@ mod tests {
     fn too_new_version_rejected() {
         let text = "Asset(format_version: 99, kind: Function, name: \"x\")";
         assert!(matches!(Asset::from_ron(text), Err(LoadError::TooNew { .. })));
+    }
+
+    #[test]
+    fn older_version_asks_for_migration() {
+        let text = "Asset(format_version: 1, kind: Function, name: \"x\")";
+        let e = Asset::from_ron(text).unwrap_err();
+        assert!(matches!(e, LoadError::TooOld { found: 1, current: FORMAT_VERSION }), "{e}");
+        assert!(e.to_string().contains("run `shader-editor migrate`"), "{e}");
+    }
+
+    /// A graph keeps its id and UUID references through the D27 path comments (ADR 0047 §5).
+    #[test]
+    fn uuid_graph_round_trips_with_path_comments() {
+        use project_core::DomainId;
+        use project_core::asset_index::annotate_refs;
+
+        let material = DomainId::new("material");
+        let (curve, func, gone) = (AssetUuid::new_v7(), AssetUuid::new_v7(), AssetUuid::new_v7());
+        let names: BTreeMap<AssetUuid, (DomainId, String)> =
+            [(curve, (material, "common/pulse".to_string())), (func, (material, "common/layer".to_string()))].into();
+        let mut a = Asset::new("rock", AssetKind::Material(MaterialKind::Unlit3d(UnlitSettings::default())));
+        assert!(!a.to_ron().contains("id:"), "a nil id is not written");
+        let id = a.ensure_id();
+        assert!(id.is_v7());
+        a.add_node(Node::new("stdlib::SampleCurve", (0.0, 0.0)).with_param("curve", Value::Str(curve.to_string())));
+        a.add_node(Node::new(format!("function::{func}"), (0.0, 0.0)));
+        a.add_node(Node::new("stdlib::SampleTexture", (0.0, 0.0)).with_param("texture", Value::Str(gone.to_string())));
+
+        let text = annotate_refs(&a.to_ron(), &names, material);
+        assert!(text.starts_with(&format!("Asset(\n  format_version: 2,\n  id: \"{id}\",\n")), "{text}");
+        assert!(text.contains(&format!("\"curve\": Str(\"{curve}\"), // common/pulse\n")), "{text}");
+        assert!(text.contains(&format!("kind: \"function::{func}\", // common/layer\n")), "{text}");
+        assert!(text.contains(&format!("Str(\"{gone}\"), // (missing)\n")), "{text}");
+        assert_eq!(Asset::from_ron(&text).unwrap(), a);
     }
 }

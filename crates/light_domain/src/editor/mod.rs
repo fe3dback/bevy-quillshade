@@ -24,7 +24,9 @@ use editor_core::menu::MainMenu;
 use editor_core::ui::icons::IconRef;
 use project_core::regen::DomainBackend;
 use project_core::{AssetRef, DomainId, Project};
+use project_migrate::DomainMigrator;
 
+use crate::backend::migrate::LightMigrator;
 use crate::backend::{ENVIRONMENT_SUFFIX, Environment, LIGHT, LightBackend, save_environment};
 
 pub use curve::{LIGHT_CURVE_VIEW, LightCurve, LightCurveDoc, LightCurveEdit, LightCurveEditor};
@@ -86,6 +88,11 @@ impl EditorDomain for LightDomain {
         Some(Box::new(LightBackend))
     }
 
+    /// The v3 step (ADR 0047 §14): asset UUIDs and the cube map by UUID in every Light source.
+    fn migrator(&self) -> Option<Box<dyn DomainMigrator>> {
+        Some(Box::new(LightMigrator))
+    }
+
     /// The asset kinds in the Assets menu's order: environments, then transition curves (`curve_kit`), then Texture
     /// assets (`texture_kit`, with its "New Texture..." template, the Light texture and image editor kinds and the
     /// `.ktx2` Game Assets).
@@ -144,7 +151,8 @@ fn create_environment(project: &Project, r: &AssetRef) -> io::Result<()> {
         return Err(io::Error::new(io::ErrorKind::AlreadyExists, format!("`{}` already exists", r.source_rel())));
     }
     project.ensure_layout()?;
-    save_environment(&file, &Environment::default())
+    // The template has no cube map: nothing to label.
+    save_environment(&file, &mut Environment::default(), &project_core::AssetIndex::default())
 }
 
 #[cfg(test)]

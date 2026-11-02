@@ -363,43 +363,45 @@ fn function_input_range_reaches_call_pin() {
     e.validate();
     let call = node_of(&e, "function::common/wet_mask");
     let d = e.doc().unwrap();
-    let sig =
-        node_signature(&d.asset, &call, &e.domains.material().registry, &e.domains.material().functions, &d.id.path)
-            .unwrap();
+    let view = e.view_of(d);
+    let sig = node_signature(&view, &call, &e.domains.material().registry, &e.domains.material().functions, &d.id.path)
+        .unwrap();
     assert_eq!(sig.input("wetness").unwrap().range, Some((0.2, 5.0)));
     assert_eq!(sig.input("base_color").unwrap().range, None, "Float3 input");
 }
 
-/// Review Focus 5: every sample function file (FunctionInputs without `min` / `max`) loads and saves byte-identical.
+/// Review Focus 5: every sample function file (FunctionInputs without `min` / `max`) loads and saves byte-identical
+/// (in a copy of the sample's Material sources, so the D27 comments of its references find their targets).
 #[test]
 fn function_files_unchanged() {
-    let sample = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/sample_game");
+    let sample = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/sample_game/quillshade/material");
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname = \"g\"\n").unwrap();
     std::fs::create_dir_all(dir.path().join("assets")).unwrap();
     let p = Project::open(dir.path()).unwrap();
     let mut files = Vec::new();
-    let mut stack = vec![sample.join("quillshade/material")];
+    let mut stack = vec![sample.clone()];
     while let Some(d) = stack.pop() {
         for entry in std::fs::read_dir(&d).unwrap() {
             let path = entry.unwrap().path();
+            let rel = path.strip_prefix(&sample).unwrap().to_string_lossy().replace('\\', "/");
+            let to = shader_project::layout::MaterialLayout::material_dir(&p).join(&rel);
             if path.is_dir() {
+                std::fs::create_dir_all(&to).unwrap();
                 stack.push(path);
-            } else if path.to_string_lossy().ends_with(".function.ron") {
-                files.push(path);
+            } else {
+                std::fs::copy(&path, &to).unwrap();
+                if let Some(name) = rel.strip_suffix(".function.ron") {
+                    files.push((AssetId::new(AssetType::Function, name), std::fs::read(&path).unwrap()));
+                }
             }
         }
     }
     assert!(files.len() >= 4, "{files:?}");
-    for file in files {
-        let rel = file.strip_prefix(sample.join("quillshade/material")).unwrap().to_string_lossy().replace('\\', "/");
-        let id = AssetId::new(AssetType::Function, rel.trim_end_matches(".function.ron"));
-        let original = std::fs::read(&file).unwrap();
-        std::fs::create_dir_all(id.file(&p).parent().unwrap()).unwrap();
-        std::fs::write(id.file(&p), &original).unwrap();
-        let asset = assets::load(&p, &id).unwrap();
-        ops::save(&p, &id, &asset).unwrap();
-        assert_eq!(std::fs::read(id.file(&p)).unwrap(), original, "{rel}");
+    for (id, original) in files {
+        let mut asset = assets::load(&p, &id).unwrap();
+        ops::save(&p, &id, &mut asset).unwrap();
+        assert_eq!(std::fs::read(id.file(&p)).unwrap(), original, "{id}");
     }
 }
 

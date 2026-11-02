@@ -106,7 +106,8 @@ fn validate_when_idle(mut editor: ResMut<Editor>, time: Res<Time>, mut quiet: Lo
 /// `SHADER_EDITOR_OPEN=env/rock_wet.material.ron` opens an asset at startup (`…ron#wesl` / `#rust`: its generated
 /// file in a text tab, after the asset's graph; `@game/textures/rock_albedo.ktx2`: a game image's tab;
 /// `@internal/default`: a built-in texture's read-only Texture tab); `SHADER_EDITOR_SELECT=stdlib::Lerp` selects the
-/// first node of that kind, or the comment frame of that id (`c01`); on a gradient collection the slot at a position,
+/// first node of that exact kind as resolved (`function::common/tex_layer`, whether the source stores the path or the
+/// function's UUID), or the comment frame of that id (`c01`); on a gradient collection the slot at a position,
 /// `0:s1` also its stop 1, `0:m1` its midpoint 1.
 /// `SHADER_EDITOR_DEMO=palette|wire|dialog|texture_channel:N|game_file_menu[:2]|gradient_color` additionally opens
 /// that popup before the shot (`game_file_menu`: the RMB menu of the first game image with a Texture asset — its item
@@ -143,15 +144,20 @@ fn debug_screenshot(
             editor.show_generated(&id, lang);
         }
         if let Ok(sel) = std::env::var("SHADER_EDITOR_SELECT")
-            && let Some(d) = editor.doc_mut()
+            && editor.doc().is_some()
         {
-            // A node kind, or the id of a comment frame.
-            if let Some(n) = d.asset.nodes.iter().find(|(_, n)| n.kind == sel).map(|(k, _)| k.clone()) {
-                d.set_selection([n]);
-            } else if d.asset.comments.iter().any(|f| f.id == sel) {
-                d.selected_frame = Some(sel);
+            // A node kind as resolved (`function::common/tex_layer` also for a `function::<uuid>` node, ADR 0047 §4),
+            // or the id of a comment frame.
+            let view = editor.doc_view().map(|(_, v)| v);
+            let node = view.and_then(|v| v.nodes.iter().find(|(_, n)| n.kind == sel).map(|(k, _)| k.clone()));
+            if let Some(d) = editor.doc_mut() {
+                if let Some(n) = node {
+                    d.set_selection([n]);
+                } else if d.asset.comments.iter().any(|f| f.id == sel) {
+                    d.selected_frame = Some(sel);
+                }
+                d.revision += 1;
             }
-            d.revision += 1;
             editor.ui.props += 1;
         } else if let Ok(sel) = std::env::var("SHADER_EDITOR_SELECT")
             && editor.gradients_doc().is_some()

@@ -521,8 +521,8 @@ pub fn scripted_input(
                 info!("demo {name}: dragged new wires {}, snapped to {snapped:?}", snapped.len());
             }
             None if s.frame == START + 40 && name == "drop_game_file" => {
-                let Some(d) = editor.doc() else { return };
-                for (id, n) in &d.asset.nodes {
+                let Some((d, view)) = editor.doc_view() else { return };
+                for (id, n) in &view.nodes {
                     let tex = ["texture", "default", "curve"].iter().find_map(|k| n.params.get(*k));
                     let kinds = ["Texture", "SampleCurve", shader_graph_core::registry::FUNCTION_PREFIX];
                     if kinds.iter().any(|k| n.kind.contains(k)) {

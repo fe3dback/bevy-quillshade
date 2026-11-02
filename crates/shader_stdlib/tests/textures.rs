@@ -200,6 +200,25 @@ fn missing_texture_asset_is_e006() {
     }
 }
 
+/// `check_texture_refs` rejects only image paths (they contain `.`): asset paths, `@internal/*` and the UUID
+/// references of the UUID format (ADR 0047 §3) load.
+#[test]
+fn texture_refs_accept_asset_paths_internal_ids_and_uuids() {
+    use shader_stdlib::nodes::texture::check_texture_refs;
+
+    let reg = shader_stdlib::registry();
+    for value in ["textures/rock", "@internal/default", "019b76da-a800-7a1b-8c2d-0123456789ab", ""] {
+        let mut a = unlit();
+        node(&mut a, "t", "stdlib::TextureSample", &[("texture", value)]);
+        node(&mut a, "o", "stdlib::TextureObject", &[("texture", value)]);
+        assert_eq!(check_texture_refs(&a, &reg), Ok(()), "{value}");
+    }
+    let mut a = unlit();
+    node(&mut a, "t", "stdlib::TextureSample", &[("texture", "textures/rock_albedo.png")]);
+    let e = check_texture_refs(&a, &reg).unwrap_err();
+    assert!(e.contains("image path `textures/rock_albedo.png`"), "{e}");
+}
+
 #[test]
 fn internal_texture_needs_no_project_asset() {
     let mut a = unlit();

@@ -350,7 +350,7 @@ impl TabDoc for GradientsDoc {
 
     fn save(&mut self, ctx: &mut DocCtx) -> std::io::Result<()> {
         let project = project_of(ctx)?;
-        ops::save_gradients(project, &self.id, &self.collection).map_err(io_error)?;
+        ops::save_gradients(project, &self.id, &mut self.collection).map_err(io_error)?;
         self.mark_saved();
         Ok(())
     }

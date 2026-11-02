@@ -151,6 +151,30 @@ impl From<TabAction> for Action {
     }
 }
 
+/// The Migration Tool's buttons (ADR 0046 "Editor (Migration Tool modal)"): while a
+/// [`crate::state::migration::MigrationSession`] is open these (and quitting) are the only actions
+/// [`crate::state::editor::Editor::apply`] runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MigrationAction {
+    /// Recomputes the plan (writes nothing) and appends it to the session's log: per step the files that would
+    /// change, grouped by domain. Not while the migration runs.
+    DryRun,
+    /// Runs the migration on a background thread (progress and log over a channel); also resumes after a failure.
+    /// Only when ready or failed.
+    Run,
+    /// Closes the Migration Tool: no project is open afterwards and nothing is written. Not while the migration runs.
+    Cancel,
+    /// After a successful run: closes the Migration Tool, opens the project normally and regenerates every enabled
+    /// domain (generated files are never migrated).
+    Open,
+}
+
+impl From<MigrationAction> for Action {
+    fn from(a: MigrationAction) -> Action {
+        Action::Migration(a)
+    }
+}
+
 /// UI → editor command queue, drained once per frame.
 #[derive(bevy::prelude::Resource, Default)]
 pub struct Actions(pub Vec<Action>);
@@ -221,6 +245,8 @@ pub enum Action {
     ToggleZen,
     /// The console/logs "All domains" checkbox: flips `Editor::console_all` (session only, design §6.4).
     ToggleConsoleAll,
+    /// The console/logs "Info" checkbox: flips `Editor::console_info` (session only, spec §13).
+    ToggleConsoleInfo,
     /// Back / Forward through the navigation history (decision 0041).
     NavBack,
     NavForward,
@@ -257,7 +283,15 @@ pub enum Action {
     ToggleFolder(TreeId, String),
     /// Selects a folder of a domain's Project tree: the target of that domain's "New ..." items (design §6.3).
     SelectFolder(DomainId, String),
+    /// Opens the asset of a diagnostic through its domain; the asset index's `AE001` / `AE004` open the matching
+    /// quick-fix dialog instead (ADR 0047 §11, §16).
     FocusDiagnostic(Diagnostic),
+    /// The duplicate-UUID quick fix (`AE001`, ADR 0047 §11): an unsaved document of the asset is saved first, then its
+    /// file gets a fresh UUIDv7 ([`crate::domain::DomainState::set_asset_uuid`]) and the project is rescanned.
+    RegenerateUuid(AssetRef),
+    /// The missing-UUID quick fix (`AE004`, ADR 0047 §16): as [`Action::RegenerateUuid`], for a file without a valid
+    /// UUIDv7 `id`.
+    AssignUuid(AssetRef),
     /// The tab `TabKey` names (an asset's or a tool's, [`crate::tab::Tab::key`]) reloads its file, dropping its edits
     /// (the "File changed on disk" dialog).
     Reload(crate::tab::TabKey),
@@ -270,6 +304,9 @@ pub enum Action {
     Quit,
     ForceQuit,
     SaveAllAndQuit,
+    /// A button of the Migration Tool modal (ADR 0046), the only actions besides quitting that run while a migration
+    /// session is open.
+    Migration(MigrationAction),
 }
 
 #[cfg(test)]

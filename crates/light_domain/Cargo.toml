@@ -15,6 +15,8 @@ dynamic_linking = ["bevy?/dynamic_linking"]
 
 [dependencies]
 project_core = { workspace = true }
+# The v3 migration step (`backend::migrate`); Bevy-free.
+project_migrate = { workspace = true }
 curve_kit = { workspace = true }
 texture_kit = { workspace = true }
 serde = { workspace = true }
@@ -33,6 +35,8 @@ tempfile = { workspace = true }
 bevy = { workspace = true, features = ["dynamic_linking"] }
 # The sample's cube map is checked against the `ktx2` crate Bevy loads `.ktx2` with.
 ktx2 = { workspace = true }
+# The v3 migration test migrates and regenerates a copy of the sample game with both domains.
+shader_project = { workspace = true }
 
 # `cargo test` runs the sample generator's unit tests too.
 [[example]]

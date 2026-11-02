@@ -29,7 +29,7 @@ use crate::ops::prelude::*;
 use crate::ops::*;
 use editor_core::tab::TabKey;
 use project_core::DomainId;
-use shader_graph_core::ir::WPO_PIN;
+use shader_graph_core::ir::{WORLD_NORMAL_PIN, WPO_PIN};
 use shader_project::Project;
 use shader_project::fixtures;
 
@@ -49,12 +49,23 @@ fn new_asset(suffix: &'static str, template: usize) -> Action {
     Action::NewAssetDialog { kind: (MATERIAL, suffix), template }
 }
 
+/// An editor on the fixtures (`fixtures::save_all`: asset UUIDs, references by UUID).
 fn project() -> (tempfile::TempDir, Editor) {
+    project_with(fixtures::save_all)
+}
+
+/// An editor on the fixtures with references stored as paths (`fixtures::save_all_path_form`, as written by hand):
+/// the resolve seam shows them like the UUID form.
+fn path_form_project() -> (tempfile::TempDir, Editor) {
+    project_with(fixtures::save_all_path_form)
+}
+
+fn project_with(write: fn(&Project) -> Result<(), shader_project::ops::OpError>) -> (tempfile::TempDir, Editor) {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname = \"g\"\n").unwrap();
     std::fs::create_dir_all(dir.path().join("assets")).unwrap();
     let p = Project::open(dir.path()).unwrap();
-    fixtures::save_all(&p).unwrap();
+    write(&p).unwrap();
     let mut e = crate::test_editor();
     e.open_project(dir.path()).unwrap();
     (dir, e)
@@ -71,6 +82,7 @@ mod palette;
 mod project;
 mod tab_docs;
 mod textures;
+mod uuid;
 mod wires;
 
 use consts::*;

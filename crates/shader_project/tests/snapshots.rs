@@ -123,9 +123,9 @@ fn every_stdlib_node_generates_and_compiles() {
     let (_dir, p) = project();
     let mut ids = Vec::new();
     for def in reg.defs() {
-        if let Some((name, asset)) = node_material(&def.info().id) {
+        if let Some((name, mut asset)) = node_material(&def.info().id) {
             let id = AssetId::new(AssetType::Material, format!("nodes/{name}"));
-            ops::save(&p, &id, &asset).unwrap();
+            ops::save(&p, &id, &mut asset).unwrap();
             ids.push(id);
         }
     }
@@ -215,7 +215,7 @@ fn preview_modes_generate_and_compile() {
             let mut asset = g.finish();
             asset.preview = Preview { node: Some(lerp), mode };
             let id = AssetId::new(AssetType::Material, format!("preview/{name}"));
-            ops::save(&p, &id, &asset).unwrap();
+            ops::save(&p, &id, &mut asset).unwrap();
             ids.push((id, asset));
         }
     }
@@ -262,7 +262,7 @@ fn wrapped_output_generates_and_compiles() {
     g.link((&make, "attributes"), (&out, "attributes"));
     g.link((&wpo, "out"), (&out, shader_graph_core::ir::WPO_PIN));
     let id = AssetId::new(AssetType::Material, "wrapped/pbr3d");
-    ops::save(&p, &id, &g.finish()).unwrap();
+    ops::save(&p, &id, &mut g.finish()).unwrap();
     let bevy = BevySources::discover();
     if bevy.is_none() {
         eprintln!("warning: Bevy 0.20 sources not in the cargo registry; WESL compile check skipped");
@@ -272,6 +272,60 @@ fn wrapped_output_generates_and_compiles() {
     assert!(errors.is_empty(), "errors:\n{}", errors.join("\n"));
     let text = std::fs::read_to_string(wesl_file(&p, &id).unwrap()).unwrap();
     snapshot("wesl__wrapped__pbr3d", &text);
+}
+
+/// Pbr3d World Normal (vertex stage, spec §7.3): a CLOD-style morph `lerp(vertex normal, up, k)` alone, with World
+/// Position Offset, and under a tangent-space normal map whose fragment `VertexNormalWS` reads the override.
+#[test]
+fn world_normal_generates_and_compiles() {
+    use shader_graph_core::ir::{WORLD_NORMAL_PIN, WPO_PIN};
+    use shader_graph_core::model::PbrSettings;
+    let (_dir, p) = project();
+    let mat = MaterialKind::Pbr3d(PbrSettings::default());
+    let mut ids = Vec::new();
+    for name in ["only", "with_wpo", "with_normal_map"] {
+        let mut g = GraphBuilder::new(name, AssetKind::Material(mat));
+        let out = g.node(mat.output_node_kind(), (900.0, 0.0));
+        let vn = g.node("stdlib::VertexNormalWS", (0.0, 0.0));
+        let up = g.node_p("stdlib::Constant3Vector", (0.0, 150.0), &[("value", Value::Float3([0.0, 1.0, 0.0]))]);
+        let k = g.node_p("param::Scalar", (0.0, 300.0), &[("name", Value::Str("morph".into()))]);
+        let lerp = g.node("stdlib::Lerp", (300.0, 0.0));
+        g.link((&vn, "out"), (&lerp, "a"));
+        g.link((&up, "out"), (&lerp, "b"));
+        g.link((&k, "out"), (&lerp, "alpha"));
+        g.link((&lerp, "out"), (&out, WORLD_NORMAL_PIN));
+        match name {
+            "with_wpo" => {
+                let wpo =
+                    g.node_p("stdlib::Constant3Vector", (300.0, 300.0), &[("value", Value::Float3([0.0, 0.1, 0.0]))]);
+                g.link((&wpo, "out"), (&out, WPO_PIN));
+            }
+            "with_normal_map" => {
+                let ts =
+                    g.node_p("stdlib::Constant3Vector", (300.0, 300.0), &[("value", Value::Float3([0.2, 0.0, 1.0]))]);
+                g.link((&ts, "out"), (&out, "normal"));
+                // Slope mask in the fragment: reads the overridden normal.
+                let fvn = g.node("stdlib::VertexNormalWS", (300.0, 450.0));
+                g.link((&fvn, "out"), (&out, "base_color"));
+            }
+            _ => {}
+        }
+        let id = AssetId::new(AssetType::Material, format!("world_normal/{name}"));
+        ops::save(&p, &id, &mut g.finish()).unwrap();
+        ids.push(id);
+    }
+    let bevy = BevySources::discover();
+    if bevy.is_none() {
+        eprintln!("warning: Bevy 0.20 sources not in the cargo registry; WESL compile check skipped");
+    }
+    let report = regenerate(&p, &RegenOptions { compile_check: bevy.as_ref(), ..Default::default() }).unwrap();
+    let errors: Vec<String> = report.diagnostics().filter(|d| d.is_error()).map(|d| d.to_string()).collect();
+    assert!(errors.is_empty(), "errors:\n{}", errors.join("\n"));
+    for id in &ids {
+        let text = std::fs::read_to_string(wesl_file(&p, id).unwrap()).unwrap();
+        assert!(text.contains("out.world_normal = normalize("), "{id:?}");
+        snapshot(&format!("wesl__world_normal__{}", id.name()), &text);
+    }
 }
 
 /// Preview of a Make node in `full` mode (decision 0023): every attribute field feeds its slot.
@@ -290,7 +344,7 @@ fn preview_attributes_generates_and_compiles() {
     let mut asset = g.finish();
     asset.preview = Preview { node: Some(make), mode: PreviewMode::Full };
     let id = AssetId::new(AssetType::Material, "preview/pbr3d_attributes_full");
-    ops::save(&p, &id, &asset).unwrap();
+    ops::save(&p, &id, &mut asset).unwrap();
     let bevy = BevySources::discover();
     if bevy.is_none() {
         eprintln!("warning: Bevy 0.20 sources not in the cargo registry; WESL compile check skipped");
@@ -305,7 +359,7 @@ fn preview_attributes_generates_and_compiles() {
 
     // Preview off: the Rust module does not change.
     asset.preview.node = None;
-    ops::save(&p, &id, &asset).unwrap();
+    ops::save(&p, &id, &mut asset).unwrap();
     assert!(!regenerate(&p, &RegenOptions::default()).unwrap().has_errors());
     assert_eq!(rust, std::fs::read_to_string(rust_file(&p, &id).unwrap()).unwrap());
 }

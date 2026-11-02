@@ -1,12 +1,15 @@
 //! Domain-neutral regeneration (design §6.5): every domain plans its files, then [`commit`] compares them with the
 //! disk, refuses to overwrite foreign files (E008, spec §12), deletes orphans inside each domain's own roots and writes
 //! one atomic batch together with the umbrella crate files (design §10: written by every run, whatever domains are
-//! selected).
+//! selected). Every run first builds the project's [`AssetIndex`] from all compiled-in backends (ADR 0047 §9);
+//! [`run_affected`] regenerates only what a set of changed assets affects, across domains (techdoc §4.3).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::PathBuf;
 
+use crate::asset_index::{AssetIndex, DomainIndex};
+use crate::asset_ref::AssetRef;
 use crate::diag::Diagnostic;
 use crate::domain::DomainId;
 use crate::files::walk_files;
@@ -178,13 +181,30 @@ pub fn write_umbrella(project: &Project, crates: &[CrateContribution]) -> io::Re
     commit(project, &[], crates, false)
 }
 
-/// A domain's generator (design §6.5).
-pub trait DomainBackend {
+/// A domain's generator (design §6.5). `Send + Sync`: the editor's Migration Tool regenerates the migrated project on
+/// its background thread (ADR 0046 "Editor (Migration Tool modal)").
+pub trait DomainBackend: Send + Sync {
     fn id(&self) -> DomainId;
     /// Its module of the umbrella crate.
     fn crate_contribution(&self) -> CrateContribution;
-    /// Loads, validates and generates the whole domain; `compile` also runs its compile check (design §10).
-    fn plan(&self, project: &Project, compile: bool) -> DomainPlan;
+    /// The domain's part of the project's [`AssetIndex`] (ADR 0047 §7): its current-format source files with their
+    /// ids, sub-items and references. Called for every compiled-in backend, enabled or not.
+    fn index(&self, project: &Project) -> DomainIndex;
+    /// Loads, validates and generates the whole domain; `compile` also runs its compile check (design §10). `index`
+    /// spans every compiled-in domain: references are resolved against it.
+    fn plan(&self, project: &Project, index: &AssetIndex, compile: bool) -> DomainPlan;
+    /// Like [`DomainBackend::plan`], but only `affected` (the domain's assets among [`AssetIndex::affected`] of a
+    /// change, the changed ones included) need to be regenerated: the files of the domain's other assets may be kept
+    /// as they are ([`DomainOutput::keep`]). [`run_affected`] never lets it orphan-scan. By default the whole domain.
+    fn plan_affected(
+        &self,
+        project: &Project,
+        index: &AssetIndex,
+        _affected: &BTreeSet<AssetRef>,
+        compile: bool,
+    ) -> DomainPlan {
+        self.plan(project, index, compile)
+    }
 }
 
 /// A domain's diagnostics and files.
@@ -206,9 +226,10 @@ impl RunReport {
     }
 }
 
-/// Regenerates the domains in `only` (all when empty) and the umbrella crate (design §10). Diagnostics: W105 first,
-/// then each selected domain's in backend order, then one E008 per blocked file. Errors only on I/O failure of the
-/// final write.
+/// Regenerates the domains in `only` (all when empty) and the umbrella crate (design §10). The [`AssetIndex`] is built
+/// from every backend in `backends`, enabled or not (a reference into a disabled domain is AE003). Diagnostics: W105
+/// first, then the index's (`AE###`) of the selected enabled domains, then each selected domain's in backend order,
+/// then one E008 per blocked file. Errors only on I/O failure of the final write.
 pub fn run(
     project: &Project,
     backends: &[&dyn DomainBackend],
@@ -221,13 +242,62 @@ pub fn run(
     if let Some(text) = project.workspace_problem() {
         report.diagnostics.push(Diagnostic::warning("W105", text).in_asset("Cargo.toml"));
     }
+    let selected = |d: DomainId| (only.is_empty() || only.contains(&d)) && project.domain_enabled(d);
+    let index = AssetIndex::build(backends.iter().map(|b| b.index(project)).collect());
+    report.diagnostics.extend(index.diagnostics(project).into_iter().filter(|d| d.domain.is_some_and(selected)));
     let mut outputs = Vec::new();
-    for b in backends.iter().filter(|b| (only.is_empty() || only.contains(&b.id())) && project.domain_enabled(b.id())) {
-        let plan = b.plan(project, compile);
+    for b in backends.iter().filter(|b| selected(b.id())) {
+        let plan = b.plan(project, &index, compile);
         report.diagnostics.extend(plan.diagnostics);
         outputs.push(plan.output);
     }
-    let committed = commit(project, &outputs, &crates, dry_run)?;
+    finish(project, report, &outputs, &crates, dry_run)
+}
+
+/// Regenerates what changing `changed` affects, across domains (techdoc §4.3, ADR 0047 §9): the [`AssetIndex`] of
+/// every backend gives [`AssetIndex::affected`] (`changed` plus its transitive referrers, whatever their domain); each
+/// enabled domain with assets in it plans them ([`DomainBackend::plan_affected`], in backend order), and one
+/// [`commit`] writes the result and the umbrella crate files. No domain orphan-scans (out-of-scope files are not
+/// orphans). Diagnostics: W105 first, then the index's (`AE###`) of the replanned domains, then theirs, then E008.
+/// A domain with none of its assets affected is not planned. Errors only on I/O failure of the final write.
+pub fn run_affected(
+    project: &Project,
+    backends: &[&dyn DomainBackend],
+    changed: &BTreeSet<AssetRef>,
+    compile: bool,
+    dry_run: bool,
+) -> io::Result<RunReport> {
+    let crates: Vec<CrateContribution> = backends.iter().map(|b| b.crate_contribution()).collect();
+    let mut report = RunReport::default();
+    if let Some(text) = project.workspace_problem() {
+        report.diagnostics.push(Diagnostic::warning("W105", text).in_asset("Cargo.toml"));
+    }
+    let index = AssetIndex::build(backends.iter().map(|b| b.index(project)).collect());
+    let mut by_domain: BTreeMap<DomainId, BTreeSet<AssetRef>> = BTreeMap::new();
+    for r in index.affected(changed) {
+        by_domain.entry(r.domain).or_default().insert(r);
+    }
+    let selected = |d: DomainId| by_domain.contains_key(&d) && project.domain_enabled(d);
+    report.diagnostics.extend(index.diagnostics(project).into_iter().filter(|d| d.domain.is_some_and(selected)));
+    let mut outputs = Vec::new();
+    for b in backends.iter().filter(|b| selected(b.id())) {
+        let mut plan = b.plan_affected(project, &index, &by_domain[&b.id()], compile);
+        plan.output.orphan_scan = false;
+        report.diagnostics.extend(plan.diagnostics);
+        outputs.push(plan.output);
+    }
+    finish(project, report, &outputs, &crates, dry_run)
+}
+
+/// The end of [`run`] / [`run_affected`]: [`commit`], one E008 per blocked file, the changes.
+fn finish(
+    project: &Project,
+    mut report: RunReport,
+    outputs: &[DomainOutput],
+    crates: &[CrateContribution],
+    dry_run: bool,
+) -> io::Result<RunReport> {
+    let committed = commit(project, outputs, crates, dry_run)?;
     for b in committed.blocked {
         let mut d = Diagnostic::error("E008", b.message);
         if let Some(domain) = b.domain {
@@ -244,7 +314,12 @@ pub fn run(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use super::*;
+    use crate::asset_index::IndexedAsset;
+    use crate::asset_ref::AssetRef;
+    use crate::asset_uuid::AssetUuid;
     use crate::files::OWNED_DIR_MARKER;
     use crate::marker::header;
 
@@ -252,16 +327,31 @@ mod tests {
     const B: DomainId = DomainId::new("beta");
 
     /// Test backend: marker text files under its output and module directories, optionally an owned binary root
-    /// `bin/` under its output directory.
+    /// `bin/` under its output directory; `assets` is its index part, `seen` the ids of the index `plan` received,
+    /// `affected` the paths `plan_affected` received (it then plans everything, orphan scan included).
     struct Fake {
         id: DomainId,
         files: Vec<&'static str>,
         binary: bool,
+        assets: Vec<IndexedAsset>,
+        seen: Mutex<Option<Vec<AssetUuid>>>,
+        affected: Mutex<Option<Vec<String>>>,
     }
 
     impl Fake {
         fn new(id: DomainId, files: &[&'static str]) -> Fake {
-            Fake { id, files: files.to_vec(), binary: false }
+            Fake {
+                id,
+                files: files.to_vec(),
+                binary: false,
+                assets: Vec::new(),
+                seen: Mutex::new(None),
+                affected: Mutex::new(None),
+            }
+        }
+
+        fn affected(&self) -> Option<Vec<String>> {
+            self.affected.lock().unwrap().clone()
         }
     }
 
@@ -274,7 +364,13 @@ mod tests {
             CrateContribution { domain: self.id, plugin: "FakePlugin", bevy_features: &[], dependencies: &[] }
         }
 
-        fn plan(&self, project: &Project, _compile: bool) -> DomainPlan {
+        fn index(&self, _project: &Project) -> DomainIndex {
+            DomainIndex { domain: self.id, assets: self.assets.clone() }
+        }
+
+        fn plan(&self, project: &Project, index: &AssetIndex, _compile: bool) -> DomainPlan {
+            let ids = [A, B].into_iter().flat_map(|d| index.assets_of(d, "x").map(|e| e.id)).collect();
+            *self.seen.lock().unwrap() = Some(ids);
             let out = project.output_dir(self.id);
             let module = project.module_dir(self.id);
             let mut files = Vec::new();
@@ -295,6 +391,17 @@ mod tests {
                 diagnostics: Vec::new(),
                 output: DomainOutput { domain: self.id, files, keep: BTreeSet::new(), roots, orphan_scan: true },
             }
+        }
+
+        fn plan_affected(
+            &self,
+            project: &Project,
+            index: &AssetIndex,
+            affected: &BTreeSet<AssetRef>,
+            compile: bool,
+        ) -> DomainPlan {
+            *self.affected.lock().unwrap() = Some(affected.iter().map(|r| r.path.clone()).collect());
+            self.plan(project, index, compile)
         }
     }
 
@@ -351,7 +458,7 @@ mod tests {
         std::fs::write(bin.join("x.png"), [0x89, b'P', b'N', b'G']).unwrap();
         // A foreign file outside the binary root is never deleted.
         std::fs::write(p.output_dir(A).join("foreign.txt"), "mine\n").unwrap();
-        let a = Fake { id: A, files: vec!["a.txt"], binary: true };
+        let a = Fake { binary: true, ..Fake::new(A, &["a.txt"]) };
         let r = run(&p, &[&a], &[], false, false).unwrap();
         assert!(!r.has_errors(), "{:?}", r.diagnostics);
         assert!(!bin.join("x.png").exists());
@@ -424,5 +531,136 @@ mod tests {
         assert_eq!(r.diagnostics[0].code, "W105");
         assert_eq!(r.diagnostics[0].asset.as_deref(), Some("Cargo.toml"));
         assert!(!r.has_errors());
+    }
+
+    fn x(domain: DomainId, path: &str, id: u128, to: &[u128]) -> IndexedAsset {
+        let uuid = |n: u128| AssetUuid::from_u128(0x0190_0000_0000_7000_8000_0000_0000_0000 | n);
+        IndexedAsset {
+            asset: AssetRef { domain, path: path.into(), suffix: "x" },
+            id: Ok(uuid(id)),
+            sub_items: Vec::new(),
+            refs: to
+                .iter()
+                .map(|&n| crate::asset_index::IndexedRef { to: uuid(n), sub: None, location: Some("f".into()) })
+                .collect(),
+        }
+    }
+
+    /// Every `plan` gets the index of all backends, unselected and disabled ones included.
+    #[test]
+    fn plan_receives_the_index_of_every_backend() {
+        let (_d, mut p) = project();
+        p.settings.domains.insert(B.as_str().into(), crate::layout::DomainEntry { enabled: false });
+        let a = Fake { assets: vec![x(A, "one", 1, &[2])], ..Fake::new(A, &[]) };
+        let b = Fake { assets: vec![x(B, "two", 2, &[])], ..Fake::new(B, &[]) };
+        let r = run(&p, &[&a, &b], &[], false, true).unwrap();
+        let seen = a.seen.lock().unwrap().clone().expect("alpha was planned");
+        assert_eq!(seen.len(), 2, "{seen:?}");
+        assert!(b.seen.lock().unwrap().is_none(), "a disabled domain is not planned");
+        // The reference into the disabled domain is AE003.
+        let codes: Vec<_> = r.diagnostics.iter().map(|d| d.code.as_str()).collect();
+        assert_eq!(codes, ["AE003"]);
+    }
+
+    /// Index diagnostics come right after W105, only for the selected enabled domains, before the domains' own.
+    #[test]
+    fn index_diagnostics_are_in_the_report() {
+        let (_d, p) = project();
+        std::fs::write(p.root.join("Cargo.toml"), "[workspace]\nmembers = [\"game\"]\n").unwrap();
+        let a = Fake { assets: vec![x(A, "one", 1, &[9]), x(A, "copy", 1, &[])], ..Fake::new(A, &[]) };
+        let b = Fake { assets: vec![x(B, "two", 2, &[8])], ..Fake::new(B, &[]) };
+        let r = run(&p, &[&a, &b], &[], false, true).unwrap();
+        let got: Vec<_> =
+            r.diagnostics.iter().map(|d| (d.code.as_str(), d.domain, d.asset.as_deref().unwrap_or("-"))).collect();
+        assert_eq!(
+            got,
+            [
+                ("W105", None, "Cargo.toml"),
+                ("AE001", Some(A), "quillshade/alpha/one.x.ron"),
+                ("AE002", Some(A), "quillshade/alpha/one.x.ron"),
+                ("AE002", Some(B), "quillshade/beta/two.x.ron"),
+            ]
+        );
+        assert!(r.has_errors());
+        let only_b = run(&p, &[&a, &b], &[B], false, true).unwrap();
+        let codes: Vec<_> = only_b.diagnostics.iter().map(|d| (d.code.as_str(), d.domain)).collect();
+        assert_eq!(codes, [("W105", None), ("AE002", Some(B))]);
+    }
+
+    fn changed(domain: DomainId, path: &str) -> BTreeSet<AssetRef> {
+        BTreeSet::from([AssetRef { domain, path: path.into(), suffix: "x" }])
+    }
+
+    /// Only the domains with affected assets are replanned, each with its own affected assets; the others' files and
+    /// their index diagnostics stay out of the run.
+    #[test]
+    fn run_affected_replans_only_affected_domains() {
+        let (_d, p) = project();
+        // beta/two refers to alpha/one; alpha/lone and beta/other refer to nothing (beta/other dangles: AE002).
+        let a = Fake { assets: vec![x(A, "one", 1, &[]), x(A, "lone", 3, &[])], ..Fake::new(A, &["a.txt"]) };
+        let b = Fake { assets: vec![x(B, "two", 2, &[1]), x(B, "other", 4, &[9])], ..Fake::new(B, &["b.txt"]) };
+        let r = run_affected(&p, &[&a, &b], &changed(A, "one"), false, true).unwrap();
+        assert_eq!(a.affected(), Some(vec!["one".to_string()]));
+        assert_eq!(b.affected(), Some(vec!["two".to_string()]), "the referrer in the other domain");
+        assert!(a.seen.lock().unwrap().is_some(), "the default `plan_affected` is the full plan");
+        let codes: Vec<_> = r.diagnostics.iter().map(|d| (d.code.as_str(), d.domain)).collect();
+        assert_eq!(codes, [("AE002", Some(B))], "the index diagnostics of the replanned domains");
+        assert!(r.changes.contains(&Change::Create(p.output_dir(B).join("b.txt"))), "{:?}", r.changes);
+
+        // A change nothing refers to replans its own domain only.
+        let (a, b) = (Fake { assets: a.assets.clone(), ..Fake::new(A, &["a.txt"]) }, Fake::new(B, &["b.txt"]));
+        let r = run_affected(&p, &[&a, &b], &changed(A, "lone"), false, true).unwrap();
+        assert_eq!((a.affected(), b.affected()), (Some(vec!["lone".to_string()]), None));
+        assert!(b.seen.lock().unwrap().is_none(), "beta is not planned at all");
+        assert!(!r.changes.iter().any(|c| c.path().starts_with(p.output_dir(B))), "{:?}", r.changes);
+        // The umbrella is written by every run.
+        assert!(r.changes.contains(&Change::Create(p.crate_dir().join("src/lib.rs"))), "{:?}", r.changes);
+
+        // A change outside the index (a legacy file) is still its own domain's; a disabled domain is never planned.
+        let mut off = p.clone();
+        off.settings.domains.insert(B.as_str().into(), crate::layout::DomainEntry { enabled: false });
+        let (a, b) = (Fake::new(A, &[]), Fake::new(B, &[]));
+        run_affected(&off, &[&a, &b], &changed(A, "legacy"), false, true).unwrap();
+        run_affected(&off, &[&a, &b], &changed(B, "legacy"), false, true).unwrap();
+        assert_eq!((a.affected(), b.affected()), (Some(vec!["legacy".to_string()]), None));
+    }
+
+    /// alpha/one <- beta/two <- alpha/three <- beta/four: a change of alpha/one reaches all four, across the domain
+    /// boundary twice.
+    #[test]
+    fn run_affected_is_transitive_across_domains() {
+        let (_d, p) = project();
+        let a =
+            Fake { assets: vec![x(A, "one", 1, &[]), x(A, "three", 3, &[2]), x(A, "x", 5, &[])], ..Fake::new(A, &[]) };
+        let b = Fake { assets: vec![x(B, "two", 2, &[1]), x(B, "four", 4, &[3])], ..Fake::new(B, &[]) };
+        let r = run_affected(&p, &[&a, &b], &changed(A, "one"), false, true).unwrap();
+        assert!(!r.has_errors(), "{:?}", r.diagnostics);
+        assert_eq!(a.affected(), Some(vec!["one".to_string(), "three".to_string()]));
+        assert_eq!(b.affected(), Some(vec!["four".to_string(), "two".to_string()]));
+        // From the middle of the chain: only what lies downstream.
+        let (a, b) = (
+            Fake { assets: a.assets.clone(), ..Fake::new(A, &[]) },
+            Fake { assets: b.assets.clone(), ..Fake::new(B, &[]) },
+        );
+        run_affected(&p, &[&a, &b], &changed(A, "three"), false, true).unwrap();
+        assert_eq!((a.affected(), b.affected()), (Some(vec!["three".to_string()]), Some(vec!["four".to_string()])));
+    }
+
+    /// Even a domain whose `plan_affected` asks for an orphan scan (the default full plan does) deletes nothing.
+    #[test]
+    fn run_affected_never_orphan_scans() {
+        let (_d, p) = project();
+        let a = Fake { assets: vec![x(A, "one", 1, &[])], ..Fake::new(A, &["a.txt"]) };
+        run(&p, &[&a], &[], false, false).unwrap();
+        let orphan = p.output_dir(A).join("old.txt");
+        std::fs::write(&orphan, format!("{}\nold\n", header("//", None))).unwrap();
+        let r = run_affected(&p, &[&a], &changed(A, "one"), false, false).unwrap();
+        assert!(!r.has_errors(), "{:?}", r.diagnostics);
+        assert!(a.affected().is_some());
+        assert!(orphan.is_file(), "{:?}", r.changes);
+        assert!(!r.changes.iter().any(|c| matches!(c, Change::Delete(_))), "{:?}", r.changes);
+        // A full run would have deleted it.
+        let r = run(&p, &[&a], &[], false, true).unwrap();
+        assert_eq!(r.changes, [Change::Delete(orphan)]);
     }
 }

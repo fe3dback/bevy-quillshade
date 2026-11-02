@@ -7,13 +7,15 @@
 use std::collections::HashSet;
 use std::hash::{BuildHasher, RandomState};
 
-use project_core::probe_version;
+use project_core::{AssetUuid, check_version, probe_version};
 use serde::{Deserialize, Serialize};
 
 use crate::model::LoadError;
 
-/// Current gradient collection file format version (its own probe; the graph `FORMAT_VERSION` is unrelated).
-pub const GRADIENTS_FORMAT_VERSION: u32 = 1;
+/// Current gradient collection file format version (its own probe; the graph `FORMAT_VERSION` is unrelated): 2
+/// carries the asset `id` (ADR 0047 §2, written by the v3 migration); older files are upgraded by the Migration Tool
+/// (`shader-editor migrate`), never by the loader.
+pub const GRADIENTS_FORMAT_VERSION: u32 = 2;
 
 /// Slots in every collection (rows of the baked texture).
 pub const SLOTS: usize = 128;
@@ -45,6 +47,9 @@ pub fn texture_id(collection: &str) -> String {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GradientCollection {
     pub format_version: u32,
+    /// The asset's UUID (ADR 0047 §2); nil (omitted from the file) until the asset is first saved.
+    #[serde(default, skip_serializing_if = "AssetUuid::is_nil")]
+    pub id: AssetUuid,
     /// Exactly [`SLOTS`] entries; position `r` is row `r` of the baked texture.
     #[serde(default)]
     pub slots: Vec<Slot>,
@@ -101,7 +106,7 @@ impl GradientCollection {
                 Slot { id, name: String::new(), stops: Vec::new() }
             })
             .collect();
-        GradientCollection { format_version: GRADIENTS_FORMAT_VERSION, slots }
+        GradientCollection { format_version: GRADIENTS_FORMAT_VERSION, id: AssetUuid::NIL, slots }
     }
 
     /// [`GradientCollection::new`] with random ids (splitmix64 seeded from the std hasher's random keys).
@@ -117,22 +122,20 @@ impl GradientCollection {
         })
     }
 
-    /// Parses a collection file (older format versions would migrate here), normalizes it and checks its structure:
-    /// slot count, ids, stop count (`LoadError::Parse` naming the problem).
+    /// Parses a collection file of the current format ([`GRADIENTS_FORMAT_VERSION`]; any other is refused),
+    /// normalizes it and checks its structure: slot count, ids, stop count (`LoadError::Parse` naming the problem).
     pub fn from_ron(text: &str) -> Result<Self, LoadError> {
-        match probe_version(text)? {
-            v if v > GRADIENTS_FORMAT_VERSION => {
-                Err(LoadError::TooNew { found: v, supported: GRADIENTS_FORMAT_VERSION })
-            }
-            GRADIENTS_FORMAT_VERSION => {
-                let mut c: GradientCollection =
-                    ron::Options::default().from_str(text).map_err(|e| LoadError::Parse(e.to_string()))?;
-                c.normalize();
-                c.check().map_err(LoadError::Parse)?;
-                Ok(c)
-            }
-            v => Err(LoadError::Unsupported(v)),
-        }
+        check_version(probe_version(text)?, GRADIENTS_FORMAT_VERSION)?;
+        let mut c: GradientCollection =
+            ron::Options::default().from_str(text).map_err(|e| LoadError::Parse(e.to_string()))?;
+        c.normalize();
+        c.check().map_err(LoadError::Parse)?;
+        Ok(c)
+    }
+
+    /// Mints the asset's UUID when it has none (ADR 0047 §6); returns it.
+    pub fn ensure_id(&mut self) -> AssetUuid {
+        self.id.ensure()
     }
 
     /// Struct names, 2-space indent, one slot per line, defaults (empty name / stops, `mid: 0.5`) omitted.
@@ -468,7 +471,24 @@ mod tests {
 
         let too_new = "GradientCollection(format_version: 9, slots: [])";
         assert!(matches!(GradientCollection::from_ron(too_new), Err(LoadError::TooNew { .. })));
+        let older = "GradientCollection(format_version: 1, slots: [])";
+        assert!(matches!(GradientCollection::from_ron(older), Err(LoadError::TooOld { found: 1, current: 2 })));
         assert!(matches!(GradientCollection::from_ron("garbage"), Err(LoadError::Parse(_))));
+    }
+
+    #[test]
+    fn saved_collection_keeps_its_id() {
+        let mut next = 0;
+        let mut c = GradientCollection::new(|| {
+            next += 1;
+            next
+        });
+        assert!(!c.to_ron().contains("\n  id: "), "a nil id is not written");
+        let id = c.ensure_id();
+        assert!(id.is_v7());
+        let text = c.to_ron();
+        assert!(text.starts_with(&format!("GradientCollection(\n  format_version: 2,\n  id: \"{id}\",\n")), "{text}");
+        assert_eq!(GradientCollection::from_ron(&text).unwrap(), c);
     }
 
     #[test]

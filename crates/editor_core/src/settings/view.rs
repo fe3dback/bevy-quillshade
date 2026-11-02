@@ -128,10 +128,10 @@ fn sections(editor: &Editor, project: &Project, doc: &SettingsDoc) -> Vec<Box<dy
             Node { flex_grow: 1.0, min_width: px(0) } tip Children [ @clipped_text(root, TEXT, 13.0) ]
         ]
     });
-    let version: Box<dyn Scene> = Box::new(text(doc.settings.format_version.to_string(), TEXT_DIM, 13.0));
+    let version: Box<dyn Scene> = Box::new(text(doc.settings.project_version.to_string(), TEXT_DIM, 13.0));
     let general = vec![
         path,
-        Box::new(labeled("Format version".into(), version)),
+        Box::new(labeled("Version".into(), version)),
         checkbox_row("Header date", SettingsProp::HeaderDate, doc.settings.header_date),
         hint("Adds the generation date to the header of every generated file (the files then change every day)."),
     ];

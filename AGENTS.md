@@ -12,12 +12,13 @@ This document serves as the primary architectural guide, codebase map, glossary,
 1. **Source Authoring (`quillshade/<domain>/`)**:
    - **Material Domain (`quillshade/material/`)**: Node-based shader graphs (`.material.ron`, `.function.ron`), shared constants (`.consts.ron`), 1D transfer curves (`.curve.ron`), 1D OKLab gradients (`.gradients.ron`), and texture import policies (`.texture.ron`).
    - **Light Domain (`quillshade/light/`)**: Lighting, skybox, fog, and camera post-processing environments (`.environment.ron`), transition curves (`.curve.ron`), and cube-map texture policies (`.texture.ron`).
-   - **Project Domain (`quillshade/project.ron`)**: Global project settings and cross-domain codegen orchestration.
+   - **Project Domain (`quillshade/project.ron`)**: Global project settings (incl. the project version `project_version`) and cross-domain codegen orchestration. An older project is upgraded by the **Migration Tool** (`project_migrate`, ADR 0046) before anything else runs.
+   - **Asset identity (ADR 0047)**: every editor-owned source carries a top-level UUIDv7 `id` and references other sources by UUID (each such line ends with a `// <path>` comment written by the editor); the core **`AssetIndex`** collects ids and references of all domains and reports `AE001`–`AE004`. Code generation reads references through a resolve seam (UUID → current path), so generated names still derive from paths.
 2. **Validation & IR Lowering (`shader_graph_core`, `light_domain`)**:
-   - Parses RON files, checks format versions and `snake_case` identifiers (`E001`–`E014`, `W101`–`W112`, `LE001`–`LE003`, `LE009`, `LE011`–`LE014`, `LW101`–`LW104`, `LW109`), runs topological sort and cycle detection, resolves port types, and packs scalar/vector uniforms into deterministic 16-byte-aligned GPU uniform structs (`UniformLayout`).
+   - Parses RON files, checks format versions and `snake_case` identifiers (`E001`–`E014`, `W101`–`W112` (no `W103`), info `I103`, `LE001`–`LE003`, `LE009`, `LE011`–`LE014`, `LW101`–`LW104`, `LW109`; core: `E008`, `W105`, and the asset-index codes `AE001`–`AE004`), runs topological sort and cycle detection, resolves port types, and packs scalar/vector uniforms into deterministic 16-byte-aligned GPU uniform structs (`UniformLayout`).
 3. **Code Generation & Asset Baking (`shader_codegen_wesl`, `shader_codegen_rust`, `shader_project`, `light_domain`)**:
    - **WESL (`shader_codegen_wesl`)**: Emits `.wesl` vertex/fragment shaders (PBR `ExtendedMaterial<StandardMaterial, <Pascal>Ext>`, Unlit `Material`, or `MaterialExtension2d`) and reusable WESL function/curve modules (`autogen/functions/`, `autogen/curves/`), optionally verified against Bevy 0.20's `bevy_pbr` WESL headers via `wesl::Wesl::compile`.
-   - **Rust (`shader_codegen_rust`)**: Emits Bevy `AsBindGroup` structs, builder methods, typed parameter handles, and the `baked` runtime loader module (`baked/mod.rs` + `baked.ron`), which hot-reloads scalar/color/texture parameters in-game **without** recompiling Rust or shaders unless the `SG_LAYOUT_<16-hex-hash>` structural guard changes.
+   - **Rust (`shader_codegen_rust`)**: Emits Bevy `AsBindGroup` structs, builder methods, typed parameter handles, and the `baked` runtime loader module (`baked/mod.rs` + `baked.ron`; `BakedMaterials` has `by_path` and `by_id` / `get_by_id` by asset UUID), which hot-reloads scalar/color/texture parameters in-game **without** recompiling Rust or shaders unless the `SG_LAYOUT_<16-hex-hash>` structural guard changes.
    - **Light Runtime (`light_domain`)**: Emits `crates/quillshade/src/light/mod.rs` (`Light` `SystemParam`, `Preset`/`Curve`/`State` enums, `BlendedSkyboxPlugin` with embedded `blended_skybox.wesl`, and `EnvironmentValues` interpolation engine) and `assets/quillshade/light/autogen/baked.ron` for hot-reloading environments, curves, and cube-map texture settings.
    - **Baked Textures (`assets/quillshade/`)**: Bakes 1D gradients into a $128 \times 128$ sRGB RGBA8 PNG atlas (`assets/quillshade/material/gradients/<path>.png`) and writes internal fallback textures (`assets/quillshade/material/internal/`).
    - **Umbrella Crate (`crates/quillshade/`)**: `project_core::umbrella` assembles a single game-facing crate (`quillshade`) that re-exports `quillshade::material::*` and `quillshade::light::*` along with `QuillshadePlugin`.
@@ -30,10 +31,16 @@ This document serves as the primary architectural guide, codebase map, glossary,
 | :--- | :--- |
 | **Domain (`EditorDomain` / `DomainBackend`)** | A vertical slice of functionality. Headless codegen implements `project_core::regen::DomainBackend`; GUI implements `editor_core::domain::EditorDomain`. Currently registered domains: `material`, `light`, and `project` (built-in). |
 | **Umbrella Crate (`crates/quillshade`)** | The single generated crate inside the user's game workspace (`examples/sample_game/crates/quillshade`). Contains per-domain modules (`src/material/`, `src/light/`) and `QuillshadePlugin`. |
+| **Project version (`ProjectVersion`)** | The single global version of a project's source formats (`project_core::version`, D28, ADR 0046), stored as `project_version` in `quillshade/project.ron` (v1 spelled it `format_version`; a `quillshade/` with sources but no `project.ron` is v1). `ProjectVersion::CURRENT` (now `3`: v2 → v3 assigns asset UUIDs, ADR 0047) is what this build opens and writes; `Project::open` returns `OpenError::NeedsMigration` for older and `OpenError::TooNew` for newer projects. Per-file `format_version`s stay as idempotency markers. |
+| **Migration Tool (`project_migrate`, `DomainMigrator`, `MigrationFacts`, `RawProject`)** | Bevy-free engine that upgrades a project one step at a time to `CURRENT` (D38/D39, ADR 0046). `RawProject` opens any version; each domain owns its files through a `DomainMigrator` (`files`, `is_fresh`, `collect`, `migrate`; registered by `EditorDomain::migrator()`), the built-in `ProjectMigrator` rewrites `project.ron` last (the step's commit point); `MigrationFacts` is the per-step cross-domain string store filled by `collect`. `Migrator::plan` is the in-memory dry run, `Migrator::run` writes. Runs from the CLI (`migrate`) and the editor's blocking modal (`state/migration.rs`, `ui/migration.rs`). |
+| **Asset UUID (`AssetUuid`)** | `project_core::asset_uuid::AssetUuid`: the identity of an editor-owned source (ADR 0047, techdoc D4). Stored as the top-level `id: "<uuidv7>"` right after `format_version` in every `.material.ron`, `.function.ron`, `.curve.ron`, `.consts.ron`, `.gradients.ron`, `.texture.ron`, `.environment.ron` and user node (`quillshade/material/.nodes/*.ron`, scanned non-recursively; the WESL identifier is its `ident`). Writers call `ensure_id()` before saving (mints `new_v7()` when the id is nil or not v7); the v3 migration uses the deterministic `AssetUuid::legacy(source_rel)`. A non-UUID `id` string is a load error (`E009` / `LE009`). `quillshade/project.ron` and game files under `assets/` have no UUID. |
+| **UUID references & path comments (D27)** | Sources reference other sources by UUID: `kind: "function::<uuid>"`, `kind: "user::<uuid>"`, reference params `Str("<uuid>")` (curves, const tables, textures, gradient collections; sub-items keep their `Int` local id), Light `cubemap: Some("<uuid>")`. `project_core::asset_index::annotate_refs` appends ` // <path>` (`(missing)` when unknown) to every such line on save; hand-written comments are not kept. Rename / move (in or outside the editor) rewrites nothing. |
+| **`AssetIndex`** | `project_core::asset_index`, Bevy-free and `BTreeMap`-only: every domain contributes a `DomainIndex` through `DomainBackend::index`; the index holds `by_id`, forward (`refs_from`, keyed by file) and reverse (`refs_to`) edges, `duplicates` (winner = smaller `source_rel`), missing ids, `affected(changed)` and `diagnostics()` — core codes `AE001` duplicate UUID (a copied file), `AE002` dangling reference, `AE003` reference into a disabled domain, `AE004` missing / non-v7 `id`. `regen::run` builds it over all compiled-in backends and passes it to `plan`; the editor keeps `Editor.asset_index` (rebuilt on rescan, `replace_domain` after saves) and offers the quick fixes Regenerate UUID (`AE001`) and Assign UUID (`AE004`) via `DomainState::set_asset_uuid`. |
+| **Resolve seam / resolved view** | Everything that *reads* references maps UUIDs to current paths first: `shader_project::resolve::{resolve_asset, resolve_set}` (Material, needs the `Registry` for function / user-node kinds; `user::<uuid>` → `user::<ident>`) and `LightAssets::resolve` (Light). Planning, IR and codegen see paths (generated output is byte-identical to the path form); graph documents cache a resolved copy for the canvas, sidebar and previews. Everything that *writes* references (pickers, drops, palette) stores the UUID from the index. |
 | **`Asset` (Material Graph)** | The unified AST in `shader_graph_core::model::Asset` representing either a `Material` (`AssetKind::Material(MaterialKind)`) or a `Function` (`AssetKind::Function`). Contains `nodes: BTreeMap<String, Node>`, `edges: Vec<Edge>`, and `comments: BTreeMap<String, CommentFrame>`. |
 | **IR (`Ir`)** | Lowered, type-checked representation in `shader_graph_core::ir::Ir`. Produced by `build_ir`. Holds topologically sorted `Stmt`s, `UniformLayout`, texture bindings, and call dependencies. |
 | **`UniformLayout` & `SG_LAYOUT_<hash>`** | Deterministic packing of material `Param` nodes (`vec4` $\rightarrow$ `vec3+pad` $\rightarrow$ `vec2` $\rightarrow$ scalars, padded to 16 bytes) at `@group(#{MATERIAL_BIND_GROUP}) @binding(100)`. Its FNV-1a 64-bit structural hash is embedded as `SG_LAYOUT_<16-hex>` in both `<slug>.rs` and `baked.ron`. Parameter value tweaks keep the hash identical (instant hot-reload via `baked.ron`); adding/removing/retyping params or changing pipeline state changes the hash. |
-| **`NodeDef` & `Registry`** | Static or dynamic definition of a shader graph node (`shader_graph_core::registry::NodeDef`). Includes `stdlib::*` (built-in nodes in `shader_stdlib`), `param::*`, `output::*`, `function::<sub/name>` (project `.function.ron` graphs), and `user::<id>` (`quillshade/material/.nodes/*.ron`). |
+| **`NodeDef` & `Registry`** | Static or dynamic definition of a shader graph node (`shader_graph_core::registry::NodeDef`). Includes `stdlib::*` (built-in nodes in `shader_stdlib`), `param::*`, `output::*`, `function::<sub/name>` (project `.function.ron` graphs), and `user::<ident>` (`quillshade/material/.nodes/*.ron`). Sources store `function::<uuid>` / `user::<uuid>`; the registry only knows the resolved (path / ident) kinds. |
 | **`Editor` & `DomainState`** | Central editor state in `editor_core::state::editor::Editor`. Owns shell state (`tabs`, `config`, `messages`, `project`, `nav`) and a type-erased `DomainStates` (`BTreeMap<DomainId, Box<dyn DomainState>>`). |
 | **`TabDoc` & `EditorAreas`** | Declarative traits registered by domains in `DomainRegistrar`. `TabDoc` (`editor_core::doc_kind::TabDoc`) defines how an open tab document behaves for save/undo/dirty/status. `EditorAreas` (`editor_core::editors::EditorAreas`) defines the `ViewKindId`, `EditorTopbar`, and `RightSidebar` scenes for an editor kind. |
 | **Kit Crates (`curve_kit`, `texture_kit`)** | Reusable, domain-agnostic crates parameterized by a marker trait (`CurveDomain`, `TextureDomain`) so both `material` and `light` domains can share curve and texture data models, RON I/O, validation, and Bevy UI editors without colliding ECS components/resources. |
@@ -45,12 +52,12 @@ This document serves as the primary architectural guide, codebase map, glossary,
 
 ```text
 bevy-quillshade/
-├── Cargo.toml                     # Workspace manifest (12 crates + root binary `shader-editor`)
+├── Cargo.toml                     # Workspace manifest (13 crates + root binary `shader-editor`)
 ├── flake.nix / .envrc             # Nix flake devShell (Rust, Vulkan loader, Wayland, libxkbcommon, ALSA)
 ├── AGENTS.md                      # Agent instructions & architectural reference
 ├── AUDIT.md                       # Technical audit findings & improvement candidates
 ├── src/
-│   └── main.rs                    # Binary entry point: CLI arg parsing (`check`/`regen`/`diff` vs GUI launch),
+│   └── main.rs                    # Binary entry point: CLI arg parsing (`check`/`regen`/`diff`/`migrate` vs GUI launch),
 │                                  # registers `MaterialDomain` and `LightDomain` into `editor_core::run`
 ├── examples/
 │   └── sample_game/               # Standalone Bevy 0.20 game workspace consuming generated `crates/quillshade`
@@ -60,11 +67,13 @@ bevy-quillshade/
 ├── docs/
 │   ├── techdoc.md                 # End-user & developer specification (`spec §N`)
 │   ├── ui-checklist.md            # Pre-release manual UI verification checklist
-│   └── decisions/                 # ADRs: 0043 (multi-domain layout), 0044 (domain API), 0045 (shell/tools)
+│   ├── data-domain-techdoc.md     # Approved design + roadmap: Migration Tool, asset UUIDs, common runtime, Data domain
+│   └── decisions/                 # ADRs: 0043 (multi-domain layout), 0044 (domain API), 0045 (shell/tools), 0046 (migration tool), 0047 (asset UUIDs, AssetIndex)
 ├── vendor/
 │   └── bevy_noodle/               # Vendored fork of `bevy_noodle` node-graph canvas widget (see FORK.md)
 └── crates/
-    ├── project_core/              # Foundation: project layout, RON I/O, identifiers, diagnostics, atomic writes, umbrella gen
+    ├── project_core/              # Foundation: project layout & version, asset UUIDs & AssetIndex, RON I/O, identifiers, diagnostics, atomic writes, umbrella gen
+    ├── project_migrate/           # Migration Tool engine: project version steps, domain migrators, orchestrator, git check
     ├── curve_kit/                 # Generic 1D curves (`Curve`, evaluation, optional `editor` UI)
     ├── texture_kit/               # Generic texture policies & validation (`TextureAsset`, `TexturePolicy`, optional `editor` UI)
     ├── shader_graph_core/         # Material graph AST (`model.rs`), IR builder & type/layout checker (`ir.rs`), `Registry`
@@ -81,13 +90,27 @@ bevy-quillshade/
 ### Detailed Module Map by Crate
 
 #### 1. `crates/project_core` (Headless Foundation)
-- [`lib.rs`](file:///home/neo/code/fe3dback/bevy-quillshade/crates/project_core/src/lib.rs) & [`regen.rs`](file:///home/neo/code/fe3dback/bevy-quillshade/crates/project_core/src/regen.rs): Defines `DomainBackend`, `DomainPlan`, `DomainOutput`, `OutFile`, `OutRoot`, `run`, `commit`, `write_umbrella`.
-- [`layout.rs`](file:///home/neo/code/fe3dback/bevy-quillshade/crates/project_core/src/layout.rs): `Project` path resolver, `ProjectSettings` (`quillshade/project.ron`), `save_settings`, `workspace_problem`.
+- [`lib.rs`](file:///home/neo/code/fe3dback/bevy-quillshade/crates/project_core/src/lib.rs) & [`regen.rs`](file:///home/neo/code/fe3dback/bevy-quillshade/crates/project_core/src/regen.rs): Defines `DomainBackend` (`index`, `plan` with the `AssetIndex`, `plan_affected`), `DomainPlan`, `DomainOutput`, `OutFile`, `OutRoot`, `run`, `run_affected`, `commit`, `write_umbrella`.
+- [`layout.rs`](file:///home/neo/code/fe3dback/bevy-quillshade/crates/project_core/src/layout.rs): `Project` path resolver, `ProjectSettings` (`quillshade/project.ron`), `save_settings`, `settings_text`, `workspace_problem`; `Project::open` compares the project version (`OpenError::NeedsMigration` / `TooNew`).
+- [`version.rs`](file:///home/neo/code/fe3dback/bevy-quillshade/crates/project_core/src/version.rs): `ProjectVersion` (`CURRENT`), `probe_project_version` (`project_version` or legacy `format_version`), legacy-layout rule (sources without `project.ron` = v1).
+- [`asset_uuid.rs`](file:///home/neo/code/fe3dback/bevy-quillshade/crates/project_core/src/asset_uuid.rs): `AssetUuid` (`new_v7`, `legacy`, `parse`, `is_v7`, `ensure`), `is_uuid_shaped`.
+- [`asset_index.rs`](file:///home/neo/code/fe3dback/bevy-quillshade/crates/project_core/src/asset_index.rs): `AssetIndex`, `DomainIndex`, `IndexedAsset`, `IndexedRef`, `AssetEntry`, `SubItem`, `AE001`–`AE004` diagnostics, D27 `annotate_refs` / `RefNames`, `rewrite_root_id`.
+- [`asset_ref.rs`](file:///home/neo/code/fe3dback/bevy-quillshade/crates/project_core/src/asset_ref.rs): `AssetRef` (domain + path + suffix; an empty suffix for user nodes, kind id `material.node`).
 - [`umbrella.rs`](file:///home/neo/code/fe3dback/bevy-quillshade/crates/project_core/src/umbrella.rs): `CrateContribution`, generates `crates/quillshade/Cargo.toml` and `crates/quillshade/src/lib.rs` (`QuillshadePlugin`).
 - [`writer.rs`](file:///home/neo/code/fe3dback/bevy-quillshade/crates/project_core/src/writer.rs): `WriteBatch` content-addressed staged file writer with temp-file rename and orphan cleanup.
 - [`ident.rs`](file:///home/neo/code/fe3dback/bevy-quillshade/crates/project_core/src/ident.rs): Validates lower `snake_case` identifiers (`check_ident`, `check_path`, `to_snake_case`).
 - [`ron_io.rs`](file:///home/neo/code/fe3dback/bevy-quillshade/crates/project_core/src/ron_io.rs): Version probing (`probe_version`) and `LoadError`.
 - [`diag.rs`](file:///home/neo/code/fe3dback/bevy-quillshade/crates/project_core/src/diag.rs): Structured `Diagnostic` and `Level` (`Error`, `Warning`).
+
+#### 1a. `crates/project_migrate` (Migration Tool Engine; ADR 0046, techdoc §4.4)
+- [`lib.rs`](file:///home/neo/code/fe3dback/bevy-quillshade/crates/project_migrate/src/lib.rs): crate overview and re-exports.
+- [`raw.rs`](file:///home/neo/code/fe3dback/bevy-quillshade/crates/project_migrate/src/raw.rs): `RawProject` (opens any version; path helpers like `Project`).
+- [`domain.rs`](file:///home/neo/code/fe3dback/bevy-quillshade/crates/project_migrate/src/domain.rs): `DomainMigrator` trait, `MigrationFacts`.
+- [`steps.rs`](file:///home/neo/code/fe3dback/bevy-quillshade/crates/project_migrate/src/steps.rs): `STEPS` table (`StepInfo { to, title }`, contiguous up to `CURRENT`).
+- [`project.rs`](file:///home/neo/code/fe3dback/bevy-quillshade/crates/project_migrate/src/project.rs): built-in `ProjectMigrator` (`project.ron`, always last in a step).
+- [`orchestrator.rs`](file:///home/neo/code/fe3dback/bevy-quillshade/crates/project_migrate/src/orchestrator.rs): `Migrator` (`plan` = in-memory dry run, `run` with `MigrationEvent`s), `MigrationPlan`, `PlannedStep`, `StaleFile`, `MigrationReport`; per-step barrier, resume on rerun.
+- [`git.rs`](file:///home/neo/code/fe3dback/bevy-quillshade/crates/project_migrate/src/git.rs) & `error.rs`: `git_state` (`GitState`: warn-only "commit first" check), `MigrationError`.
+- `tests/orchestrator.rs`, `tests/git_state.rs`, `tests/fixtures/v1/`: chain, barrier, interruption + rerun, double run, dry run, too new, legacy layout.
 
 #### 2. `crates/curve_kit` & `crates/texture_kit` (Reusable Domain Kits)
 - [`crates/curve_kit/src/lib.rs`](file:///home/neo/code/fe3dback/bevy-quillshade/crates/curve_kit/src/lib.rs): `Curve`, `Interp` (`Simple`, `CatmullRom`), `Curve::sample`, `range_error`.
@@ -99,7 +122,7 @@ bevy-quillshade/
 - [`crates/shader_graph_core/src/model.rs`](file:///home/neo/code/fe3dback/bevy-quillshade/crates/shader_graph_core/src/model.rs): `Asset`, `AssetKind`, `MaterialKind`, `Node`, `Edge`, `Value`, `CommentFrame`.
 - [`crates/shader_graph_core/src/types.rs`](file:///home/neo/code/fe3dback/bevy-quillshade/crates/shader_graph_core/src/types.rs): `PinType`, implicit broadcast/conversion rules (`conversion`).
 - [`crates/shader_graph_core/src/registry.rs`](file:///home/neo/code/fe3dback/bevy-quillshade/crates/shader_graph_core/src/registry.rs): `Registry`, `NodeDef`, `EmitCtx`, `ParamKind`, reference finders (`curve_refs`, `const_refs`, `texture_refs`, `gradient_refs`).
-- [`crates/shader_graph_core/src/ir.rs`](file:///home/neo/code/fe3dback/bevy-quillshade/crates/shader_graph_core/src/ir.rs): `build_ir`, `Ir`, `Stmt`, `UniformLayout` packing, function signature resolution (`declared_function_sig`), diagnostic checks (`E001`–`E014`, `W101`–`W112`).
+- [`crates/shader_graph_core/src/ir.rs`](file:///home/neo/code/fe3dback/bevy-quillshade/crates/shader_graph_core/src/ir.rs): `build_ir`, `Ir`, `Stmt`, `UniformLayout` packing, function signature resolution (`declared_function_sig`), diagnostic checks (`E001`–`E014`, `W101`–`W112`, info `I103`).
 - [`crates/shader_graph_core/src/gradient.rs`](file:///home/neo/code/fe3dback/bevy-quillshade/crates/shader_graph_core/src/gradient.rs): `GradientCollection` (128 slots per `.gradients.ron`), OKLab interpolation (`Slot::sample`), $128 \times 128$ RGBA8 baker (`bake_rgba8`).
 - [`crates/shader_stdlib/src/nodes/`](file:///home/neo/code/fe3dback/bevy-quillshade/crates/shader_stdlib/src/nodes/mod.rs): Built-in `stdlib::*` node catalog (`attributes.rs`, `color.rs`, `constants.rs`, `coords.rs`, `math.rs`, `output.rs`, `scene.rs`, `texture.rs`, `utility.rs`, `vector.rs`) and `user.rs` custom WGSL nodes.
 
@@ -108,19 +131,22 @@ bevy-quillshade/
 - [`crates/shader_codegen_wesl/src/check.rs`](file:///home/neo/code/fe3dback/bevy-quillshade/crates/shader_codegen_wesl/src/check.rs): `BevySources::discover` and WESL/naga compilation verifier against Bevy 0.20 shader headers.
 - [`crates/shader_codegen_rust/src/lib.rs`](file:///home/neo/code/fe3dback/bevy-quillshade/crates/shader_codegen_rust/src/lib.rs): `emit_material_rs`, `emit_materials_mod`, `emit_material_domain_mod`.
 - [`crates/shader_codegen_rust/src/baked.rs`](file:///home/neo/code/fe3dback/bevy-quillshade/crates/shader_codegen_rust/src/baked.rs), [`manifest.rs`](file:///home/neo/code/fe3dback/bevy-quillshade/crates/shader_codegen_rust/src/manifest.rs), & [`templates/baked_mod.rs`](file:///home/neo/code/fe3dback/bevy-quillshade/crates/shader_codegen_rust/templates/baked_mod.rs): Generates `crates/quillshade/src/material/baked/{mod,materials,textures}.rs` and `assets/quillshade/material/autogen/baked.ron`.
-- [`crates/shader_project/src/regen.rs`](file:///home/neo/code/fe3dback/bevy-quillshade/crates/shader_project/src/regen.rs) & [`backend.rs`](file:///home/neo/code/fe3dback/bevy-quillshade/crates/shader_project/src/backend.rs): `plan_set`, `regenerate_set`, `Scope` (`Full`, `ManifestOnly`, `Affected`), `DepGraph`, and `MaterialBackend`.
+- [`crates/shader_project/src/regen.rs`](file:///home/neo/code/fe3dback/bevy-quillshade/crates/shader_project/src/regen.rs) & [`backend.rs`](file:///home/neo/code/fe3dback/bevy-quillshade/crates/shader_project/src/backend.rs): `plan_set`, `regenerate_set`, `Scope` (`Full`, `ManifestOnly`, `Affected`), `DepGraph`, `MaterialBackend` and its index part (`index_part`).
+- [`crates/shader_project/src/resolve.rs`](file:///home/neo/code/fe3dback/bevy-quillshade/crates/shader_project/src/resolve.rs): the Material resolve seam (`resolve_asset`, `resolve_set`, `resolve_ref`, `resolve_user`, `ref_value`, `stored_kind`).
+- [`crates/shader_project/src/migrate.rs`](file:///home/neo/code/fe3dback/bevy-quillshade/crates/shader_project/src/migrate.rs): `MaterialMigrator` (project step v3: legacy ids, path → UUID references, frozen v1 user-node DTOs).
+- [`crates/shader_project/src/fixtures.rs`](file:///home/neo/code/fe3dback/bevy-quillshade/crates/shader_project/src/fixtures.rs): sample fixtures in the migrated form (`legacy` ids, UUID references; checked by `tests/migrate_v3.rs::fixtures_equal_the_migrated_sample`).
 - [`crates/shader_project/examples/make_sample.rs`](file:///home/neo/code/fe3dback/bevy-quillshade/crates/shader_project/examples/make_sample.rs): Writes the sample game's `quillshade/material/` fixtures and regenerates.
 
 #### 5. `crates/light_domain` (Light & Environment Domain)
-- [`crates/light_domain/src/backend/`](file:///home/neo/code/fe3dback/bevy-quillshade/crates/light_domain/src/backend/mod.rs): Bevy-free headless backend (`mod.rs`, `model.rs`, `codegen.rs`, `validate.rs`, `hdr.rs`, `templates/light_mod.rs`, `templates/blended_skybox.wesl`). Defines `Environment` (`.environment.ron`), `LIGHT_TEXTURES`, `LightAssets`, `validate` (`LE001`–`LE003`, `LE009`, `LE011`–`LE014`, `LW101`–`LW104`, `LW109`), `HdrImage` / `convert_hdr_to_ktx2` (equirectangular Radiance `.hdr` to Bevy `.ktx2` cubemap converter), and `LightBackend` (emits `crates/quillshade/src/light/mod.rs` and `assets/quillshade/light/autogen/baked.ron`).
+- [`crates/light_domain/src/backend/`](file:///home/neo/code/fe3dback/bevy-quillshade/crates/light_domain/src/backend/mod.rs): Bevy-free headless backend (`mod.rs`, `model.rs`, `codegen.rs`, `validate.rs`, `hdr.rs`, `migrate.rs` (`LightMigrator`, step v3), `templates/light_mod.rs`, `templates/blended_skybox.wesl`). Defines `Environment` (`.environment.ron`), `LIGHT_TEXTURES`, `LightAssets`, `validate` (`LE001`–`LE003`, `LE009`, `LE011`–`LE014`, `LW101`–`LW104`, `LW109`), `LightAssets::resolve` (cube-map UUID → path), `HdrImage` / `convert_hdr_to_ktx2` (equirectangular Radiance `.hdr` to Bevy `.ktx2` cubemap converter), and `LightBackend` (emits `crates/quillshade/src/light/mod.rs` and `assets/quillshade/light/autogen/baked.ron`).
 - [`crates/light_domain/src/editor/`](file:///home/neo/code/fe3dback/bevy-quillshade/crates/light_domain/src/editor/mod.rs): GUI domain implementation (`mod.rs`, `state.rs`, `curve.rs`, `environment.rs`, `form.rs`, `texture.rs`, `hdr_converter.rs`, `preview.rs`). Defines `LightDomain`, `LightState`, `LightCurve`, `EnvironmentDoc`, `EnvironmentEditor`, `LightTexture`, and `HdrConverterDoc` / `HdrConverterEditor` (`HDR Converter` tool).
 - [`crates/light_domain/examples/make_sample.rs`](file:///home/neo/code/fe3dback/bevy-quillshade/crates/light_domain/examples/make_sample.rs): Writes `examples/sample_game`'s `sky_cube.ktx2`, `sky.texture.ron`, `day.environment.ron`, `night.environment.ron`, and `smooth.curve.ron`.
 
 #### 6. `crates/editor_core`, `crates/node_graph_base`, `crates/material_domain` (GUI Editor)
 - [`crates/editor_core/src/app.rs`](file:///home/neo/code/fe3dback/bevy-quillshade/crates/editor_core/src/app.rs): `run` Bevy app builder, `EditorCorePlugin`, `apply_actions`, and shell `debug_screenshot` hook.
 - [`crates/editor_core/src/domain/`](file:///home/neo/code/fe3dback/bevy-quillshade/crates/editor_core/src/domain/mod.rs): `EditorDomain`, `DomainRegistrar`, `DomainList`, `DomainState`, `ToolDef`, `ProjectDomain` (`mod.rs`, `list.rs`, `project.rs`, `registrar.rs`, `state.rs`, `tool.rs`).
-- [`crates/editor_core/src/state/`](file:///home/neo/code/fe3dback/bevy-quillshade/crates/editor_core/src/state/mod.rs): `Editor` state (`editor.rs`), central dispatcher (`apply.rs`), asset operations (`assets.rs`), domain switching (`domain_switch.rs`), asset-kind defaults (`kinds.rs`), tab management (`tabs.rs`), file watcher (`watch.rs`).
-- [`crates/editor_core/src/ui/`](file:///home/neo/code/fe3dback/bevy-quillshade/crates/editor_core/src/ui/mod.rs): Window shell (`shell.rs`), areas (`areas.rs`), project/assets browser (`browser.rs`, `tree.rs`), dialogs & menus (`dialog.rs`, `menu.rs`), icons (`icons.rs`), console/logs (`log.rs`), property widgets (`props.rs`), tabs (`tabs.rs`), text viewer (`text_view.rs`), welcome screen (`welcome.rs`), Feathers widgets (`widgets.rs`).
+- [`crates/editor_core/src/state/`](file:///home/neo/code/fe3dback/bevy-quillshade/crates/editor_core/src/state/mod.rs): `Editor` state (`editor.rs`), central dispatcher (`apply.rs`), asset operations (`assets.rs`; also the `AE001` / `AE004` quick-fix dialogs and `set_uuid`), domain switching (`domain_switch.rs`), asset-kind defaults (`kinds.rs`), tab management (`tabs.rs`), file watcher (`watch.rs`), Migration Tool session (`migration.rs`: `MigrationSession`, `MigrationPhase`; blocks every other action, background run, deferred quit).
+- [`crates/editor_core/src/ui/`](file:///home/neo/code/fe3dback/bevy-quillshade/crates/editor_core/src/ui/mod.rs): Window shell (`shell.rs`), areas (`areas.rs`), project/assets browser (`browser.rs`, `tree.rs`), dialogs & menus (`dialog.rs`, `menu.rs`), icons (`icons.rs`), console/logs (`log.rs`), property widgets (`props.rs`), tabs (`tabs.rs`), text viewer (`text_view.rs`), welcome screen (`welcome.rs`), Migration Tool modal (`migration.rs`), Feathers widgets (`widgets.rs`).
 - [`crates/node_graph_base/src/`](file:///home/neo/code/fe3dback/bevy-quillshade/crates/node_graph_base/src/lib.rs): Shared node-graph canvas over `bevy_noodle` (`canvas.rs`, `domain.rs`, `edit.rs`, `editor.rs`, `input.rs`, `layout.rs`, `palette.rs`, `preview.rs`, `view.rs`).
 - [`crates/material_domain/src/`](file:///home/neo/code/fe3dback/bevy-quillshade/crates/material_domain/src/lib.rs): `MaterialDomain` (`domain.rs`), `MaterialState` (`material_state.rs`), `MaterialGraph` (`graph_domain.rs`), documents (`doc.rs`, `consts_doc.rs`, `gradients_doc.rs`), kits (`curve.rs`, `texture.rs`), editors (`editors/{graph,consts,gradients}.rs`), operations (`ops/{apply,asset_ops,consts_ops,droppable,gradient_ops,graph_ops,nav,regen,tabs,types,watch}.rs`), and UI (`ui/`).
 
@@ -185,14 +211,14 @@ Icons are SVGs from the `icon-rs` crate (pinned `=0.4.5`, browse at https://rvde
   XDG_CONFIG_HOME=/tmp GIT_CONFIG_GLOBAL=/dev/null git status
   ```
 - **Editor User Config**: `~/.config/fe3dback/bevy-shader-editor` is outside the sandbox write allowlist. Pass `XDG_CONFIG_HOME=/tmp/qs-config` when running the GUI binary to avoid permission warnings and keep test runs isolated.
-- **Nix Runtime Libraries & Software Vulkan (Mesa Lavapipe)**:
-  GUI runs (`shader-editor`, UI tests, `sample_game`) require `LD_LIBRARY_PATH` (for `libudev`, `libasound`, `libvulkan`, `libxkbcommon`, `libwayland-client`) and `VK_ICD_FILENAMES` (pointing to Mesa's `lvp_icd.x86_64.json` software rasterizer in `/nix/store` if hardware GPU is unavailable or headless determinism is needed):
+- **GUI Runs Go Through Headless weston (mandatory)**: every agent-launched window (`shader-editor` screenshot / demo / input runs, `sample_game` with `SAMPLE_SCREENSHOT`) must run inside the private headless weston via the global `running-gui-in-weston` skill — prefix the command with `bash ~/.claude/skills/running-gui-in-weston/run-inside-weston.sh`. Never launch a GUI window directly: it opens on the user's desktop, and a window on another workspace or behind a fullscreen one is throttled by niri to ~1 fps (a frame-300 run then takes ~5 min instead of ~8–25 s). The wrapper starts / reuses one shared weston (`/tmp/weston-agent-$UID/`), unsets `DISPLAY`, sets `WAYLAND_DISPLAY` and selects Mesa lavapipe (software Vulkan) — do **not** set `VK_ICD_FILENAMES` yourself and do not use the GPU: lavapipe runs are pixel-identical, which the `magick compare` workflow (§6) relies on (GPU runs are not reproducible). Leave weston running between runs; `--status` / `--stop` manage it. Headless `cargo test` / `cargo run -- check|regen|diff|migrate` need no wrapper.
+- **Nix Runtime Libraries**:
+  GUI runs (`shader-editor`, `sample_game`) require `LD_LIBRARY_PATH` (for `libudev`, `libasound`, `libvulkan`, `libxkbcommon`, `libwayland-client`); pass it (and `XDG_CONFIG_HOME`) in front of the wrapper:
   ```bash
   export LD_LIBRARY_PATH="/nix/store/cgzr5afjdbx30j7g44z2h92i8h3828k2-systemd-minimal-libs-262/lib:/nix/store/9rpg951mvn34kcnp82c4mfvnr5ssxblf-alsa-lib-1.2.16.1/lib:/nix/store/la62431p5qf1ggr3rdzql9dksv5fhicc-vulkan-loader-1.4.363.0/lib:/nix/store/mp9krn4yrm1hwh657y1aa2jv0x97fbin-libxkbcommon-1.13.2/lib:/nix/store/8vz293r6dqfci9p6m955yziz2agxx990-wayland-1.26.0/lib"
-  export VK_ICD_FILENAMES="/nix/store/v2isk5r5fzlriczi14ckn20hf45079di-mesa-26.1.2/share/vulkan/icd.d/lvp_icd.x86_64.json"
   export XDG_CONFIG_HOME="/tmp/qs-config"
   ```
-  *(If `/nix/store` hashes change after a flake update, inspect `.direnv/flake-profile-*.rc` for `LD_LIBRARY_PATH` and run `find /nix/store -maxdepth 4 -name "lvp_icd*.json"` for `VK_ICD_FILENAMES`.)*
+  *(If `/nix/store` hashes change after a flake update, inspect `.direnv/flake-profile-*.rc` for `LD_LIBRARY_PATH`.)*
 
 ### Verification Commands (Must Pass Before Finishing Work)
 ```bash
@@ -211,6 +237,7 @@ cargo test --workspace --no-fail-fast
 # 5. Headless CLI verification against sample_game (including WESL shader compilation against Bevy 0.20)
 cargo run -- check examples/sample_game --compile
 cargo run -- diff examples/sample_game
+cargo run -- migrate examples/sample_game --dry-run   # expects "project is up to date (v3)"
 
 # 6. Sample game workspace verification (uses separate target dir)
 cd examples/sample_game
@@ -224,6 +251,8 @@ CARGO_TARGET_DIR=/home/neo/code/fe3dback/bevy-quillshade/target/sample cargo tes
 
 Both `shader-editor` and `examples/sample_game` have built-in, deterministic screenshot and scripted-input pipelines controlled via environment variables.
 
+**Always run them inside headless weston** (§5): put `bash ~/.claude/skills/running-gui-in-weston/run-inside-weston.sh` right before `cargo run …`. Every recipe below that shows a bare `cargo run -- … <project>` GUI launch means "through the wrapper".
+
 ### A. Editor Screenshots (`shader-editor`) — Frame-Exact Timeline
 
 Setting `SHADER_EDITOR_SCREENSHOT=/abs/path/to/out.png` activates the frame-driven automation pipeline in [`crates/editor_core/src/app.rs`](file:///home/neo/code/fe3dback/bevy-quillshade/crates/editor_core/src/app.rs#L190-L247), [`crates/editor_core/src/demo.rs`](file:///home/neo/code/fe3dback/bevy-quillshade/crates/editor_core/src/demo.rs#L28-L215), [`crates/material_domain/src/lib.rs`](file:///home/neo/code/fe3dback/bevy-quillshade/crates/material_domain/src/lib.rs#L113-L217), and [`crates/material_domain/src/demo.rs`](file:///home/neo/code/fe3dback/bevy-quillshade/crates/material_domain/src/demo.rs#L138-L540):
@@ -232,7 +261,9 @@ Setting `SHADER_EDITOR_SCREENSHOT=/abs/path/to/out.png` activates the frame-driv
 | :--- | :--- | :--- |
 | **Frame 2** | Opens the requested file/tab, selects the target node/frame/gradient stop, and switches the active domain. | `SHADER_EDITOR_OPEN`, `SHADER_EDITOR_SELECT`, `SHADER_EDITOR_DOMAIN` |
 | **Frame 140** | Applies custom canvas zoom (`CanvasView.zoom`) before any demo/input runs (`START - 20`). | `SHADER_EDITOR_ZOOM=<f32>` (e.g. `1.5`, `0.5`) |
-| **Frame 150** | Opens modal dialogs, dropdown menus, quick-start guides, or context popups. | `SHADER_EDITOR_DEMO=<mode>` |
+| **Frame 150** | Opens modal dialogs, dropdown menus, quick-start guides, or context popups; presses the Migration Tool's Dry run / Migrate. | `SHADER_EDITOR_DEMO=<mode>` |
+| **Frame 170** | `duplicate_uuid_fix` only: presses the duplicate-UUID dialog's Regenerate UUID. | `SHADER_EDITOR_DEMO=duplicate_uuid_fix` |
+| **Frames 200–239** | `migration_open` only: presses the Migration Tool's Open project once the run is done. | `SHADER_EDITOR_DEMO=migration_open` |
 | **Frames 160–200** | Builds a scripted sequence of winit `CursorMoved` / `MouseButtonInput` / `KeyboardInput` / `MouseWheel` steps on **Frame 160** (`START`) and replays 1 step per frame. Logs final state at **Frame 200** (`START + 40`). | `SHADER_EDITOR_INPUT=<gesture>`, `SHADER_EDITOR_INPUT_*` |
 | **Frame 240** | Spawns `Screenshot::primary_window()` and observes `save_to_disk(path)`. | `SHADER_EDITOR_SCREENSHOT=<path.png>` |
 | **Frame 300** | Emits `AppExit::Success` to cleanly terminate the editor process. | *(automatic when `SHADER_EDITOR_SCREENSHOT` is set)* |
@@ -243,13 +274,18 @@ Setting `SHADER_EDITOR_SCREENSHOT=/abs/path/to/out.png` activates the frame-driv
   - *Tip for opening a specific Light asset on startup*: Seed `$XDG_CONFIG_HOME/fe3dback/bevy-shader-editor/config.ron` before launching:
     ```ron
     (
-        recent: [],
-        last_project: Some("/home/neo/code/fe3dback/bevy-quillshade/examples/sample_game"),
-        open: ["light:quillshade/light/day.environment.ron"],
-        active_tab: Some("light:quillshade/light/day.environment.ron"),
-        active_domain: Some("light"),
+        recent_projects: ["/home/neo/code/fe3dback/bevy-quillshade/examples/sample_game"],
+        tabs: {
+            "/home/neo/code/fe3dback/bevy-quillshade/examples/sample_game": (
+                open: ["light:quillshade/light/day.environment.ron"],
+                active: Some(0),
+                active_domain: Some("light"),
+                last_tabs: {"light": "quillshade/light/day.environment.ron"},
+            ),
+        },
     )
     ```
+    Use the canonical project root as the `tabs` key; omitted fields keep their defaults (`progress/p1_shots.sh` seeds it the same way).
 - **`SHADER_EDITOR_OPEN=<spec>`** (Material domain, frame 2):
   - `<rel_path>.material.ron` or `<rel_path>.function.ron` — opens graph view (e.g. `env/rock_wet.material.ron`).
   - `<rel_path>#wesl` or `<rel_path>#rust` — opens generated WESL or Rust code preview tab.
@@ -258,12 +294,23 @@ Setting `SHADER_EDITOR_SCREENSHOT=/abs/path/to/out.png` activates the frame-driv
   - `@game/textures/rock_albedo.ktx2` — opens game texture preview & policy inspector.
   - `@internal/default` — opens internal texture preview.
 - **`SHADER_EDITOR_SELECT=<spec>`** (Material domain, frame 2):
-  - Node kind substring (e.g. `stdlib::Lerp`, `Parameter`, `Output`) — selects the first matching node and centers the canvas on it.
+  - Exact node kind (e.g. `stdlib::Lerp`, `stdlib::SampleCurve`, `param::TextureObject`; **not** a substring) — selects the first node whose kind equals it and centers the canvas on it. Function and user-node calls match their **resolved** kind (`function::common/tex_layer`, `user::soft_clamp`), not the stored `function::<uuid>`.
   - Comment frame ID (e.g. `c01`) — selects the comment frame.
   - Gradient selection `<slot>[:s<stop>|:m<segment>]` (e.g. `1:s2` or `0:m0`) — selects gradient slot and stop/midpoint.
 - **`SHADER_EDITOR_DEMO=<mode>`** (Frame 150):
-  - Shell demos: `about`, `quick_start` (or `quick_start:2`), `open_project`, `welcome`, `menu` or `menu:<name>` (`file`, `edit`, `view`, `assets`, `help`), `tab_menu`, `settings_dirty`.
+  - Shell demos: `about`, `quick_start` (or `quick_start:2`), `open_project`, `welcome`, `menu` or `menu:<name>` (`file`, `edit`, `view`, `assets`, `help`), `tab_menu`, `settings_dirty`, `duplicate_uuid` (focuses the first `AE001`: the "Duplicate asset UUID" dialog with Cancel / Open / Regenerate UUID), `duplicate_uuid_fix` (the same, then presses Regenerate UUID on frame 170; the console logs `Regenerated the UUID of <file>`).
+  - Asset UUID recipes (ADR 0047), always on a copy: `cp quillshade/material/common/pulse.curve.ron quillshade/material/common/pulse_copy.curve.ron` makes an `AE001` for `duplicate_uuid[_fix]`; `mv` any source (also into another folder; a user node only within `.nodes/`, which is not scanned recursively) and the references stay valid.
   - Material demos: `palette`, `wire`, `dialog`, `texture_channel:0`..`4`, `gradient_color`, `game_file_menu`, `game_file_menu:2`.
+  - Migration Tool demos (the project passed on the command line must be older than the editor, so the modal is open from the start): `migration_dry_run` (presses **Dry run**; the shot shows the plan in the log), `migration_run` (presses **Migrate**; the shot shows the result with **Open project**), `migration_open` (presses **Migrate**, then **Open project** once the run is done, from frame 200; the shot shows the migrated project opened normally). Without a demo mode the shot shows the modal as opened (Ready). Never run them on `examples/sample_game` itself; use an old copy, re-created before every run that migrates:
+    ```bash
+    rm -rf /tmp/qs-mig && cp -r crates/project_migrate/tests/fixtures/v1 /tmp/qs-mig          # small fixture
+    rm -rf /tmp/qs-mig-sample && mkdir /tmp/qs-mig-sample && \
+      tar -C examples/sample_game --exclude=./target -cf - . | tar -C /tmp/qs-mig-sample -xf - && \
+      printf 'ProjectSettings(\n    format_version: 1,\n)\n' > /tmp/qs-mig-sample/quillshade/project.ron   # realistic
+    SHADER_EDITOR_DEMO=migration_open SHADER_EDITOR_SCREENSHOT=/tmp/mig_open.png \
+      bash ~/.claude/skills/running-gui-in-weston/run-inside-weston.sh cargo run -- --width 1280 --height 720 /tmp/qs-mig-sample
+    ```
+    `git -C /tmp/qs-mig init -q` (untracked files) shows the git "uncommitted changes" warning. The current sample is already v3, so the copy above only exercises the project-file steps; for a realistic v2 → v3 run (33 files) use the last v2 sample: `rm -rf /tmp/qs-mig-v2 && mkdir /tmp/qs-mig-v2 && git archive 234951e examples/sample_game | tar -x -C /tmp/qs-mig-v2` and pass `/tmp/qs-mig-v2/examples/sample_game`.
 - **`SHADER_EDITOR_INPUT=<gesture>`** (Frames 160–200):
   - Shell gestures: `menu_click`, `menu_close`, `hover`, `tab[:N]`.
   - Material gestures: `drag`, `rmb_click`, `rmb_pan`, `mmb_pan`, `slider`, `color`, `pin_rmb`, `node_rmb`, `node_dblclick`, `frame_dblclick`, `hover`, `curve_drag`, `curve_add`, `texture_zoom`, `drop_game_file`, `ctrl_drag_wire`, `ctrl_wire_hold`, `wire_drag`, `wire_hold`, `alt_click`, `box_delete`, `box_delete_partial`, `type_field`.
@@ -284,13 +331,14 @@ Setting `SHADER_EDITOR_SCREENSHOT=/abs/path/to/out.png` activates the frame-driv
 #### Example One-Liner to Capture an Editor Screenshot
 ```bash
 LD_LIBRARY_PATH="/nix/store/cgzr5afjdbx30j7g44z2h92i8h3828k2-systemd-minimal-libs-262/lib:/nix/store/9rpg951mvn34kcnp82c4mfvnr5ssxblf-alsa-lib-1.2.16.1/lib:/nix/store/la62431p5qf1ggr3rdzql9dksv5fhicc-vulkan-loader-1.4.363.0/lib:/nix/store/mp9krn4yrm1hwh657y1aa2jv0x97fbin-libxkbcommon-1.13.2/lib:/nix/store/8vz293r6dqfci9p6m955yziz2agxx990-wayland-1.26.0/lib" \
-VK_ICD_FILENAMES="/nix/store/v2isk5r5fzlriczi14ckn20hf45079di-mesa-26.1.2/share/vulkan/icd.d/lvp_icd.x86_64.json" \
 XDG_CONFIG_HOME="/tmp/qs-config" \
 SHADER_EDITOR_SCREENSHOT="/tmp/editor_shot.png" \
 SHADER_EDITOR_OPEN="env/rock_wet.material.ron" \
 SHADER_EDITOR_SELECT="stdlib::Lerp" \
+bash ~/.claude/skills/running-gui-in-weston/run-inside-weston.sh \
 cargo run -- --width 1280 --height 720 examples/sample_game
 ```
+Expected log noise inside weston (harmless): clipboard "data-control protocol not supported", ALSA "cannot find card", `sctk_adwaita` button warnings, "adapter … software rendering".
 
 #### Before / After Visual Regression Diff Workflow (`magick compare`)
 Whenever modifying a module that affects editor views, widgets, canvas rendering, curves, textures, gradients, or domains:
@@ -305,7 +353,7 @@ Whenever modifying a module that affects editor views, widgets, canvas rendering
 
 ### B. Sample Game Screenshots (`examples/sample_game`) — Real-Time Trigger
 Implemented in [`examples/sample_game/src/main.rs`](file:///home/neo/code/fe3dback/bevy-quillshade/examples/sample_game/src/main.rs#L25-L87):
-- Setting `SAMPLE_SCREENSHOT=/tmp/sample_out` switches the window to `PresentMode::AutoNoVsync` + `WinitSettings::continuous()`, captures `/tmp/sample_out-1.png` at **`+5.0s`** real elapsed time and `/tmp/sample_out-2.png` at **`+25.0s`** real elapsed time, and exits automatically once the second screenshot finishes writing to disk.
+- Setting `SAMPLE_SCREENSHOT=/tmp/sample_out` switches the window to `PresentMode::AutoNoVsync` + `WinitSettings::continuous()`, captures `/tmp/sample_out-1.png` at **`+5.0s`** real elapsed time and `/tmp/sample_out-2.png` at **`+25.0s`** real elapsed time, and exits automatically once the second screenshot finishes writing to disk. Run it through the weston wrapper too (`… run-inside-weston.sh cargo run` from `examples/sample_game`); the triggers are wall-clock based, so on lavapipe fewer frames are rendered by then than on a GPU.
 
 ---
 

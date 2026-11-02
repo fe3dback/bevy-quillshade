@@ -1,6 +1,8 @@
 //! Error/warning log (spec §9.5, 13, design §6.4): every domain's diagnostics ([`Editor::console_diagnostics`]) and
 //! the operation messages; click focuses the node. View → Show console off (design §3) leaves only the pane's header
-//! bar: the counts, Clear and the show / hide button; Zen mode hides the whole console.
+//! bar: the counts, Clear and the show / hide button; Zen mode hides the whole console. Info diagnostics (spec §13)
+//! are listed, dimmed after the errors and warnings, only while the header's "Info" checkbox is on; the title counts
+//! them separately.
 
 use crate::action::{Action, Actions};
 use crate::config::Panel;
@@ -16,7 +18,7 @@ use bevy::feathers::rounded_corners::RoundedCorners;
 use bevy::prelude::*;
 use bevy::ui::Checked;
 use bevy::ui_widgets::ValueChange;
-use project_core::{Diagnostic, DomainId};
+use project_core::{Diagnostic, DomainId, Level as DiagLevel};
 
 use super::{areas, icon_button, tool_button};
 use crate::state::editor::Editor;
@@ -28,7 +30,7 @@ pub struct LogPane;
 #[derive(Component, Default, Clone)]
 pub struct LogBody;
 
-/// The pane title: `Log - N errors, M warnings`.
+/// The pane title: `Log - N errors, M warnings` (`, K info` while there are info diagnostics).
 #[derive(Component, Default, Clone)]
 pub struct LogHeader;
 
@@ -40,14 +42,20 @@ pub struct LogToggle;
 #[derive(Component, Default, Clone)]
 pub struct ConsoleAllToggle;
 
+/// The header's "Info" checkbox (spec §13): lists the info diagnostics too.
+#[derive(Component, Default, Clone)]
+pub struct ConsoleInfoToggle;
+
 /// Height of the console/logs while the log is shown.
 const LOG_HEIGHT: f32 = 190.0;
 
 #[derive(Component, Default, Clone)]
 pub struct LogRow(pub Option<Diagnostic>);
 
-const ERR: Color = Color::srgb(0.95, 0.42, 0.42);
-const WARN: Color = Color::srgb(0.95, 0.78, 0.35);
+/// Error lines (also the Migration Tool's, [`super::migration`]).
+pub(crate) const ERR: Color = Color::srgb(0.95, 0.42, 0.42);
+/// Warning lines (also the Migration Tool's, [`super::migration`]).
+pub(crate) const WARN: Color = Color::srgb(0.95, 0.78, 0.35);
 const ROW_LIMIT: usize = 300;
 
 pub struct LogPlugin;
@@ -56,7 +64,8 @@ impl Plugin for LogPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Update, (redraw, show_log).after(crate::apply_actions))
             .add_observer(click_row)
-            .add_observer(toggle_all);
+            .add_observer(toggle_all)
+            .add_observer(toggle_info);
     }
 }
 
@@ -68,8 +77,14 @@ pub fn console() -> impl Scene {
         Node { flex_shrink: 0.0 }
         ConsoleAllToggle
     };
+    let info = bsn! {
+        @FeathersCheckbox { @caption: bsn! { @caption("Info") } }
+        Node { flex_shrink: 0.0 }
+        ConsoleInfoToggle
+    };
     let tools: Vec<Box<dyn Scene>> = vec![
         Box::new(all),
+        Box::new(info),
         Box::new(tool_button("Clear messages", Action::ClearMessages)),
         Box::new(bsn! { @{toggle} LogToggle }),
     ];
@@ -157,15 +172,37 @@ fn row(label: String, color: Color, diag: Option<Diagnostic>) -> impl Scene {
     }
 }
 
+/// The pane title for `diags`: errors and warnings, then `, K info` while there are info diagnostics (listed or not).
+pub(crate) fn header_text(diags: &[Diagnostic]) -> String {
+    let count = |level: DiagLevel| diags.iter().filter(|d| d.level == level).count();
+    let mut out = format!(
+        "Log - {}, {}",
+        plural(count(DiagLevel::Error), "error", "errors"),
+        plural(count(DiagLevel::Warning), "warning", "warnings")
+    );
+    let info = count(DiagLevel::Info);
+    if info > 0 {
+        out.push_str(&format!(", {info} info"));
+    }
+    out
+}
+
+/// The listed diagnostics: errors and warnings in their console order, then the infos while `info` is on.
+pub(crate) fn listed(diags: &[Diagnostic], info: bool) -> (Vec<&Diagnostic>, Vec<&Diagnostic>) {
+    let problems = diags.iter().filter(|d| !d.is_info()).collect();
+    let infos = if info { diags.iter().filter(|d| d.is_info()).collect() } else { Vec::new() };
+    (problems, infos)
+}
+
 fn redraw(
     editor: Res<Editor>,
     body: Query<Entity, With<LogBody>>,
     mut header: Query<&mut Text, With<LogHeader>>,
-    mut last: Local<Option<(u64, Option<DomainId>, bool)>>,
+    mut last: Local<Option<(u64, Option<DomainId>, bool, bool)>>,
     mut scroll: Query<&mut ScrollPosition, With<LogBody>>,
     mut commands: Commands,
 ) {
-    let key = (editor.ui.log, editor.active_domain, editor.console_all);
+    let key = (editor.ui.log, editor.active_domain, editor.console_all, editor.console_info);
     if *last == Some(key) {
         return;
     }
@@ -173,17 +210,19 @@ fn redraw(
     *last = Some(key);
     commands.entity(body).despawn_children();
     let diags = editor.console_diagnostics();
-    let (errors, warnings) =
-        (diags.iter().filter(|d| d.is_error()).count(), diags.iter().filter(|d| !d.is_error()).count());
     for mut h in &mut header {
-        h.0 = format!("Log - {}, {}", plural(errors, "error", "errors"), plural(warnings, "warning", "warnings"));
+        h.0 = header_text(&diags);
     }
-    for d in diags.iter().take(ROW_LIMIT) {
+    let (problems, infos) = listed(&diags, editor.console_info);
+    for d in problems.iter().take(ROW_LIMIT) {
         let color = if d.is_error() { ERR } else { WARN };
-        commands.spawn_scene(bsn! { @row(d.to_string(), color, Some(d.clone())) ChildOf(body) });
+        commands.spawn_scene(bsn! { @row(d.to_string(), color, Some((*d).clone())) ChildOf(body) });
     }
-    if diags.is_empty() && editor.project.is_some() {
+    if problems.is_empty() && editor.project.is_some() {
         commands.spawn_scene(bsn! { @row("No problems.".into(), TEXT_DIM, None) ChildOf(body) });
+    }
+    for d in infos.iter().take(ROW_LIMIT.saturating_sub(problems.len())) {
+        commands.spawn_scene(bsn! { @row(d.to_string(), TEXT_DIM, Some((*d).clone())) ChildOf(body) });
     }
     let messages: Vec<_> = editor.console_messages().collect();
     for m in messages.iter().rev().take(50).rev() {
@@ -219,5 +258,54 @@ fn toggle_all(
             commands.entity(ev.source).remove::<Checked>();
         }
         actions.push(Action::ToggleConsoleAll);
+    }
+}
+
+/// The "Info" checkbox: like "All domains", the model's flag is the source.
+fn toggle_info(
+    ev: On<ValueChange<bool>>,
+    boxes: Query<(), With<ConsoleInfoToggle>>,
+    mut actions: ResMut<Actions>,
+    mut commands: Commands,
+) {
+    if boxes.contains(ev.source) {
+        if ev.value {
+            commands.entity(ev.source).insert(Checked);
+        } else {
+            commands.entity(ev.source).remove::<Checked>();
+        }
+        actions.push(Action::ToggleConsoleInfo);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn diags() -> Vec<Diagnostic> {
+        vec![
+            Diagnostic::info("I103", "uv1"),
+            Diagnostic::error("E003", "bad"),
+            Diagnostic::warning("W104", "truncated"),
+            Diagnostic::info("I103", "color"),
+        ]
+    }
+
+    #[test]
+    fn header_counts_info_apart() {
+        assert_eq!(header_text(&diags()), "Log - 1 error, 1 warning, 2 info");
+        assert_eq!(header_text(&diags()[1..3]), "Log - 1 error, 1 warning");
+        assert_eq!(header_text(&[]), "Log - 0 errors, 0 warnings");
+    }
+
+    #[test]
+    fn infos_listed_last_and_only_when_asked() {
+        let all = diags();
+        let codes = |v: &[&Diagnostic]| v.iter().map(|d| d.code.clone()).collect::<Vec<_>>();
+        let (problems, infos) = listed(&all, false);
+        assert_eq!((codes(&problems), infos.len()), (vec!["E003".to_string(), "W104".into()], 0));
+        let (problems, infos) = listed(&all, true);
+        assert_eq!(problems.len(), 2);
+        assert_eq!(infos.iter().map(|d| d.message.as_str()).collect::<Vec<_>>(), ["uv1", "color"]);
     }
 }

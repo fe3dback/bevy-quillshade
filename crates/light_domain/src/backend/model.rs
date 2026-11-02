@@ -1,6 +1,11 @@
 //! The Light domain's files (design §9.2): environments (`quillshade/light/<path>.environment.ron`), transition
 //! curves (`quillshade/light/<path>.curve.ron`, the curve kit's model), and cube-map Texture assets
 //! (`quillshade/light/<path>.texture.ron`, the texture kit's model under [`LIGHT_TEXTURES`]).
+//!
+//! Asset UUIDs (ADR 0047 §2–4): every kind carries an `id` (format 2, written by the v3 migration), and an
+//! environment's `cubemap` stores the texture's UUID. Readers of references see paths: [`LightAssets::resolve`] is
+//! the Light resolve seam (UUID -> current path, anything else passes through), [`LightAssets::index_part`] the
+//! Light part of the `AssetIndex`.
 
 use std::collections::BTreeMap;
 use std::io;
@@ -8,13 +13,19 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use project_core::{AssetRef, Diagnostic, LoadError, Project, probe_version};
+use project_core::asset_index::{IndexedAsset, IndexedRef, RefNames, annotate_refs};
+use project_core::layout::QUILLSHADE_DIR;
+use project_core::{
+    AssetIndex, AssetRef, AssetUuid, Diagnostic, DomainIndex, LoadError, Project, check_version, probe_version,
+};
 use texture_kit::{TextureAsset, TexturePolicy, TextureShape};
 
 use super::LIGHT;
 
-/// Current environment file format version.
-pub const ENVIRONMENT_FORMAT_VERSION: u32 = 1;
+/// Current environment file format version: 2 carries an asset `id` and stores the cube map's UUID (ADR 0047 §2–3,
+/// written by the v3 migration); older files are upgraded by the Migration Tool (`shader-editor migrate`), never by
+/// the loader.
+pub const ENVIRONMENT_FORMAT_VERSION: u32 = 2;
 
 /// File suffix of an environment (`<path>.environment.ron`).
 pub const ENVIRONMENT_SUFFIX: &str = "environment";
@@ -323,10 +334,14 @@ impl Default for FogDef {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Environment {
     pub format_version: u32,
+    /// The asset's UUID (ADR 0047 §2); nil (omitted from the file) until the asset is first saved.
+    #[serde(default, skip_serializing_if = "AssetUuid::is_nil")]
+    pub id: AssetUuid,
     /// Camera clear color in linear RGBA (`ClearColor`).
     #[serde(default = "default_clear_color")]
     pub clear_color: [f32; 4],
-    /// The Light Texture asset of the cube map: its path, domain-relative and without suffix (`textures/sky`).
+    /// The Light Texture asset of the cube map: its path, domain-relative and without suffix (`textures/sky`); stored as
+    /// its UUID ([`LightAssets::resolve`] turns it back into the path for every reader).
     #[serde(default)]
     pub cubemap: Option<String>,
     /// Brightness of the skybox (Bevy's `Skybox::brightness`, cd/m²).
@@ -487,6 +502,7 @@ impl Default for Environment {
     fn default() -> Self {
         Environment {
             format_version: ENVIRONMENT_FORMAT_VERSION,
+            id: AssetUuid::NIL,
             clear_color: default_clear_color(),
             cubemap: None,
             skybox_brightness: default_skybox_brightness(),
@@ -510,17 +526,16 @@ impl Default for Environment {
 }
 
 impl Environment {
-    /// Parses an environment file (older format versions would migrate here).
+    /// Parses an environment file of the current format ([`ENVIRONMENT_FORMAT_VERSION`]; any other is refused).
     pub fn from_ron(text: &str) -> Result<Self, String> {
-        match probe_version(text).map_err(|e| e.to_string())? {
-            v if v > ENVIRONMENT_FORMAT_VERSION => {
-                Err(LoadError::TooNew { found: v, supported: ENVIRONMENT_FORMAT_VERSION }.to_string())
-            }
-            ENVIRONMENT_FORMAT_VERSION => {
-                ron::Options::default().from_str(text).map_err(|e| LoadError::Parse(e.to_string()).to_string())
-            }
-            v => Err(LoadError::Unsupported(v).to_string()),
-        }
+        check_version(probe_version(text).map_err(|e| e.to_string())?, ENVIRONMENT_FORMAT_VERSION)
+            .map_err(|e| e.to_string())?;
+        ron::Options::default().from_str(text).map_err(|e| LoadError::Parse(e.to_string()).to_string())
+    }
+
+    /// Mints the asset's UUID when it has none (ADR 0047 §6); returns it.
+    pub fn ensure_id(&mut self) -> AssetUuid {
+        self.id.ensure()
     }
 
     /// Struct names, 2-space indent, `\n` line ends, a final newline (like Material assets).
@@ -554,9 +569,12 @@ pub fn load_environment(file: &Path) -> Result<Environment, String> {
     Environment::from_ron(&text)
 }
 
-/// Writes an environment file through a temporary file next to it, creating the parent directories.
-pub fn save_environment(file: &Path, env: &Environment) -> io::Result<()> {
-    project_core::writer::write_atomic(file, env.to_ron())
+/// Writes an environment file through a temporary file next to it, creating the parent directories. The environment
+/// gets its asset id first when it has none (ADR 0047 §6), and its cube map UUID the D27 path comment labelled by
+/// `names` (the project's `AssetIndex`, ADR 0047 §5).
+pub fn save_environment(file: &Path, env: &mut Environment, names: &dyn RefNames) -> io::Result<()> {
+    env.ensure_id();
+    project_core::writer::write_atomic(file, annotate_refs(&env.to_ron(), names, LIGHT))
 }
 
 /// Reads a curve file.
@@ -565,20 +583,56 @@ pub fn load_curve(file: &Path) -> Result<curve_kit::Curve, String> {
     curve_kit::Curve::from_ron(&text).map_err(|e| e.to_string())
 }
 
-/// Writes a curve file through a temporary file next to it, creating the parent directories.
-pub fn save_curve(file: &Path, curve: &curve_kit::Curve) -> io::Result<()> {
+/// Writes a curve file through a temporary file next to it, creating the parent directories. The curve gets its
+/// asset id first when it has none (ADR 0047 §6).
+pub fn save_curve(file: &Path, curve: &mut curve_kit::Curve) -> io::Result<()> {
+    curve.ensure_id();
     project_core::writer::write_atomic(file, curve.to_ron())
+}
+
+/// Gives the Light source file `r` the asset id `id` (the UUID quick fixes Regenerate UUID and Assign UUID, ADR 0047
+/// §11, §16): the file is loaded, its id set and written back through its kind's canonical writer (an environment
+/// with the D27 cube-map comment labelled by `names`), so a hand-written file without an `id` line gets one. A file
+/// that does not load is refused untouched.
+pub fn set_asset_uuid(project: &Project, r: &AssetRef, id: AssetUuid, names: &dyn RefNames) -> Result<(), String> {
+    let file = project.root.join(r.source_rel());
+    let invalid = |e: String| format!("`{r}`: {e}");
+    let written = match r.suffix {
+        ENVIRONMENT_SUFFIX => {
+            let mut env = load_environment(&file).map_err(invalid)?;
+            env.id = id;
+            save_environment(&file, &mut env, names)
+        }
+        CURVE_SUFFIX => {
+            let mut curve = load_curve(&file).map_err(invalid)?;
+            curve.id = id;
+            save_curve(&file, &mut curve)
+        }
+        TEXTURE_SUFFIX => {
+            let mut texture = texture_kit::load(&file).map_err(invalid)?;
+            texture.id = id;
+            texture_kit::save(&file, &texture)
+        }
+        _ => return Err(format!("`{r}` is not a Light asset")),
+    };
+    written.map_err(|e| e.to_string())
 }
 
 /// Every Light asset file of the project (`quillshade/light/**`), in path order; files and folders whose name starts
 /// with `.` are skipped.
 pub fn scan(project: &Project) -> Vec<AssetRef> {
-    let dir = project.domain_dir(LIGHT);
+    scan_root(&project.root)
+}
+
+/// [`scan`] of the project at `root` (any project version: the Migration Tool lists the Light sources with it).
+pub fn scan_root(root: &Path) -> Vec<AssetRef> {
+    let dir = root.join(QUILLSHADE_DIR).join(LIGHT.as_str());
     let mut out: Vec<AssetRef> = project_core::files::walk_files(&dir)
         .into_iter()
         .filter(|f| f.strip_prefix(&dir).is_ok_and(|rel| !rel.iter().any(|c| c.to_string_lossy().starts_with('.'))))
         .filter_map(|f| {
-            project_core::asset_ref::parse(&project.rel(&f), LIGHT, &[ENVIRONMENT_SUFFIX, TEXTURE_SUFFIX, CURVE_SUFFIX])
+            let rel = f.strip_prefix(root).ok()?.to_string_lossy().replace('\\', "/");
+            project_core::asset_ref::parse(&rel, LIGHT, &[ENVIRONMENT_SUFFIX, TEXTURE_SUFFIX, CURVE_SUFFIX])
         })
         .collect();
     out.sort();
@@ -622,22 +676,88 @@ impl LightAssets {
         }
         assets
     }
+
+    /// The Light domain's part of the `AssetIndex` (ADR 0047 §7): every loaded asset (one that does not load is not
+    /// listed) with its `id`; an environment's cube map is a reference located at `cubemap` when it is a UUID (a
+    /// hand-written path is not an edge).
+    pub fn index_part(&self) -> DomainIndex {
+        let mut assets = Vec::new();
+        for (path, e) in &self.environments {
+            let refs = e
+                .cubemap
+                .as_deref()
+                .and_then(AssetUuid::parse)
+                .map(|to| IndexedRef { to, sub: None, location: Some("cubemap".into()) })
+                .into_iter()
+                .collect();
+            assets.push(IndexedAsset { asset: environment_ref(path), id: Ok(e.id), sub_items: Vec::new(), refs });
+        }
+        for (path, c) in &self.curves {
+            assets.push(IndexedAsset { asset: curve_ref(path), id: Ok(c.id), sub_items: Vec::new(), refs: Vec::new() });
+        }
+        for (path, t) in &self.textures {
+            assets.push(IndexedAsset {
+                asset: texture_ref(path),
+                id: Ok(t.id),
+                sub_items: Vec::new(),
+                refs: Vec::new(),
+            });
+        }
+        assets.sort_by(|a, b| a.asset.cmp(&b.asset));
+        DomainIndex { domain: LIGHT, assets }
+    }
+
+    /// The Light resolve seam (ADR 0047 §4): every environment's cube map that is the UUID of a Light Texture asset in
+    /// `index` becomes that texture's current path, so validation, planning and codegen see the path form (generated
+    /// files are identical). Anything else — a path (hand-written), a dangling UUID, the UUID of another kind —
+    /// passes through unchanged (a dangling one is then `LE001`, plus `AE002` from the index).
+    pub fn resolve(&mut self, index: &AssetIndex) {
+        for env in self.environments.values_mut() {
+            if let Some(path) = env.cubemap.as_deref().and_then(|c| resolve_texture(c, index)) {
+                env.cubemap = Some(path.to_string());
+            }
+        }
+    }
+
+    /// [`LightAssets::resolve`] against the index of these assets alone ([`LightAssets::index_part`]): Light
+    /// references stay inside the domain, so this is enough where no project-wide index is at hand.
+    pub fn resolve_locally(&mut self) {
+        let index = AssetIndex::build(vec![self.index_part()]);
+        self.resolve(&index);
+    }
 }
 
-/// Rewrites (`Some`) or clears (`None`) the cube map of every environment showing the Light Texture asset `from`
-/// (a texture renamed or deleted); the paths of the rewritten environments, in path order. An environment that does
-/// not load is left alone.
-pub fn rewrite_texture_refs(project: &Project, from: &str, to: Option<&str>) -> io::Result<Vec<String>> {
+/// The current path of the Light Texture asset whose UUID is `value`; `None` when `value` is not a UUID or names no
+/// such asset (unknown, another domain or another kind).
+pub fn resolve_texture<'a>(value: &str, index: &'a AssetIndex) -> Option<&'a str> {
+    let entry = index.get(AssetUuid::parse(value)?)?;
+    (entry.asset.domain == LIGHT && entry.asset.suffix == TEXTURE_SUFFIX).then_some(entry.asset.path.as_str())
+}
+
+/// Clears the cube map of every environment showing the deleted Light Texture asset named by `names` (the values a
+/// cube map stores for it: its UUID, or its path in a hand-written file; ADR 0047 §13); the paths of the rewritten
+/// environments, in path order. An environment that does not load is left alone. A rename needs nothing: cube maps
+/// store the texture's UUID.
+pub fn clear_texture_refs(project: &Project, names: &[String]) -> io::Result<Vec<String>> {
     let mut rewritten = Vec::new();
     for r in scan(project).into_iter().filter(|r| r.suffix == ENVIRONMENT_SUFFIX) {
         let file = project.root.join(r.source_rel());
         let Ok(mut env) = load_environment(&file) else { continue };
-        if env.cubemap.as_deref() != Some(from) {
+        if !env.cubemap.as_ref().is_some_and(|c| names.contains(c)) {
             continue;
         }
-        env.cubemap = to.map(str::to_string);
-        save_environment(&file, &env)?;
+        env.cubemap = None;
+        // Nothing is left to label: the cube map was the environment's only reference.
+        save_environment(&file, &mut env, &AssetIndex::default())?;
         rewritten.push(r.path);
     }
     Ok(rewritten)
+}
+
+/// The values a cube map naming Light Texture asset `path` stores, as `index` knows it: its UUID (ADR 0047 §4) and
+/// its path (a hand-written file may still name it so). A duplicate loser (a copied file, AE001) has no UUID here:
+/// cube maps storing its id name the original ([`AssetIndex::ref_id_of`]).
+pub fn texture_ref_names(path: &str, index: &AssetIndex) -> Vec<String> {
+    let uuid = index.ref_id_of(&texture_ref(path)).map(|u| u.to_string());
+    std::iter::once(path.to_string()).chain(uuid).collect()
 }

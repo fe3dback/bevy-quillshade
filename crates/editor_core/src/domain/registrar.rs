@@ -13,6 +13,7 @@ use crate::ui::icons::IconRef;
 use bevy::prelude::{App, Scene};
 use project_core::regen::DomainBackend;
 use project_core::{AssetRef, DomainId, Project};
+use project_migrate::DomainMigrator;
 
 use super::{DomainState, ToolDef};
 use crate::state::editor::Editor;
@@ -23,6 +24,12 @@ pub trait EditorDomain: Send + Sync + 'static {
     fn info(&self) -> DomainInfo;
     /// Its generator (`None` for a domain without output); the CLI runs it, the editor reads its crate contribution.
     fn backend(&self) -> Option<Box<dyn DomainBackend>>;
+    /// Its source-format migration steps (techdoc §4.4, ADR 0046 "Registration"): `None` (the default) for a domain
+    /// without steps. The CLI's `migrate` and the editor's Migration Tool collect them from the same domain list as
+    /// the backends; the built-in project domain returns `None` (its migrator is built into the orchestrator).
+    fn migrator(&self) -> Option<Box<dyn DomainMigrator>> {
+        None
+    }
     /// Registers everything the editor needs of the domain.
     fn register(&self, r: &mut DomainRegistrar);
 }

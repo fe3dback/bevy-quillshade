@@ -1,0 +1,23 @@
+UserNode(
+  format_version: 2,
+  id: "019b76da-a800-7c9d-a24f-a55383a7ae80",
+  ident: "soft_clamp",
+  name: "SoftClamp",
+  category: "User",
+  keywords: [
+    "clamp",
+  ],
+  inputs: [
+    UserPin(
+      name: "x",
+      ty: Float3,
+    ),
+    UserPin(
+      name: "k",
+      ty: Float,
+      default: Some(Float(0.5)),
+    ),
+  ],
+  output: Float3,
+  template: "return x / (vec3<f32>(1.0) + abs(x) * k);",
+)

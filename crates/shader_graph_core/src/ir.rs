@@ -17,8 +17,17 @@ use crate::registry::{
 use crate::types::{PinType, conversion};
 use crate::value::Value;
 
-/// Input pin of material output nodes evaluated in the vertex stage.
+/// Input pin of material output nodes evaluated in the vertex stage: World Position Offset.
 pub const WPO_PIN: &str = "world_position_offset";
+/// Input pin of `output::Pbr3d` evaluated in the vertex stage: World Normal, replaces the geometric normal
+/// (`out.world_normal`) so everything downstream (the tangent-space Normal pin, the fragment `VertexNormalWS`, the
+/// prepass / deferred normals) builds on it (spec §7.3; decision 0022 for the preview).
+pub const WORLD_NORMAL_PIN: &str = "world_normal";
+
+/// Whether the material output pin `pin` is evaluated in the vertex stage.
+pub fn is_vertex_pin(pin: &str) -> bool {
+    pin == WPO_PIN || pin == WORLD_NORMAL_PIN
+}
 
 /// One generated stage (fragment / vertex / function body).
 #[derive(Debug, Clone, Default)]
@@ -187,7 +196,7 @@ pub struct Ir {
     pub kind: AssetKind,
     /// Fragment stage for materials, function body for functions.
     pub main: IrStage,
-    /// Vertex stage (World Position Offset), materials only.
+    /// Vertex stage (World Position Offset, World Normal), materials only.
     pub vertex: Option<IrStage>,
     /// Material parameters sorted by name (ties: node id; decision 0027): constructor and binding order.
     pub params: Vec<MaterialParam>,
@@ -232,12 +241,14 @@ impl Ir {
 
     /// WESL feature naming the binding layout of a material (decision 0029): `SG_LAYOUT_` + an FNV-1a hash of its
     /// kind, the settings compiled into the Rust side (blend mode, two-sided, Pbr3d shading: alpha mode, culling and
-    /// `StandardMaterial::unlit`), vertex stage, uniform fields (names, types, offsets) and texture binding numbers.
-    /// The generated Rust material enables it in `specialize`; the WESL refuses to compile without it, so a
-    /// hot-reloaded shader whose bindings no longer match the compiled game fails to compile instead of failing
-    /// pipeline creation (which quits the game), and one written for another blend mode fails instead of running
-    /// with the old pipeline's blending. Texture identifiers are left out: the bindings are matched by number (the
-    /// runtime overlay maps them by position), so wiring another fixed texture node in keeps the layout.
+    /// `StandardMaterial::unlit`), whether there is a vertex stage (only its presence reaches the Rust side: what
+    /// World Position Offset and World Normal compute is WESL-only and hot-reloads), uniform fields (names, types,
+    /// offsets) and texture binding numbers. The generated Rust material enables it in `specialize`; the WESL
+    /// refuses to compile without it, so a hot-reloaded shader whose bindings no longer match the compiled game
+    /// fails to compile instead of failing pipeline creation (which quits the game), and one written for another
+    /// blend mode fails instead of running with the old pipeline's blending. Texture identifiers are left out: the
+    /// bindings are matched by number (the runtime overlay maps them by position), so wiring another fixed texture
+    /// node in keeps the layout.
     pub fn layout_feature(&self) -> String {
         let kind = match self.kind.material() {
             Some(MaterialKind::Pbr3d(s)) => format!("pbr3d:{:?}:{}:{:?}", s.blend, s.two_sided, s.shading),
@@ -640,7 +651,7 @@ pub fn build_ir_with_overrides(
 
     // 5. Live sets per stage (inactive output pins and inactive CompileIf branches are not traversed for codegen,
     // while `all_reachable` traverses both branches of connected CompileIf nodes for W101 and diagnostic checks).
-    let pin_stage = |pin: &str| if pin == WPO_PIN { Stage::Vertex } else { Stage::Fragment };
+    let pin_stage = |pin: &str| if is_vertex_pin(pin) { Stage::Vertex } else { Stage::Fragment };
     let mut live: BTreeMap<Stage, BTreeSet<&str>> = BTreeMap::new();
     let mut all_reachable: BTreeSet<&str> = BTreeSet::new();
     for (stage, root) in &roots {
@@ -1108,9 +1119,11 @@ pub fn build_ir_with_overrides(
                 main.outputs.insert(out_pin.to_string(), v);
             }
         }
-        // Keep the vertex stage (the Rust side declares its shader) but drop the offset.
+        // Keep the vertex stage (the Rust side declares its shader) but drop the offset and the world-normal
+        // override: the preview shows the node on the undeformed mesh with its geometric normal.
         if let Some(v) = &mut vertex {
             v.outputs.insert(WPO_PIN.to_string(), "vec3<f32>(0.0)".to_string());
+            v.outputs.remove(WORLD_NORMAL_PIN);
         }
         let msg = format!(
             "preview active on this node (mode {}); the material output is bypassed",
@@ -1178,7 +1191,7 @@ pub fn build_ir_with_overrides(
         for b in main.builtins.iter().chain(vertex.iter().flat_map(|v| v.builtins.iter())) {
             if let Some(attr) = b.optional_attribute() {
                 diags.push(Diagnostic::new(
-                    Code::W103,
+                    Code::I103,
                     format!("uses vertex attribute {attr}; meshes without it get a default value"),
                 ));
             }

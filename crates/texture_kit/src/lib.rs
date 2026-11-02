@@ -12,13 +12,14 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use project_core::{LoadError, probe_version};
+use project_core::{AssetUuid, LoadError, check_version, probe_version};
 
 #[cfg(feature = "editor")]
 pub mod editor;
 
-/// Current texture asset file format version.
-pub const TEXTURE_FORMAT_VERSION: u32 = 1;
+/// Current texture asset file format version: 2 carries the asset `id` (ADR 0047 §2, written by the v3 migration);
+/// older files are upgraded by the Migration Tool (`shader-editor migrate`), never by the loader.
+pub const TEXTURE_FORMAT_VERSION: u32 = 2;
 
 /// Which GPU view a texture of a domain must have (design §7.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,6 +75,9 @@ pub struct InternalTexture {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct TextureAsset {
     pub format_version: u32,
+    /// The asset's UUID (ADR 0047 §2); nil (omitted from the file) until the asset is first saved.
+    #[serde(default, skip_serializing_if = "AssetUuid::is_nil")]
+    pub id: AssetUuid,
     /// Image path relative to the game's `assets/` directory (`textures/env/rock_albedo.ktx2`), `/`-separated.
     pub path: String,
     #[serde(default, skip_serializing_if = "TextureSettings::is_default")]
@@ -244,20 +248,25 @@ fn is_default_anisotropy_clamp(v: &u16) -> bool {
 impl TextureAsset {
     /// Texture asset for `path` with Bevy's default loader settings.
     pub fn new(path: &str) -> Self {
-        TextureAsset { format_version: TEXTURE_FORMAT_VERSION, path: path.to_string(), settings: Default::default() }
+        TextureAsset {
+            format_version: TEXTURE_FORMAT_VERSION,
+            id: AssetUuid::NIL,
+            path: path.to_string(),
+            settings: Default::default(),
+        }
     }
 
-    /// Parses a texture asset file (older format versions would migrate here). The path is not checked here (E012
-    /// is reported by validation, the asset still loads).
+    /// Parses a texture asset file of the current format ([`TEXTURE_FORMAT_VERSION`]; any other is refused). The
+    /// path is not checked here (E012 is reported by validation, the asset still loads).
     pub fn from_ron(text: &str) -> Result<Self, String> {
-        let parse = |e: ron::error::SpannedError| LoadError::Parse(e.to_string()).to_string();
-        match probe_version(text).map_err(|e| e.to_string())? {
-            v if v > TEXTURE_FORMAT_VERSION => {
-                Err(LoadError::TooNew { found: v, supported: TEXTURE_FORMAT_VERSION }.to_string())
-            }
-            TEXTURE_FORMAT_VERSION => ron::Options::default().from_str(text).map_err(parse),
-            v => Err(LoadError::Unsupported(v).to_string()),
-        }
+        check_version(probe_version(text).map_err(|e| e.to_string())?, TEXTURE_FORMAT_VERSION)
+            .map_err(|e| e.to_string())?;
+        ron::Options::default().from_str(text).map_err(|e| LoadError::Parse(e.to_string()).to_string())
+    }
+
+    /// Mints the asset's UUID when it has none (ADR 0047 §6); returns it.
+    pub fn ensure_id(&mut self) -> AssetUuid {
+        self.id.ensure()
     }
 
     /// Struct names, 2-space indent, fields at their default omitted.
@@ -552,6 +561,20 @@ mod tests {
         assert_eq!(TextureAsset::from_ron(&d.to_ron()).unwrap(), d);
         let too_new = "TextureAsset(format_version: 9, path: \"a.png\")";
         assert!(TextureAsset::from_ron(too_new).unwrap_err().contains("newer"));
+        let older = "TextureAsset(format_version: 1, path: \"a.png\")";
+        assert!(TextureAsset::from_ron(older).unwrap_err().contains("run `shader-editor migrate`"));
+    }
+
+    #[test]
+    fn saved_texture_keeps_its_id() {
+        let mut t = TextureAsset::new("a.png");
+        assert!(!t.to_ron().contains("id:"), "a nil id is not written");
+        let id = t.ensure_id();
+        assert!(id.is_v7());
+        assert_eq!(t.ensure_id(), id, "an id is minted once");
+        let text = t.to_ron();
+        assert!(text.starts_with(&format!("TextureAsset(\n  format_version: 2,\n  id: \"{id}\",\n")), "{text}");
+        assert_eq!(TextureAsset::from_ron(&text).unwrap(), t);
     }
 
     #[test]

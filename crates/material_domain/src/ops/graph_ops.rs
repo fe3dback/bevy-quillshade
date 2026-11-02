@@ -3,13 +3,16 @@ use super::*;
 use crate::doc::snap;
 use shader_graph_core::model::Edge;
 use shader_graph_core::registry::ROUTE_PARAM;
+use shader_project::resolve::ref_type;
 use shader_stdlib::nodes::color::{GRADIENT_COLLECTION_PARAM, SAMPLE_GRADIENT_KIND};
 use shader_stdlib::nodes::utility::{CURVE_PARAM, SAMPLE_CURVE_KIND};
 
 /// Graph editing (spec §9): nodes, wires, previews, the palette and the node menus.
 pub trait MaterialGraphOps {
     /// Adds a `kind` node at `pos` (snapped), connected to `link` when it has a compatible pin, in one undo step, and
-    /// selects it. Returns its id (`None` without an active graph).
+    /// selects it. `kind` is as the canvas shows it (`function::<path>`, `user::<ident>`); the graph stores the
+    /// target's UUID when it has one ([`MaterialEditor::stored_kind`], ADR 0047 §4). Returns its id (`None` without
+    /// an active graph).
     fn add_node(
         &mut self,
         kind: &str,
@@ -24,7 +27,7 @@ pub trait MaterialGraphOps {
     /// with a param of that reference's kind the param is set (a collection resets the node's slot, as in
     /// a [`GraphProp::Param`] edit); otherwise (empty canvas or any other node) the droppable's node is added at
     /// `pos`. A Function asset always adds its call node, unless the call would be recursive (as in the palette).
-    /// Either way one undo step.
+    /// Either way one undo step. The node stores the target's UUID when it has one (ADR 0047 §4).
     fn drop_item(&mut self, item: Dropped, pos: (f32, f32), node: Option<NodeId>);
 
     fn connect(&mut self, from: (NodeId, String), to: (NodeId, String));
@@ -124,15 +127,22 @@ impl MaterialGraphOps for Editor {
         link: Option<Link>,
         params: &[(String, Value)],
     ) -> Option<NodeId> {
+        let Some(stored) = self.stored_kind(kind) else {
+            self.push_msg(
+                Level::Warning,
+                format!("`{kind}` cannot be added: its file {}", crate::graph_domain::NEEDS_UUID),
+            );
+            return None;
+        };
         let d = self.doc_mut()?;
         let asset_kind = d.asset.kind;
-        let id = d.add_node_with(kind, snap(pos), params);
+        let id = d.add_node_with(&stored, snap(pos), params);
         if let Some(link) = link {
-            let d = self.doc().expect("active graph");
+            let (d, view) = self.doc_view().expect("active graph");
             let path = d.id.path.clone();
-            let ty = d.asset.nodes.get(&link.node).and_then(|_| {
+            let ty = view.nodes.get(&link.node).and_then(|_| {
                 let sig = node_signature(
-                    &d.asset,
+                    &view,
                     &link.node,
                     &self.domains.material().registry,
                     &self.domains.material().functions,
@@ -192,8 +202,17 @@ impl MaterialGraphOps for Editor {
                 return;
             }
         };
+        let value = match ref_type(&param_kind).map(|ty| self.stored_ref(ty, &value)) {
+            Some(Some(stored)) => stored,
+            Some(None) => {
+                let msg = format!("`{value}` cannot be referenced: its file {}", crate::graph_domain::NEEDS_UUID);
+                return self.push_msg(Level::Warning, msg);
+            }
+            None => value,
+        };
         let target = node.and_then(|node| {
-            let n = self.doc()?.asset.nodes.get(&node)?;
+            let (_, view) = self.doc_view()?;
+            let n = view.nodes.get(&node)?;
             let def = self.domains.material().registry.get(&n.kind)?;
             let param = def.params().into_iter().find(|p| p.kind == param_kind)?;
             Some((node, param.id))
@@ -219,9 +238,9 @@ impl MaterialGraphOps for Editor {
     }
 
     fn connect_checked(&mut self, from: (NodeId, String), to: (NodeId, String), into_last_step: bool) {
-        let Some(d) = self.doc() else { return };
+        let Some((d, view)) = self.doc_view() else { return };
         if let Some(e) = connection_error(
-            &d.asset,
+            &view,
             (&from.0, &from.1),
             (&to.0, &to.1),
             &self.domains.material().registry,
@@ -263,11 +282,13 @@ impl MaterialGraphOps for Editor {
     }
 
     fn plan_move_wires(&self, from: &(NodeId, String), output: bool, to: &(NodeId, String)) -> Result<Asset, String> {
-        let Some(d) = self.doc() else { return Err("no graph is open".into()) };
-        let mut moved = d.asset.clone();
+        let Some((d, view)) = self.doc_view() else { return Err("no graph is open".into()) };
         if from == to {
-            return Ok(moved);
+            return Ok(d.asset.clone());
         }
+        // Checked on the resolved view (ADR 0047 §4); only wires move, so the model gets the view's wires.
+        let mut moved = view.as_ref().clone();
+        let model = |moved: Asset| Asset { edges: moved.edges, ..d.asset.clone() };
         let path = &d.id.path;
         let label = |asset: &Asset, (node, pin): &(NodeId, String)| {
             format!(
@@ -295,7 +316,7 @@ impl MaterialGraphOps for Editor {
             .map(|e| if output { Edge { from: to.clone(), ..e.clone() } } else { Edge { to: to.clone(), ..e.clone() } })
             .collect();
         if rewired.is_empty() {
-            return Ok(moved);
+            return Ok(model(moved));
         }
         // Checked one by one against the graph without the old wires — nor, for an input, the wire into `to` it
         // replaces — each accepted one added before the next.
@@ -315,13 +336,13 @@ impl MaterialGraphOps for Editor {
             moved.connect(f, t);
         }
         moved.normalize();
-        Ok(moved)
+        Ok(model(moved))
     }
 
     fn pin_menu(&self, node: &str, pin: &str) -> Vec<(String, Action)> {
-        let Some(d) = self.doc() else { return Vec::new() };
+        let Some((d, view)) = self.doc_view() else { return Vec::new() };
         let Some(sig) = node_signature(
-            &d.asset,
+            &view,
             node,
             &self.domains.material().registry,
             &self.domains.material().functions,
@@ -414,13 +435,13 @@ impl MaterialGraphOps for Editor {
     }
 
     fn preview_refusal(&self, node: &str) -> Option<String> {
-        let d = self.doc()?;
-        if !matches!(d.asset.kind, AssetKind::Material(_)) {
+        let (d, view) = self.doc_view()?;
+        if !matches!(view.kind, AssetKind::Material(_)) {
             return Some("only material nodes can be previewed".into());
         }
-        let Some(n) = d.asset.nodes.get(node) else { return Some(format!("node `{node}` does not exist")) };
+        let Some(n) = view.nodes.get(node) else { return Some(format!("node `{node}` does not exist")) };
         let sig = node_signature(
-            &d.asset,
+            &view,
             node,
             &self.domains.material().registry,
             &self.domains.material().functions,
@@ -430,12 +451,8 @@ impl MaterialGraphOps for Editor {
             self.domains.material().registry.get(&n.kind).zip(sig).is_some_and(|(def, sig)| {
                 def.role() != NodeRole::MaterialOutput && !def.preview_output(&sig).is_empty()
             });
-        let title = crate::doc::node_title(
-            &self.domains.material().registry,
-            &self.domains.material().functions,
-            &d.asset,
-            node,
-        );
+        let title =
+            crate::doc::node_title(&self.domains.material().registry, &self.domains.material().functions, &view, node);
         (!previewable).then(|| format!("`{title}` has no output that converts to a color"))
     }
 
@@ -452,11 +469,11 @@ impl MaterialGraphOps for Editor {
     }
 
     fn node_actions(&self, node: &str) -> Vec<NodeAction> {
-        let Some(d) = self.doc() else { return Vec::new() };
-        let Some(n) = d.asset.nodes.get(node) else { return Vec::new() };
+        let Some((_, view)) = self.doc_view() else { return Vec::new() };
+        let Some(n) = view.nodes.get(node) else { return Vec::new() };
         let mut actions =
             self.domains.material().registry.get(&n.kind).map(|def| def.context_actions()).unwrap_or_default();
-        if d.asset.kind.is_function() {
+        if view.kind.is_function() {
             actions.retain(|a| {
                 let NodeOp::Convert(c) = &a.op;
                 self.domains.material().registry.get(&c.kind).is_none_or(|t| t.role() != NodeRole::Parameter)
@@ -504,9 +521,11 @@ impl MaterialGraphOps for Editor {
                 }
             }
         }
+        // Signatures of the converted graph as resolved (ADR 0047 §4); node ids and wires are the model's.
+        let view = self.resolve(&asset);
         for id in nodes {
             let Some(sig) = node_signature(
-                &asset,
+                &view,
                 id,
                 &self.domains.material().registry,
                 &self.domains.material().functions,
@@ -528,7 +547,8 @@ impl MaterialGraphOps for Editor {
     }
 
     fn rename_target(&self, node: &str) -> Option<GraphProp> {
-        let n = self.doc()?.asset.nodes.get(node)?;
+        let (_, view) = self.doc_view()?;
+        let n = view.nodes.get(node)?;
         if crate::doc::has_label(&n.kind) {
             return Some(GraphProp::NodeLabel(node.to_string()));
         }
@@ -541,8 +561,8 @@ impl MaterialGraphOps for Editor {
     }
 
     fn header_action(&self, node: &str) -> Option<Action> {
-        let d = self.doc()?;
-        let n = d.asset.nodes.get(node)?;
+        let (_, view) = self.doc_view()?;
+        let n = view.nodes.get(node)?;
         if let Some(open) = self.open_action(node) {
             return Some(open);
         }
@@ -557,15 +577,15 @@ impl MaterialGraphOps for Editor {
     }
 
     fn route_declaration_of(&self, node: &str) -> Option<NodeId> {
-        let d = self.doc()?;
-        let n = d.asset.nodes.get(node)?;
+        let (_, view) = self.doc_view()?;
+        let n = view.nodes.get(node)?;
         let def = self.domains.material().registry.get(&n.kind)?;
         if def.role() != NodeRole::RouteUsage {
             return None;
         }
         let params = self.domains.material().registry.resolved_params(&n.kind, &n.params);
         let decl = params.get(ROUTE_PARAM)?.as_str();
-        let decl_node = d.asset.nodes.get(decl)?;
+        let decl_node = view.nodes.get(decl)?;
         let decl_def = self.domains.material().registry.get(&decl_node.kind)?;
         (decl_def.role() == NodeRole::RouteDeclaration).then(|| decl.to_string())
     }
@@ -581,7 +601,8 @@ impl MaterialGraphOps for Editor {
     }
 
     fn referenced_asset(&self, node: &str) -> Option<AssetId> {
-        let n = self.doc()?.asset.nodes.get(node)?;
+        let (_, view) = self.doc_view()?;
+        let n = view.nodes.get(node)?;
         if let Some(path) = n.kind.strip_prefix(FUNCTION_PREFIX) {
             return self
                 .domains
@@ -626,7 +647,8 @@ impl MaterialGraphOps for Editor {
     }
 
     fn referenced_gradient_slot(&self, node: &str) -> Option<u32> {
-        let n = self.doc()?.asset.nodes.get(node)?;
+        let (_, view) = self.doc_view()?;
+        let n = view.nodes.get(node)?;
         let def = self.domains.material().registry.get(&n.kind)?;
         let params = self.domains.material().registry.resolved_params(&n.kind, &n.params);
         let col_path = def
@@ -647,10 +669,10 @@ impl MaterialGraphOps for Editor {
     }
 
     fn set_pin_type(&mut self, node: &str, ty: PinType) {
-        let Some(d) = self.doc() else { return };
-        let Some(n) = d.asset.nodes.get(node) else { return };
+        let Some((d, view)) = self.doc_view() else { return };
+        let Some(n) = view.nodes.get(node) else { return };
         let Some(sig) = node_signature(
-            &d.asset,
+            &view,
             node,
             &self.domains.material().registry,
             &self.domains.material().functions,
@@ -661,7 +683,7 @@ impl MaterialGraphOps for Editor {
         let values: Vec<(String, Value)> = sig
             .inputs
             .iter()
-            .filter(|p| p.poly && d.asset.edge_into(node, &p.id).is_none())
+            .filter(|p| p.poly && view.edge_into(node, &p.id).is_none())
             .map(|p| (p.id.clone(), n.inputs.get(&p.id).unwrap_or(&p.default).coerce(ty)))
             .collect();
         if values.is_empty() {
@@ -678,9 +700,9 @@ impl MaterialGraphOps for Editor {
     }
 
     fn node_height(&self, id: &str) -> f32 {
-        let Some(d) = self.doc() else { return 60.0 };
+        let Some((d, view)) = self.doc_view() else { return 60.0 };
         let rows = node_signature(
-            &d.asset,
+            &view,
             id,
             &self.domains.material().registry,
             &self.domains.material().functions,
@@ -706,9 +728,9 @@ impl MaterialGraphOps for Editor {
     }
 
     fn pin_type(&self, node: &str, pin: &str, output: bool) -> Option<PinType> {
-        let d = self.doc()?;
+        let (d, view) = self.doc_view()?;
         let sig = node_signature(
-            &d.asset,
+            &view,
             node,
             &self.domains.material().registry,
             &self.domains.material().functions,
@@ -718,9 +740,8 @@ impl MaterialGraphOps for Editor {
     }
 
     fn is_output_node(&self, node: &str) -> bool {
-        self.doc()
-            .and_then(|d| d.asset.nodes.get(node))
-            .and_then(|n| self.domains.material().registry.get(&n.kind))
+        self.doc_view()
+            .and_then(|(_, view)| view.nodes.get(node).and_then(|n| self.domains.material().registry.get(&n.kind)))
             .is_some_and(|def| def.role() == NodeRole::MaterialOutput)
     }
 }
@@ -729,6 +750,7 @@ impl MaterialGraphOps for Editor {
 /// that need other tabs (function signatures, validation, the preview regeneration) follow in [`Editor::apply`].
 impl Doc {
     pub(crate) fn apply_edit(&mut self, ctx: &mut DocCtx, action: &TabAction) -> Handled {
+        let index = ctx.index;
         let Some(m) = ctx.domain::<MaterialState>() else { return Handled::No };
         let redraw = match action {
             TabAction::Undo => self.undo(),
@@ -769,20 +791,23 @@ impl Doc {
             }
             TabAction::SetValue { key, value, merge } => {
                 let Some(target) = key.downcast::<GraphProp>() else { return Handled::No };
-                let value = self.model_value_for(target, value, m);
-                self.set_prop(m, key, target, value, *merge)
+                let value = self.model_value_for(target, value, m, index);
+                self.set_prop(m, index, key, target, value, *merge)
             }
             TabAction::SetComponent { key, comp, value, is_final } => {
                 let Some(target) = key.downcast::<GraphProp>() else { return Handled::No };
-                let Some(cur) = self.prop_of(target, m) else { return Handled::Yes };
+                let Some(cur) = self.prop_of(target, m, index) else { return Handled::Yes };
                 let new = match (&cur, target) {
                     // A frame without a hue gets one from its Hue field.
                     (Value::Str(_), GraphProp::FrameHue(_)) => Some(Value::Float(*value)),
-                    _ => prop_value(&cur).with_component(*comp, *value).map(|v| self.model_value_for(target, &v, m)),
+                    _ => {
+                        let v = prop_value(&cur).with_component(*comp, *value);
+                        v.map(|v| self.model_value_for(target, &v, m, index))
+                    }
                 };
                 // `None`: a field sent its shown (rounded) text back on focus loss, which is not an edit.
                 let Some(new) = new else { return Handled::Yes };
-                let redraw = self.set_prop(m, key, target, new, true);
+                let redraw = self.set_prop(m, index, key, target, new, true);
                 if *is_final {
                     self.end_merge();
                 }
@@ -844,9 +869,9 @@ impl Doc {
 
     /// `v` as the model value of `target`: a param holding a pin type gets the type back from its label, and a
     /// `GlobalConst` param parses its constant id (`0` for `(none)`).
-    fn model_value_for(&self, target: &GraphProp, v: &PropValue, m: &MaterialState) -> Value {
+    fn model_value_for(&self, target: &GraphProp, v: &PropValue, m: &MaterialState, index: &AssetIndex) -> Value {
         if let (GraphProp::Param { node, key }, PropValue::Str(s)) = (target, v)
-            && let Some(n) = self.asset.nodes.get(node)
+            && let Some(n) = self.resolved(index, &m.registry).nodes.get(node)
             && let Some(def) = m.registry.get(&n.kind)
         {
             if def.params().iter().any(|p| p.id == *key && matches!(p.kind, ParamKind::PinType(_)))
@@ -861,20 +886,23 @@ impl Doc {
         model_value(v)
     }
 
-    /// Value a property widget shows: the stored one, or the pin's default.
-    pub(crate) fn prop_of(&self, target: &GraphProp, m: &MaterialState) -> Option<Value> {
+    /// Value a property widget shows: the stored one, or the pin's default. Params and input defaults are read from
+    /// the resolved view (ADR 0047 §4): a reference param stored as a UUID shows the target's path.
+    pub(crate) fn prop_of(&self, target: &GraphProp, m: &MaterialState, index: &AssetIndex) -> Option<Value> {
         match target {
             GraphProp::OutputMode => match self.asset.kind {
                 AssetKind::Material(MaterialKind::Pbr3d(s)) => Some(Value::Str(s.output.label().into())),
                 _ => None,
             },
             GraphProp::Param { node, key } => {
-                let n = self.asset.nodes.get(node)?;
+                let view = self.resolved(index, &m.registry);
+                let n = view.nodes.get(node)?;
                 Some(m.registry.resolved_params(&n.kind, &n.params).get(key).cloned().unwrap_or(Value::Float(0.0)))
             }
             GraphProp::Input { node, pin } => {
-                let n = self.asset.nodes.get(node)?;
-                let pin_def = node_signature(&self.asset, node, &m.registry, &m.functions, &self.id.path)
+                let view = self.resolved(index, &m.registry);
+                let n = view.nodes.get(node)?;
+                let pin_def = node_signature(&view, node, &m.registry, &m.functions, &self.id.path)
                     .and_then(|sig| sig.input(pin).cloned());
                 // In the pin's resolved type: a wire on another poly pin may widen a stored scalar.
                 match (n.inputs.get(pin), pin_def) {
@@ -902,8 +930,22 @@ impl Doc {
 
     /// Sets a property (merged into the last undo step of the same `key` while `merge`); returns whether the right
     /// sidebar must redraw (not during merged edits, which would take the widget being edited).
-    fn set_prop(&mut self, m: &MaterialState, key: &PropKey, target: &GraphProp, value: Value, merge: bool) -> bool {
-        if self.prop_of(target, m).as_ref() == Some(&value) {
+    fn set_prop(
+        &mut self,
+        m: &MaterialState,
+        index: &AssetIndex,
+        key: &PropKey,
+        target: &GraphProp,
+        value: Value,
+        merge: bool,
+    ) -> bool {
+        // A reference picked as its target's UUID compares as the path it resolves to (ADR 0047 §4): picking the
+        // target a node shows already changes nothing.
+        let shown = match target {
+            GraphProp::Param { node, key: k } => self.resolved_param_value(node, k, &value, m, index),
+            _ => value.clone(),
+        };
+        if self.prop_of(target, m, index).as_ref() == Some(&shown) {
             return false;
         }
         let mkey = merge.then(|| MergeKey::Prop(key.clone()));
@@ -911,12 +953,12 @@ impl Doc {
             return PbrOutputMode::ALL
                 .into_iter()
                 .find(|mode| mode.label() == value.as_str())
-                .is_some_and(|mode| self.set_pbr_output_mode(mode, m));
+                .is_some_and(|mode| self.set_pbr_output_mode(mode, m, index));
         }
         // Gradient design §6: slot ids of one collection mean nothing in another, so picking another collection resets
         // the node's slot (`0`: none) in the same undo step.
         let reset_slot = match target {
-            GraphProp::Param { node, key: k } => self.slot_param_reset_by(node, k, &value, &m.registry),
+            GraphProp::Param { node, key: k } => self.slot_param_reset_by(node, k, &shown, &m.registry, index),
             _ => None,
         };
         let mut refresh = !merge;
@@ -1023,7 +1065,7 @@ impl Doc {
     /// Switches the Pbr3d output layout (decision 0023) in one undo step; `false` on another kind of asset. Like
     /// [`Editor::convert_nodes`], wires and inline values of material output pins the new layout lacks are dropped;
     /// undo brings them back.
-    fn set_pbr_output_mode(&mut self, mode: PbrOutputMode, m: &MaterialState) -> bool {
+    fn set_pbr_output_mode(&mut self, mode: PbrOutputMode, m: &MaterialState, index: &AssetIndex) -> bool {
         let mut asset = self.asset.clone();
         let AssetKind::Material(MaterialKind::Pbr3d(s)) = &mut asset.kind else { return false };
         s.output = mode;
@@ -1033,8 +1075,10 @@ impl Doc {
             .filter(|(_, n)| m.registry.get(&n.kind).is_some_and(|def| def.role() == NodeRole::MaterialOutput))
             .map(|(id, _)| id.clone())
             .collect();
+        // Signatures as resolved (ADR 0047 §4); node ids and wires are the model's.
+        let view = shader_project::resolve::resolve_asset(&asset, index, &m.registry);
         for id in &outputs {
-            let Some(sig) = node_signature(&asset, id, &m.registry, &m.functions, &self.id.path) else { continue };
+            let Some(sig) = node_signature(&view, id, &m.registry, &m.functions, &self.id.path) else { continue };
             asset.edges.retain(|e| e.to.0 != *id || sig.input(&e.to.1).is_some());
             if let Some(n) = asset.nodes.get_mut(id) {
                 n.inputs.retain(|pin, _| sig.input(pin).is_some());
@@ -1044,11 +1088,39 @@ impl Doc {
         true
     }
 
+    /// `value` for the param `key` of `node` as the resolved view shows it: a reference param's UUID of a known
+    /// target becomes the target's path; anything else stays.
+    fn resolved_param_value(
+        &self,
+        node: &str,
+        key: &str,
+        value: &Value,
+        m: &MaterialState,
+        index: &AssetIndex,
+    ) -> Value {
+        let Value::Str(v) = value else { return value.clone() };
+        let view = self.resolved(index, &m.registry);
+        let def = view.nodes.get(node).and_then(|n| m.registry.get(&n.kind));
+        let ty = def.and_then(|d| d.params().into_iter().find(|p| p.id == key)).and_then(|p| ref_type(&p.kind));
+        match ty.and_then(|ty| shader_project::resolve::resolve_ref(v, ty, index)) {
+            Some(path) => Value::Str(path.to_string()),
+            None => value.clone(),
+        }
+    }
+
     /// The `GradientSlot` or `GlobalConst` param of `node` that setting its param `key` to `value` resets: `key` is a
     /// `GradientCollection` or `GlobalConsts` param, `value` another collection/table than the current one and a
     /// slot/constant is picked.
-    fn slot_param_reset_by(&self, node: &str, key: &str, value: &Value, registry: &Registry) -> Option<String> {
-        let n = self.asset.nodes.get(node)?;
+    fn slot_param_reset_by(
+        &self,
+        node: &str,
+        key: &str,
+        value: &Value,
+        registry: &Registry,
+        index: &AssetIndex,
+    ) -> Option<String> {
+        let view = self.resolved(index, registry);
+        let n = view.nodes.get(node)?;
         let params = registry.get(&n.kind)?.params();
         let is_gradient = params.iter().find(|p| p.id == key).and_then(|p| match p.kind {
             ParamKind::GradientCollection => Some(true),

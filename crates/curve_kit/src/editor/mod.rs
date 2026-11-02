@@ -148,8 +148,10 @@ pub fn load(project: &Project, r: &AssetRef) -> Result<Curve, String> {
     Ok(curve)
 }
 
-/// Writes a curve file (creating `quillshade/<domain>/` and the parent directories), through a temporary file.
-pub fn save(project: &Project, r: &AssetRef, curve: &Curve) -> io::Result<()> {
+/// Writes a curve file (creating `quillshade/<domain>/` and the parent directories), through a temporary file. The
+/// curve gets its asset id first when it has none (ADR 0047 §6), so the caller keeps the id the file now has.
+pub fn save(project: &Project, r: &AssetRef, curve: &mut Curve) -> io::Result<()> {
+    curve.ensure_id();
     project.ensure_layout()?;
     project_core::writer::write_atomic(&file(project, r), curve.to_ron())
 }
@@ -160,7 +162,7 @@ fn create(project: &Project, r: &AssetRef) -> io::Result<()> {
     if file(project, r).exists() {
         return Err(io::Error::other(format!("`{}` already exists", r.source_rel())));
     }
-    save(project, r, &Curve::ramp(name_of(r)))
+    save(project, r, &mut Curve::ramp(name_of(r)))
 }
 
 /// The asset's name: the last component of its path.

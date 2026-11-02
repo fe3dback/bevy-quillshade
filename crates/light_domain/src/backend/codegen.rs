@@ -3,6 +3,7 @@
 
 use std::collections::BTreeMap;
 
+use project_core::AssetUuid;
 use project_core::marker::header;
 use serde::{Deserialize, Serialize};
 use texture_kit::TextureSettings;
@@ -15,7 +16,9 @@ use super::model::{
 const LIGHT_MOD_TEMPLATE: &str = include_str!("templates/light_mod.rs");
 const BLENDED_SKYBOX_WESL: &str = include_str!("templates/blended_skybox.wesl");
 
-/// Format version of `assets/quillshade/light/autogen/baked.ron`.
+/// Format version of `assets/quillshade/light/autogen/baked.ron`; also the `format_version` of every generated
+/// `EnvironmentValues` (the runtime struct's own default), never the source file's: a source format bump must not
+/// change generated output (ADR 0047 §15).
 pub const MANIFEST_FORMAT_VERSION: u32 = 1;
 
 /// One Light cube-map texture entry in `baked.ron`.
@@ -49,7 +52,7 @@ pub fn manifest(assets: &LightAssets) -> String {
         .iter()
         .map(|(id, t)| (id.clone(), ManifestTextureEntry { path: t.path.clone(), settings: t.settings.clone() }))
         .collect();
-    let environments = assets.environments.clone();
+    let environments = assets.environments.iter().map(|(id, e)| (id.clone(), runtime_environment(e))).collect();
     let curves = assets
         .curves
         .iter()
@@ -64,6 +67,12 @@ pub fn manifest(assets: &LightAssets) -> String {
         .separate_tuple_members(false);
     let body = ron::ser::to_string_pretty(&data, cfg).expect("light manifest serialization");
     format!("{}\nBakedLightManifest{body}\n", header("//", None))
+}
+
+/// `e` as the runtime's `EnvironmentValues` reads it: the runtime format version ([`MANIFEST_FORMAT_VERSION`]) and no
+/// asset id, whatever the source file's format (ADR 0047 §15).
+fn runtime_environment(e: &Environment) -> Environment {
+    Environment { format_version: MANIFEST_FORMAT_VERSION, id: AssetUuid::NIL, ..e.clone() }
 }
 
 /// Generates `crates/quillshade/src/light/mod.rs` from error-free `assets`.
@@ -394,7 +403,7 @@ fn emit_env_literal(e: &Environment) -> String {
     };
     format!(
         "EnvironmentValues {{ format_version: {}, clear_color: {}, cubemap: {cubemap}, skybox_brightness: {}, skybox_rotation: {}, env_intensity: {}, sky_top_color: {}, sky_horizon_color: {}, ground_color: {}, env_affects_lightmapped: {}, ambient_color: {}, ambient_brightness: {}, ambient_affects_lightmapped: {}, lights: vec![{}], ev100: {}, tonemapping: {tm}, deband_dither: {}, color_grading: {}, fog: {}, skybox_blend: None }}",
-        e.format_version,
+        MANIFEST_FORMAT_VERSION,
         fmt_arr4(e.clear_color),
         fmt_f32(e.skybox_brightness),
         fmt_f32(e.skybox_rotation),

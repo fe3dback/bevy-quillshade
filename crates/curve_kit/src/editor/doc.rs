@@ -188,7 +188,7 @@ impl<D> CurveDoc<D> {
     }
 
     pub fn undo(&mut self) -> bool {
-        let done = self.history.undo(&mut self.curve);
+        let done = self.history.undo_keeping(&mut self.curve, |m| &mut m.id);
         if done {
             self.after_history();
         }
@@ -196,7 +196,7 @@ impl<D> CurveDoc<D> {
     }
 
     pub fn redo(&mut self) -> bool {
-        let done = self.history.redo(&mut self.curve);
+        let done = self.history.redo_keeping(&mut self.curve, |m| &mut m.id);
         if done {
             self.after_history();
         }
@@ -288,7 +288,7 @@ impl<D: CurveDomain> TabDoc for CurveDoc<D> {
 
     fn save(&mut self, ctx: &mut DocCtx) -> std::io::Result<()> {
         let project = ctx.project.ok_or_else(|| std::io::Error::other("no project is open"))?;
-        save(project, &self.aref, &self.curve)?;
+        save(project, &self.aref, &mut self.curve)?;
         self.mark_saved();
         Ok(())
     }
@@ -328,9 +328,8 @@ impl<D: CurveDomain> TabDoc for CurveDoc<D> {
         let counts = vec![plural(self.curve.points.len(), "point", "points")];
         let mut status = StatusInfo::new(CurveDoc::is_dirty(self), ctx, counts);
         let own = D::validate(&self.curve);
-        let errors = own.iter().filter(|d| d.is_error()).count();
-        status.errors += errors;
-        status.warnings += own.len() - errors;
+        status.errors += own.iter().filter(|d| d.is_error()).count();
+        status.warnings += own.iter().filter(|d| d.is_warning()).count();
         Some(status)
     }
 }

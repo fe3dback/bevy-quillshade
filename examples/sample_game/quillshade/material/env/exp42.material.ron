@@ -1,5 +1,6 @@
 Asset(
-  format_version: 1,
+  format_version: 2,
+  id: "019b76da-a800-7a78-a4fc-50e06b0ca34a",
   kind: Material(Pbr3d(PbrSettings(
     blend: Opaque,
     two_sided: false,
@@ -43,7 +44,7 @@ Asset(
       kind: "stdlib::SampleCurve",
       pos: (182.87036, -121.415184),
       params: {
-        "curve": Str("common/pulse"),
+        "curve": Str("019b76da-a800-783e-be72-971715772890"), // common/pulse
       },
       inputs: {
         "t": Float(0.7),
@@ -54,7 +55,7 @@ Asset(
       pos: (-530.0148, 73.61316),
       params: {
         "const": Int(1003),
-        "table": Str("common/tuning"),
+        "table": Str("019b76da-a800-7125-8de2-e524cab316e1"), // common/tuning
       },
     ),
     "01m5snxy0d3d3kk068athbvtst": Node(
@@ -62,7 +63,7 @@ Asset(
       pos: (-43.19693, -375.26147),
       params: {
         "const": Int(1001),
-        "table": Str("common/tuning"),
+        "table": Str("019b76da-a800-7125-8de2-e524cab316e1"), // common/tuning
       },
     ),
   },

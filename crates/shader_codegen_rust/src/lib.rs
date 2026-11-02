@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 pub mod baked;
 pub mod manifest;
 
+use project_core::AssetUuid;
 use shader_codegen_wesl::{header, params_struct, paths};
 use shader_graph_core::ident::{input_ident, to_pascal_case};
 use shader_graph_core::registry::{Builtin, ParamType};
@@ -128,7 +129,8 @@ pub fn material_module(ir: &Ir, source_file: &str) -> String {
         MaterialKind::Unlit3d(s) => s.two_sided,
         MaterialKind::Sprite2d(_) => false,
     };
-    let wpo = ir.vertex.is_some();
+    // World Position Offset and / or World Normal: the material has its own vertex shader.
+    let has_vertex = ir.vertex.is_some();
     let mut o = String::new();
     let line = |o: &mut String, s: &str| {
         o.push_str(s);
@@ -304,7 +306,7 @@ pub fn material_module(ir: &Ir, source_file: &str) -> String {
             line(&mut o, "    fn deferred_fragment_shader() -> ShaderRef {");
             line(&mut o, "        SHADER_PATH.into()");
             line(&mut o, "    }");
-            if wpo {
+            if has_vertex {
                 line(&mut o, "");
                 line(&mut o, "    fn vertex_shader() -> ShaderRef {");
                 line(&mut o, "        SHADER_PATH.into()");
@@ -339,7 +341,7 @@ pub fn material_module(ir: &Ir, source_file: &str) -> String {
             line(&mut o, "    fn fragment_shader() -> ShaderRef {");
             line(&mut o, "        SHADER_PATH.into()");
             line(&mut o, "    }");
-            if wpo {
+            if has_vertex {
                 line(&mut o, "");
                 line(&mut o, "    fn vertex_shader() -> ShaderRef {");
                 line(&mut o, "        SHADER_PATH.into()");
@@ -558,9 +560,13 @@ pub struct MaterialEntry {
     pub main: String,
     pub material: String,
     pub params: Option<String>,
+    /// The `id` of its `.material.ron` when it is a valid UUIDv7 (ADR 0047 §12): its key in
+    /// `BakedMaterials::by_id`. `None` (no id, or not a v7) leaves the material out of `by_id`.
+    pub uuid: Option<AssetUuid>,
 }
 
 impl MaterialEntry {
+    /// The entry of `ir`, without a UUID ([`MaterialEntry::with_uuid`]).
     pub fn from_ir(ir: &Ir) -> Self {
         let n = type_names(ir);
         MaterialEntry {
@@ -568,7 +574,14 @@ impl MaterialEntry {
             main: n.main.clone(),
             material: n.material.clone(),
             params: (!ir.uniform.is_empty()).then_some(n.params),
+            uuid: None,
         }
+    }
+
+    /// Sets the source's `id`; a nil or non-v7 one is not an asset id and leaves [`MaterialEntry::uuid`] `None`.
+    pub fn with_uuid(mut self, id: AssetUuid) -> Self {
+        self.uuid = id.is_v7().then_some(id);
+        self
     }
 }
 

@@ -1,4 +1,5 @@
 TextureAsset(
-  format_version: 1,
+  format_version: 2,
+  id: "019b76da-a800-77a0-a990-734147946a3b",
   path: "textures/rock_albedo.ktx2",
 )

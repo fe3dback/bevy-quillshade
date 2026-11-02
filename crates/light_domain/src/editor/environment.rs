@@ -100,7 +100,8 @@ impl From<EnvironmentAction> for Action {
 pub enum EnvironmentProp {
     // Sky & IBL
     ClearColor,
-    /// [`Environment::cubemap`]: a Light Texture asset's path, `""` for none ([`PropValue::Str`]).
+    /// [`Environment::cubemap`]: a Light Texture asset's UUID (its path while it has none, ADR 0047 §4), `""` for
+    /// none ([`PropValue::Str`]).
     Cubemap,
     /// [`Environment::skybox_brightness`] ([`PropValue::Float`]).
     SkyboxBrightness,
@@ -576,31 +577,26 @@ impl EnvironmentDoc {
         self.layout += 1;
     }
 
-    /// The Light Texture asset `from` was renamed to `to` (`None`: deleted) and the environment files on disk were
-    /// rewritten: the edited and the saved environment follow, so the unsaved edits stay and the tab is not dirty for
-    /// it, and so do the undo / redo states, so an undo never brings `from` back. `false` when neither the edited nor
-    /// the saved environment showed `from`.
-    pub fn retarget(&mut self, from: &str, to: Option<&str>) -> bool {
-        let follow = |env: &mut Environment| {
-            let hit = env.cubemap.as_deref() == Some(from);
+    /// The Light Texture asset whose cube map values are `names` (its UUID and path) was deleted and the environment
+    /// files on disk were rewritten: the edited and the saved environment lose that cube map, so the unsaved edits
+    /// stay and the tab is not dirty for it, and so do the undo / redo states, so an undo never brings it back.
+    /// `false` when neither the edited nor the saved environment showed it.
+    pub fn clear_cubemap(&mut self, names: &[String]) -> bool {
+        let clear = |env: &mut Environment| {
+            let hit = env.cubemap.as_ref().is_some_and(|c| names.contains(c));
             if hit {
-                env.cubemap = to.map(str::to_string);
+                env.cubemap = None;
             }
             hit
         };
         self.history.for_each_snapshot(|env| {
-            follow(env);
+            clear(env);
         });
-        let hit = [follow(&mut self.env), follow(&mut self.saved)].contains(&true);
+        let hit = [clear(&mut self.env), clear(&mut self.saved)].contains(&true);
         if hit {
             self.changed();
         }
         hit
-    }
-
-    /// Whether the edited or the saved environment shows the Light Texture asset `path`.
-    pub fn shows(&self, path: &str) -> bool {
-        [&self.env, &self.saved].iter().any(|e| e.cubemap.as_deref() == Some(path))
     }
 }
 
@@ -625,8 +621,8 @@ impl TabDoc for EnvironmentDoc {
         match action {
             TabAction::Undo | TabAction::Redo => {
                 let done = match action {
-                    TabAction::Undo => self.history.undo(&mut self.env),
-                    _ => self.history.redo(&mut self.env),
+                    TabAction::Undo => self.history.undo_keeping(&mut self.env, |m| &mut m.id),
+                    _ => self.history.redo_keeping(&mut self.env, |m| &mut m.id),
                 };
                 if done {
                     if !fits_easy(&self.env) {
@@ -756,7 +752,8 @@ impl TabDoc for EnvironmentDoc {
     fn save(&mut self, ctx: &mut DocCtx) -> std::io::Result<()> {
         let project = ctx.project.ok_or_else(|| std::io::Error::other("no project is open"))?;
         project.ensure_layout()?;
-        save_environment(&project.root.join(self.aref.source_rel()), &self.env)?;
+        // The cube map UUID gets its D27 label from the editor's index (ADR 0047 §5, §10).
+        save_environment(&project.root.join(self.aref.source_rel()), &mut self.env, ctx.index)?;
         self.saved = self.env.clone();
         self.revision += 1;
         Ok(())
@@ -858,23 +855,30 @@ mod tests {
         assert_eq!((d.env.env_intensity, d.layout), (3.0, layout), "an accepted value keeps the form");
     }
 
-    /// A renamed cube map is followed in the edited and the saved environment: the tab stays as dirty as it was.
+    /// A deleted cube map is cleared in the edited and the saved environment, matched by its UUID or path: the tab
+    /// stays as dirty as it was.
     #[test]
-    fn retarget_keeps_the_dirty_state() {
+    fn clear_cubemap_keeps_the_dirty_state() {
+        let uuid = project_core::AssetUuid::new_v7().to_string();
+        let names = |n: &[&str]| n.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         let mut d = EnvironmentDoc::new(
             crate::backend::environment_ref("day"),
-            Environment { cubemap: Some("sky".into()), ..Environment::default() },
+            Environment { cubemap: Some(uuid.clone()), ..Environment::default() },
         );
-        assert!(d.retarget("sky", Some("blue")));
-        assert!(!d.is_dirty() && d.shows("blue"));
+        assert!(!d.clear_cubemap(&names(&["sky"])), "another texture's path");
         apply(&mut d, drag(EnvironmentProp::SkyboxBrightness, 5.0, true));
-        assert!(d.retarget("blue", None));
+        assert!(d.clear_cubemap(&names(&["sky", &uuid])));
         assert_eq!(d.env.cubemap, None);
         assert!(d.is_dirty(), "the brightness edit stays");
-        assert!(!d.retarget("blue", None));
+        assert!(!d.clear_cubemap(&names(&["sky", &uuid])));
         apply(&mut d, TabAction::Undo);
         assert_eq!((d.env.skybox_brightness, d.env.cubemap.as_deref()), (2500.0, None), "the undo state follows too");
         assert!(!d.is_dirty());
+        let mut d = EnvironmentDoc::new(
+            crate::backend::environment_ref("night"),
+            Environment { cubemap: Some("sky".into()), ..Environment::default() },
+        );
+        assert!(d.clear_cubemap(&names(&["sky", &uuid])) && !d.is_dirty(), "a hand-written path");
     }
 
     /// Adding and removing directional lights are undoable steps, and all new property groups edit and clamp properly.

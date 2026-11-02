@@ -18,13 +18,13 @@ fn create_rename_delete_assets() {
     e.apply(Action::Delete(moved.to_ref()));
     assert!(e.doc_index(&moved).is_none());
     assert!(!dir.path().join("assets/quillshade/material/autogen/dir_fx2/mat_glow.wesl").exists());
-    // Function rename updates open callers in memory.
+    // Function rename: open callers show the new path (they store its UUID, ADR 0047 §4).
     let rock = AssetId::new(AssetType::Material, "env/rock_wet");
     e.apply(Action::OpenAsset(rock.to_ref()));
     e.apply(Action::RenameDialog(AssetId::new(AssetType::Function, "common/wet_mask").to_ref()));
     e.apply(Action::Submit("common/wetness".into()));
     let d = e.tabs[e.doc_index(&rock).unwrap()].get::<Doc>().unwrap();
-    assert!(d.asset.nodes.values().any(|n| n.kind == "function::common/wetness"));
+    assert!(e.view_of(d).nodes.values().any(|n| n.kind == "function::common/wetness"));
     assert!(!d.is_dirty());
 }
 
@@ -339,4 +339,44 @@ fn clicking_a_diagnostic_opens_its_asset() {
     e.apply(Action::FocusDiagnostic(diag.to_generic(MATERIAL)));
     assert_eq!(e.doc().map(|d| &d.id), Some(&id));
     assert!(e.doc().unwrap().selection.contains(&node));
+}
+
+/// ADR 0047 §16: a hand-written format-2 user node without `id` (one line, with a comment) is AE004; its quick fix
+/// Assign UUID rewrites it canonically with a fresh UUIDv7, AE004 goes and the node stays registered (now resolvable
+/// by its UUID too).
+#[test]
+fn assign_uuid_to_a_hand_written_user_node() {
+    use shader_stdlib::user::UserNode;
+    let (dir, mut e) = project();
+    let file = dir.path().join("quillshade/material/.nodes/hand.ron");
+    let hand = "UserNode(format_version: 2, ident: \"hand_clamp\", name: \"HandClamp\", inputs: [UserPin(name: \"x\", \
+                ty: Float)], output: Float, template: \"return x;\") // written by hand\n";
+    std::fs::write(&file, hand).unwrap();
+    e.files_changed(vec![file.clone()]);
+    let r = assets::user_node_ref("hand");
+    assert!(e.domains.material().registry.get("user::hand_clamp").is_some(), "registered without an id");
+    let ae004 = e.console_diagnostics().into_iter().find(|d| d.code == "AE004").expect("AE004");
+    assert_eq!((ae004.domain, ae004.asset.as_deref()), (Some(MATERIAL), Some(r.source_rel().as_str())));
+    assert!(e.error_count() >= 1);
+
+    e.apply(Action::FocusDiagnostic(ae004));
+    let Some(editor_core::action::Dialog::Confirm { buttons, .. }) = e.dialog.clone() else {
+        panic!("no dialog: {:?}", e.dialog)
+    };
+    let labels: Vec<&str> = buttons.iter().map(|(l, _)| l.as_str()).collect();
+    assert_eq!(labels, ["Cancel", "Assign UUID"], "a user node has no tab to open");
+    e.apply(buttons[1].1.clone());
+    assert!(e.dialog.is_none(), "{:?}", e.dialog);
+
+    let text = std::fs::read_to_string(&file).unwrap();
+    let node = UserNode::from_ron(&text).unwrap();
+    assert!(node.id.is_v7(), "{text}");
+    assert_eq!(text, node.to_ron(), "the canonical format");
+    assert!(!text.contains("by hand"), "comments are not kept");
+    assert_eq!((node.ident.as_str(), node.name.as_str()), ("hand_clamp", "HandClamp"));
+    assert!(!e.console_diagnostics().iter().any(|d| d.code == "AE004"), "{:?}", e.console_diagnostics());
+    assert_eq!(e.asset_index.id_of(&r), Some(node.id));
+    let registry = &e.domains.material().registry;
+    assert!(registry.get("user::hand_clamp").is_some(), "still registered");
+    assert_eq!(registry.asset_kind(node.id), Some("user::hand_clamp"), "re-registered with its UUID");
 }

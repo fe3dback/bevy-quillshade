@@ -23,8 +23,10 @@ use editor_core::ui::props::{
 use editor_core::ui::shell::VIEW_BG;
 use editor_core::ui::widgets::{Caption, GroupButton, button_group, scroll_column, subpane_box};
 use editor_core::ui::{OnActivate, icon_tool_button};
+use project_core::{AssetIndex, AssetRef};
 use texture_kit::editor::TEXTURE_ICON;
 
+use super::state::cubemap_path;
 use super::{CgSection, ENVIRONMENT_VIEW, EnvironmentAction, EnvironmentDoc, EnvironmentProp, LightState};
 use crate::backend::{ColorGradingSectionDef, FogFalloffDef, LIGHT, TEXTURE_SUFFIX, TonemappingMode, texture_ref};
 
@@ -129,25 +131,43 @@ pub fn environment_view() -> impl Scene {
     }
 }
 
-/// The domain's Light Texture assets (their paths), as of the last rescan.
-fn light_textures(editor: &Editor) -> Vec<String> {
-    let files = editor.kind_files.get(&LIGHT).into_iter().flatten();
-    files.filter(|r| r.suffix == TEXTURE_SUFFIX).map(|r| r.path.clone()).collect()
+/// The domain's Light Texture assets as of the last rescan, as `(stored value, path)` ([`texture_choices`]).
+fn light_textures(editor: &Editor) -> Vec<(String, String)> {
+    texture_choices(editor.kind_files.get(&LIGHT).into_iter().flatten(), &editor.asset_index)
 }
 
-/// The picker's labels and values: "None" (`""`), then every Light texture; a cube map that is none of them is
-/// listed as missing, so the picker shows what the file says. The index of the current one.
-pub(super) fn cubemap_options(textures: &[String], current: Option<&str>) -> (Vec<String>, Vec<String>, usize) {
+/// The Light Texture assets of `files` as `(stored value, path)`: what the cube-map picker stores for a texture is
+/// its UUID from `index` (ADR 0047 §4); a texture without one (AE004) is not offered, nor a copy sharing another
+/// file's UUID (a duplicate loser, AE001: its UUID names the original, §8).
+fn texture_choices<'a>(files: impl Iterator<Item = &'a AssetRef>, index: &AssetIndex) -> Vec<(String, String)> {
+    files
+        .filter(|r| r.suffix == TEXTURE_SUFFIX)
+        .filter_map(|r| Some((index.ref_id_of(r)?.to_string(), r.path.clone())))
+        .collect()
+}
+
+/// The picker's labels and values: "None" (`""`), then every Light texture of `textures` (`(stored value, path)`,
+/// labelled by its path); the current cube map is the texture it names by stored value or by path, and one that is
+/// none of them is listed as missing, so the picker shows what the file says. The index of the current one.
+pub(super) fn cubemap_options(
+    textures: &[(String, String)],
+    current: Option<&str>,
+) -> (Vec<String>, Vec<String>, usize) {
     let (mut labels, mut values) = (vec!["None".to_string()], vec![String::new()]);
-    for t in textures {
-        labels.push(t.clone());
-        values.push(t.clone());
+    for (value, path) in textures {
+        labels.push(path.clone());
+        values.push(value.clone());
     }
-    if let Some(c) = current.filter(|c| !textures.iter().any(|t| t == c)) {
-        labels.push(format!("{c} (missing)"));
-        values.push(c.to_string());
-    }
-    let at = values.iter().position(|v| v == current.unwrap_or_default()).unwrap_or(0);
+    let current = current.unwrap_or_default();
+    let at = textures.iter().position(|(value, path)| value == current || path == current).map(|i| i + 1);
+    let at = at.unwrap_or_else(|| {
+        if current.is_empty() {
+            return 0;
+        }
+        labels.push(format!("{current} (missing)"));
+        values.push(current.to_string());
+        values.len() - 1
+    });
     (labels, values, at)
 }
 
@@ -231,7 +251,7 @@ fn vector_row(doc: &EnvironmentDoc, label: &str, prop: EnvironmentProp, vals: &[
 
 /// The form organized into 6 subpanes: Sky & IBL, Ambient Light, Directional Lights, Camera & Tonemapping,
 /// Color Grading, and Distance Fog.
-fn form(doc: &EnvironmentDoc, textures: &[String]) -> Vec<Box<dyn Scene>> {
+fn form(doc: &EnvironmentDoc, textures: &[(String, String)]) -> Vec<Box<dyn Scene>> {
     let env = &doc.env;
     let advanced = !doc.easy;
 
@@ -596,7 +616,7 @@ fn hint(s: &str) -> Box<dyn Scene> {
 }
 
 /// What the form shows: the project generation, the active tab, its [`EnvironmentDoc::layout`], the Light textures.
-type FormKey = (u64, usize, u64, Vec<String>);
+type FormKey = (u64, usize, u64, Vec<(String, String)>);
 
 /// Rebuilds the form when another environment tab is shown, its form must follow the model (not during a drag) or
 /// the Light textures changed.
@@ -681,8 +701,9 @@ fn redraw_bar(
         *last = None;
         return;
     };
-    let cubemap = doc.env.cubemap.clone();
-    let known = cubemap.as_ref().is_some_and(|c| light_textures(&editor).contains(c));
+    // The texture's path, for a cube map stored by UUID too (ADR 0047 §4).
+    let cubemap = doc.env.cubemap.as_deref().map(|c| cubemap_path(&editor, c).to_string());
+    let known = cubemap.as_ref().is_some_and(|c| light_textures(&editor).iter().any(|(_, path)| path == c));
     let key = (i, doc.easy, cubemap, known);
     if last.as_ref() == Some(&key) {
         return;
@@ -758,7 +779,13 @@ fn sidebar_rows(editor: &Editor, doc: &EnvironmentDoc) -> Vec<Box<dyn Scene>> {
         .flat_map(|s| &s.diagnostics)
         .filter(|d| d.asset.as_deref() == Some(rel.as_str()))
         .map(|d| -> Box<dyn Scene> {
-            let c = if d.is_error() { ERROR } else { WARN };
+            let c = if d.is_error() {
+                ERROR
+            } else if d.is_info() {
+                TEXT_DIM
+            } else {
+                WARN
+            };
             Box::new(text(format!("{}: {}", d.code, d.message), c, 12.0))
         })
         .collect();
@@ -776,7 +803,7 @@ mod tests {
 
     #[test]
     fn picker_lists_none_the_textures_and_a_missing_one() {
-        let textures = vec!["sky".to_string(), "skies/blue".to_string()];
+        let textures = vec![("sky".to_string(), "sky".to_string()), ("skies/blue".into(), "skies/blue".into())];
         let (labels, values, at) = cubemap_options(&textures, None);
         assert_eq!(
             (labels, values, at),
@@ -789,5 +816,42 @@ mod tests {
         assert_eq!(cubemap_options(&textures, Some("skies/blue")).2, 2);
         let (labels, values, at) = cubemap_options(&textures, Some("gone"));
         assert_eq!((labels[3].as_str(), values[3].as_str(), at), ("gone (missing)", "gone", 3));
+    }
+
+    /// ADR 0047 §4: a texture is picked by its UUID and labelled by its path; a cube map naming it by UUID or (written
+    /// by hand) by path shows it; a dangling UUID is missing.
+    #[test]
+    fn picker_values_are_uuids_of_textures_with_an_id() {
+        let sky = project_core::AssetUuid::new_v7().to_string();
+        let textures = vec![(sky.clone(), "sky".to_string()), ("old".into(), "old".into())];
+        let (labels, values, at) = cubemap_options(&textures, Some(&sky));
+        assert_eq!(
+            (labels, values, at),
+            (vec!["None".into(), "sky".into(), "old".into()], vec![String::new(), sky, "old".into()], 1)
+        );
+        assert_eq!(cubemap_options(&textures, Some("sky")).2, 1, "a path cube map of a texture with an id");
+        let dangling = project_core::AssetUuid::new_v7().to_string();
+        let (labels, _, at) = cubemap_options(&textures, Some(&dangling));
+        assert_eq!((labels[at].clone(), at), (format!("{dangling} (missing)"), 3));
+    }
+
+    /// ADR 0047 §8: a copied texture shares its original's UUID; the picker offers the original only (picking the
+    /// copy would store the original's UUID).
+    #[test]
+    fn picker_skips_a_duplicate_copy() {
+        use project_core::AssetUuid;
+        use project_core::asset_index::{DomainIndex, IndexedAsset};
+        let (sky, blue) = (AssetUuid::new_v7(), AssetUuid::new_v7());
+        let files = [texture_ref("sky"), texture_ref("sky_copy"), texture_ref("skies/blue")];
+        let assets = files
+            .iter()
+            .zip([sky, sky, blue])
+            .map(|(r, id)| IndexedAsset { asset: r.clone(), id: Ok(id), sub_items: Vec::new(), refs: Vec::new() })
+            .collect();
+        let index = AssetIndex::build(vec![DomainIndex { domain: LIGHT, assets }]);
+        assert_eq!(
+            texture_choices(files.iter(), &index),
+            [(sky.to_string(), "sky".to_string()), (blue.to_string(), "skies/blue".to_string())]
+        );
     }
 }

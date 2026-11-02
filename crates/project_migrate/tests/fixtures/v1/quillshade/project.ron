@@ -1,0 +1,6 @@
+ProjectSettings(
+    format_version: 1,
+    domains: {
+        "light": (enabled: false),
+    },
+)

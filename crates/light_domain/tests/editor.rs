@@ -6,7 +6,8 @@
 //! `png`, 2D, presets) built from `texture_kit` alone: `light_domain` never depends on `material_domain`, not even
 //! for its tests.
 
-use std::path::Path;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use bevy::prelude::*;
@@ -26,8 +27,8 @@ use editor_core::ui::props::PropField;
 use editor_core::ui::shell::{DomainWindowPlugin, domain_doc_views};
 use editor_core::ui::tree::{GameAssetsTree, TreeItem, TreeRow, TreeSource, row_menu};
 use light_domain::backend::{
-    Environment, FogFalloffDef, LIGHT, TonemappingMode, curve_ref, environment_ref, load_environment, save_environment,
-    texture_ref,
+    Environment, FogFalloffDef, LIGHT, LightBackend, TonemappingMode, curve_ref, environment_ref, load_environment,
+    save_environment, texture_ref,
 };
 use light_domain::{
     BlendedSkybox, CgSection, EnvironmentAction, EnvironmentDoc, EnvironmentProp, INSPECT_GAME_TOOL, InspectGameDoc,
@@ -35,7 +36,7 @@ use light_domain::{
     LightPreviewSessions, LightState, LightTexture, interpolate_environments,
 };
 use project_core::regen::DomainBackend;
-use project_core::{AssetRef, DomainId, Project};
+use project_core::{AssetIndex, AssetRef, AssetUuid, DomainId, Project};
 use texture_kit::editor::{CreateTextureForFile, TextureAction, TextureDoc, TextureDomain, TextureEdit};
 use texture_kit::{TextureAsset, TexturePolicy, TextureShape};
 
@@ -145,8 +146,8 @@ fn project() -> (tempfile::TempDir, Editor) {
     std::fs::copy(format!("{SAMPLES}/rock_albedo.ktx2"), textures.join("a.ktx2")).unwrap();
     std::fs::write(textures.join("sky.ktx2"), cube_ktx2(4)).unwrap();
     let p = Project::open(dir.path()).unwrap();
-    texture_kit::editor::save(&p, &mat_tex("t"), &TextureAsset::new("textures/a.png")).unwrap();
-    texture_kit::editor::save(&p, &light_tex("sky"), &TextureAsset::new("textures/sky.ktx2")).unwrap();
+    texture_kit::editor::save(&p, &mat_tex("t"), &mut TextureAsset::new("textures/a.png")).unwrap();
+    texture_kit::editor::save(&p, &light_tex("sky"), &mut TextureAsset::new("textures/sky.ktx2")).unwrap();
     environment(&p, "day", Some("sky"));
     environment(&p, "night", None);
     let mut e = Editor::new(domains());
@@ -155,8 +156,8 @@ fn project() -> (tempfile::TempDir, Editor) {
 }
 
 fn environment(p: &Project, path: &str, cubemap: Option<&str>) {
-    let env = Environment { cubemap: cubemap.map(str::to_string), ..Environment::default() };
-    save_environment(&p.root.join(environment_ref(path).source_rel()), &env).unwrap();
+    let mut env = Environment { cubemap: cubemap.map(str::to_string), ..Environment::default() };
+    save_environment(&p.root.join(environment_ref(path).source_rel()), &mut env, &AssetIndex::default()).unwrap();
 }
 
 fn env_on_disk(dir: &Path, path: &str) -> Environment {
@@ -204,7 +205,8 @@ fn light_assets_menu() {
     }
     assert_eq!(active_env_or_texture_path(&e), Some(String::new()), "a new Texture asset has no image yet");
     let dusk = env_on_disk(e.project.as_ref().unwrap().root.as_path(), "outdoor/dusk");
-    assert_eq!(dusk, Environment::default());
+    assert!(dusk.id.is_v7(), "a new environment has its UUID (ADR 0047 §6)");
+    assert_eq!(dusk, Environment { id: dusk.id, ..Environment::default() });
 }
 
 fn active_env_or_texture_path(e: &Editor) -> Option<String> {
@@ -326,42 +328,165 @@ fn game_assets_menu_is_light_only() {
     assert!(s.diagnostics.iter().any(|d| d.code == "LE014"), "{:?}", s.diagnostics);
 }
 
-/// Design §9.2: renaming a Light texture rewrites the environments naming it, the open one included (it stays clean);
-/// deleting it clears them with a warning.
+/// The source files of `dir`'s `quillshade/` but the Light texture `skip` (by path relative to `dir`).
+fn sources_but(dir: &Path, skip: &[&str]) -> BTreeMap<String, Vec<u8>> {
+    walkdir(&dir.join("quillshade"))
+        .into_iter()
+        .map(|f| (f.strip_prefix(dir).unwrap().to_string_lossy().into_owned(), f))
+        .filter(|(rel, _)| !skip.contains(&rel.as_str()))
+        .map(|(rel, f)| (rel, std::fs::read(f).unwrap()))
+        .collect()
+}
+
+fn walkdir(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(dir).unwrap().flatten() {
+        let path = entry.path();
+        if path.is_dir() { out.extend(walkdir(&path)) } else { out.push(path) }
+    }
+    out
+}
+
+/// ADR 0047 §13: renaming a Light texture rewrites nothing — the environments store its UUID, on disk and in the open
+/// tabs (a clean one stays clean, a dirty one keeps its edit and undo history), and the module generates with the new
+/// path; deleting it clears the cube maps naming it by UUID, with a warning.
 #[test]
-fn rename_light_texture_updates_open_environment() {
+fn rename_keeps_referrers_byte_identical() {
     let (dir, mut e) = project();
-    environment(e.project.as_ref().unwrap(), "noon", Some("sky"));
+    let p = e.project.clone().unwrap();
+    let sky = e.asset_index.id_of(&light_tex("sky")).expect("sky has an id").to_string();
+    environment(&p, "noon", Some(&sky));
+    environment(&p, "day", Some(&sky));
     e.rescan();
     e.apply(Action::OpenAsset(environment_ref("day")));
-    // An unsaved edit of another field survives the rename.
     set_number(&mut e, EnvironmentProp::EnvIntensity, 2.0);
     e.apply(Action::OpenAsset(environment_ref("noon")));
+    let before = sources_but(dir.path(), &["quillshade/light/sky.texture.ron"]);
     e.rename(&light_tex("sky"), "skies/blue");
     assert!(dir.path().join("quillshade/light/skies/blue.texture.ron").is_file(), "{:?}", e.messages);
-    assert_eq!(env_on_disk(dir.path(), "day").cubemap.as_deref(), Some("skies/blue"));
-    let noon = active_env(&e);
-    assert_eq!(noon.env.cubemap.as_deref(), Some("skies/blue"));
-    assert!(!crate_is_dirty(&e, "noon"), "the clean tab follows the file");
+    assert_eq!(sources_but(dir.path(), &["quillshade/light/skies/blue.texture.ron"]), before);
+    assert_eq!(e.asset_index.id_of(&light_tex("skies/blue")).map(|u| u.to_string()), Some(sky.clone()));
+    assert_eq!(active_env(&e).env.cubemap.as_deref(), Some(sky.as_str()));
+    assert!(!crate_is_dirty(&e, "noon"));
     let day = e.tabs.iter().find_map(|t| t.get::<EnvironmentDoc>().filter(|d| d.aref.path == "day")).unwrap();
-    assert_eq!(day.env.cubemap.as_deref(), Some("skies/blue"));
-    assert_eq!(day.env.env_intensity, 2.0);
-    assert!(crate_is_dirty(&e, "day"), "only the unsaved edit stays");
+    assert_eq!((day.env.cubemap.as_deref(), day.env.env_intensity), (Some(sky.as_str()), 2.0));
+    assert!(crate_is_dirty(&e, "day"), "the unsaved edit stays");
     let s = e.domains.get::<LightState>().unwrap();
     assert!(!s.diagnostics.iter().any(|d| d.code == "LE001"), "{:?}", s.diagnostics);
-    // Undoing the unsaved edit keeps the renamed cube map: the undo state followed too.
+    let manifest = std::fs::read_to_string(dir.path().join("assets/quillshade/light/autogen/baked.ron")).unwrap();
+    assert!(manifest.contains("cubemap: Some(\"skies/blue\")"), "{manifest}");
     e.apply(Action::OpenAsset(environment_ref("day")));
     e.apply(Action::Tab(TabAction::Undo));
     assert_eq!(active_env(&e).env.env_intensity, 2500.0);
-    assert_eq!(active_env(&e).env.cubemap.as_deref(), Some("skies/blue"));
     assert!(!crate_is_dirty(&e, "day"));
 
     e.apply(Action::OpenAsset(environment_ref("noon")));
     e.delete(&light_tex("skies/blue"));
-    assert_eq!(env_on_disk(dir.path(), "noon").cubemap, None);
+    assert_eq!((env_on_disk(dir.path(), "noon").cubemap, env_on_disk(dir.path(), "day").cubemap), (None, None));
     assert_eq!(active_env(&e).env.cubemap, None);
+    assert!(!crate_is_dirty(&e, "noon"), "the clean tab follows the file");
     let warning = e.messages.iter().rev().find(|m| m.level == Level::Warning).expect("a warning");
-    assert!(warning.text.contains("skies/blue") && warning.text.contains("noon"), "{}", warning.text);
+    assert!(warning.text.contains("skies/blue") && warning.text.contains("day, noon"), "{}", warning.text);
+}
+
+/// A dirty environment tab loses the cube map of a deleted texture as an edit: undo never brings it back.
+#[test]
+fn delete_light_texture_clears_a_dirty_tab() {
+    let (dir, mut e) = project();
+    let p = e.project.clone().unwrap();
+    let sky = e.asset_index.id_of(&light_tex("sky")).expect("sky has an id").to_string();
+    environment(&p, "noon", Some(&sky));
+    e.rescan();
+    e.apply(Action::OpenAsset(environment_ref("noon")));
+    set_number(&mut e, EnvironmentProp::EnvIntensity, 2.0);
+    e.delete(&light_tex("sky"));
+    assert_eq!(env_on_disk(dir.path(), "noon").cubemap, None);
+    assert_eq!(env_on_disk(dir.path(), "day").cubemap, None, "a path reference is cleared too");
+    assert_eq!((active_env(&e).env.cubemap.as_deref(), active_env(&e).env.env_intensity), (None, 2.0));
+    e.apply(Action::Tab(TabAction::Undo));
+    assert_eq!(active_env(&e).env.cubemap, None);
+    assert!(!crate_is_dirty(&e, "noon"));
+}
+
+/// Deleting a copied texture (a duplicate loser, AE001) leaves the cube maps naming its original alone, on disk and
+/// in open tabs (clean or dirty): they resolve to the original (ADR 0047 §8). Deleting the original still clears them.
+#[test]
+fn deleting_a_duplicate_texture_keeps_cube_maps() {
+    let (dir, mut e) = project();
+    let p = e.project.clone().unwrap();
+    let sky = e.asset_index.id_of(&light_tex("sky")).expect("sky has an id").to_string();
+    environment(&p, "noon", Some(&sky));
+    environment(&p, "day", Some(&sky));
+    let (from, copy) = (light_tex("sky"), light_tex("sky_copy"));
+    std::fs::copy(dir.path().join(from.source_rel()), dir.path().join(copy.source_rel())).unwrap();
+    e.rescan();
+    assert_eq!(e.asset_index.id_of(&copy).map(|u| u.to_string()), Some(sky.clone()), "the copy shares the UUID");
+    e.apply(Action::OpenAsset(environment_ref("day")));
+    set_number(&mut e, EnvironmentProp::EnvIntensity, 2.0);
+    e.apply(Action::OpenAsset(environment_ref("noon")));
+    let tab = |e: &Editor, path: &str| {
+        let d = e.tabs.iter().find_map(|t| t.get::<EnvironmentDoc>().filter(|d| d.aref.path == path)).unwrap();
+        (d.env.cubemap.clone(), d.env.env_intensity)
+    };
+    let before = sources_but(dir.path(), &[copy.source_rel().as_str()]);
+    e.delete(&copy);
+    assert!(!dir.path().join(copy.source_rel()).exists());
+    assert_eq!(sources_but(dir.path(), &[copy.source_rel().as_str()]), before, "no environment is rewritten");
+    assert_eq!((tab(&e, "noon"), tab(&e, "day")), ((Some(sky.clone()), 2500.0), (Some(sky.clone()), 2.0)));
+    assert!(!crate_is_dirty(&e, "noon") && crate_is_dirty(&e, "day"));
+    assert!(!e.messages.iter().any(|m| m.text.contains("was the cube map")), "{:?}", e.messages);
+
+    e.delete(&from);
+    assert_eq!((env_on_disk(dir.path(), "noon").cubemap, env_on_disk(dir.path(), "day").cubemap), (None, None));
+    assert_eq!((tab(&e, "noon").0, tab(&e, "day").0), (None, None));
+}
+
+/// ADR 0047 §16: "Assign UUID" on hand-written Light files without an `id` line (a curve, an environment, a Texture
+/// asset) writes one through the canonical writers; AE004 is gone and the index knows the new UUIDs.
+#[test]
+fn assign_uuid_to_light_files_without_id() {
+    let (dir, mut e) = project();
+    let write = |r: &AssetRef, text: String| {
+        assert!(!text.contains("id:"), "{text}");
+        std::fs::write(dir.path().join(r.source_rel()), text).unwrap();
+    };
+    let (curve, env, tex) = (curve_ref("bare"), environment_ref("bare"), light_tex("bare"));
+    write(&curve, curve_kit::Curve::ramp("bare").to_ron());
+    write(&env, Environment::default().to_ron());
+    write(&tex, TextureAsset::new("textures/sky.ktx2").to_ron());
+    e.rescan();
+    let missing: Vec<AssetRef> = e.asset_index.missing_ids().map(|(r, _)| r.clone()).collect();
+    for r in [&curve, &env, &tex] {
+        assert!(missing.contains(r), "{r}: {missing:?}");
+        e.apply(Action::AssignUuid(r.clone()));
+        let error = e.messages.iter().find(|m| m.level == Level::Error);
+        assert!(error.is_none(), "{r}: {error:?}");
+        let id = e.asset_index.id_of(r).unwrap_or_else(|| panic!("{r} has an id now"));
+        let text = std::fs::read_to_string(dir.path().join(r.source_rel())).unwrap();
+        assert!(text.contains(&format!("id: \"{id}\"")), "{text}");
+    }
+    assert!(e.asset_index.missing_ids().all(|(r, _)| ![&curve, &env, &tex].contains(&r)));
+}
+
+/// ADR 0047 §6: the first save of an environment without an `id` mints one in place, without an undo step; undoing
+/// an edit made before that save keeps it, so the next save writes the same UUID.
+#[test]
+fn undo_after_first_save_keeps_the_minted_uuid() {
+    let (dir, mut e) = project();
+    let env = environment_ref("bare");
+    std::fs::write(dir.path().join(env.source_rel()), Environment::default().to_ron()).unwrap();
+    e.rescan();
+    assert_eq!(e.asset_index.id_of(&env), None);
+    e.apply(Action::OpenAsset(env.clone()));
+    set_number(&mut e, EnvironmentProp::EnvIntensity, 2.0);
+    e.apply(Action::Save);
+    let minted = e.asset_index.id_of(&env).expect("the save mints an id");
+    e.apply(Action::Tab(TabAction::Undo));
+    assert_eq!(active_env(&e).env.id, minted, "undo keeps the id");
+    e.apply(Action::Save);
+    assert_eq!(e.asset_index.id_of(&env), Some(minted));
+    e.apply(Action::Tab(TabAction::Redo));
+    assert_eq!((active_env(&e).env.id, active_env(&e).env.env_intensity), (minted, 2.0), "redo too");
 }
 
 fn crate_is_dirty(e: &Editor, path: &str) -> bool {
@@ -396,6 +521,43 @@ fn material_and_light_texture_tabs_side_by_side() {
     let (sky, t) = (load(light_tex("sky")), load(mat_tex("t")));
     assert_eq!((sky.settings, sky.path), (linear, "textures/sky.ktx2".to_string()));
     assert_eq!((t.settings, t.path), (nearest, "textures/a.png".to_string()));
+}
+
+/// ADR 0047 §4: an environment storing its cube map by UUID resolves to the texture's path for the editor's checks
+/// (no LE001, open tab included), the texture's delete message names it, and Generate writes the path; saving the
+/// open tab keeps the UUID with its D27 path comment.
+#[test]
+fn uuid_cube_map_resolves_in_the_editor() {
+    let (dir, mut e) = project();
+    let p = e.project.clone().unwrap();
+    let sky = AssetUuid::legacy(&light_tex("sky").source_rel());
+    let mut t = TextureAsset { id: sky, ..TextureAsset::new("textures/sky.ktx2") };
+    texture_kit::editor::save(&p, &light_tex("sky"), &mut t).unwrap();
+    let mut dawn = Environment { cubemap: Some(sky.to_string()), ..Environment::default() };
+    save_environment(
+        &p.root.join(environment_ref("dawn").source_rel()),
+        &mut dawn,
+        &AssetIndex::build(vec![LightBackend.index(&p)]),
+    )
+    .unwrap();
+    e.rescan();
+    e.apply(Action::OpenAsset(environment_ref("dawn")));
+    set_number(&mut e, EnvironmentProp::EnvIntensity, 2.0);
+    let s = e.domains.get::<LightState>().unwrap();
+    assert!(!s.diagnostics.iter().any(|d| d.code == "LE001"), "{:?}", s.diagnostics);
+    let message = s.delete_message(&e, &light_tex("sky")).expect("a delete message");
+    assert!(message.contains("dawn, day"), "{message}");
+
+    e.apply(Action::RegenAll);
+    let manifest = std::fs::read_to_string(dir.path().join("assets/quillshade/light/autogen/baked.ron")).unwrap();
+    assert!(manifest.contains("\"dawn\": (\n      format_version: 1,\n"), "{manifest}");
+    assert!(!manifest.contains(&sky.to_string()) && !manifest.contains("id:"), "{manifest}");
+
+    e.apply(Action::Save);
+    let text = std::fs::read_to_string(p.root.join(environment_ref("dawn").source_rel())).unwrap();
+    assert!(text.contains(&format!("\n  id: \"{}\",\n", dawn.id)), "the id is kept: {text}");
+    assert!(text.contains(&format!("\n  cubemap: Some(\"{sky}\"), // sky\n")), "{text}");
+    assert_eq!(env_on_disk(dir.path(), "dawn").env_intensity, 2.0);
 }
 
 /// Design §6.5, §9.2: Generate in the editor writes Light's module and the umbrella crate naming it.
@@ -479,7 +641,8 @@ fn environment_form_uses_core_widgets() {
     }
     let (_, picker) = field(&mut app, EnvironmentProp::Cubemap).expect("the cube-map picker");
     assert_eq!(picker.options, ["None", "sky"]);
-    assert_eq!(picker.values, ["", "sky"]);
+    let sky = app.world().resource::<Editor>().asset_index.id_of(&light_tex("sky")).expect("indexed").to_string();
+    assert_eq!(picker.values, [String::new(), sky], "the texture's UUID (ADR 0047 §4)");
     let (brightness, _) = field(&mut app, EnvironmentProp::SkyboxBrightness).expect("the brightness field");
     assert!(field(&mut app, EnvironmentProp::EnvIntensity).is_some());
     app.world_mut().trigger(ValueChange { source: brightness, value: 250.0f32, is_final: true });
@@ -503,6 +666,53 @@ fn environment_form_uses_core_widgets() {
     app.update();
     app.update();
     assert_eq!(active_env(app.world().resource::<Editor>()).env.ambient_color, [0.25, 0.5, 0.75, 1.0]);
+}
+
+/// ADR 0047 §4: with the Light texture indexed (it has an id), the cube-map picker offers its UUID labelled `sky`;
+/// picking stores the UUID, the form and the editor topbar show `sky`, and saving writes the UUID with its D27 path
+/// comment. A path-form environment naming the same texture still shows it as picked.
+#[test]
+fn cube_map_picker_stores_the_uuid() {
+    let (dir, mut editor) = project();
+    let p = editor.project.clone().unwrap();
+    let sky = AssetUuid::legacy(&light_tex("sky").source_rel());
+    let mut t = TextureAsset { id: sky, ..TextureAsset::new("textures/sky.ktx2") };
+    texture_kit::editor::save(&p, &light_tex("sky"), &mut t).unwrap();
+    let mut dawn = Environment::default();
+    save_environment(&p.root.join(environment_ref("dawn").source_rel()), &mut dawn, &AssetIndex::default()).unwrap();
+    editor.rescan();
+    let mut app = app(editor);
+    let act = |app: &mut App, a: Action| {
+        app.world_mut().resource_mut::<Actions>().push(a);
+        for _ in 0..3 {
+            app.update();
+        }
+    };
+    act(&mut app, Action::OpenAsset(environment_ref("dawn")));
+    let (_, picker) = field(&mut app, EnvironmentProp::Cubemap).expect("the cube-map picker");
+    assert_eq!(
+        (picker.options, picker.values),
+        (vec!["None".into(), "sky".into()], vec![String::new(), sky.to_string()])
+    );
+    let value = PropValue::Str(sky.to_string());
+    act(&mut app, Action::Tab(TabAction::SetValue { key: key(EnvironmentProp::Cubemap), value, merge: false }));
+    assert_eq!(active_env(app.world().resource::<Editor>()).env.cubemap, Some(sky.to_string()));
+    let (_, picker) = field(&mut app, EnvironmentProp::Cubemap).unwrap();
+    assert_eq!(picker.options, ["None", "sky"], "the UUID shows as `sky`, not as missing");
+    let w = app.world_mut();
+    let tips: Vec<String> = w.query::<&editor_core::tooltip::Tooltip>().iter(w).map(|t| t.0.clone()).collect();
+    assert!(tips.iter().any(|t| t == "Open the Light Texture asset sky"), "{tips:?}");
+    let s = app.world().resource::<Editor>().domains.get::<LightState>().unwrap();
+    assert!(!s.diagnostics.iter().any(|d| d.code == "LE001"), "{:?}", s.diagnostics);
+
+    act(&mut app, Action::Save);
+    let text = std::fs::read_to_string(dir.path().join(environment_ref("dawn").source_rel())).unwrap();
+    assert!(text.contains(&format!("\n  cubemap: Some(\"{sky}\"), // sky\n")), "{text}");
+    assert!(env_on_disk(dir.path(), "dawn").id.is_v7(), "{text}");
+
+    act(&mut app, Action::OpenAsset(environment_ref("day")));
+    let (_, picker) = field(&mut app, EnvironmentProp::Cubemap).unwrap();
+    assert_eq!(picker.options, ["None", "sky"], "a path cube map of a texture with an id");
 }
 
 /// Editing the extended EnvironmentProp fields (colors, directional lights, tonemapping, color grading, distance fog)
@@ -570,7 +780,7 @@ fn extended_environment_fields_edit_and_undo() {
 fn curve_tab_edits_update_live_lw103_diagnostics() {
     let (_dir, mut e) = project();
     let p = e.project.as_ref().unwrap().clone();
-    curve_kit::editor::save(&p, &curve_ref("ease"), &curve_kit::Curve::ramp("ease")).unwrap();
+    curve_kit::editor::save(&p, &curve_ref("ease"), &mut curve_kit::Curve::ramp("ease")).unwrap();
     e.rescan();
     e.apply(Action::OpenAsset(curve_ref("ease")));
     assert!(e.active_doc::<LightCurveDoc>().is_some());
@@ -784,19 +994,20 @@ fn light_preview_tool_interpolates_transition_and_cleans_raii_handle_on_close() 
     let p = editor.project.as_ref().unwrap().clone();
 
     // Configure `night` with ev100 = 9.0, skybox_brightness = 500.0, tonemapping = AgX.
-    let night_env = Environment {
+    let mut night_env = Environment {
         cubemap: None,
         skybox_brightness: 500.0,
         ev100: 9.0,
         tonemapping: TonemappingMode::AgX,
         ..Environment::default()
     };
-    save_environment(&dir.path().join(environment_ref("night").source_rel()), &night_env).unwrap();
+    save_environment(&dir.path().join(environment_ref("night").source_rel()), &mut night_env, &AssetIndex::default())
+        .unwrap();
 
     // Save a custom curve `smooth` that maps t = 0.5 -> s = 0.25.
     let mut smooth = curve_kit::Curve::ramp("smooth");
     smooth.points = vec![(0.0, 0.0), (0.5, 0.25), (1.0, 1.0)];
-    curve_kit::editor::save(&p, &curve_ref("smooth"), &smooth).unwrap();
+    curve_kit::editor::save(&p, &curve_ref("smooth"), &mut smooth).unwrap();
     editor.rescan();
 
     let mut app = app(editor);
@@ -891,7 +1102,7 @@ fn light_preview_tool_interpolates_transition_and_cleans_raii_handle_on_close() 
 fn light_preview_sky_color_to_cubemap_blending() {
     let (dir, mut editor) = project();
 
-    let env_a = Environment {
+    let mut env_a = Environment {
         cubemap: None,
         clear_color: [0.8, 0.85, 0.9, 1.0],
         skybox_brightness: 500.0,
@@ -900,7 +1111,7 @@ fn light_preview_sky_color_to_cubemap_blending() {
         ground_color: [0.4, 0.38, 0.35, 1.0],
         ..Environment::default()
     };
-    let env_b = Environment {
+    let mut env_b = Environment {
         cubemap: Some("sky".into()),
         clear_color: [0.02, 0.02, 0.05, 1.0],
         skybox_brightness: 2500.0,
@@ -909,8 +1120,10 @@ fn light_preview_sky_color_to_cubemap_blending() {
         ground_color: [0.01, 0.01, 0.02, 1.0],
         ..Environment::default()
     };
-    save_environment(&dir.path().join(environment_ref("night").source_rel()), &env_a).unwrap();
-    save_environment(&dir.path().join(environment_ref("day").source_rel()), &env_b).unwrap();
+    save_environment(&dir.path().join(environment_ref("night").source_rel()), &mut env_a, &AssetIndex::default())
+        .unwrap();
+    save_environment(&dir.path().join(environment_ref("day").source_rel()), &mut env_b, &AssetIndex::default())
+        .unwrap();
     editor.rescan();
 
     // Direct `interpolate_environments` check:

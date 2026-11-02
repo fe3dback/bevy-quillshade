@@ -1,5 +1,6 @@
 Asset(
-  format_version: 1,
+  format_version: 2,
+  id: "019b76da-a800-7976-937a-b4af01dbeaa0",
   kind: Function,
   name: "fn",
   nodes: {

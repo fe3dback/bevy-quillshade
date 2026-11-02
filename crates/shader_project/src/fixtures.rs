@@ -1,18 +1,24 @@
 //! Reference graphs used by tests, snapshot suites and `examples/sample_game` (spec §15, 17).
 
+use std::collections::BTreeMap;
+
+use project_core::{AssetUuid, DomainId};
 use shader_graph_core::consts::{ConstType, GlobalConst, GlobalConsts};
 use shader_graph_core::curve::Curve;
 use shader_graph_core::gradient::{GradientCollection, Stop, srgb_to_linear};
 use shader_graph_core::model::{
     Asset, AssetKind, BlendMode, MaterialKind, Node, PbrOutputMode, PbrSettings, SpriteSettings, UnlitSettings,
 };
+use shader_graph_core::registry::FUNCTION_PREFIX;
 use shader_graph_core::texture::{AddressMode, FilterMode, SamplerSettings, TextureAsset, TextureSettings};
 use shader_graph_core::{PinType, Value};
 use shader_stdlib::nodes::color::{GRADIENT_COLLECTION_PARAM, GRADIENT_SLOT_PARAM, SAMPLE_GRADIENT_KIND};
+use shader_stdlib::user::{USER_PREFIX, UserNode};
 
-use crate::assets::{AssetId, AssetType};
-use crate::layout::Project;
+use crate::assets::{self, AssetId, AssetType};
+use crate::layout::{MATERIAL, Project, USER_NODES_DIR};
 use crate::ops::{self, OpError};
+use crate::resolve::{ref_type, stdlib};
 
 /// Programmatic graph construction with deterministic node ids (`n01`, `n02`, …).
 /// Scale from the sketch coordinates used below to canvas coordinates.
@@ -126,7 +132,45 @@ pub fn wet_mask() -> Asset {
         &[("name", s("tint")), ("type", Value::Type(PinType::Float3)), ("order", Value::Int(1))],
     );
     g.link((&tint, "out"), (&out_tint, "value"));
-    g.finish()
+    let mut a = g.finish();
+    // The layout the sample's file got by hand in the editor (`examples/sample_game` is the source of truth).
+    place(
+        &mut a,
+        &[
+            ("n01", (-336.0, 0.0)),
+            ("n02", (224.0, 426.0)),
+            ("n03", (224.0, 0.0)),
+            ("n04", (-56.0, 0.0)),
+            ("n05", (224.0, 142.0)),
+            ("n06", (224.0, 284.0)),
+            ("n07", (504.0, 0.0)),
+            ("n08", (504.0, 166.0)),
+            ("n09", (784.0, 0.0)),
+            ("n10", (1064.0, 0.0)),
+            ("n11", (1064.0, 94.0)),
+        ],
+    );
+    a
+}
+
+/// Moves the nodes `layout` names to their positions (exact canvas coordinates, no [`SPREAD`]).
+fn place<S: AsRef<str>>(a: &mut Asset, layout: &[(S, (f32, f32))]) {
+    for (node, pos) in layout {
+        a.nodes.get_mut(node.as_ref()).expect("node").pos = *pos;
+    }
+}
+
+/// Inserts a Named Route node `id` called `name`, fed by `from`, and returns `id`.
+fn route(a: &mut Asset, id: &str, name: &str, pos: (f32, f32), from: (&str, &str)) -> String {
+    a.nodes.insert(id.into(), Node::new("stdlib::NamedRoute", pos).with_param("name", s(name)));
+    a.connect(from, (id, "in"));
+    id.into()
+}
+
+/// Inserts a Named Route Usage node `id` reading `route`, and returns `id`.
+fn route_usage(a: &mut Asset, id: &str, route: &str, pos: (f32, f32)) -> String {
+    a.nodes.insert(id.into(), Node::new("stdlib::NamedRouteUsage", pos).with_param("route", s(route)));
+    id.into()
 }
 
 /// Reference material `rock_wet` (spec §17): 2 textures, 1 color, 2 scalars, Normal, Roughness,
@@ -148,7 +192,7 @@ pub fn rock_wet() -> Asset {
     let tint = g.node_p(
         "param::Color",
         (0.0, 440.0),
-        &[("name", s("tint")), ("default", Value::Color([0.9, 0.85, 0.8, 1.0]))],
+        &[("name", s("tint")), ("default", Value::Color([0.6288158, 0.14549951, 0.65770394, 1.0]))],
     );
     let wet = g.node_p(
         "param::Scalar",
@@ -166,11 +210,9 @@ pub fn rock_wet() -> Asset {
     let wm = g.node("function::common/wet_mask", (450.0, 120.0));
     g.link((&wet, "out"), (&wm, "wetness"));
     g.link((&base, "out"), (&wm, "base_color"));
-    g.link((&wm, "tint"), (&out, "base_color"));
     let rough = g.node("stdlib::Lerp", (680.0, 160.0));
-    g.input(&rough, "a", f(0.9));
+    g.input(&rough, "a", f(1.358));
     g.input(&rough, "b", f(0.15));
-    g.link((&wm, "mask"), (&rough, "alpha"));
     g.link((&rough, "out"), (&out, "roughness"));
     g.link((&normal, "rgb"), (&out, "normal"));
     let time = g.node("stdlib::Time", (250.0, 600.0));
@@ -187,14 +229,46 @@ pub fn rock_wet() -> Asset {
     g.link((&glow, "out"), (&em, "b"));
     let em2 = g.node("stdlib::Multiply", (860.0, 520.0));
     g.link((&em, "out"), (&em2, "a"));
-    g.link((&wm, "mask"), (&em2, "b"));
     g.link((&em2, "out"), (&out, "emissive"));
-    g.link((&albedo, "a"), (&out, "opacity_mask"));
     let mut a = g.finish();
+    // Named routes (ids and layout as the sample's file got them by hand in the editor; `examples/sample_game` is the
+    // source of truth): the wet mask's tint to the base color, its mask to roughness and emissive, the albedo's alpha
+    // to the opacity mask.
+    let to_base = route(&mut a, "01m5s455rm9dm7z9kxbad7x87e", "albedo", (765.1182, -956.15), (&wm, "tint"));
+    let base_color = route_usage(&mut a, "01m5s45mg5rdgm9c68t9bq0abw", &to_base, (1539.7871, -652.31464));
+    a.connect((&base_color, "out"), (&out, "base_color"));
+    let wet_mask = route(&mut a, "01m5s4627d6nhvxda96dkq6m25", "r_wet_mask", (762.7104, -1099.4967), (&wm, "mask"));
+    let mask = route_usage(&mut a, "01m5s46teq0pyf283b3a96s4da", &wet_mask, (927.6546, -436.13312));
+    a.connect((&mask, "out"), (&rough, "alpha"));
+    a.connect((&mask, "out"), (&em2, "b"));
+    let opacity = route(&mut a, "01m5s47f603sg399gxryx6bp3p", "r_opacity", (206.62381, -838.9257), (&albedo, "a"));
+    let opacity_mask = route_usage(&mut a, "01m5s47szygyqq6a7zewb7ykgx", &opacity, (1552.7684, -138.2656));
+    a.connect((&opacity_mask, "out"), (&out, "opacity_mask"));
+    place(
+        &mut a,
+        &[
+            (&out, (1827.2538, -472.7735)),
+            (&albedo, (-136.09784, -988.7245)),
+            (&normal, (1533.1292, -16.522425)),
+            (&tint, (-135.21205, -714.25256)),
+            (&wet, (209.74829, -1132.3137)),
+            (&speed, (42.95868, 24.378235)),
+            (&base, (213.78462, -990.0447)),
+            (&wm, (519.6215, -1006.14874)),
+            (&rough, (1173.5908, -476.924)),
+            (&time, (31.342651, -92.53511)),
+            (&ts, (241.34262, -65.53517)),
+            (&sin, (451.34262, -65.53517)),
+            (&pulse, (633.3425, -65.53517)),
+            (&glow, (564.6335, 79.20438)),
+            (&em, (827.7401, -65.3965)),
+            (&em2, (1173.5908, -310.924)),
+        ],
+    );
     a.comments.push(shader_graph_core::Frame {
         id: "c01".into(),
         title: "Emissive pulse".into(),
-        rect: (230.0 * SPREAD.0, 560.0 * SPREAD.1, 720.0 * SPREAD.0, 260.0 * SPREAD.1),
+        rect: (3.3426514, -146.53513, 1008.0, 351.0),
         nodes: vec![],
         color: None,
         hue: None,
@@ -549,6 +623,28 @@ pub fn global_tint() -> Asset {
     g.finish()
 }
 
+/// Unlit tint scaled by a horizontal ramp and soft-clamped by the project user node `.nodes/soft_clamp`
+/// ([`SOFT_CLAMP`], ADR 0047 §16; its `k` pin keeps the node's default).
+pub fn user_node() -> Asset {
+    let kind = AssetKind::Material(MaterialKind::Unlit3d(UnlitSettings::default()));
+    let mut g = GraphBuilder::new("user_node", kind);
+    let out = g.node("output::Unlit3d", (750.0, 0.0));
+    let tint = g.node_p("param::Color", (0.0, 0.0), &[("name", s("tint"))]);
+    let uv = g.node("stdlib::TextureCoordinate", (0.0, 150.0));
+    let br = g.node("stdlib::BreakOutFloat2", (150.0, 150.0));
+    g.link((&uv, "out"), (&br, "v"));
+    let ramp = g.node("stdlib::Multiply", (300.0, 150.0));
+    g.link((&br, "x"), (&ramp, "a"));
+    g.input(&ramp, "b", f(4.0));
+    let scaled = g.node("stdlib::Multiply", (450.0, 50.0));
+    g.link((&tint, "rgb"), (&scaled, "a"));
+    g.link((&ramp, "out"), (&scaled, "b"));
+    let soft = g.node(&format!("{USER_PREFIX}{}", SOFT_CLAMP.0), (600.0, 50.0));
+    g.link((&scaled, "out"), (&soft, "x"));
+    g.link((&soft, "out"), (&out, "color"));
+    g.finish()
+}
+
 /// Function returning a whole PBR layer as `MaterialAttributes (PBR)` (decision 0023): a tinted rough rock.
 pub fn rock_layer() -> Asset {
     let mut g = GraphBuilder::new("rock_layer", AssetKind::Function);
@@ -797,6 +893,36 @@ pub fn gradients() -> Vec<(&'static str, GradientCollection)> {
     vec![("common/terrain", terrain)]
 }
 
+/// The user node fixture (ADR 0047 §16): (file name in `quillshade/material/.nodes/`, file text). Hand-written in
+/// the current format without an `id` (the example of the `shader_stdlib::user` module docs); [`save_all`] gives it
+/// its [`fixture_user_id`].
+pub const SOFT_CLAMP: (&str, &str) = (
+    "soft_clamp",
+    r#"UserNode(
+    format_version: 2,
+    ident: "soft_clamp",
+    name: "SoftClamp",
+    category: "User",
+    keywords: ["clamp"],
+    inputs: [UserPin(name: "x", ty: Float3), UserPin(name: "k", ty: Float, default: Some(Float(0.5)))],
+    output: Float3,
+    template: "return x / (vec3<f32>(1.0) + abs(x) * k);",
+)
+"#,
+);
+
+/// [`SOFT_CLAMP`] in format 1 (no `format_version`, the code identifier in `id`), as projects before v3 have it.
+const SOFT_CLAMP_V1: &str = r#"UserNode(
+    id: "soft_clamp",
+    name: "SoftClamp",
+    category: "User",
+    keywords: ["clamp"],
+    inputs: [UserPin(name: "x", ty: Float3), UserPin(name: "k", ty: Float, default: Some(Float(0.5)))],
+    output: Float3,
+    template: "return x / (vec3<f32>(1.0) + abs(x) * k);",
+)
+"#;
+
 /// Texture asset fixtures (design §1.1): (`quillshade/material/`-relative path, asset). The images are in
 /// `examples/sample_game/assets/textures/`; `rock_albedo` and `water_normal` are `.ktx2` (made from the `.png` next to
 /// them by the `png_to_ktx2` example, design §4.4), the rest `.png`, so the sample exercises both formats.
@@ -829,23 +955,168 @@ pub fn textures() -> Vec<(&'static str, TextureAsset)> {
     ]
 }
 
-/// Writes every fixture (graphs, curves, constant tables, Texture assets, gradient collections) into `project`.
+/// The id the fixtures give the Material asset of type `ty` at `path`: [`AssetUuid::legacy`] of its `source_rel`,
+/// the id the v3 migration gives an asset that had none, so [`save_all`] reproduces a migrated project byte for byte.
+pub fn fixture_id(ty: AssetType, path: &str) -> AssetUuid {
+    AssetUuid::legacy(&AssetId::new(ty, path).source_rel())
+}
+
+/// What a fixture graph stores to reference the Material asset of type `ty` at `path` (ADR 0047 §3): its
+/// [`fixture_id`].
+pub fn fixture_ref(ty: AssetType, path: &str) -> String {
+    fixture_id(ty, path).to_string()
+}
+
+/// The id the fixtures give the user node file `quillshade/material/.nodes/<name>.ron` (see [`fixture_id`]).
+pub fn fixture_user_id(name: &str) -> AssetUuid {
+    AssetUuid::legacy(&assets::user_node_ref(name).source_rel())
+}
+
+/// Writes every fixture (user nodes, graphs, curves, constant tables, Texture assets, gradient collections) into
+/// `project` in the form of ADR 0047: every asset with its [`fixture_id`], every reference to a project asset
+/// stored as the target's UUID with its D27 path comment — byte for byte what the v3 migration makes of
+/// [`save_all_v1`] (`examples/sample_game` is written this way by `make_sample`).
 pub fn save_all(project: &Project) -> Result<(), OpError> {
+    save_all_path_form(project)?;
+    convert_to_uuid_form(project)
+}
+
+/// [`save_all`] with references stored as paths (function kinds `function::<path>`, user node kinds
+/// `user::<ident>`, reference params holding the target's path). Current-format files with path references still
+/// load and resolve (the resolve seam passes a path through), so tests can prove that the UUID form behaves exactly
+/// like the paths it stands for ([`convert_to_uuid_form`] turns this into [`save_all`]'s form).
+pub fn save_all_path_form(project: &Project) -> Result<(), OpError> {
+    let (name, text) = SOFT_CLAMP;
+    let mut node = UserNode::from_ron(text).map_err(OpError::Invalid)?;
+    node.id = fixture_user_id(name);
+    ops::save_user_node(project, name, &mut node)?;
+    for (path, mut texture) in textures() {
+        texture.id = fixture_id(AssetType::Texture, path);
+        ops::save_texture(project, &AssetId::new(AssetType::Texture, path), &mut texture)?;
+    }
+    for (path, is_fn, mut asset) in all() {
+        let ty = if is_fn { AssetType::Function } else { AssetType::Material };
+        asset.id = fixture_id(ty, path);
+        ops::save(project, &AssetId::new(ty, path), &mut asset)?;
+    }
+    for (path, mut curve) in curves() {
+        curve.id = fixture_id(AssetType::Curve, path);
+        ops::save_curve(project, &AssetId::new(AssetType::Curve, path), &mut curve)?;
+    }
+    for (path, mut table) in const_tables() {
+        table.id = fixture_id(AssetType::Consts, path);
+        ops::save_consts(project, &AssetId::new(AssetType::Consts, path), &mut table)?;
+    }
+    for (path, mut collection) in gradients() {
+        collection.id = fixture_id(AssetType::Gradients, path);
+        ops::save_gradients(project, &AssetId::new(AssetType::Gradients, path), &mut collection)?;
+    }
+    Ok(())
+}
+
+/// Writes every fixture's Material source into the project at `root` as projects before v3 have them (format 1,
+/// no ids, references by path; the user node in format 1): the input of the migration tests, and what
+/// `examples/sample_game` held before the Migration Tool upgraded it. Raw writes: no loader or writer of this build
+/// accepts format 1. `quillshade/project.ron` is left to the caller.
+pub fn save_all_v1(root: &std::path::Path) -> std::io::Result<()> {
+    use project_core::writer::write_atomic;
+
+    let dir = root.join(crate::layout::MATERIAL_DIR);
+    let file = |id: AssetId| dir.join(format!("{}.{}.ron", id.path, id.ty.suffix()));
+    write_atomic(&dir.join(USER_NODES_DIR).join(format!("{}.ron", SOFT_CLAMP.0)), SOFT_CLAMP_V1)?;
     for (path, texture) in textures() {
-        ops::save_texture(project, &AssetId::new(AssetType::Texture, path), &texture)?;
+        let t = TextureAsset { format_version: 1, ..texture };
+        write_atomic(&file(AssetId::new(AssetType::Texture, path)), t.to_ron())?;
     }
     for (path, is_fn, asset) in all() {
-        let id = AssetId::new(if is_fn { AssetType::Function } else { AssetType::Material }, path);
-        ops::save(project, &id, &asset)?;
+        let ty = if is_fn { AssetType::Function } else { AssetType::Material };
+        write_atomic(&file(AssetId::new(ty, path)), Asset { format_version: 1, ..asset }.to_ron())?;
     }
     for (path, curve) in curves() {
-        ops::save_curve(project, &AssetId::new(AssetType::Curve, path), &curve)?;
+        write_atomic(&file(AssetId::new(AssetType::Curve, path)), Curve { format_version: 1, ..curve }.to_ron())?;
     }
     for (path, table) in const_tables() {
-        ops::save_consts(project, &AssetId::new(AssetType::Consts, path), &table)?;
+        let t = GlobalConsts { format_version: 1, ..table };
+        write_atomic(&file(AssetId::new(AssetType::Consts, path)), t.to_ron())?;
     }
     for (path, collection) in gradients() {
-        ops::save_gradients(project, &AssetId::new(AssetType::Gradients, path), &collection)?;
+        let g = GradientCollection { format_version: 1, ..collection };
+        write_atomic(&file(AssetId::new(AssetType::Gradients, path)), g.to_ron())?;
+    }
+    Ok(())
+}
+
+/// Rewrites every Material source of `project` (as [`save_all_path_form`] writes them) into the UUID form of ADR
+/// 0047: each asset (user nodes included) with the id [`AssetUuid::legacy`] of its `source_rel`, each path
+/// reference to a project asset (function node kinds, reference params) and each `user::<ident>` kind replaced by
+/// the target's id, graphs with D27 path comments. Unknown paths and idents and `@internal/*` stay.
+pub fn convert_to_uuid_form(project: &Project) -> Result<(), OpError> {
+    let ids = assets::scan(project);
+    let uuid_of: BTreeMap<(AssetType, &str), AssetUuid> =
+        ids.iter().map(|id| ((id.ty, id.path.as_str()), AssetUuid::legacy(&id.source_rel()))).collect();
+    let mut names: BTreeMap<AssetUuid, (DomainId, String)> =
+        uuid_of.iter().map(|((_, path), uuid)| (*uuid, (MATERIAL, path.to_string()))).collect();
+    let invalid = OpError::Invalid;
+    let mut user_uuid_of: BTreeMap<String, AssetUuid> = BTreeMap::new();
+    for f in assets::user_node_files(project) {
+        let mut node = f.node.map_err(invalid)?;
+        let uuid = AssetUuid::legacy(&f.asset.source_rel());
+        user_uuid_of.insert(node.ident.clone(), uuid);
+        names.insert(uuid, (MATERIAL, f.asset.path.clone()));
+        node.id = uuid;
+        let name = f.asset.path.rsplit('/').next().unwrap_or(&f.asset.path);
+        ops::save_user_node(project, name, &mut node)?;
+    }
+    for id in &ids {
+        let uuid = uuid_of[&(id.ty, id.path.as_str())];
+        match id.ty {
+            AssetType::Material | AssetType::Function => {
+                let mut a = assets::load(project, id).map_err(invalid)?;
+                a.id = uuid;
+                for n in a.nodes.values_mut() {
+                    if let Some(target) = n.kind.strip_prefix(FUNCTION_PREFIX)
+                        && let Some(to) = uuid_of.get(&(AssetType::Function, target))
+                    {
+                        n.kind = format!("{FUNCTION_PREFIX}{to}");
+                    }
+                    if let Some(ident) = n.kind.strip_prefix(USER_PREFIX)
+                        && let Some(to) = user_uuid_of.get(ident)
+                    {
+                        n.kind = format!("{USER_PREFIX}{to}");
+                    }
+                    let Some(def) = stdlib().get(&n.kind) else { continue };
+                    for p in def.params() {
+                        if let Some(ty) = ref_type(&p.kind)
+                            && let Some(Value::Str(v)) = n.params.get_mut(&p.id)
+                            && let Some(to) = uuid_of.get(&(ty, v.as_str()))
+                        {
+                            *v = to.to_string();
+                        }
+                    }
+                }
+                ops::save_annotated(project, id, &mut a, &names)?;
+            }
+            AssetType::Curve => {
+                let mut c = assets::load_curve(project, id).map_err(invalid)?;
+                c.id = uuid;
+                ops::save_curve(project, id, &mut c)?;
+            }
+            AssetType::Consts => {
+                let mut t = assets::load_consts(project, id).map_err(invalid)?;
+                t.id = uuid;
+                ops::save_consts(project, id, &mut t)?;
+            }
+            AssetType::Texture => {
+                let mut t = assets::load_texture(project, id).map_err(invalid)?;
+                t.id = uuid;
+                ops::save_texture(project, id, &mut t)?;
+            }
+            AssetType::Gradients => {
+                let mut g = assets::load_gradients(project, id).map_err(invalid)?;
+                g.id = uuid;
+                ops::save_gradients(project, id, &mut g)?;
+            }
+        }
     }
     Ok(())
 }
@@ -866,6 +1137,7 @@ pub fn all() -> Vec<(&'static str, bool, Asset)> {
         ("fx/coords", false, coords()),
         ("fx/curve_bands", false, curve_bands()),
         ("fx/global_tint", false, global_tint()),
+        ("fx/user_node", false, user_node()),
         ("ui/dissolve", false, dissolve()),
         ("kw/fn", true, keyword_fn()),
         ("kw/loop/type", false, keyword_names()),

@@ -2,6 +2,9 @@
 
 Design reference: `AGENTS.md` and decisions 0043–0045.
 
+Superseded in part by decision 0046 (`format_version` in `project.ron` is now `project_version`; a missing
+`project.ron` no longer always means defaults).
+
 ## Context
 
 The editor handled one domain, materials, with a layout hard-wired to it (`shaders/`, `assets/shaders/`,

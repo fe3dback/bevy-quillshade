@@ -1,5 +1,6 @@
 Asset(
-  format_version: 1,
+  format_version: 2,
+  id: "019b76da-a800-7718-99ad-01ec0fcbe9da",
   kind: Material(Pbr3d(PbrSettings(
     blend: Opaque,
     two_sided: false,
@@ -13,7 +14,7 @@ Asset(
       params: {},
     ),
     "n02": Node(
-      kind: "function::common/tex_layer",
+      kind: "function::019b76da-a800-79a4-861e-ba527e418587", // common/tex_layer
       pos: (0.0, -202.5),
       params: {},
       inputs: {
@@ -21,7 +22,7 @@ Asset(
       },
     ),
     "n03": Node(
-      kind: "function::common/tex_layer",
+      kind: "function::019b76da-a800-79a4-861e-ba527e418587", // common/tex_layer
       pos: (0.0, 67.5),
       params: {},
       inputs: {
@@ -29,7 +30,7 @@ Asset(
       },
     ),
     "n04": Node(
-      kind: "function::common/tex_layer_outer",
+      kind: "function::019b76da-a800-71b1-a713-f21696a67905", // common/tex_layer_outer
       pos: (0.0, 337.5),
       params: {},
       inputs: {

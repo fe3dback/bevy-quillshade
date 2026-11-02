@@ -23,5 +23,6 @@ pub use dir_fx::mat_coords::CoordsMaterial;
 pub use dir_fx::mat_curve_bands::CurveBandsMaterial;
 pub use dir_fx::mat_global_tint::GlobalTintMaterial;
 pub use dir_fx::mat_hologram::{HologramMaterial, HologramParams};
+pub use dir_fx::mat_user_node::{UserNodeMaterial, UserNodeParams};
 pub use dir_kw::dir_loop::mat_type::{TypeMaterial, TypeParams};
 pub use dir_ui::mat_dissolve::{DissolveMaterial, DissolveParams};

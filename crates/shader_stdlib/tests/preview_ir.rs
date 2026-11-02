@@ -1,7 +1,7 @@
 //! Node preview in the IR (spec §5, decision 0022): the previewed node's outputs replace the material output's.
 
 use shader_graph_core::consts::NoConsts;
-use shader_graph_core::ir::{IrPreview, WPO_PIN, build_ir};
+use shader_graph_core::ir::{IrPreview, WORLD_NORMAL_PIN, WPO_PIN, build_ir};
 use shader_graph_core::model::{
     Asset, AssetKind, MaterialKind, Node, PbrSettings, Preview, PreviewMode, SpriteSettings, UnlitSettings,
 };
@@ -169,6 +169,24 @@ fn preview_keeps_vertex_stage() {
     assert_eq!(vertex.outputs[WPO_PIN], "vec3<f32>(0.0)");
     assert_eq!(ir.main.outputs.keys().collect::<Vec<_>>(), ["color"]);
     assert_eq!(ir.main.outputs["color"], "vec3<f32>(0.5f)");
+}
+
+/// The preview drops the world-normal override too, but keeps the vertex stage (decision 0022).
+#[test]
+fn preview_drops_world_normal() {
+    let mut a = Asset::new("mat", AssetKind::Material(MaterialKind::Pbr3d(PbrSettings::default())));
+    let out = node(&mut a, "out", "output::Pbr3d", &[]);
+    let n = node(&mut a, "n", "stdlib::Constant3Vector", &[("value", Value::Float3([0.0, 1.0, 0.0]))]);
+    let c = node(&mut a, "c", "stdlib::Constant", &[("value", Value::Float(0.5))]);
+    a.connect((&n, "out"), (&out, WORLD_NORMAL_PIN));
+    a.connect((&c, "out"), (&out, "base_color"));
+    let (ir, _) = build(&a);
+    assert!(ir.vertex.as_ref().expect("vertex stage").outputs.contains_key(WORLD_NORMAL_PIN));
+    a.preview = Preview { node: Some(c), mode: PreviewMode::Lit };
+    let (ir, _) = build(&a);
+    let vertex = ir.vertex.expect("vertex stage kept");
+    assert!(!vertex.outputs.contains_key(WORLD_NORMAL_PIN), "{:?}", vertex.outputs);
+    assert_eq!(vertex.outputs[WPO_PIN], "vec3<f32>(0.0)");
 }
 
 #[test]

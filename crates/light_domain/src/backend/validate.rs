@@ -5,7 +5,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use project_core::{Diagnostic, Project};
+use project_core::{Diagnostic, Project, is_uuid_shaped};
 use texture_kit::{ProblemKind, TextureAsset};
 
 use super::LIGHT;
@@ -154,6 +154,11 @@ pub fn validate_in_memory(
         let d = match &env.cubemap {
             None => Diagnostic::warning("LW101", "no cube map set: the environment shows nothing"),
             // A texture file that does not load still exists: it has its own LE009.
+            // A UUID left by the resolve seam names no Light Texture asset (dangling: AE002 too).
+            Some(cubemap) if is_uuid_shaped(cubemap) => {
+                Diagnostic::error("LE001", format!("cube map {cubemap} is not the UUID of a Light Texture asset"))
+                    .at("cubemap")
+            }
             Some(cubemap)
                 if !assets.textures.contains_key(cubemap)
                     && !assets.load_errors.iter().any(|d| d.asset == Some(texture_ref(cubemap).source_rel())) =>

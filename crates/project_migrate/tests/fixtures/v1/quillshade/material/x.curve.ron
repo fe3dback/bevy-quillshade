@@ -1,0 +1,8 @@
+Curve(
+  format_version: 1,
+  name: "x",
+  points: [
+    (0.0, 0.0),
+    (1.0, 1.0),
+  ],
+)

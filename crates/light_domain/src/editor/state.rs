@@ -1,5 +1,5 @@
 //! The Light domain's state in the editor (design §6.3, §9.2): the assets of the last scan, the diagnostics of what
-//! the open tabs show, generation (Generate, after a save) and what follows a renamed or deleted Light texture.
+//! the open tabs show, generation (Generate, after a save) and what follows a deleted Light texture.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -12,14 +12,15 @@ use editor_core::tab::{Tab, TextDoc, parse_highlights};
 use editor_core::util::text::plural;
 use project_core::regen::commit;
 use project_core::writer::Change;
-use project_core::{AssetRef, Diagnostic, DomainId};
+use project_core::{AssetRef, AssetUuid, Diagnostic, DomainId};
 use texture_kit::TextureAsset;
 use texture_kit::editor::TextureDoc;
 
 use super::{EnvironmentDoc, LightCurve, LightTexture};
 use crate::backend::{
-    CURVE_SUFFIX, ENVIRONMENT_SUFFIX, LIGHT, LightAssets, TEXTURE_SUFFIX, plan_assets, rewrite_texture_refs,
-    scan_game_conflicts, texture_ref, validate_in_memory, validate_texture, validate_textures,
+    CURVE_SUFFIX, ENVIRONMENT_SUFFIX, LIGHT, LightAssets, TEXTURE_SUFFIX, clear_texture_refs, plan_assets,
+    resolve_texture, scan_game_conflicts, set_asset_uuid, texture_ref, texture_ref_names, validate_in_memory,
+    validate_texture, validate_textures,
 };
 
 /// What the Light domain keeps between frames.
@@ -36,6 +37,9 @@ pub struct LightState {
     pub game_conflicts: Vec<Diagnostic>,
     /// Incremented on every `reload` so [`super::PreviewCubemapCache`] knows when to drop cached `.ktx2` handles.
     pub reload_generation: u64,
+    /// What a cube map naming the Light texture being deleted stores (its UUID and path), from `before_delete` to
+    /// `deleted` (the index forgets the UUID when core rescans after the delete).
+    pub deleting: Vec<String>,
 }
 
 impl LightState {
@@ -52,7 +56,9 @@ impl LightState {
             *state = Self { reload_generation: next_gen, ..Self::default() };
             return;
         };
-        let assets = LightAssets::load(&project);
+        let mut assets = LightAssets::load(&project);
+        // Cube map UUIDs read as paths everywhere in the editor's checks (ADR 0047 §4).
+        assets.resolve_locally();
         let texture_diags = validate_textures(&project, &assets.textures)
             .into_iter()
             .filter_map(|(k, d)| Some((k.clone(), (assets.textures.get(&k)?.clone(), d))))
@@ -148,14 +154,14 @@ impl LightState {
         }
     }
 
-    /// The Light texture `from` was renamed to `to` (`None`: deleted) and the environment files on disk naming it were
-    /// rewritten (`rewritten`): the open environment tabs follow ([`EnvironmentDoc::retarget`]: their edits and undo
+    /// The cube maps naming a deleted Light texture (`names`) were cleared in the environment files on disk
+    /// (`rewritten`): the open environment tabs follow ([`EnvironmentDoc::clear_cubemap`]: their edits and undo
     /// history stay), then the assets reload and the module regenerates. Returns the environments that showed it.
-    fn texture_moved(editor: &mut Editor, from: &str, to: Option<&str>, rewritten: Vec<String>) -> Vec<String> {
+    fn texture_deleted(editor: &mut Editor, names: &[String], rewritten: Vec<String>) -> Vec<String> {
         let mut shown = rewritten;
         for doc in editor.tabs.iter_mut().filter_map(|t| t.get_mut::<EnvironmentDoc>()) {
             // Edited, saved and undo / redo states alike: a clean tab stays clean, a dirty one keeps its edits.
-            if doc.retarget(from, to) && !shown.contains(&doc.aref.path) {
+            if doc.clear_cubemap(names) && !shown.contains(&doc.aref.path) {
                 shown.push(doc.aref.path.clone());
             }
         }
@@ -173,8 +179,14 @@ fn is_rust_in(path: &Path, crate_dir: &Path) -> bool {
     path.starts_with(crate_dir) && path.extension().is_some_and(|e| e == "rs")
 }
 
+/// The Light Texture asset path a cube map `value` names: a UUID the editor's `AssetIndex` knows reads as the
+/// texture's current path (ADR 0047 §4); a path or a dangling UUID stays.
+pub(super) fn cubemap_path<'a>(editor: &'a Editor, value: &'a str) -> &'a str {
+    resolve_texture(value, &editor.asset_index).unwrap_or(value)
+}
+
 /// `assets` with the open Light tabs' environments, curves and Texture assets (unsaved edits included) in place of
-/// their files.
+/// their files, cube maps resolved to paths ([`LightAssets::resolve_locally`]).
 pub(super) fn shown(assets: &LightAssets, tabs: &[Tab]) -> LightAssets {
     let mut out = assets.clone();
     for t in tabs.iter().filter(|t| t.domain == LIGHT) {
@@ -186,6 +198,7 @@ pub(super) fn shown(assets: &LightAssets, tabs: &[Tab]) -> LightAssets {
             out.textures.insert(d.aref.path.clone(), d.asset.clone());
         }
     }
+    out.resolve_locally();
     out
 }
 
@@ -218,7 +231,7 @@ impl DomainState for LightState {
         Self::regenerate(editor);
     }
 
-    /// A Light texture that environments show: they lose their cube map.
+    /// A Light texture that environments show (cube maps are resolved to paths): they lose their cube map.
     fn delete_message(&self, _editor: &Editor, r: &AssetRef) -> Option<String> {
         if r.suffix != TEXTURE_SUFFIX {
             return None;
@@ -235,25 +248,24 @@ impl DomainState for LightState {
         })
     }
 
-    /// A renamed Light texture: the environments naming it (files and open tabs) follow. Any rename regenerates (the
-    /// module lists the environments); core rescanned first.
-    fn renamed(editor: &mut Editor, from: &AssetRef, to: &AssetRef) {
-        if from.suffix != TEXTURE_SUFFIX {
-            return Self::regenerate(editor);
-        }
-        let Some(project) = editor.project.clone() else { return };
-        let rewritten = match rewrite_texture_refs(&project, &from.path, Some(&to.path)) {
-            Ok(r) => r,
-            Err(e) => {
-                editor.io_error("Cannot update the environments", e);
-                Vec::new()
-            }
-        };
-        let shown = Self::texture_moved(editor, &from.path, Some(&to.path), rewritten);
-        if !shown.is_empty() {
-            let what = plural(shown.len(), "environment", "environments");
-            editor.info(format!("Updated the cube map of {what}: {}", shown.join(", ")));
-        }
+    /// Any rename regenerates (the module lists the environments; core rescanned first). Nothing else follows: cube
+    /// maps store the texture's UUID and the form shows its new path (ADR 0047 §13).
+    fn renamed(editor: &mut Editor, _from: &AssetRef, _to: &AssetRef) {
+        Self::regenerate(editor);
+    }
+
+    /// The UUID quick fixes (ADR 0047 §16): through the canonical writers ([`set_asset_uuid`]), so a hand-written
+    /// file without an `id` line gets one (core's default only rewrites an existing line).
+    fn set_asset_uuid(editor: &mut Editor, r: &AssetRef, id: AssetUuid) -> Result<(), String> {
+        let project = editor.project.clone().ok_or("no project is open")?;
+        set_asset_uuid(&project, r, id, &editor.asset_index)
+    }
+
+    /// Keeps what a cube map naming a Light texture `r` stores for [`DomainState::deleted`].
+    fn before_delete(editor: &mut Editor, r: &AssetRef) {
+        let names =
+            if r.suffix == TEXTURE_SUFFIX { texture_ref_names(&r.path, &editor.asset_index) } else { Vec::new() };
+        editor.domains.get_mut::<Self>().expect("Light domain not registered").deleting = names;
     }
 
     /// A deleted Light texture: the environments naming it lose their cube map, with a warning.
@@ -262,14 +274,16 @@ impl DomainState for LightState {
             return Self::regenerate(editor);
         }
         let Some(project) = editor.project.clone() else { return };
-        let rewritten = match rewrite_texture_refs(&project, &r.path, None) {
+        let state = editor.domains.get_mut::<Self>().expect("Light domain not registered");
+        let names = std::mem::take(&mut state.deleting);
+        let rewritten = match clear_texture_refs(&project, &names) {
             Ok(r) => r,
             Err(e) => {
                 editor.io_error("Cannot update the environments", e);
                 Vec::new()
             }
         };
-        let shown = Self::texture_moved(editor, &r.path, None, rewritten);
+        let shown = Self::texture_deleted(editor, &names, rewritten);
         if !shown.is_empty() {
             let text = format!(
                 "Deleted {} was the cube map of {}: {}; they have none now",

@@ -36,10 +36,10 @@ pub struct CurvePreviewImage;
 /// What a curve preview shows.
 #[derive(Clone, PartialEq)]
 pub struct CurveKey {
-    curve: Curve,
-    interp: Interp,
+    pub(crate) curve: Curve,
+    pub(crate) interp: Interp,
     /// Value of the unconnected `T` input.
-    t: Option<f32>,
+    pub(crate) t: Option<f32>,
 }
 
 /// Preview of nodes sampling a curve asset.
@@ -88,7 +88,9 @@ impl NodePreview for CurvePreview {
     }
 
     fn key(editor: &Editor, doc: &Doc, node: &NodeId) -> Option<CurveKey> {
-        let n = doc.asset.nodes.get(node)?;
+        // Reference values as paths (ADR 0047 §4).
+        let view = editor.view_of(doc);
+        let n = view.nodes.get(node)?;
         let def = editor.domains.material().registry.get(&n.kind)?;
         let params = editor.domains.material().registry.resolved_params(&n.kind, &n.params);
         let curve_param = def.params().into_iter().find(|p| p.kind == ParamKind::Curve)?;
@@ -100,11 +102,11 @@ impl NodePreview for CurvePreview {
             None => editor.domains.material().disk.curves.get(&id)?.as_ref().ok()?,
         };
         let interp = params.get("type").and_then(|v| Interp::from_label(v.as_str())).unwrap_or_default();
-        let t = match doc.asset.edge_into(node, T_PIN) {
+        let t = match view.edge_into(node, T_PIN) {
             Some(_) => None,
             None => {
                 let sig = node_signature(
-                    &doc.asset,
+                    &view,
                     node,
                     &editor.domains.material().registry,
                     &editor.domains.material().functions,
@@ -204,13 +206,10 @@ mod tests {
         let mut e = crate::test_editor();
         e.open_project(dir.path()).unwrap();
         e.apply(Action::OpenAsset(AssetId::new(AssetType::Material, "fx/curve_bands").to_ref()));
-        let d = e.doc().unwrap();
-        let (node, _) = d
-            .asset
-            .nodes
-            .iter()
-            .find(|(_, n)| n.params.get("curve") == Some(&Value::Str("common/pulse".into())))
-            .unwrap();
+        // The node stores the curve's UUID; its resolved view names the path (ADR 0047 §4).
+        let view = e.view_of(e.doc().unwrap());
+        let (node, _) =
+            view.nodes.iter().find(|(_, n)| n.params.get("curve") == Some(&Value::Str("common/pulse".into()))).unwrap();
         let node = node.clone();
 
         let p = key(&e, &node).unwrap();

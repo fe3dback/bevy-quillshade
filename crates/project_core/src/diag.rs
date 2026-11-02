@@ -8,6 +8,9 @@ use crate::domain::DomainId;
 pub enum Level {
     Error,
     Warning,
+    /// Informational: never blocks, is not marked on the canvas and is hidden in the console unless asked for
+    /// (spec §13).
+    Info,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -35,6 +38,10 @@ impl Diagnostic {
         Self::new(Level::Warning, code, msg)
     }
 
+    pub fn info(code: &str, msg: impl Into<String>) -> Self {
+        Self::new(Level::Info, code, msg)
+    }
+
     pub fn in_asset(mut self, asset: impl Into<String>) -> Self {
         self.asset = Some(asset.into());
         self
@@ -52,6 +59,14 @@ impl Diagnostic {
 
     pub fn is_error(&self) -> bool {
         self.level == Level::Error
+    }
+
+    pub fn is_warning(&self) -> bool {
+        self.level == Level::Warning
+    }
+
+    pub fn is_info(&self) -> bool {
+        self.level == Level::Info
     }
 }
 
@@ -79,5 +94,9 @@ mod tests {
         assert_eq!(d.to_string(), "quillshade/material/a.material.ron:n05.color:E003: bad");
         assert!(d.is_error());
         assert_eq!(Diagnostic::warning("W105", "x").to_string(), "-:-:W105: x");
+        let i = Diagnostic::info("I103", "y");
+        assert!(i.is_info() && !i.is_error() && !i.is_warning());
+        assert_eq!(i.level, Level::Info);
+        assert!(Level::Error < Level::Warning && Level::Warning < Level::Info);
     }
 }

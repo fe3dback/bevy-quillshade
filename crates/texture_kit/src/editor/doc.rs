@@ -198,7 +198,7 @@ impl<D> TextureDoc<D> {
     }
 
     pub fn undo(&mut self) -> bool {
-        let done = self.history.undo(&mut self.asset);
+        let done = self.history.undo_keeping(&mut self.asset, |m| &mut m.id);
         if done {
             self.after_history();
         }
@@ -206,7 +206,7 @@ impl<D> TextureDoc<D> {
     }
 
     pub fn redo(&mut self) -> bool {
-        let done = self.history.redo(&mut self.asset);
+        let done = self.history.redo_keeping(&mut self.asset, |m| &mut m.id);
         if done {
             self.after_history();
         }
@@ -323,7 +323,7 @@ impl<D: TextureDomain> TabDoc for TextureDoc<D> {
         if self.is_internal() {
             return Ok(());
         }
-        save(project, &self.aref, &self.asset)?;
+        save(project, &self.aref, &mut self.asset)?;
         self.mark_saved();
         Ok(())
     }

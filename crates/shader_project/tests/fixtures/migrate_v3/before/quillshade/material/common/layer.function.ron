@@ -1,0 +1,47 @@
+Asset(
+  format_version: 1,
+  kind: Function,
+  name: "layer",
+  nodes: {
+    "n01": Node(
+      kind: "output::FunctionInput",
+      pos: (0.0, 0.0),
+      params: {
+        "name": Str("t"),
+        "order": Int(0),
+        "type": Type(Float),
+      },
+    ),
+    "n02": Node(
+      kind: "stdlib::SampleCurve",
+      pos: (280.0, 0.0),
+      params: {
+        "curve": Str("common/pulse"),
+      },
+    ),
+    "n03": Node(
+      kind: "output::FunctionOutput",
+      pos: (560.0, 0.0),
+      params: {
+        "name": Str("result"),
+        "order": Int(0),
+        "type": Type(Float),
+      },
+    ),
+  },
+  edges: [
+    Edge(
+      from: ("n01", "out"),
+      to: ("n02", "t"),
+    ),
+    Edge(
+      from: ("n02", "out"),
+      to: ("n03", "value"),
+    ),
+  ],
+  comments: [],
+  meta: Meta(
+    description: "",
+    tags: [],
+  ),
+)

@@ -7,15 +7,16 @@ use std::hash::BuildHasher;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 
-use project_core::probe_version;
+use project_core::{AssetUuid, check_version, probe_version};
 use serde::{Deserialize, Serialize};
 
 use crate::model::LoadError;
 use crate::types::PinType;
 use crate::value::Value;
 
-/// Current constant table file format version.
-pub const CONSTS_FORMAT_VERSION: u32 = 1;
+/// Current constant table file format version: 2 carries the asset `id` (ADR 0047 §2, written by the v3 migration);
+/// older files are upgraded by the Migration Tool (`shader-editor migrate`), never by the loader.
+pub const CONSTS_FORMAT_VERSION: u32 = 2;
 
 /// Type of a global constant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default, Serialize, Deserialize)]
@@ -148,6 +149,9 @@ impl GlobalConst {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GlobalConsts {
     pub format_version: u32,
+    /// The asset's UUID (ADR 0047 §2); nil (omitted from the file) until the asset is first saved.
+    #[serde(default, skip_serializing_if = "AssetUuid::is_nil")]
+    pub id: AssetUuid,
     pub name: String,
     #[serde(default)]
     pub consts: Vec<GlobalConst>,
@@ -155,24 +159,26 @@ pub struct GlobalConsts {
 
 impl GlobalConsts {
     pub fn new(name: impl Into<String>, consts: Vec<GlobalConst>) -> Self {
-        let mut c = GlobalConsts { format_version: CONSTS_FORMAT_VERSION, name: name.into(), consts };
+        let mut c =
+            GlobalConsts { format_version: CONSTS_FORMAT_VERSION, id: AssetUuid::NIL, name: name.into(), consts };
         c.normalize();
         c
     }
 
-    /// Parses a table file (older format versions would migrate here), normalizes values, and checks constant ids.
+    /// Parses a table file of the current format ([`CONSTS_FORMAT_VERSION`]; any other is refused), normalizes
+    /// values, and checks constant ids.
     pub fn from_ron(text: &str) -> Result<GlobalConsts, LoadError> {
-        match probe_version(text)? {
-            v if v > CONSTS_FORMAT_VERSION => Err(LoadError::TooNew { found: v, supported: CONSTS_FORMAT_VERSION }),
-            CONSTS_FORMAT_VERSION => {
-                let mut c: GlobalConsts =
-                    ron::Options::default().from_str(text).map_err(|e| LoadError::Parse(e.to_string()))?;
-                c.normalize();
-                c.check().map_err(LoadError::Parse)?;
-                Ok(c)
-            }
-            v => Err(LoadError::Unsupported(v)),
-        }
+        check_version(probe_version(text)?, CONSTS_FORMAT_VERSION)?;
+        let mut c: GlobalConsts =
+            ron::Options::default().from_str(text).map_err(|e| LoadError::Parse(e.to_string()))?;
+        c.normalize();
+        c.check().map_err(LoadError::Parse)?;
+        Ok(c)
+    }
+
+    /// Mints the asset's UUID when it has none (ADR 0047 §6); returns it.
+    pub fn ensure_id(&mut self) -> AssetUuid {
+        self.id.ensure()
     }
 
     pub fn to_ron(&self) -> String {
@@ -275,13 +281,26 @@ mod tests {
         assert_eq!(GlobalConsts::from_ron(&text).unwrap(), t);
         let too_new = "GlobalConsts(format_version: 9, name: \"x\")";
         assert!(matches!(GlobalConsts::from_ron(too_new), Err(LoadError::TooNew { .. })));
+        let older = "GlobalConsts(format_version: 1, name: \"x\")";
+        assert!(matches!(GlobalConsts::from_ron(older), Err(LoadError::TooOld { found: 1, current: 2 })));
+    }
+
+    #[test]
+    fn saved_table_keeps_its_id() {
+        let mut t = GlobalConsts::new("g", vec![GlobalConst::with_id(3, "x", ConstType::F32, Value::Float(1.0))]);
+        assert!(!t.to_ron().contains("\n  id: "), "a nil id is not written");
+        let id = t.ensure_id();
+        assert!(id.is_v7());
+        let text = t.to_ron();
+        assert!(text.starts_with(&format!("GlobalConsts(\n  format_version: 2,\n  id: \"{id}\",\n")), "{text}");
+        assert_eq!(GlobalConsts::from_ron(&text).unwrap(), t);
     }
 
     #[test]
     fn invalid_or_duplicate_ids_are_rejected() {
-        let zero_id = "GlobalConsts(format_version: 1, name: \"g\", consts: [GlobalConst(id: 0, name: \"x\", ty: F32, value: Float(1.0))])";
+        let zero_id = "GlobalConsts(format_version: 2, name: \"g\", consts: [GlobalConst(id: 0, name: \"x\", ty: F32, value: Float(1.0))])";
         assert!(matches!(GlobalConsts::from_ron(zero_id), Err(LoadError::Parse(msg)) if msg.contains("must be in")));
-        let dup_id = "GlobalConsts(format_version: 1, name: \"g\", consts: [GlobalConst(id: 7, name: \"x\", ty: F32, value: Float(1.0)), GlobalConst(id: 7, name: \"y\", ty: F32, value: Float(2.0))])";
+        let dup_id = "GlobalConsts(format_version: 2, name: \"g\", consts: [GlobalConst(id: 7, name: \"x\", ty: F32, value: Float(1.0)), GlobalConst(id: 7, name: \"y\", ty: F32, value: Float(2.0))])";
         assert!(matches!(GlobalConsts::from_ron(dup_id), Err(LoadError::Parse(msg)) if msg.contains("duplicate id 7")));
     }
 

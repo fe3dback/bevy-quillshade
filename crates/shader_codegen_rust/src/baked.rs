@@ -6,8 +6,9 @@
 //! struct (folder `env/water/` next to material `env/water`) are all prefixed. The nested struct types live in
 //! modules named like the generated module tree (`dir_env::Group`), unique by construction.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
+use project_core::AssetUuid;
 use shader_codegen_wesl::paths;
 use shader_graph_core::GENERATOR_VERSION;
 use shader_graph_core::gradient::GRADIENT_PREFIX;
@@ -27,6 +28,8 @@ pub const GRADIENTS_GROUP: &str = "gradients";
 const TEXTURE_GROUPS: [(&str, &str); 2] = [(INTERNAL_GROUP, INTERNAL_PREFIX), (GRADIENTS_GROUP, GRADIENT_PREFIX)];
 /// Root field of `BakedMaterials` and `BakedTextures` mapping asset ids to handles (`baked.by_path["env/rock_wet"]`).
 pub const BY_PATH_FIELD: &str = "by_path";
+/// Root field of `BakedMaterials` mapping asset UUIDs to handles (ADR 0047 §12).
+pub const BY_ID_FIELD: &str = "by_id";
 
 /// Static part of `baked/mod.rs`; `{{GENERATOR_VERSION}}` is replaced.
 const MOD_TEMPLATE: &str = include_str!("../templates/baked_mod.rs");
@@ -140,7 +143,7 @@ fn build_group(tree: &Tree, leaf_prefix: &str, reserved: &[&str]) -> Group {
 }
 
 fn material_tree<'a>(ids: impl Iterator<Item = &'a str>) -> Group {
-    build_group(&Tree::of(ids), MATERIAL_PREFIX, &[BY_PATH_FIELD])
+    build_group(&Tree::of(ids), MATERIAL_PREFIX, &[BY_PATH_FIELD, BY_ID_FIELD])
 }
 
 /// Project textures by folder, plus the internal ones in the `internal` field and the baked gradient collections in
@@ -311,7 +314,8 @@ pub fn materials_rs(entries: &[MaterialEntry]) -> String {
 
     let mut o = marker();
     o.push_str("//! [`BakedMaterials`]: a handle per generated material, nested by folder (design §3.1).\n\n");
-    o.push_str("use std::collections::HashMap;\n\n");
+    o.push_str("use std::collections::{BTreeMap, HashMap};\n\n");
+    o.push_str("use bevy::asset::uuid::Uuid;\n");
     o.push_str("use bevy::prelude::*;\n\n");
     o.push_str("use super::MaterialValues;\n\n");
     o.push_str(
@@ -326,6 +330,11 @@ pub fn materials_rs(entries: &[MaterialEntry]) -> String {
         "    /// `.material.ron`), for game data that names materials; [`BakedMaterials::get`] gives the typed handle.\n",
     );
     o.push_str(&format!("    pub {BY_PATH_FIELD}: HashMap<String, UntypedHandle>,\n"));
+    o.push_str("    /// Every material by asset UUID (the `id` of its `.material.ron`, ADR 0047), which survives renames and\n");
+    o.push_str(
+        "    /// moves; [`BakedMaterials::get_by_id`] gives the typed handle. A material without a valid id is not listed.\n",
+    );
+    o.push_str(&format!("    pub {BY_ID_FIELD}: BTreeMap<Uuid, UntypedHandle>,\n"));
     o.push_str("}\n");
     o.push('\n');
     o.push_str("impl BakedMaterials {\n");
@@ -339,15 +348,30 @@ pub fn materials_rs(entries: &[MaterialEntry]) -> String {
     o.push_str("    pub fn get<M: Asset>(&self, id: &str) -> Option<Handle<M>> {\n");
     o.push_str(&format!("        self.{BY_PATH_FIELD}.get(id)?.clone().try_typed().ok()\n"));
     o.push_str("    }\n");
+    o.push('\n');
+    o.push_str("    /// Material `id` (its asset UUID) as `Handle<M>`, `M` being its asset type; `None` for an unknown id or another\n");
+    o.push_str("    /// type.\n");
+    o.push_str("    pub fn get_by_id<M: Asset>(&self, id: Uuid) -> Option<Handle<M>> {\n");
+    o.push_str(&format!("        self.{BY_ID_FIELD}.get(&id)?.clone().try_typed().ok()\n"));
+    o.push_str("    }\n");
     o.push_str(&dispatch(entries));
     o.push_str("}\n");
     o.push_str(&generator.modules(&tree, &[]));
     o
 }
 
-/// `BakedMaterials::reserve`: the folder groups reserve their handles, then `by_path` lists them all.
+/// `BakedMaterials::reserve`: the folder groups reserve their handles, then `by_path` lists them all and `by_id` those
+/// with a UUID (in path order; of materials sharing a UUID, a duplicate error, the first path is listed: the
+/// `AssetIndex` winner).
 fn root_reserve(tree: &Group, entries: &[MaterialEntry]) -> String {
     let paths = material_field_paths(entries.iter().map(|e| e.path.as_str()));
+    let uuids: BTreeMap<&str, AssetUuid> = entries.iter().filter_map(|e| Some((e.path.as_str(), e.uuid?))).collect();
+    let mut seen = BTreeSet::new();
+    let by_id: Vec<(AssetUuid, &str, &Vec<String>)> = paths
+        .iter()
+        .filter_map(|(id, path)| uuids.get(id.as_str()).map(|u| (*u, id.as_str(), path)))
+        .filter(|(u, _, _)| seen.insert(*u))
+        .collect();
     let world = if tree.fields.is_empty() { "_world" } else { "world" };
     let mut o = String::new();
     o.push_str(
@@ -366,6 +390,7 @@ fn root_reserve(tree: &Group, entries: &[MaterialEntry]) -> String {
         }
     }
     o.push_str(&format!("            {BY_PATH_FIELD}: HashMap::new(),\n"));
+    o.push_str(&format!("            {BY_ID_FIELD}: BTreeMap::new(),\n"));
     o.push_str(if paths.is_empty() { "        }\n" } else { "        };\n" });
     if !paths.is_empty() {
         o.push_str(&format!("        s.{BY_PATH_FIELD} = HashMap::from([\n"));
@@ -373,6 +398,17 @@ fn root_reserve(tree: &Group, entries: &[MaterialEntry]) -> String {
             o.push_str(&format!("            (\"{id}\".to_string(), s.{}.clone().untyped()),\n", path.join(".")));
         }
         o.push_str("        ]);\n");
+        if !by_id.is_empty() {
+            o.push_str(&format!("        s.{BY_ID_FIELD} = BTreeMap::from([\n"));
+            for (uuid, id, path) in &by_id {
+                o.push_str(&format!(
+                    "            (Uuid::from_u128(0x{:032x}), s.{}.clone().untyped()), // {uuid} {id}\n",
+                    uuid.as_u128(),
+                    path.join(".")
+                ));
+            }
+            o.push_str("        ]);\n");
+        }
         o.push_str("        s\n");
     }
     o.push_str("    }\n");
@@ -642,16 +678,58 @@ mod tests {
         assert_eq!(f["a/by_path"].join("."), "a.by_path", "only the root reserves it");
         let t = texture_field_paths(["by_path"].into_iter());
         assert_eq!(t["by_path"].join("."), "tex_by_path");
+        // `by_id` (ADR 0047 §12) only at the root of `BakedMaterials`.
+        let f = material_field_paths(["by_id/x", "by_id"].into_iter());
+        assert_eq!((f["by_id/x"].join("."), f["by_id"].join(".")), ("dir_by_id.x".into(), "mat_by_id".into()));
+        assert_eq!(texture_field_paths(["by_id"].into_iter())["by_id"].join("."), "by_id");
     }
 
-    /// A project without materials or textures still gets the `by_path` maps.
+    /// A project without materials or textures still gets the `by_path` maps (and `BakedMaterials` its `by_id`).
     #[test]
     fn empty_structs_have_by_path() {
         let m = materials_rs(&[]);
         assert!(m.contains("pub struct BakedMaterials {\n    /// Every material by asset id"), "{m}");
-        assert!(m.contains("    pub(crate) fn reserve(_world: &mut World) -> Self {\n        Self {\n            by_path: HashMap::new(),\n        }\n    }\n"), "{m}");
+        assert!(m.contains("    pub(crate) fn reserve(_world: &mut World) -> Self {\n        Self {\n            by_path: HashMap::new(),\n            by_id: BTreeMap::new(),\n        }\n    }\n"), "{m}");
         let t = textures_rs(&[]);
         assert!(t.contains("    pub by_path: HashMap<String, Handle<Image>>,\n}"), "{t}");
+    }
+
+    /// `by_id` (ADR 0047 §12): `Uuid::from_u128` literals of the valid ids in path order; a material without a v7 id
+    /// is left out, and of two sharing one (AE001) the first path is kept.
+    #[test]
+    fn by_id_lists_valid_unique_ids() {
+        let entry = |path: &str, uuid: AssetUuid| {
+            MaterialEntry {
+                path: path.into(),
+                main: "MMaterial".into(),
+                material: "MMaterial".into(),
+                params: None,
+                uuid: None,
+            }
+            .with_uuid(uuid)
+        };
+        let a = AssetUuid::parse("019b76da-a800-75c1-939b-7e0a98afeaba").unwrap();
+        let b = AssetUuid::parse("019b76da-a800-7944-befc-7d739007bf84").unwrap();
+        let v4 = AssetUuid::parse("6f1c1b8e-6c8a-4a43-9a1e-0d2b8f3c5e71").unwrap();
+        let m = materials_rs(&[
+            entry("z", b),
+            entry("a/copy", a),
+            entry("a/orig", a),
+            entry("none", AssetUuid::NIL),
+            entry("old", v4),
+        ]);
+        let lines: Vec<&str> = m.lines().filter(|l| l.contains("Uuid::from_u128(")).collect();
+        assert_eq!(
+            lines,
+            [
+                "            (Uuid::from_u128(0x019b76daa80075c1939b7e0a98afeaba), s.a.copy.clone().untyped()), // \
+                 019b76da-a800-75c1-939b-7e0a98afeaba a/copy",
+                "            (Uuid::from_u128(0x019b76daa8007944befc7d739007bf84), s.z.clone().untyped()), // \
+                 019b76da-a800-7944-befc-7d739007bf84 z",
+            ],
+            "{m}"
+        );
+        assert!(m.contains("    pub fn get_by_id<M: Asset>(&self, id: Uuid) -> Option<Handle<M>> {\n"), "{m}");
     }
 
     /// The serde mirrors in the template know every field and variant `manifest_ron` writes.

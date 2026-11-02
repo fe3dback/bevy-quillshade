@@ -1,0 +1,4 @@
+[package]
+name = "migrate_v3"
+version = "0.1.0"
+edition = "2024"

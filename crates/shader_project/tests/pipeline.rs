@@ -6,15 +6,37 @@ use shader_codegen_rust::manifest::{ManifestMaterial, ManifestTexture, parse_man
 use shader_codegen_wesl::check::BevySources;
 use shader_graph_core::Code;
 use shader_project::assets::{AssetId, AssetType};
-use shader_project::{Project, RegenOptions, fixtures, ops, regenerate};
+use shader_project::{MaterialLayout, Project, RegenOptions, fixtures, ops, regenerate};
 
+/// The fixtures (`fixtures::save_all`: asset UUIDs, references by UUID) in a temporary game crate.
 fn temp_project() -> (tempfile::TempDir, Project) {
+    let (dir, p) = empty_project();
+    fixtures::save_all(&p).unwrap();
+    (dir, p)
+}
+
+/// The fixtures with references stored as paths (`fixtures::save_all_path_form`).
+fn path_form_project() -> (tempfile::TempDir, Project) {
+    let (dir, p) = empty_project();
+    fixtures::save_all_path_form(&p).unwrap();
+    (dir, p)
+}
+
+fn empty_project() -> (tempfile::TempDir, Project) {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("Cargo.toml"), "[workspace]\nmembers = [\"crates/*\"]\n").unwrap();
     std::fs::create_dir_all(dir.path().join("assets")).unwrap();
     let p = Project::open(dir.path()).unwrap();
-    fixtures::save_all(&p).unwrap();
     (dir, p)
+}
+
+/// The project's Material assets with their UUID references resolved to paths (what `plan_set` and its `DepGraph`
+/// see, ADR 0047 §4).
+fn resolved_set(p: &Project) -> shader_project::AssetSet {
+    use project_core::regen::DomainBackend;
+    let (registry, _) = shader_project::regen::project_registry(p);
+    let index = project_core::AssetIndex::build(vec![shader_project::backend::MaterialBackend::default().index(p)]);
+    shader_project::resolve::resolve_set(&shader_project::AssetSet::load_all(p), &index, &registry)
 }
 
 fn read(p: &Path) -> String {
@@ -94,10 +116,15 @@ fn foreign_file_blocks_write_with_e008() {
     assert_eq!(read(&target), "// my own shader\n");
 }
 
+/// ADR 0047 §13: a renamed function keeps its callers' files byte-identical (they store its UUID); the callers
+/// regenerate against the new module path.
 #[test]
-fn function_rename_updates_callers() {
+fn function_rename_keeps_callers() {
     let (_d, p) = temp_project();
+    let caller = AssetId::new(AssetType::Material, "env/rock_wet").file(&p);
+    let before = read(&caller);
     ops::rename(&p, &AssetId::new(AssetType::Function, "common/wet_mask"), "lib/wet_mask").unwrap();
+    assert_eq!(read(&caller), before);
     let r = regenerate(&p, &RegenOptions::default()).unwrap();
     assert!(!r.has_errors(), "{:?}", r.diagnostics().collect::<Vec<_>>());
     assert!(
@@ -121,7 +148,7 @@ fn label_does_not_change_codegen() {
         labelled += 1;
     }
     assert!(labelled > 0, "rock_wet has no constant node");
-    ops::save(&p, &id, &a).unwrap();
+    ops::save(&p, &id, &mut a).unwrap();
     regenerate(&p, &RegenOptions::default()).unwrap();
     assert_eq!(wesl, read(&p.root.join(wesl_path)));
     assert_eq!(rs, read(&p.root.join(rs_path)));
@@ -139,7 +166,7 @@ fn errors_block_only_affected_asset() {
     for n in a.nodes.values_mut().filter(|n| n.kind == "stdlib::TextureSample") {
         n.params.insert("texture".into(), shader_graph_core::Value::Str("textures/missing".into()));
     }
-    ops::save(&p, &id, &a).unwrap();
+    ops::save(&p, &id, &mut a).unwrap();
     let r = regenerate(&p, &RegenOptions::default()).unwrap();
     assert!(r.assets[&id].diagnostics.iter().any(|d| d.code == Code::E006), "{:?}", r.assets[&id].diagnostics);
     assert_eq!(old, read(&p.root.join("assets/quillshade/material/autogen/dir_env/mat_water.wesl")));
@@ -189,7 +216,7 @@ fn project_ron_disables_material_plugin() {
     let (_d, p) = temp_project();
     std::fs::write(
         p.root.join("quillshade/project.ron"),
-        "ProjectSettings(format_version: 1, domains: {\"material\": (enabled: false)})\n",
+        "ProjectSettings(project_version: 3, domains: {\"material\": (enabled: false)})\n",
     )
     .unwrap();
     let p = Project::open(&p.root).unwrap();
@@ -284,16 +311,21 @@ fn curves_generate_rename_and_report_missing() {
 
     // Editing a curve rewrites only its own module.
     let id = AssetId::new(AssetType::Curve, "common/pulse");
-    let edited = shader_graph_core::Curve::new("pulse", vec![(0.0, 1.0), (1.0, 0.0)]);
-    ops::save_curve(&p, &id, &edited).unwrap();
+    let mut edited = shader_graph_core::Curve::new("pulse", vec![(0.0, 1.0), (1.0, 0.0)]);
+    edited.id = fixtures::fixture_id(AssetType::Curve, "common/pulse");
+    ops::save_curve(&p, &id, &mut edited).unwrap();
     let r = regenerate(&p, &RegenOptions::default()).unwrap();
     let changed: Vec<String> = r.changes.iter().map(|c| p.rel(c.path())).collect();
     assert_eq!(changed.len(), 1, "{changed:?}");
     assert!(changed[0].contains("curves/dir_common/crv_pulse.wesl"), "{changed:?}");
     assert_eq!(read(&bands), before);
 
-    // Renaming follows the users; the old module becomes an orphan.
+    // Renaming keeps the users' sources (they store the curve's UUID) and their output follows; the old module
+    // becomes an orphan.
+    let bands_source = AssetId::new(AssetType::Material, "fx/curve_bands").file(&p);
+    let source = read(&bands_source);
     ops::rename(&p, &id, "ramps/pulse").unwrap();
+    assert_eq!(read(&bands_source), source);
     let r = regenerate(&p, &RegenOptions::default()).unwrap();
     assert!(!r.has_errors(), "{:?}", r.diagnostics().collect::<Vec<_>>());
     assert!(read(&bands).contains("import super::super::curves::dir_ramps::crv_pulse::sample_curve_catmullrom as"));
@@ -310,6 +342,59 @@ fn curves_generate_rename_and_report_missing() {
     assert!(bands.exists(), "a broken material keeps its previous output");
 }
 
+/// Cross-domain affected regeneration (techdoc §4.3): the Material backend's `plan_affected` on a curve regenerates
+/// the curve and the material sampling it; every other asset keeps its files and nothing is orphan-scanned.
+#[test]
+fn plan_affected_on_a_curve_plans_the_curve_and_its_users_only() {
+    use project_core::regen::DomainBackend;
+    use shader_project::MaterialLayout;
+    use shader_project::backend::MaterialBackend;
+    use shader_project::regen::{rust_file, wesl_file};
+    use std::collections::BTreeSet;
+
+    let (_d, p) = temp_project();
+    let r = regenerate(&p, &RegenOptions::default()).unwrap();
+    assert!(!r.has_errors(), "{:?}", r.diagnostics().collect::<Vec<_>>());
+    let backend = MaterialBackend::default();
+    let index = project_core::AssetIndex::build(vec![backend.index(&p)]);
+    let curve = AssetId::new(AssetType::Curve, "common/pulse");
+    let bands = AssetId::new(AssetType::Material, "fx/curve_bands");
+    let plan = backend.plan_affected(&p, &index, &BTreeSet::from([curve.to_ref()]), false);
+    assert!(plan.diagnostics.iter().all(|d| !d.is_error()), "{:?}", plan.diagnostics);
+    assert!(!plan.output.orphan_scan);
+
+    let stdlib = p.autogen_dir().join("stdlib");
+    let materials = p.material_module_dir().join("materials");
+    let planned: BTreeSet<std::path::PathBuf> = plan
+        .output
+        .files
+        .iter()
+        .map(|f| f.path.clone())
+        .filter(|f| f.extension().is_some_and(|e| e == "wesl") && !f.starts_with(&stdlib))
+        .chain(
+            plan.output
+                .files
+                .iter()
+                .map(|f| f.path.clone())
+                .filter(|f| f.starts_with(&materials) && f.file_name().is_some_and(|n| n != "mod.rs")),
+        )
+        .collect();
+    let expected = BTreeSet::from([
+        wesl_file(&p, &curve).unwrap(),
+        wesl_file(&p, &bands).unwrap(),
+        rust_file(&p, &bands).unwrap(),
+    ]);
+    assert_eq!(planned, expected);
+    let rock = AssetId::new(AssetType::Material, "env/rock_wet");
+    for f in [wesl_file(&p, &rock).unwrap(), rust_file(&p, &rock).unwrap()] {
+        assert!(plan.output.keep.contains(&f), "{} is kept", f.display());
+    }
+    // The full plan regenerates every module.
+    let full = backend.plan(&p, &index, false);
+    assert!(full.output.orphan_scan);
+    assert!(full.output.files.iter().any(|f| f.path == wesl_file(&p, &rock).unwrap()));
+}
+
 #[test]
 fn keyword_names_generate_and_compile() {
     use shader_graph_core::model::{Asset, AssetKind, MaterialKind, UnlitSettings};
@@ -322,8 +407,8 @@ fn keyword_names_generate_and_compile() {
         a
     };
     // A material next to the fixture's `kw/loop/` directory, and one in a top-level `curves/` directory.
-    ops::save(&p, &AssetId::new(AssetType::Material, "kw/loop"), &unlit("loop")).unwrap();
-    ops::save(&p, &AssetId::new(AssetType::Material, "curves/tint"), &unlit("tint")).unwrap();
+    ops::save(&p, &AssetId::new(AssetType::Material, "kw/loop"), &mut unlit("loop")).unwrap();
+    ops::save(&p, &AssetId::new(AssetType::Material, "curves/tint"), &mut unlit("tint")).unwrap();
     let bevy = BevySources::discover();
     let r = regenerate(&p, &RegenOptions { compile_check: bevy.as_ref(), ..Default::default() }).unwrap();
     let errors: Vec<_> = r.diagnostics().filter(|d| d.is_error()).collect();
@@ -343,13 +428,13 @@ fn a_curve_named_like_a_broken_function_is_not_that_function() {
     let (_d, p) = temp_project();
     // `fx/curve_bands` samples a curve that shares its path with the function `common/wet_mask`.
     let curve = AssetId::new(AssetType::Curve, "common/wet_mask");
-    ops::save_curve(&p, &curve, &shader_graph_core::Curve::ramp("wet_mask")).unwrap();
+    ops::save_curve(&p, &curve, &mut shader_graph_core::Curve::ramp("wet_mask")).unwrap();
     let bands = AssetId::new(AssetType::Material, "fx/curve_bands");
     let mut a = fixtures::curve_bands();
     for n in a.nodes.values_mut().filter(|n| n.kind == "stdlib::SampleCurve") {
         n.params.insert("curve".into(), shader_graph_core::Value::Str("common/wet_mask".into()));
     }
-    ops::save(&p, &bands, &a).unwrap();
+    ops::save(&p, &bands, &mut a).unwrap();
     // Break the function.
     let f = AssetId::new(AssetType::Function, "common/wet_mask");
     std::fs::write(f.file(&p), "Asset(format_version: 1, kind: Function, name: \"wet_mask\", nodes: {})").unwrap();
@@ -380,7 +465,7 @@ fn global_consts_are_inlined_and_their_users_follow() {
     let id = AssetId::new(AssetType::Consts, "common/tuning");
     let mut table = shader_project::assets::load_consts(&p, &id).unwrap();
     table.get_mut("fancy_stripes").unwrap().value = Value::Bool(false);
-    ops::save_consts(&p, &id, &table).unwrap();
+    ops::save_consts(&p, &id, &mut table).unwrap();
     let scope = shader_project::Scope::Affected([id.clone()].into());
     let r = regenerate(&p, &RegenOptions { scope, compile_check: bevy.as_ref(), ..Default::default() }).unwrap();
     assert!(!r.has_errors(), "{:?}", r.diagnostics().collect::<Vec<_>>());
@@ -392,7 +477,7 @@ fn global_consts_are_inlined_and_their_users_follow() {
     // Editing the table rewrites the materials reading it, also in an affected-only run.
     table.get_mut("fancy_stripes").unwrap().value = Value::Bool(true);
     table.get_mut("glow_amount").unwrap().value = Value::Float(0.75);
-    ops::save_consts(&p, &id, &table).unwrap();
+    ops::save_consts(&p, &id, &mut table).unwrap();
     let scope = shader_project::Scope::Affected([id.clone()].into());
     let r = regenerate(&p, &RegenOptions { scope, ..Default::default() }).unwrap();
     let changed: Vec<String> = r.changes.iter().map(|c| p.rel(c.path())).collect();
@@ -405,32 +490,32 @@ fn global_consts_are_inlined_and_their_users_follow() {
     let mat_ron_before = read(&mat.file(&p));
     let wesl_before = read(&tint);
     table.get_by_id_mut(1003).unwrap().name = "Glow Amount (HDR)!".into();
-    ops::save_consts(&p, &id, &table).unwrap();
+    ops::save_consts(&p, &id, &mut table).unwrap();
     let r = regenerate(&p, &RegenOptions::default()).unwrap();
     assert!(!r.has_errors(), "{:?}", r.diagnostics().collect::<Vec<_>>());
     assert!(r.changes.is_empty(), "renaming a constant must not rewrite WESL: {:?}", r.changes);
     assert_eq!(read(&tint), wesl_before);
     assert_eq!(read(&mat.file(&p)), mat_ron_before);
     table.get_by_id_mut(1003).unwrap().name = "glow_amount".into();
-    ops::save_consts(&p, &id, &table).unwrap();
+    ops::save_consts(&p, &id, &mut table).unwrap();
 
     // Same constant name in another table is valid; duplicate or empty name in the SAME table is E005.
     let other = AssetId::new(AssetType::Consts, "more");
-    let other_ok = shader_graph_core::GlobalConsts::new(
+    let mut other_ok = shader_graph_core::GlobalConsts::new(
         "more",
         vec![GlobalConst::new("glow_amount", ConstType::Vec2, Value::Float(0.0))],
     );
-    ops::save_consts(&p, &other, &other_ok).unwrap();
+    ops::save_consts(&p, &other, &mut other_ok).unwrap();
     let r = regenerate(&p, &RegenOptions { dry_run: true, ..Default::default() }).unwrap();
     assert!(!r.has_errors(), "{:?}", r.diagnostics().collect::<Vec<_>>());
-    let dup = shader_graph_core::GlobalConsts::new(
+    let mut dup = shader_graph_core::GlobalConsts::new(
         "more",
         vec![
             GlobalConst::new("same name", ConstType::Vec2, Value::Float(0.0)),
             GlobalConst::new("same name", ConstType::F32, Value::Float(1.0)),
         ],
     );
-    ops::save_consts(&p, &other, &dup).unwrap();
+    ops::save_consts(&p, &other, &mut dup).unwrap();
     let r = regenerate(&p, &RegenOptions { dry_run: true, ..Default::default() }).unwrap();
     let errors: Vec<_> = r.diagnostics().filter(|d| d.is_error()).collect();
     assert_eq!(errors.len(), 1, "{errors:?}");
@@ -440,15 +525,17 @@ fn global_consts_are_inlined_and_their_users_follow() {
     std::fs::remove_file(other.file(&p)).unwrap();
     let glow_id = table.get("glow_amount").unwrap().id;
     table.get_mut("glow_amount").unwrap().ty = ConstType::Vec2;
-    ops::save_consts(&p, &id, &table).unwrap();
+    ops::save_consts(&p, &id, &mut table).unwrap();
     let r = regenerate(&p, &RegenOptions { dry_run: true, ..Default::default() }).unwrap();
     let codes = |r: &shader_project::RegenReport| r.assets[&mat].diagnostics.iter().map(|d| d.code).collect::<Vec<_>>();
     assert_eq!(codes(&r), vec![Code::E003], "{:?}", r.assets[&mat].diagnostics);
     let mut a = shader_project::assets::load(&p, &mat).unwrap();
     let (registry, _) = shader_project::regen::project_registry(&p);
-    assert!(ops::clear_const_refs(&mut a, &registry, "common/tuning", glow_id));
-    assert!(!ops::clear_const_refs(&mut a, &registry, "common/tuning", glow_id));
-    ops::save(&p, &mat, &a).unwrap();
+    // The graph stores the table's UUID (ADR 0047 §3).
+    let tuning = fixtures::fixture_ref(AssetType::Consts, "common/tuning");
+    assert!(ops::clear_const_refs(&mut a, &registry, &tuning, glow_id));
+    assert!(!ops::clear_const_refs(&mut a, &registry, &tuning, glow_id));
+    ops::save(&p, &mat, &mut a).unwrap();
     let r = regenerate(&p, &RegenOptions::default()).unwrap();
     assert_eq!(codes(&r), vec![Code::W106]);
     std::fs::remove_file(id.file(&p)).unwrap();
@@ -462,9 +549,9 @@ fn global_consts_are_inlined_and_their_users_follow() {
     // Every node without a constant outputs 1.0 / true, and the shader still compiles.
     for name in ["base_color", "glow_color", "stripe_scale", "use_stripes", "fancy_stripes"] {
         let cid = table.get(name).unwrap().id;
-        ops::clear_const_refs(&mut a, &registry, "common/tuning", cid);
+        ops::clear_const_refs(&mut a, &registry, &tuning, cid);
     }
-    ops::save(&p, &mat, &a).unwrap();
+    ops::save(&p, &mat, &mut a).unwrap();
     let r = regenerate(&p, &RegenOptions { compile_check: bevy.as_ref(), ..Default::default() }).unwrap();
     assert_eq!(codes(&r), vec![Code::W106; 6], "{:?}", r.assets[&mat].diagnostics);
     let wesl = read(&tint);
@@ -490,7 +577,7 @@ fn preview_needing_extra_param_warns_w108() {
     a.connect((&extra, "out"), (&mul, "a"));
     a.preview = Preview { node: Some(mul.clone()), mode: PreviewMode::Unlit };
     let id = AssetId::new(AssetType::Material, "pv/extra");
-    ops::save(&p, &id, &a).unwrap();
+    ops::save(&p, &id, &mut a).unwrap();
     let wesl = p.root.join("assets/quillshade/material/autogen/dir_pv/mat_extra.wesl");
     let rs = p.root.join("crates/quillshade/src/material/materials/dir_pv/mat_extra.rs");
 
@@ -505,7 +592,7 @@ fn preview_needing_extra_param_warns_w108() {
     assert!(read(&wesl).contains("params.inp_extra"), "{}", read(&wesl));
 
     a.preview.node = None;
-    ops::save(&p, &id, &a).unwrap();
+    ops::save(&p, &id, &mut a).unwrap();
     let r = regenerate(&p, &RegenOptions::default()).unwrap();
     assert!(!r.assets[&id].diagnostics.iter().any(|d| d.code == Code::W108), "{:?}", r.assets[&id].diagnostics);
     assert!(!read(&rs).contains("inp_extra"), "{}", read(&rs));
@@ -542,7 +629,7 @@ fn function_with_attributes_compiles() {
     }
     f.connect((&glow, "out"), (&make, "emissive"));
     f.connect((&make, "attributes"), (&fout, "value"));
-    ops::save(&p, &AssetId::new(AssetType::Function, "common/layer"), &f).unwrap();
+    ops::save(&p, &AssetId::new(AssetType::Function, "common/layer"), &mut f).unwrap();
 
     let mut m = Asset::new("m", AssetKind::Material(MaterialKind::Pbr3d(PbrSettings::default())));
     let out = m.add_node(Node::new("output::Pbr3d", (600.0, 0.0)));
@@ -550,7 +637,7 @@ fn function_with_attributes_compiles() {
     let brk = m.add_node(Node::new("stdlib::BreakMaterialAttributesPbr", (300.0, 0.0)));
     m.connect((&call, "out"), (&brk, "attributes"));
     m.connect((&brk, "base_color"), (&out, "base_color"));
-    ops::save(&p, &AssetId::new(AssetType::Material, "env/m"), &m).unwrap();
+    ops::save(&p, &AssetId::new(AssetType::Material, "env/m"), &mut m).unwrap();
 
     let bevy = BevySources::discover();
     if bevy.is_none() {
@@ -589,9 +676,9 @@ fn texture_duplicate_path_is_e011_on_both() {
     let a = AssetId::new(AssetType::Texture, "textures/rock");
     let b = AssetId::new(AssetType::Texture, "textures/rock_copy");
     let c = AssetId::new(AssetType::Texture, "textures/moss");
-    ops::create_texture(&p, &a, &TextureAsset::new("textures/rock.png")).unwrap();
-    ops::save_texture(&p, &b, &TextureAsset::new("textures/rock.png")).unwrap();
-    ops::create_texture(&p, &c, &TextureAsset::new("textures/moss.png")).unwrap();
+    ops::create_texture(&p, &a, &mut TextureAsset::new("textures/rock.png")).unwrap();
+    ops::save_texture(&p, &b, &mut TextureAsset::new("textures/rock.png")).unwrap();
+    ops::create_texture(&p, &c, &mut TextureAsset::new("textures/moss.png")).unwrap();
     let set = shader_project::AssetSet::load_all(&p);
     assert_eq!(set.textures.len(), 3 + fixtures::textures().len());
     assert!(set.contains(&a) && set.ids().any(|i| *i == c));
@@ -607,13 +694,14 @@ fn texture_duplicate_path_is_e011_on_both() {
     assert_eq!(r.diagnostics().filter(|d| d.is_error()).count(), 2);
 
     // Resolving the clash by a path edit, then creating it again by another one.
-    ops::save_texture(&p, &b, &TextureAsset::new("textures/moss.png")).unwrap();
+    ops::save_texture(&p, &b, &mut TextureAsset::new("textures/moss.png")).unwrap();
     let r = regenerate(&p, &RegenOptions { dry_run: true, ..Default::default() }).unwrap();
     assert!(codes_of(&r, &a).is_empty() && r.assets[&a].ok);
     assert_eq!(codes_of(&r, &b), vec![Code::E011]);
     assert_eq!(codes_of(&r, &c), vec![Code::E011]);
     // Creating a second asset for a file that already has one is refused.
-    let e = ops::create_texture(&p, &AssetId::new(AssetType::Texture, "x"), &TextureAsset::new("textures/rock.png"));
+    let e =
+        ops::create_texture(&p, &AssetId::new(AssetType::Texture, "x"), &mut TextureAsset::new("textures/rock.png"));
     assert!(e.unwrap_err().to_string().contains("textures/rock.texture.ron"));
 }
 
@@ -627,6 +715,7 @@ fn texture_invalid_sampler_is_e013() {
     game_image(&p, "textures/rock_albedo.ktx2");
     let id = AssetId::new(AssetType::Texture, "textures/rock_albedo");
     let with = |sampler: SamplerSettings| TextureAsset {
+        id: fixtures::fixture_id(AssetType::Texture, "textures/rock_albedo"),
         settings: TextureSettings { sampler: Some(sampler), ..Default::default() },
         ..TextureAsset::new("textures/rock_albedo.ktx2")
     };
@@ -642,7 +731,7 @@ fn texture_invalid_sampler_is_e013() {
         SamplerSettings { lod_min_clamp: 4.0, lod_max_clamp: 2.0, ..linear },
         SamplerSettings { lod_min_clamp: -1.0, ..linear },
     ] {
-        ops::save_texture(&p, &id, &with(bad)).unwrap();
+        ops::save_texture(&p, &id, &mut with(bad)).unwrap();
         let r = regenerate(&p, &RegenOptions::default()).unwrap();
         assert_eq!(codes_of(&r, &id), vec![Code::E013], "{bad:?}: {:?}", r.assets[&id].diagnostics);
         assert!(r.assets[&id].diagnostics[0].message.starts_with("invalid sampler settings: "));
@@ -651,7 +740,7 @@ fn texture_invalid_sampler_is_e013() {
         assert!(!textures.iter().any(|t| t.id == "textures/rock_albedo"), "{bad:?}");
         assert_eq!(manifest_material(&materials, "env/rock_wet").textures["inp_albedo"], "@internal/default");
     }
-    ops::save_texture(&p, &id, &with(SamplerSettings { anisotropy_clamp: 16, ..linear })).unwrap();
+    ops::save_texture(&p, &id, &mut with(SamplerSettings { anisotropy_clamp: 16, ..linear })).unwrap();
     let r = regenerate(&p, &RegenOptions::default()).unwrap();
     assert!(codes_of(&r, &id).is_empty() && r.assets[&id].ok, "{:?}", r.assets[&id].diagnostics);
     let (textures, materials) = manifest(&p);
@@ -665,16 +754,16 @@ fn texture_bad_extension_is_e012() {
     let (_d, p) = temp_project();
     game_image(&p, "textures/old.ktx");
     let id = AssetId::new(AssetType::Texture, "old");
-    ops::save_texture(&p, &id, &TextureAsset::new("textures/old.ktx")).unwrap();
+    ops::save_texture(&p, &id, &mut TextureAsset::new("textures/old.ktx")).unwrap();
     let abs = AssetId::new(AssetType::Texture, "abs");
-    ops::save_texture(&p, &abs, &TextureAsset::new("/textures/old.png")).unwrap();
+    ops::save_texture(&p, &abs, &mut TextureAsset::new("/textures/old.png")).unwrap();
     let r = regenerate(&p, &RegenOptions { dry_run: true, ..Default::default() }).unwrap();
     assert_eq!(codes_of(&r, &id), vec![Code::E012], "{:?}", r.assets[&id].diagnostics);
     assert!(r.assets[&id].diagnostics[0].message.contains("ktx2, png"));
     assert_eq!(codes_of(&r, &abs), vec![Code::E012], "no W109 for an invalid path");
     assert!(!r.assets[&id].ok && !r.assets[&abs].ok);
     // Creating one with a bad path is refused; a broken file is E009.
-    assert!(ops::create_texture(&p, &AssetId::new(AssetType::Texture, "y"), &TextureAsset::new("a.jpg")).is_err());
+    assert!(ops::create_texture(&p, &AssetId::new(AssetType::Texture, "y"), &mut TextureAsset::new("a.jpg")).is_err());
     std::fs::write(id.file(&p), "TextureAsset(format_version: 1)").unwrap();
     let r = regenerate(&p, &RegenOptions { dry_run: true, ..Default::default() }).unwrap();
     assert_eq!(codes_of(&r, &id), vec![Code::E009]);
@@ -686,7 +775,7 @@ fn texture_missing_file_is_w109() {
     let (_d, p) = temp_project();
     regenerate(&p, &RegenOptions::default()).unwrap();
     let id = AssetId::new(AssetType::Texture, "textures/rock");
-    ops::create_texture(&p, &id, &TextureAsset::new("textures/rock.ktx2")).unwrap();
+    ops::create_texture(&p, &id, &mut TextureAsset::new("textures/rock.ktx2")).unwrap();
     let r = regenerate(&p, &RegenOptions::default()).unwrap();
     assert_eq!(codes_of(&r, &id), vec![Code::W109], "{:?}", r.assets[&id].diagnostics);
     assert!(r.assets[&id].ok, "a missing file is only a warning");
@@ -718,7 +807,7 @@ fn texture_cube_map_is_e014() {
     }
     std::fs::write(&file, &header).unwrap();
     let id = AssetId::new(AssetType::Texture, "textures/sky");
-    ops::create_texture(&p, &id, &TextureAsset::new("textures/sky.ktx2")).unwrap();
+    ops::create_texture(&p, &id, &mut TextureAsset::new("textures/sky.ktx2")).unwrap();
     let r = regenerate(&p, &RegenOptions::default()).unwrap();
     assert_eq!(codes_of(&r, &id), vec![Code::E014]);
     let d = &r.assets[&id].diagnostics[0];
@@ -741,7 +830,7 @@ fn texture_rename_keeps_file() {
         mag_filter: FilterMode::Linear,
         ..Default::default()
     });
-    ops::create_texture(&p, &id, &t).unwrap();
+    ops::create_texture(&p, &id, &mut t).unwrap();
     let moved = ops::rename(&p, &id, "env/rock_albedo").unwrap();
     assert_eq!(moved, AssetId::new(AssetType::Texture, "env/rock_albedo"));
     assert!(!id.file(&p).exists());
@@ -759,6 +848,8 @@ fn texture_rename_keeps_file() {
 /// function.
 struct TextureUsers {
     texture: AssetId,
+    /// The texture's UUID, what the graphs store.
+    uuid: String,
     material: AssetId,
     function: AssetId,
     caller: AssetId,
@@ -771,31 +862,34 @@ fn texture_users(p: &Project) -> TextureUsers {
     let s = |v: &str| Value::Str(v.into());
     game_image(p, "textures/a.png");
     let texture = AssetId::new(AssetType::Texture, "textures/a");
-    ops::create_texture(p, &texture, &TextureAsset::new("textures/a.png")).unwrap();
+    let mut asset = TextureAsset::new("textures/a.png");
+    ops::create_texture(p, &texture, &mut asset).unwrap();
+    // Graphs store the texture's UUID (ADR 0047 §4).
+    let uuid = asset.id.to_string();
 
     let mut g = GraphBuilder::new("tex_fn", AssetKind::Function);
     let c = g.node("stdlib::Constant", (0.0, 0.0));
     let out = g.node_p("output::FunctionOutput", (200.0, 0.0), &[("name", s("result"))]);
     g.link((&c, "out"), (&out, "in"));
-    g.node_p("param::TextureObject", (0.0, 200.0), &[("name", s("tex")), ("default", s("textures/a"))]);
+    g.node_p("param::TextureObject", (0.0, 200.0), &[("name", s("tex")), ("default", s(&uuid))]);
     let function = AssetId::new(AssetType::Function, "lib/tex_fn");
-    ops::save(p, &function, &g.finish()).unwrap();
+    ops::save(p, &function, &mut g.finish()).unwrap();
 
     let unlit = AssetKind::Material(MaterialKind::Unlit3d(UnlitSettings::default()));
     let mut g = GraphBuilder::new("tex_mat", unlit);
     let out = g.node("output::Unlit3d", (400.0, 0.0));
-    let t = g.node_p("param::TextureSample2D", (0.0, 0.0), &[("name", s("albedo")), ("default", s("textures/a"))]);
+    let t = g.node_p("param::TextureSample2D", (0.0, 0.0), &[("name", s("albedo")), ("default", s(&uuid))]);
     g.link((&t, "rgb"), (&out, "color"));
     let material = AssetId::new(AssetType::Material, "m/tex_mat");
-    ops::save(p, &material, &g.finish()).unwrap();
+    ops::save(p, &material, &mut g.finish()).unwrap();
 
     let mut g = GraphBuilder::new("caller", unlit);
     let out = g.node("output::Unlit3d", (400.0, 0.0));
     let call = g.node("function::lib/tex_fn", (0.0, 0.0));
     g.link((&call, "result"), (&out, "color"));
     let caller = AssetId::new(AssetType::Material, "m/caller");
-    ops::save(p, &caller, &g.finish()).unwrap();
-    TextureUsers { texture, material, function, caller }
+    ops::save(p, &caller, &mut g.finish()).unwrap();
+    TextureUsers { texture, uuid, material, function, caller }
 }
 
 /// Texture ids the nodes of asset `id` refer to.
@@ -805,30 +899,33 @@ fn texture_ids(p: &Project, id: &AssetId) -> Vec<String> {
     shader_graph_core::registry::texture_refs(&a, &registry).into_iter().map(|r| r.2).collect()
 }
 
-/// Review focus 5: renaming a Texture asset rewrites the references of materials and functions.
+/// Review focus 5, ADR 0047 §13: renaming a Texture asset keeps its users' files byte-identical (they store its
+/// UUID); they still depend on it and regenerate with it.
 #[test]
-fn texture_rename_rewrites_refs() {
+fn texture_rename_keeps_refs() {
     let (_d, p) = temp_project();
     let u = texture_users(&p);
-    assert_eq!(texture_ids(&p, &u.material), vec!["textures/a"]);
-    assert_eq!(texture_ids(&p, &u.function), vec!["textures/a"]);
+    assert_eq!(texture_ids(&p, &u.material), std::slice::from_ref(&u.uuid));
+    assert_eq!(texture_ids(&p, &u.function), std::slice::from_ref(&u.uuid));
+    let before = [&u.material, &u.function].map(|id| read(&id.file(&p)));
     let moved = ops::rename(&p, &u.texture, "textures/b").unwrap();
-    assert_eq!(texture_ids(&p, &u.material), vec!["textures/b"]);
-    assert_eq!(texture_ids(&p, &u.function), vec!["textures/b"]);
-    // Both users depend on the renamed asset, so they regenerate with it.
+    assert_eq!([&u.material, &u.function].map(|id| read(&id.file(&p))), before);
     let (registry, _) = shader_project::regen::project_registry(&p);
-    let deps = shader_project::regen::DepGraph::build(&shader_project::AssetSet::load_all(&p), &registry);
+    let deps = shader_project::regen::DepGraph::build(&resolved_set(&p), &registry);
     let affected = deps.affected(&[moved].into());
     assert!(affected.contains(&u.material) && affected.contains(&u.function), "{affected:?}");
     let r = regenerate(&p, &RegenOptions::default()).unwrap();
     assert!(r.assets[&u.material].ok, "{:?}", r.assets[&u.material].diagnostics);
+    assert!(codes_of(&r, &u.material).is_empty(), "{:?}", r.assets[&u.material].diagnostics);
 }
 
-/// Review focus 5: deleting a Texture asset clears the references to it (W110, the default texture).
+/// Review focus 5: deleting a Texture asset clears the references to it, stored as its UUID (W110, the default
+/// texture).
 #[test]
 fn texture_delete_clears_refs() {
     let (_d, p) = temp_project();
     let u = texture_users(&p);
+    assert_eq!(texture_ids(&p, &u.material), std::slice::from_ref(&u.uuid));
     ops::delete(&p, &u.texture).unwrap();
     assert!(!u.texture.file(&p).exists());
     let (registry, _) = shader_project::regen::project_registry(&p);
@@ -875,7 +972,7 @@ fn texture_dependency_regenerates_materials() {
     let (_d, p) = temp_project();
     let u = texture_users(&p);
     let (registry, _) = shader_project::regen::project_registry(&p);
-    let set = shader_project::AssetSet::load_all(&p);
+    let set = resolved_set(&p);
     let ids = shader_project::regen::texture_ids(&set);
     let mut want: std::collections::BTreeSet<String> = ["@internal/default", "textures/a"].map(String::from).into();
     want.extend(fixtures::textures().into_iter().map(|(path, _)| path.to_string()));
@@ -894,8 +991,8 @@ fn texture_dependency_regenerates_materials() {
     for n in a.nodes.values_mut().filter(|n| n.kind == "param::TextureSample2D") {
         n.params.insert("default".into(), shader_graph_core::Value::Str("@internal/default".into()));
     }
-    ops::save(&p, &u.material, &a).unwrap();
-    let deps = shader_project::regen::DepGraph::build(&shader_project::AssetSet::load_all(&p), &registry);
+    ops::save(&p, &u.material, &mut a).unwrap();
+    let deps = shader_project::regen::DepGraph::build(&resolved_set(&p), &registry);
     assert!(!deps.uses.contains_key(&u.material), "{:?}", deps.uses.get(&u.material));
 }
 
@@ -919,7 +1016,7 @@ fn fixed_texture_binding_in_wesl_and_rust() {
     g.link((&mul, "out"), (&out, "base_color"));
     let id = AssetId::new(AssetType::Material, "m/fixed");
     let mut asset = g.finish();
-    ops::save(&p, &id, &asset).unwrap();
+    ops::save(&p, &id, &mut asset).unwrap();
     let bevy = BevySources::discover();
     let r = regenerate(&p, &RegenOptions { compile_check: bevy.as_ref(), ..Default::default() }).unwrap();
     assert!(r.assets[&id].ok, "{:?}", r.assets[&id].diagnostics);
@@ -944,7 +1041,7 @@ fn fixed_texture_binding_in_wesl_and_rust() {
     assert_eq!(shader_codegen_wesl::binding_of(r.assets[&id].ir.as_ref().unwrap(), "detail"), Some(101));
 
     asset.nodes.get_mut(&fixed).unwrap().params.insert("texture".into(), s("textures/sprite"));
-    ops::save(&p, &id, &asset).unwrap();
+    ops::save(&p, &id, &mut asset).unwrap();
     let r = regenerate(&p, &RegenOptions::default()).unwrap();
     assert!(r.assets[&id].ok, "{:?}", r.assets[&id].diagnostics);
     assert_eq!(r.assets[&id].ir.as_ref().unwrap().textures[1].texture, "textures/sprite");
@@ -953,7 +1050,7 @@ fn fixed_texture_binding_in_wesl_and_rust() {
     // Only fixed textures: `new()` has no arguments, so the type derives `Default` (clippy `new_without_default`).
     asset.nodes.remove(&param);
     asset.connect((&fixed, "rgb"), (&mul, "b"));
-    ops::save(&p, &id, &asset).unwrap();
+    ops::save(&p, &id, &mut asset).unwrap();
     let r = regenerate(&p, &RegenOptions::default()).unwrap();
     assert!(r.assets[&id].ok, "{:?}", r.assets[&id].diagnostics);
     let rs = read(&rs_path);
@@ -1058,13 +1155,14 @@ fn swap_fixed_texture_keeps_codegen() {
 
     let fn_id = AssetId::new(AssetType::Function, "common/tex_layer");
     let mut layer = fixtures::tex_layer();
+    layer.id = fixtures::fixture_id(AssetType::Function, "common/tex_layer");
     layer
         .nodes
         .get_mut("n02")
         .unwrap()
         .params
         .insert("texture".into(), shader_graph_core::Value::Str("textures/sprite".into()));
-    ops::save(&p, &fn_id, &layer).unwrap();
+    ops::save(&p, &fn_id, &mut layer).unwrap();
     let r = regenerate(&p, &RegenOptions::default()).unwrap();
     assert!(!r.has_errors());
     let mat = AssetId::new(AssetType::Material, "env/tex_layers");
@@ -1401,7 +1499,7 @@ fn regen_writes_manifest() {
     let rock = manifest_material(&materials, "env/rock_wet");
     assert_eq!(rock.textures["inp_albedo"], "textures/rock_albedo");
     assert_eq!(rock.textures["inp_normal_map"], "textures/rock_normal");
-    assert_eq!(rock.params["inp_tint"], ParamValue::Color([0.9, 0.85, 0.8, 1.0]));
+    assert_eq!(rock.params["inp_tint"], ParamValue::Color([0.6288158, 0.14549951, 0.65770394, 1.0]));
     assert!(matches!(rock.params["inp_wetness"], ParamValue::Float(_)));
     assert!(!rock.params.contains_key("inp_albedo"), "texture parameters are in `textures`");
     let layers = manifest_material(&materials, "env/tex_layers");
@@ -1446,12 +1544,12 @@ fn failed_material_keeps_old_manifest_entry() {
             n.params.insert("default".into(), shader_graph_core::Value::Color([1.0, 0.0, 0.0, 1.0]));
         }
     }
-    let good = a.clone();
+    let mut good = a.clone();
     a.edges.retain(|e| e.to.1 != "tex");
     for n in a.nodes.values_mut().filter(|n| n.kind == "stdlib::TextureSample") {
         n.params.insert("texture".into(), shader_graph_core::Value::Str("textures/missing".into()));
     }
-    ops::save(&p, &id, &a).unwrap();
+    ops::save(&p, &id, &mut a).unwrap();
     let r = regenerate(&p, &RegenOptions::default()).unwrap();
     assert!(codes_of(&r, &id).contains(&Code::E006));
     let (_, after) = manifest(&p);
@@ -1459,7 +1557,7 @@ fn failed_material_keeps_old_manifest_entry() {
     assert_eq!(after.len(), before.len());
 
     // Fixed again: the new default is written.
-    ops::save(&p, &id, &good).unwrap();
+    ops::save(&p, &id, &mut good).unwrap();
     let r = regenerate(&p, &RegenOptions::default()).unwrap();
     assert!(!r.has_errors());
     let (_, fixed) = manifest(&p);
@@ -1476,7 +1574,7 @@ fn e011_textures_not_in_manifest() {
     use shader_graph_core::TextureAsset;
     let (_d, p) = temp_project();
     let copy = AssetId::new(AssetType::Texture, "textures/rock_copy");
-    ops::save_texture(&p, &copy, &TextureAsset::new("textures/rock_albedo.ktx2")).unwrap();
+    ops::save_texture(&p, &copy, &mut TextureAsset::new("textures/rock_albedo.ktx2")).unwrap();
     let r = regenerate(&p, &RegenOptions::default()).unwrap();
     assert!(codes_of(&r, &copy).contains(&Code::E011));
     assert!(codes_of(&r, &AssetId::new(AssetType::Texture, "textures/rock_albedo")).contains(&Code::E011));
@@ -1500,8 +1598,12 @@ fn e011_textures_not_in_manifest() {
     // A Texture asset whose RON does not parse (E009) or whose name is no identifier (E005) has no field.
     let textures = p.root.join("quillshade/material/textures");
     std::fs::write(textures.join("broken.texture.ron"), "TextureAsset(").unwrap();
-    ops::save_texture(&p, &AssetId::new(AssetType::Texture, "textures/Bad"), &TextureAsset::new("textures/bad.png"))
-        .unwrap();
+    ops::save_texture(
+        &p,
+        &AssetId::new(AssetType::Texture, "textures/Bad"),
+        &mut TextureAsset::new("textures/bad.png"),
+    )
+    .unwrap();
     let r = regenerate(&p, &RegenOptions::default()).unwrap();
     assert!(codes_of(&r, &AssetId::new(AssetType::Texture, "textures/broken")).contains(&Code::E009));
     assert!(codes_of(&r, &AssetId::new(AssetType::Texture, "textures/Bad")).contains(&Code::E005));
@@ -1522,6 +1624,8 @@ fn gradient_project() -> (tempfile::TempDir, Project) {
 
 struct GradientUsers {
     collection: AssetId,
+    /// The collection's UUID, what the graphs store.
+    uuid: String,
     material: AssetId,
     function: AssetId,
     /// Slot id the users sample (slot at position 3, one stop).
@@ -1545,17 +1649,19 @@ fn gradient_users(p: &Project) -> GradientUsers {
     terrain.slots[3].stops.push(Stop { t: 0.0, color: [0.2, 0.4, 0.6, 1.0], mid: 0.5 });
     let slot = terrain.slots[3].id as i32;
     let collection = AssetId::new(AssetType::Gradients, "common/terrain");
-    ops::save_gradients(p, &collection, &terrain).unwrap();
+    ops::save_gradients(p, &collection, &mut terrain).unwrap();
+    // Graphs store the collection's UUID (ADR 0047 §4).
+    let uuid = terrain.id.to_string();
 
     let s = |v: &str| Value::Str(v.into());
-    let params = [(GRADIENT_COLLECTION_PARAM, s("common/terrain")), (GRADIENT_SLOT_PARAM, Value::Int(slot))];
+    let params = [(GRADIENT_COLLECTION_PARAM, s(&uuid)), (GRADIENT_SLOT_PARAM, Value::Int(slot))];
     let unlit = AssetKind::Material(MaterialKind::Unlit3d(UnlitSettings::default()));
     let mut g = GraphBuilder::new("terrain_mat", unlit);
     let out = g.node("output::Unlit3d", (400.0, 0.0));
     let grad = g.node_p(SAMPLE_GRADIENT_KIND, (0.0, 0.0), &params);
     g.link((&grad, "rgb"), (&out, "color"));
     let material = AssetId::new(AssetType::Material, "m/terrain_mat");
-    ops::save(p, &material, &g.finish()).unwrap();
+    ops::save(p, &material, &mut g.finish()).unwrap();
 
     let mut g = GraphBuilder::new("terrain_fn", AssetKind::Function);
     let grad = g.node_p(SAMPLE_GRADIENT_KIND, (0.0, 0.0), &params);
@@ -1563,8 +1669,8 @@ fn gradient_users(p: &Project) -> GradientUsers {
         g.node_p("output::FunctionOutput", (400.0, 0.0), &[("name", s("rgb")), ("type", Value::Type(PinType::Float3))]);
     g.link((&grad, "rgb"), (&out, "value"));
     let function = AssetId::new(AssetType::Function, "lib/terrain_fn");
-    ops::save(p, &function, &g.finish()).unwrap();
-    GradientUsers { collection, material, function, slot }
+    ops::save(p, &function, &mut g.finish()).unwrap();
+    GradientUsers { collection, uuid, material, function, slot }
 }
 
 /// `(collection, slot)` parameters of the Sample Gradient nodes of asset `id`.
@@ -1635,18 +1741,22 @@ fn gradients_create_refuses_existing() {
     assert!(r.assets[&id].ok && r.assets[&id].diagnostics.is_empty(), "{:?}", r.assets[&id].diagnostics);
 }
 
+/// ADR 0047 §13: renaming a collection keeps its users' files byte-identical (UUID and slot id); they regenerate
+/// cleanly.
 #[test]
-fn gradients_rename_rewrites_graphs() {
+fn gradients_rename_keeps_graphs() {
     use shader_graph_core::Value;
     let (_d, p) = gradient_project();
     let u = gradient_users(&p);
     let before = shader_project::assets::load_gradients(&p, &u.collection).unwrap();
+    let sources = [&u.material, &u.function].map(|id| read(&id.file(&p)));
     let moved = ops::rename(&p, &u.collection, "common/ground").unwrap();
+    assert_eq!([&u.material, &u.function].map(|id| read(&id.file(&p))), sources);
     assert_eq!(moved, AssetId::new(AssetType::Gradients, "common/ground"));
     assert!(!u.collection.file(&p).exists());
     assert_eq!(shader_project::assets::load_gradients(&p, &moved).unwrap(), before);
     for id in [&u.material, &u.function] {
-        assert_eq!(gradient_params(&p, id), [(Value::Str("common/ground".into()), Value::Int(u.slot))], "{id}");
+        assert_eq!(gradient_params(&p, id), [(Value::Str(u.uuid.clone()), Value::Int(u.slot))], "{id}");
     }
     let r = regenerate(&p, &RegenOptions::default()).unwrap();
     assert!(r.assets[&u.material].ok && r.assets[&u.material].diagnostics.is_empty());
@@ -1657,6 +1767,7 @@ fn gradients_delete_clears_refs() {
     use shader_graph_core::Value;
     let (_d, p) = gradient_project();
     let u = gradient_users(&p);
+    assert_eq!(gradient_params(&p, &u.material), [(Value::Str(u.uuid.clone()), Value::Int(u.slot))]);
     ops::delete(&p, &u.collection).unwrap();
     assert!(!u.collection.file(&p).exists());
     for id in [&u.material, &u.function] {
@@ -1674,7 +1785,7 @@ fn gradients_dependents_regenerate() {
     let (_d, p) = gradient_project();
     let u = gradient_users(&p);
     let (registry, _) = shader_project::regen::project_registry(&p);
-    let deps = shader_project::regen::DepGraph::build(&shader_project::AssetSet::load_all(&p), &registry);
+    let deps = shader_project::regen::DepGraph::build(&resolved_set(&p), &registry);
     assert!(deps.used_by[&u.collection].contains(&u.material));
     assert!(deps.used_by[&u.collection].contains(&u.function));
     let affected = deps.affected(&[u.collection.clone()].into());
@@ -1687,7 +1798,7 @@ fn gradients_dependents_regenerate() {
     // rewrites its users.
     let mut c = shader_project::assets::load_gradients(&p, &u.collection).unwrap();
     c.slots.swap(3, 10);
-    ops::save_gradients(&p, &u.collection, &c).unwrap();
+    ops::save_gradients(&p, &u.collection, &mut c).unwrap();
     let scope = shader_project::Scope::Affected([u.collection.clone()].into());
     let r = regenerate(&p, &RegenOptions { scope, ..Default::default() }).unwrap();
     assert!(r.assets[&u.material].ok, "{:?}", r.assets[&u.material].diagnostics);
@@ -1775,7 +1886,7 @@ fn gradient_content_edits_touch_only_png() {
         let old_png = std::fs::read(&png).unwrap();
         let mut c = shader_project::assets::load_gradients(&p, &u.collection).unwrap();
         edit(&mut c.slots[row].stops);
-        ops::save_gradients(&p, &u.collection, &c).unwrap();
+        ops::save_gradients(&p, &u.collection, &mut c).unwrap();
         let scope = if scoped {
             shader_project::Scope::Affected([u.collection.clone()].into())
         } else {
@@ -1809,7 +1920,7 @@ fn gradient_reorder_changes_only_row() {
     let mut c = shader_project::assets::load_gradients(&p, &u.collection).unwrap();
     assert_eq!(c.position(u.slot as u32), Some(3));
     c.slots.swap(0, 3);
-    ops::save_gradients(&p, &u.collection, &c).unwrap();
+    ops::save_gradients(&p, &u.collection, &mut c).unwrap();
     let r = regenerate(&p, &RegenOptions::default()).unwrap();
     assert!(!r.has_errors(), "{:?}", r.diagnostics().collect::<Vec<_>>());
 
@@ -1903,4 +2014,390 @@ fn regenerate_preserves_existing_light_module_in_umbrella() {
     assert!(umbrella.contains("pub mod material;"), "{umbrella}");
     assert!(umbrella.contains("pub mod light;"), "{umbrella}");
     assert!(umbrella.contains("light::QuillshadeLightInternalPlugin"), "{umbrella}");
+}
+
+/// Every generated file under `assets/quillshade/` and `crates/quillshade/`, by project-relative path.
+fn generated_tree(root: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+    let mut out = std::collections::BTreeMap::new();
+    let mut stack = vec![root.join("assets/quillshade"), root.join("crates/quillshade")];
+    while let Some(dir) = stack.pop() {
+        for e in std::fs::read_dir(&dir).unwrap().flatten() {
+            let path = e.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                let rel = path.strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/");
+                out.insert(rel, std::fs::read(&path).unwrap());
+            }
+        }
+    }
+    out
+}
+
+/// ADR 0047 §4: the same project with references stored as paths and as UUIDs (with D27 comments)
+/// generates byte-identical files with identical diagnostics, through the CLI's backend (`regen::run`, which resolves
+/// against the project index) and through the headless `regenerate` (an index of the set alone).
+#[test]
+fn uuid_sources_generate_like_path_sources() {
+    use project_core::regen::run;
+    use shader_project::backend::MaterialBackend;
+
+    let (_a, paths) = path_form_project();
+    let (_b, uuids) = temp_project();
+    let source = read(&uuids.root.join("quillshade/material/fx/curve_bands.material.ron"));
+    let pulse = project_core::AssetUuid::legacy("quillshade/material/common/pulse.curve.ron");
+    assert!(source.starts_with("Asset(\n  format_version: 2,\n  id: \""), "{source}");
+    assert!(source.contains(&format!("\"curve\": Str(\"{pulse}\"), // common/pulse\n")), "{source}");
+    assert!(!source.contains("Str(\"common/"), "{source}");
+    // ADR 0047 §16: the user node in format 2, the graph referencing it by UUID with its D27 comment.
+    let soft = project_core::AssetUuid::legacy("quillshade/material/.nodes/soft_clamp.ron");
+    let node = read(&uuids.root.join("quillshade/material/.nodes/soft_clamp.ron"));
+    assert!(
+        node.starts_with(&format!("UserNode(\n  format_version: 2,\n  id: \"{soft}\",\n  ident: \"soft_clamp\",\n")),
+        "{node}"
+    );
+    let source = read(&uuids.root.join("quillshade/material/fx/user_node.material.ron"));
+    assert!(source.contains(&format!("kind: \"user::{soft}\", // .nodes/soft_clamp\n")), "{source}");
+
+    let backend = MaterialBackend::default();
+    let reports = [&paths, &uuids].map(|p| run(p, &[&backend], &[], false, false).unwrap());
+    let texts = reports.each_ref().map(|r| r.diagnostics.iter().map(|d| d.to_string()).collect::<Vec<_>>());
+    assert_eq!(texts[0], texts[1]);
+    assert!(!reports[1].has_errors(), "{:?}", texts[1]);
+    let trees = [&paths, &uuids].map(|p| generated_tree(&p.root));
+    assert!(trees[0].len() > 30, "{:?}", trees[0].keys());
+    assert_eq!(trees[0].keys().collect::<Vec<_>>(), trees[1].keys().collect::<Vec<_>>());
+    for (file, bytes) in &trees[0] {
+        assert!(bytes == &trees[1][file], "{file} differs between the path and the UUID form");
+    }
+    // The headless pipeline (no project index given) agrees: nothing to rewrite.
+    let again = regenerate(&uuids, &RegenOptions::default()).unwrap();
+    assert!(again.changes.is_empty(), "{:?}", again.changes);
+    assert!(!again.has_errors(), "{:?}", again.diagnostics().collect::<Vec<_>>());
+}
+
+/// ADR 0047 §7: the Material index part lists every asset with its id, its sub-items and its UUID references located
+/// at their nodes; a reference stored as a path (written by hand) is no edge and no problem.
+#[test]
+fn material_index_part_lists_uuid_sources() {
+    use std::collections::BTreeSet;
+
+    use project_core::AssetUuid;
+    use project_core::asset_index::{AssetIndex, IndexedRef};
+    use project_core::regen::DomainBackend;
+    use shader_graph_core::registry::{const_refs, curve_refs, gradient_refs, texture_refs};
+    use shader_project::backend::MaterialBackend;
+    use shader_stdlib::nodes::color::GRADIENT_SLOT_PARAM;
+
+    let (_d, p) = temp_project();
+    let backend = MaterialBackend::default();
+    let part = backend.index(&p);
+    let scanned = shader_project::assets::scan(&p);
+    assert_eq!(part.assets.len(), scanned.len() + 1, "every asset and the user node");
+    let uuid = |ty: AssetType, path: &str| AssetUuid::legacy(&AssetId::new(ty, path).source_rel());
+    for a in &part.assets {
+        assert_eq!(a.id, Ok(AssetUuid::legacy(&a.asset.source_rel())), "{}", a.asset);
+    }
+    let index = AssetIndex::build(vec![part.clone()]);
+    assert!(index.diagnostics(&p).is_empty(), "{:?}", index.diagnostics(&p));
+
+    // Sub-items: the constants of a table, the slots of a collection.
+    for (path, table) in fixtures::const_tables() {
+        let entry = index.get(uuid(AssetType::Consts, path)).unwrap();
+        let expected: Vec<(u64, String)> = table.consts.iter().map(|c| (c.id.into(), c.name.clone())).collect();
+        assert_eq!(entry.sub_items.iter().map(|s| (s.id, s.label.clone())).collect::<Vec<_>>(), expected);
+    }
+    for (path, collection) in fixtures::gradients() {
+        let entry = index.get(uuid(AssetType::Gradients, path)).unwrap();
+        assert_eq!(entry.sub_items.len(), collection.slots.len());
+        assert_eq!(entry.sub_items[0].label, collection.slots[0].name);
+    }
+
+    // References: what the path finders see in the fixture models, as UUIDs at the same nodes.
+    let registry = shader_stdlib::registry();
+    let (mut functions, mut subs, mut user_nodes) = (0, 0, 0);
+    for (path, is_fn, a) in fixtures::all() {
+        let at = |node: &String, ty: AssetType, target: &str, sub: Option<u64>| IndexedRef {
+            to: uuid(ty, target),
+            sub,
+            location: Some(node.clone()),
+        };
+        let mut expected = BTreeSet::new();
+        for (node, n) in &a.nodes {
+            if let Some(f) = n.kind.strip_prefix("function::") {
+                expected.insert(at(node, AssetType::Function, f, None));
+                functions += 1;
+            }
+            if let Some(ident) = n.kind.strip_prefix("user::") {
+                let file = shader_project::assets::user_node_ref(ident).source_rel();
+                expected.insert(IndexedRef { to: AssetUuid::legacy(&file), sub: None, location: Some(node.clone()) });
+                user_nodes += 1;
+            }
+        }
+        for (node, _, target) in curve_refs(&a, &registry) {
+            expected.insert(at(&node, AssetType::Curve, &target, None));
+        }
+        for (node, _, table, cid) in const_refs(&a, &registry) {
+            expected.insert(at(&node, AssetType::Consts, &table, Some(cid.into())));
+            subs += 1;
+        }
+        for (node, _, target) in texture_refs(&a, &registry).into_iter().filter(|r| !r.2.starts_with('@')) {
+            expected.insert(at(&node, AssetType::Texture, &target, None));
+        }
+        for (node, _, collection) in gradient_refs(&a, &registry) {
+            let slot = a.nodes[&node].params.get(GRADIENT_SLOT_PARAM).map_or(0, |v| v.as_i32());
+            let sub = u64::try_from(slot).ok().filter(|&s| s != 0);
+            subs += usize::from(sub.is_some());
+            expected.insert(at(&node, AssetType::Gradients, &collection, sub));
+        }
+        let ty = if is_fn { AssetType::Function } else { AssetType::Material };
+        let found: BTreeSet<IndexedRef> = index.refs_from(&AssetId::new(ty, path).to_ref()).cloned().collect();
+        assert_eq!(found, expected, "{path}");
+    }
+    assert!(
+        functions > 0 && subs > 0 && user_nodes > 0,
+        "the fixtures exercise function, sub-item and user node references"
+    );
+    let pulse = uuid(AssetType::Curve, "common/pulse");
+    let users: Vec<String> = index.refs_to(pulse).map(|r| r.path.clone()).collect();
+    assert!(users.contains(&"fx/curve_bands".to_string()), "{users:?}");
+
+    // A graph storing its references as paths keeps its entry without those edges; its targets stay.
+    let bands = AssetId::new(AssetType::Material, "fx/curve_bands");
+    let mut by_path = fixtures::curve_bands();
+    by_path.id = fixtures::fixture_id(AssetType::Material, "fx/curve_bands");
+    ops::save(&p, &bands, &mut by_path).unwrap();
+    let index = AssetIndex::build(vec![backend.index(&p)]);
+    assert_eq!(index.id_of(&bands.to_ref()), Some(by_path.id));
+    assert!(index.refs_from(&bands.to_ref()).next().is_none());
+    assert!(index.get(pulse).is_some() && index.refs_to(pulse).next().is_none());
+    assert!(index.diagnostics(&p).is_empty(), "{:?}", index.diagnostics(&p));
+}
+
+/// ADR 0047 §6: a model without an id gets one on its first save, in place, and keeps it.
+#[test]
+fn save_mints_the_id_once() {
+    let (_d, p) = temp_project();
+    let id = AssetId::new(AssetType::Material, "fx/coords");
+    let mut a = fixtures::coords();
+    assert!(a.id.is_nil());
+    ops::save(&p, &id, &mut a).unwrap();
+    let minted = a.id;
+    assert!(minted.is_v7());
+    assert_eq!(shader_project::assets::load(&p, &id).unwrap().id, minted);
+    ops::save(&p, &id, &mut a).unwrap();
+    assert_eq!(a.id, minted);
+    let mut curve = shader_graph_core::Curve::ramp("ramp");
+    ops::save_curve(&p, &AssetId::new(AssetType::Curve, "common/ramp"), &mut curve).unwrap();
+    assert!(curve.id.is_v7());
+}
+
+/// ADR 0047 §16: user node idents are unique; a later file repeating one is E009 and is not registered (the first
+/// file's node stays). A copied file also repeats the UUID: AE001 at the copy.
+#[test]
+fn duplicate_ident_is_e009() {
+    use project_core::asset_index::AssetIndex;
+    use project_core::regen::DomainBackend;
+    use shader_project::backend::MaterialBackend;
+    use shader_stdlib::user::UserNode;
+
+    let (_d, p) = temp_project();
+    let nodes = p.root.join("quillshade/material/.nodes");
+    let mut node = UserNode::from_ron(fixtures::SOFT_CLAMP.1).unwrap();
+    node.id = fixtures::fixture_user_id("soft_clamp");
+    ops::save_user_node(&p, "soft_clamp", &mut node).unwrap();
+    let mut copy = UserNode { template: "return x;".into(), ..node.clone() };
+    ops::save_user_node(&p, "soft_clamp_copy", &mut copy).unwrap();
+    assert_eq!(copy.id, node.id, "an existing id is kept");
+    let (registry, diags) = shader_project::regen::project_registry(&p);
+    let rows: Vec<String> = diags.iter().map(|d| d.to_string()).collect();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(diags[0].code, Code::E009);
+    assert_eq!(diags[0].asset.as_deref(), Some("quillshade/material/.nodes/soft_clamp_copy.ron"));
+    assert!(rows[0].contains("duplicate user node ident `soft_clamp`"), "{rows:?}");
+    assert!(registry.get("user::soft_clamp").is_some());
+    assert_eq!(registry.asset_kind(node.id), Some("user::soft_clamp"));
+    let r = regenerate(&p, &RegenOptions::default()).unwrap();
+    let wesl = read(&p.root.join("assets/quillshade/material/autogen/dir_fx/mat_user_node.wesl"));
+    assert!(wesl.contains("abs(x) * k"), "the first file's node is the registered one:\n{wesl}");
+    assert!(r.project.iter().any(|d| d.code == Code::E009), "{:?}", r.project);
+
+    let index = AssetIndex::build(vec![MaterialBackend::default().index(&p)]);
+    let ae: Vec<String> = index.diagnostics(&p).iter().map(|d| d.to_string()).collect();
+    assert_eq!(ae.len(), 1, "{ae:?}");
+    assert!(ae[0].contains("AE001") && ae[0].contains(".nodes/soft_clamp_copy.ron"), "{ae:?}");
+
+    // A different ident in the copy: both register, the UUID resolves to the winner (the smaller path).
+    std::fs::write(nodes.join("soft_clamp_copy.ron"), copy.to_ron().replace("\"soft_clamp\"", "\"soft_copy\""))
+        .unwrap();
+    let (registry, diags) = shader_project::regen::project_registry(&p);
+    assert!(diags.is_empty(), "{diags:?}");
+    assert!(registry.get("user::soft_copy").is_some());
+    assert_eq!(registry.asset_kind(node.id), Some("user::soft_clamp"));
+}
+
+/// ADR 0047 §16: the index part lists a user node file (kind `material.node`, label `.nodes/<name>`) and the graph
+/// references to it; a node without an id is AE004.
+#[test]
+fn user_nodes_in_the_index() {
+    use project_core::AssetUuid;
+    use project_core::asset_index::{AssetIndex, IndexedRef};
+    use project_core::regen::DomainBackend;
+    use shader_project::assets::user_node_ref;
+    use shader_project::backend::MaterialBackend;
+
+    let (_d, p) = temp_project();
+    let backend = MaterialBackend::default();
+    let soft = user_node_ref("soft_clamp");
+    let index = AssetIndex::build(vec![backend.index(&p)]);
+    let id = AssetUuid::legacy(&soft.source_rel());
+    let entry = index.get(id).unwrap();
+    assert_eq!((entry.asset.clone(), entry.kind_id()), (soft.clone(), "material.node".to_string()));
+    assert_eq!(index.id_of(&soft), Some(id));
+    let users: Vec<_> = index.refs_to(id).cloned().collect();
+    let material = AssetId::new(AssetType::Material, "fx/user_node").to_ref();
+    assert_eq!(users, std::slice::from_ref(&material));
+    let node = fixtures::user_node().nodes.into_iter().find(|(_, n)| n.kind == "user::soft_clamp").unwrap().0;
+    assert!(index.refs_from(&material).any(|r| *r == IndexedRef { to: id, sub: None, location: Some(node.clone()) }));
+    assert!(index.diagnostics(&p).is_empty(), "{:?}", index.diagnostics(&p));
+
+    // Hand-written without an id (D4): loads and registers, AE004 until it gets one.
+    let file = p.root.join("quillshade/material/.nodes/hand.ron");
+    std::fs::write(
+        &file,
+        "UserNode(format_version: 2, ident: \"hand\", name: \"Hand\", inputs: [], output: Float, template: \"1.0\")",
+    )
+    .unwrap();
+    let (registry, diags) = shader_project::regen::project_registry(&p);
+    assert!(diags.is_empty() && registry.get("user::hand").is_some(), "{diags:?}");
+    let index = AssetIndex::build(vec![backend.index(&p)]);
+    let ae: Vec<String> = index.diagnostics(&p).iter().map(|d| d.to_string()).collect();
+    assert_eq!(ae.len(), 1, "{ae:?}");
+    assert!(ae[0].contains("AE004") && ae[0].contains("quillshade/material/.nodes/hand.ron"), "{ae:?}");
+}
+
+/// Every Material source under `quillshade/material/`, by path relative to it.
+fn material_sources(p: &Project) -> std::collections::BTreeMap<String, Vec<u8>> {
+    fn walk(dir: &Path, root: &Path, out: &mut std::collections::BTreeMap<String, Vec<u8>>) {
+        for entry in std::fs::read_dir(dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, root, out);
+            } else {
+                let rel = path.strip_prefix(root).unwrap().to_string_lossy().into_owned();
+                out.insert(rel, std::fs::read(&path).unwrap());
+            }
+        }
+    }
+    let mut out = std::collections::BTreeMap::new();
+    walk(&p.material_dir(), &p.material_dir(), &mut out);
+    out
+}
+
+/// ADR 0047 §13, techdoc §10 Phase 1 Done-when 2: renaming / moving files outside the editor (`std::fs::rename`: a
+/// curve, a function, a Texture asset, a gradient collection, a constant table and a user node) keeps every reference
+/// valid. No source changes but the moves, the project index has no problem, regeneration has no error, and the
+/// generated module paths follow the new source paths.
+#[test]
+fn external_rename_regenerates_cleanly() {
+    use project_core::regen::DomainBackend;
+    let (_d, p) = temp_project();
+    assert!(!regenerate(&p, &RegenOptions::default()).unwrap().has_errors());
+    let before = material_sources(&p);
+    let moves = [
+        ("common/pulse.curve.ron", "ramps/pulse.curve.ron"),
+        ("common/wet_mask.function.ron", "lib/wet_mask.function.ron"),
+        ("textures/rock_albedo.texture.ron", "images/rock_albedo.texture.ron"),
+        ("common/terrain.gradients.ron", "palettes/terrain.gradients.ron"),
+        ("common/tuning.consts.ron", "lib/tuning.consts.ron"),
+        (".nodes/soft_clamp.ron", ".nodes/soft_clamp_moved.ron"),
+    ];
+    let mut want = before.clone();
+    for (from, to) in moves {
+        let (from_file, to_file) = (p.material_dir().join(from), p.material_dir().join(to));
+        std::fs::create_dir_all(to_file.parent().unwrap()).unwrap();
+        std::fs::rename(from_file, to_file).unwrap();
+        let bytes = want.remove(from).unwrap_or_else(|| panic!("no fixture {from}"));
+        want.insert(to.to_string(), bytes);
+    }
+
+    let index = project_core::AssetIndex::build(vec![shader_project::backend::MaterialBackend::default().index(&p)]);
+    assert!(index.diagnostics(&p).is_empty(), "{:?}", index.diagnostics(&p));
+    let r = regenerate(&p, &RegenOptions::default()).unwrap();
+    assert!(!r.has_errors(), "{:?}", r.diagnostics().filter(|d| d.is_error()).collect::<Vec<_>>());
+    assert_eq!(material_sources(&p), want, "only the moved files changed, and only their paths");
+    let bands = read(&p.root.join("assets/quillshade/material/autogen/dir_fx/mat_curve_bands.wesl"));
+    assert!(bands.contains("curves::dir_ramps::crv_pulse::"), "{bands}");
+    let rock = read(&p.root.join("assets/quillshade/material/autogen/dir_env/mat_rock_wet.wesl"));
+    assert!(rock.contains("functions::dir_lib::fun_wet_mask"), "{rock}");
+    assert!(p.root.join("assets/quillshade/material/autogen/functions/dir_lib/fun_wet_mask.wesl").exists());
+    assert!(!p.root.join("assets/quillshade/material/autogen/functions/dir_common/fun_wet_mask.wesl").exists());
+}
+
+/// ADR 0047 §11, techdoc §10 Phase 1 Done-when 3: a copied file has its original's UUID: AE001 at the copy (the
+/// later path), references keep resolving to the original, and the project still generates.
+#[test]
+fn copied_file_is_reported_as_duplicate() {
+    use project_core::regen::DomainBackend;
+    let (_d, p) = temp_project();
+    let dir = p.material_dir();
+    std::fs::copy(dir.join("common/pulse.curve.ron"), dir.join("common/pulse_copy.curve.ron")).unwrap();
+    std::fs::copy(dir.join(".nodes/soft_clamp.ron"), dir.join(".nodes/soft_copy.ron")).unwrap();
+    let index = project_core::AssetIndex::build(vec![shader_project::backend::MaterialBackend::default().index(&p)]);
+    let diags = index.diagnostics(&p);
+    let at: Vec<(&str, Option<&str>)> = diags.iter().map(|d| (d.code.as_str(), d.asset.as_deref())).collect();
+    assert_eq!(
+        at,
+        [
+            ("AE001", Some("quillshade/material/.nodes/soft_copy.ron")),
+            ("AE001", Some("quillshade/material/common/pulse_copy.curve.ron")),
+        ],
+        "{diags:?}"
+    );
+    assert!(diags[1].message.contains("as `quillshade/material/common/pulse.curve.ron`"), "{}", diags[1].message);
+    let pulse = fixtures::fixture_ref(AssetType::Curve, "common/pulse");
+    assert_eq!(shader_project::resolve::resolve_ref(&pulse, AssetType::Curve, &index), Some("common/pulse"));
+    let r = regenerate(&p, &RegenOptions::default()).unwrap();
+    let bands = read(&p.root.join("assets/quillshade/material/autogen/dir_fx/mat_curve_bands.wesl"));
+    assert!(bands.contains("curves::dir_common::crv_pulse::"), "{bands}");
+    // The copied user node has the same `ident`: E009 at the copy, which is not registered (ADR 0047 §16).
+    let errors: Vec<_> = r.diagnostics().filter(|d| d.is_error()).collect();
+    assert!(errors.iter().all(|d| d.code == Code::E009), "{errors:?}");
+}
+
+/// ADR 0047 §8, §13: a copied file shares its original's UUID, but references resolve to the original (the
+/// winner). Deleting the copy (a duplicate loser) leaves every graph untouched; deleting the original clears the
+/// references to it.
+#[test]
+fn deleting_a_duplicate_copy_keeps_refs_to_the_original() {
+    let (_d, p) = temp_project();
+    let kinds = [
+        (AssetType::Texture, "textures/rock_albedo"),
+        (AssetType::Gradients, "common/terrain"),
+        (AssetType::Consts, "common/tuning"),
+    ];
+    for (ty, path) in kinds {
+        let from = AssetId::new(ty, path);
+        let copy = AssetId::new(ty, format!("{path}_copy"));
+        std::fs::copy(from.file(&p), copy.file(&p)).unwrap();
+    }
+    let graphs = |p: &Project| {
+        let mut all = material_sources(p);
+        all.retain(|f, _| f.ends_with(".material.ron") || f.ends_with(".function.ron"));
+        all
+    };
+    let before = graphs(&p);
+    let changed = |p: &Project| -> Vec<String> {
+        let now = graphs(p);
+        before.keys().filter(|f| now.get(*f) != before.get(*f)).cloned().collect()
+    };
+    for (ty, path) in kinds {
+        ops::delete(&p, &AssetId::new(ty, format!("{path}_copy"))).unwrap();
+        assert_eq!(changed(&p), Vec::<String>::new(), "deleting the copy of {path} changed these graphs");
+    }
+    // The original still clears its referrers, even while a copy remains.
+    let tex = AssetId::new(AssetType::Texture, "textures/rock_albedo");
+    std::fs::copy(tex.file(&p), AssetId::new(AssetType::Texture, "textures/rock_albedo_copy").file(&p)).unwrap();
+    ops::delete(&p, &tex).unwrap();
+    assert!(!changed(&p).is_empty(), "deleting the original clears its references");
 }

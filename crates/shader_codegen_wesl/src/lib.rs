@@ -539,9 +539,12 @@ fn sprite_fragment(ir: &Ir, imports: &mut Imports, w: &mut Writer) {
 }
 
 /// Vertex shader (forward and prepass): Bevy's `bevy_pbr::render::mesh::vertex` / `prepass::prepass::vertex` plus
-/// World Position Offset.
+/// World Position Offset and World Normal (spec §10.2). The world normal replaces `out.world_normal`, which
+/// `pbr_input_from_standard_material` turns into `pbr_input.world_normal` / `N`: the tangent-space Normal pin, the
+/// fragment `VertexNormalWS` and the prepass / deferred normals all build on it.
 fn vertex_3d(vs: &IrStage, pbr: bool, imports: &mut Imports, w: &mut Writer) {
-    let Some(wpo) = vs.outputs.get(shader_graph_core::ir::WPO_PIN) else { return };
+    let wpo = vs.outputs.get(shader_graph_core::ir::WPO_PIN);
+    let world_normal = vs.outputs.get(shader_graph_core::ir::WORLD_NORMAL_PIN);
     let normal_guard = if pbr {
         "VERTEX_NORMALS && (!PREPASS_PIPELINE || NORMAL_PREPASS_OR_DEFERRED_PREPASS)"
     } else {
@@ -609,8 +612,17 @@ fn vertex_3d(vs: &IrStage, pbr: bool, imports: &mut Imports, w: &mut Writer) {
         w.line("    // --- graph ---");
         write_lines(w, vs, "    ");
     }
-    w.line("    // --- world position offset ---");
-    w.line(format!("    out.world_position = vec4<f32>(out.world_position.xyz + {wpo}, 1.0);"));
+    if let Some(n) = world_normal {
+        w.line("    // --- world normal ---");
+        w.line(format!("    @if({normal_guard}) out.world_normal = normalize({n});"));
+    }
+    match wpo {
+        Some(wpo) => {
+            w.line("    // --- world position offset ---");
+            w.line(format!("    out.world_position = vec4<f32>(out.world_position.xyz + {wpo}, 1.0);"));
+        }
+        None => w.line("    // --- clip position ---"),
+    }
     w.line("    out.position = position_world_to_clip(out.world_position.xyz);");
     if pbr {
         w.line("    @if(PREPASS_PIPELINE && UNCLIPPED_DEPTH_ORTHO_EMULATION) {");

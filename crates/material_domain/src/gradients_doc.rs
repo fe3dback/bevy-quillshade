@@ -285,7 +285,7 @@ impl GradientsDoc {
 
     pub fn undo(&mut self) -> bool {
         let before = self.collection.clone();
-        let done = self.history.undo(&mut self.collection);
+        let done = self.history.undo_keeping(&mut self.collection, |m| &mut m.id);
         if done {
             self.after_history(&before);
         }
@@ -294,7 +294,7 @@ impl GradientsDoc {
 
     pub fn redo(&mut self) -> bool {
         let before = self.collection.clone();
-        let done = self.history.redo(&mut self.collection);
+        let done = self.history.redo_keeping(&mut self.collection, |m| &mut m.id);
         if done {
             self.after_history(&before);
         }

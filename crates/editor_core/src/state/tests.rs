@@ -23,6 +23,11 @@ use crate::state::editor::Editor;
 use crate::ui::menu::menu_entries;
 use crate::ui::tree::{GameAssetsTree, LeftPanes, ProjectTree, TreeItem, TreeRow, TreeSource, left_panes, row_menu};
 
+/// The editor's asset index and the UUID quick fixes (ADR 0047).
+mod index;
+/// The Migration Tool session and the blocking open flow (ADR 0046).
+mod migration;
+
 const IDS: [DomainId; 2] = [DomainId::new("dummy"), DomainId::new("other")];
 const NOTE: &str = "note";
 
@@ -324,6 +329,11 @@ fn game(files: &[&str]) -> tempfile::TempDir {
         let path = dir.path().join(f);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, "()").unwrap();
+    }
+    // Sources without `project.ron` would be a v1 project (ADR 0046): these games are current.
+    if files.iter().any(|f| f.starts_with("quillshade/")) {
+        let settings = project_core::layout::settings_text(&project_core::ProjectSettings::default()).unwrap();
+        std::fs::write(dir.path().join("quillshade/project.ron"), settings).unwrap();
     }
     dir
 }
@@ -725,11 +735,11 @@ fn external_project_ron_edit_reloads_settings() {
     let dir = game(&[]);
     let mut e = open(one(), dir.path());
     let path = e.project.as_ref().unwrap().settings_path();
-    std::fs::write(&path, "ProjectSettings(format_version: 1, header_date: true)\n").unwrap();
+    std::fs::write(&path, "ProjectSettings(project_version: 3, header_date: true)\n").unwrap();
     e.files_changed(vec![path.clone()]);
     assert!(e.project.as_ref().unwrap().settings.header_date);
     // A broken edit keeps the last good settings and says so once.
-    std::fs::write(&path, "ProjectSettings(format_version: 1, header_date: ").unwrap();
+    std::fs::write(&path, "ProjectSettings(project_version: 3, header_date: ").unwrap();
     let before = e.messages.len();
     e.files_changed(vec![path.clone()]);
     assert!(e.project.as_ref().unwrap().settings.header_date);
@@ -745,7 +755,7 @@ fn malformed_project_ron_refuses_to_open() {
     std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname = \"g\"\n").unwrap();
     std::fs::create_dir_all(dir.path().join("assets")).unwrap();
     std::fs::create_dir_all(dir.path().join("quillshade")).unwrap();
-    std::fs::write(dir.path().join("quillshade/project.ron"), "(format_version: 1, header_date: tru)").unwrap();
+    std::fs::write(dir.path().join("quillshade/project.ron"), "(project_version: 3, header_date: tru)").unwrap();
     let mut e = Editor::new(one());
     e.apply(Action::OpenProject(dir.path().to_path_buf()));
     assert!(e.project.is_none());
@@ -1226,6 +1236,26 @@ fn console_filters_by_active_domain() {
     assert_eq!(e.console_diagnostics().len(), 3, "the project domain active: every domain");
 }
 
+/// Spec §13: the "Info" checkbox only flips the session flag and redraws the console; infos never count as errors.
+#[test]
+fn console_info_toggle() {
+    let dir = game(&["quillshade/dummy/a.note.ron"]);
+    let mut e = open(two(), dir.path());
+    with_problems(&mut e);
+    let mut info = Diagnostic::info("I1", "fyi").in_asset(format!("quillshade/{}/a.note.ron", IDS[0]));
+    info.domain = Some(IDS[0]);
+    e.domains.get_mut::<DummyState<0>>().unwrap().problems.push(info);
+    e.apply(Action::SwitchDomain(IDS[0]));
+    assert!(!e.console_info);
+    assert_eq!((e.console_diagnostics().len(), e.error_count()), (2, 3));
+    let log = e.ui.log;
+    e.apply(Action::ToggleConsoleInfo);
+    assert!(e.console_info);
+    assert!(e.ui.log > log, "the console redraws");
+    e.apply(Action::ToggleConsoleInfo);
+    assert!(!e.console_info);
+}
+
 #[test]
 fn global_messages_always_show() {
     let dir = game(&["quillshade/dummy/a.note.ron"]);
@@ -1280,7 +1310,15 @@ impl project_core::regen::DomainBackend for DummyBackend {
             dependencies: &[],
         }
     }
-    fn plan(&self, _project: &Project, _compile: bool) -> project_core::regen::DomainPlan {
+    fn index(&self, _project: &Project) -> project_core::DomainIndex {
+        project_core::DomainIndex::empty(IDS[0])
+    }
+    fn plan(
+        &self,
+        _project: &Project,
+        _index: &project_core::AssetIndex,
+        _compile: bool,
+    ) -> project_core::regen::DomainPlan {
         unreachable!("the editor tests never run the CLI path")
     }
 }
@@ -1372,7 +1410,7 @@ fn settings_outside_edit() {
     e.apply(open_settings());
 
     // Clean: reloaded.
-    std::fs::write(&path, "ProjectSettings(format_version: 1, header_date: true)\n").unwrap();
+    std::fs::write(&path, "ProjectSettings(project_version: 3, header_date: true)\n").unwrap();
     e.files_changed(vec![path.clone()]);
     assert_eq!(shown(&e, SettingsProp::HeaderDate), Some(PropValue::Bool(true)));
     assert!(!e.is_dirty() && e.dialog.is_none(), "{:?}", e.dialog);
@@ -1381,7 +1419,7 @@ fn settings_outside_edit() {
     e.apply(set(SettingsProp::HeaderDate, false));
     std::fs::write(
         &path,
-        "ProjectSettings(format_version: 1, header_date: true, domains: {\"dummy\": (enabled: false)})",
+        "ProjectSettings(project_version: 3, header_date: true, domains: {\"dummy\": (enabled: false)})",
     )
     .unwrap();
     e.files_changed(vec![path.clone()]);
@@ -1397,7 +1435,7 @@ fn settings_outside_edit() {
     // Unparsable: a warning, nothing else changes.
     let before = e.project.as_ref().unwrap().settings.clone();
     let messages = e.messages.len();
-    std::fs::write(&path, "ProjectSettings(format_version: 1, header_date: ").unwrap();
+    std::fs::write(&path, "ProjectSettings(project_version: 3, header_date: ").unwrap();
     e.files_changed(vec![path.clone()]);
     assert_eq!(e.project.as_ref().unwrap().settings, before);
     assert!(e.dialog.is_none(), "{:?}", e.dialog);
@@ -1409,7 +1447,7 @@ fn settings_outside_edit() {
     assert!(last.text.contains("project.ron") && last.text.contains("keeping the previous settings"), "{}", last.text);
 
     // Dirty again, Reload: the file's version.
-    std::fs::write(&path, "ProjectSettings(format_version: 1, header_date: true)").unwrap();
+    std::fs::write(&path, "ProjectSettings(project_version: 3, header_date: true)").unwrap();
     e.files_changed(vec![path.clone()]);
     let Some(Dialog::Confirm { buttons, .. }) = e.dialog.clone() else { panic!("no dialog: {:?}", e.dialog) };
     e.apply(buttons[1].1.clone());
@@ -1605,7 +1643,15 @@ impl<const N: usize> project_core::regen::DomainBackend for Built<N> {
             dependencies: &[],
         }
     }
-    fn plan(&self, _project: &Project, _compile: bool) -> project_core::regen::DomainPlan {
+    fn index(&self, _project: &Project) -> project_core::DomainIndex {
+        project_core::DomainIndex::empty(BUILT[N])
+    }
+    fn plan(
+        &self,
+        _project: &Project,
+        _index: &project_core::AssetIndex,
+        _compile: bool,
+    ) -> project_core::regen::DomainPlan {
         unreachable!("the editor runs the state's generate")
     }
 }
@@ -1647,4 +1693,65 @@ fn open_generates_missing_modules() {
     assert_eq!(generated, ["generated beta"]);
     let line = e.messages.iter().find(|m| m.text == "generated beta").unwrap();
     assert_eq!(line.domain, Some(BUILT[1]), "the domain's own line");
+}
+
+/// A domain with source-format steps (ADR 0046 "Registration").
+struct Migrating;
+
+struct NoSteps;
+
+impl project_migrate::DomainMigrator for NoSteps {
+    fn domain(&self) -> DomainId {
+        IDS[1]
+    }
+    fn files(&self, _project: &project_migrate::RawProject) -> Vec<std::path::PathBuf> {
+        Vec::new()
+    }
+    fn is_fresh(
+        &self,
+        _file: &Path,
+        _text: &str,
+        _target: project_core::ProjectVersion,
+    ) -> Result<bool, project_migrate::MigrationError> {
+        Ok(true)
+    }
+    fn migrate(
+        &self,
+        _file: &Path,
+        text: &str,
+        _target: project_core::ProjectVersion,
+        _facts: &project_migrate::MigrationFacts,
+    ) -> Result<String, project_migrate::MigrationError> {
+        Ok(text.to_string())
+    }
+}
+
+impl EditorDomain for Migrating {
+    fn id(&self) -> DomainId {
+        IDS[1]
+    }
+    fn info(&self) -> DomainInfo {
+        Dummy::<1>.info()
+    }
+    fn backend(&self) -> Option<Box<dyn project_core::regen::DomainBackend>> {
+        None
+    }
+    fn migrator(&self) -> Option<Box<dyn project_migrate::DomainMigrator>> {
+        Some(Box::new(NoSteps))
+    }
+    fn register(&self, r: &mut DomainRegistrar) {
+        Dummy::<1>.register(r);
+    }
+}
+
+/// ADR 0046 "Registration": `DomainList::migrators` holds the real domains' migrators (a domain without steps has
+/// none; the built-in project domain contributes none either).
+#[test]
+fn domain_list_collects_migrators() {
+    let none = list(vec![Box::new(Dummy::<0>) as Box<dyn EditorDomain>, Box::new(Dummy::<1>)]);
+    assert!(none.migrators().is_empty());
+    let one = list(vec![Box::new(Dummy::<0>) as Box<dyn EditorDomain>, Box::new(Migrating)]);
+    let ids: Vec<DomainId> = one.migrators().iter().map(|m| m.domain()).collect();
+    assert_eq!(ids, [IDS[1]]);
+    assert_eq!(one.clone().migrators().len(), 1, "the list stays Clone");
 }

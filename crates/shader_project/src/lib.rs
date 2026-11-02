@@ -8,8 +8,10 @@ pub mod fixtures;
 pub mod game_assets;
 pub mod gradient_png;
 pub mod layout;
+pub mod migrate;
 pub mod ops;
 pub mod regen;
+pub mod resolve;
 
 pub use assets::{AssetId, AssetSet, AssetType};
 pub use layout::{MaterialLayout, OpenError, Project, ProjectSettings};

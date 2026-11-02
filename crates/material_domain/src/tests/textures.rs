@@ -9,7 +9,8 @@ fn texture_asset_is_loaded_validated_and_opened() {
     let (dir, _) = project();
     let p = Project::open(dir.path()).unwrap();
     let id = AssetId::new(AssetType::Texture, "textures/rock");
-    shader_project::ops::create_texture(&p, &id, &shader_graph_core::TextureAsset::new("textures/rock.png")).unwrap();
+    shader_project::ops::create_texture(&p, &id, &mut shader_graph_core::TextureAsset::new("textures/rock.png"))
+        .unwrap();
     std::fs::write(dir.path().join("quillshade/material/textures/broken.texture.ron"), "TextureAsset(").unwrap();
     let mut e = crate::test_editor();
     e.open_project(dir.path()).unwrap();
@@ -34,21 +35,24 @@ fn texture_asset_is_loaded_validated_and_opened() {
     assert!(!e.is_dirty());
 }
 
-/// Review focus 5 in the editor: open graphs follow a renamed / deleted Texture asset (design §1.2) like they follow
-/// curves — a clean document reloads the rewritten file, a dirty one gets the change as an unsaved edit.
+/// Review focus 5 in the editor, ADR 0047 §13: a renamed Texture asset rewrites nothing — the open graph stores its
+/// UUID, stays clean and refers to the new path; deleting it clears the references, matched by UUID, on disk and as
+/// an unsaved edit of a dirty document.
 #[test]
-fn open_documents_follow_texture_rename_and_delete() {
+fn open_documents_keep_texture_rename_and_follow_delete() {
     use shader_graph_core::registry::texture_refs;
     let (dir, _) = project();
     let p = Project::open(dir.path()).unwrap();
     let tex = AssetId::new(AssetType::Texture, "textures/rock");
-    ops::create_texture(&p, &tex, &shader_graph_core::TextureAsset::new("textures/rock.png")).unwrap();
+    let mut texture = shader_graph_core::TextureAsset::new("textures/rock.png");
+    ops::create_texture(&p, &tex, &mut texture).unwrap();
+    let uuid = texture.id.to_string();
     let rock = AssetId::new(AssetType::Material, "env/rock_wet");
     let mut a = assets::load(&p, &rock).unwrap();
     for n in a.nodes.values_mut().filter(|n| n.kind == "param::TextureSample2D") {
-        n.params.insert("default".into(), Value::Str("textures/rock".into()));
+        n.params.insert("default".into(), Value::Str(uuid.clone()));
     }
-    ops::save(&p, &rock, &a).unwrap();
+    ops::save(&p, &rock, &mut a).unwrap();
     let mut e = crate::test_editor();
     e.open_project(dir.path()).unwrap();
     e.apply(Action::OpenAsset(rock.to_ref()));
@@ -59,11 +63,13 @@ fn open_documents_follow_texture_rename_and_delete() {
     let node = texture_refs(&doc(&e).asset, &e.domains.material().registry)[0].0.clone();
     assert_eq!(e.referenced_asset(&node), Some(tex.clone()));
 
+    let before = std::fs::read(rock.file(&p)).unwrap();
     e.apply(Action::RenameDialog(tex.to_ref()));
     e.apply(Action::Submit("textures/stone".into()));
     let stone = AssetId::new(AssetType::Texture, "textures/stone");
     assert!(e.domains.material().disk.contains(&stone));
-    assert_eq!(ids(&doc(&e).asset, &e), vec!["textures/stone"; 2]);
+    assert_eq!(std::fs::read(rock.file(&p)).unwrap(), before, "the referring file is untouched");
+    assert_eq!(ids(&doc(&e).asset, &e), vec![uuid.as_str(); 2]);
     assert!(!doc(&e).is_dirty());
     assert_eq!(e.referenced_asset(&node), Some(stone.clone()));
 

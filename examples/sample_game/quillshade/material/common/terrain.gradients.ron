@@ -1,5 +1,6 @@
 GradientCollection(
-  format_version: 1,
+  format_version: 2,
+  id: "019b76da-a800-7236-9c55-fbb62d9f20ab",
   slots: [
     Slot(id: 1007, name: "Terrain height", stops: [Stop(t: 0.0, color: (0.027320893, 0.14702727, 0.027320893, 1.0)), Stop(t: 0.45, color: (0.25415212, 0.14412847, 0.045186203, 1.0)), Stop(t: 0.8, color: (0.8069523, 0.8069523, 0.8069523, 1.0), mid: 0.3), Stop(t: 1.0, color: (1.0, 1.0, 1.0, 1.0))]),
     Slot(id: 1014, name: "Water depth", stops: [Stop(t: 0.0, color: (0.21223076, 0.65837485, 0.8069523, 1.0)), Stop(t: 0.5, color: (0.013702083, 0.18782078, 0.45641103, 1.0)), Stop(t: 1.0, color: (0.00303527, 0.013702083, 0.07421357, 1.0))]),

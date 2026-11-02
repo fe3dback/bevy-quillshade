@@ -147,6 +147,13 @@ BakedManifest(
       textures: {},
       layout: "SG_LAYOUT_7c5d798f",
     ),
+    "fx/user_node": (
+      params: {
+        "inp_tint": Color((1.0, 1.0, 1.0, 1.0)),
+      },
+      textures: {},
+      layout: "SG_LAYOUT_6fa6538c",
+    ),
     "kw/loop/type": (
       params: {
         "inp_mesh": Color((0.9, 0.4, 0.1, 1.0)),

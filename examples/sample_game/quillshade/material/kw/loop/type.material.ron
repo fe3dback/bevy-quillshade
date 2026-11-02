@@ -1,5 +1,6 @@
 Asset(
-  format_version: 1,
+  format_version: 2,
+  id: "019b76da-a800-7dd9-aa2b-0e41c8fe9b3c",
   kind: Material(Unlit3d(UnlitSettings(
     blend: Opaque,
     two_sided: false,
@@ -28,7 +29,7 @@ Asset(
       },
     ),
     "n04": Node(
-      kind: "function::kw/fn",
+      kind: "function::019b76da-a800-7976-937a-b4af01dbeaa0", // kw/fn
       pos: (350.0, 0.0),
       params: {},
     ),

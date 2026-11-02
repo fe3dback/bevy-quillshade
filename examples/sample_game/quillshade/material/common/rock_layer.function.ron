@@ -1,5 +1,6 @@
 Asset(
-  format_version: 1,
+  format_version: 2,
+  id: "019b76da-a800-77d4-b578-ee1ca0344763",
   kind: Function,
   name: "rock_layer",
   nodes: {

@@ -16,11 +16,14 @@ use shader_graph_core::texture::{self, INTERNAL_PREFIX, MATERIAL_TEXTURES, Probl
 use shader_graph_core::{Code, Diagnostic, FunctionSig, Registry};
 use shader_stdlib::internal::{DEFAULT_TEXTURE, INTERNAL_TEXTURES};
 
-use crate::assets::{self, AssetId, AssetSet, AssetType};
-use crate::backend::MATERIAL_CRATE;
+use crate::assets::{self, AssetId, AssetSet, AssetType, UserNodeFile};
+use crate::backend::{MATERIAL_CRATE, index_part};
 use crate::gradient_png;
 use crate::layout::{GRADIENTS_DIR, INTERNAL_DIR, INTERNAL_MARKER, MATERIAL, MaterialLayout, Project};
+use crate::resolve::resolve_set;
 use crate::writer::Change;
+use project_core::AssetUuid;
+use project_core::asset_index::AssetIndex;
 use project_core::files::owned_binary_dir;
 use project_core::marker::{civil_today, has_marker, insert_date};
 use project_core::regen::{DomainOutput, OutFile, OutRoot, commit};
@@ -45,11 +48,21 @@ pub struct RegenOptions<'a> {
     /// Domain modules of the umbrella crate `crates/quillshade` (its `Cargo.toml` and `src/lib.rs` are written by
     /// every regeneration).
     pub crates: &'a [CrateContribution],
+    /// The project's `AssetIndex` that UUID references resolve against (ADR 0047 §4, §9); `None`: an index of the
+    /// regenerated set and the project's user nodes ([`index_part`]), the headless convenience for tests and
+    /// [`regenerate`].
+    pub index: Option<&'a AssetIndex>,
 }
 
 impl Default for RegenOptions<'_> {
     fn default() -> Self {
-        RegenOptions { scope: Scope::default(), dry_run: false, compile_check: None, crates: &[MATERIAL_CRATE] }
+        RegenOptions {
+            scope: Scope::default(),
+            dry_run: false,
+            compile_check: None,
+            crates: &[MATERIAL_CRATE],
+            index: None,
+        }
     }
 }
 
@@ -244,11 +257,17 @@ pub fn gradient_diagnostics(set: &AssetSet) -> BTreeMap<AssetId, Vec<Diagnostic>
     out
 }
 
-/// Registry with stdlib + project user nodes.
+/// Registry with stdlib + project user nodes, and the user node load problems.
 pub fn project_registry(project: &Project) -> (Registry, Vec<Diagnostic>) {
-    let mut r = shader_stdlib::registry();
-    let d = assets::load_user_nodes(project, &mut r);
+    let (r, _, d) = project_nodes(project);
     (r, d)
+}
+
+/// [`project_registry`] plus the loaded user node files (the index part lists them, ADR 0047 §16).
+pub fn project_nodes(project: &Project) -> (Registry, Vec<UserNodeFile>, Vec<Diagnostic>) {
+    let mut r = shader_stdlib::registry();
+    let (files, d) = assets::load_user_nodes(project, &mut r);
+    (r, files, d)
 }
 
 /// Output paths of an asset (`None` for constant tables, Texture assets and gradient collections, which generate no
@@ -349,9 +368,21 @@ pub fn regenerate_set(project: &Project, set: &AssetSet, opts: &RegenOptions) ->
 }
 
 /// The Material pipeline up to the desired files (no W105, no write): the report (its `changes` empty) and the
-/// domain's output for [`commit`]. Every file of an asset names it (`source_rel`) as its owner.
+/// domain's output for [`commit`]. Every file of an asset names it (`source_rel`) as its owner. UUID references are
+/// resolved to paths (user nodes: `user::<ident>`) first ([`resolve_set`] against [`RegenOptions::index`]), so
+/// everything below sees paths.
 pub fn plan_set(project: &Project, set: &AssetSet, opts: &RegenOptions) -> (RegenReport, DomainOutput) {
-    let (registry, user_diags) = project_registry(project);
+    let (registry, user_nodes, user_diags) = project_nodes(project);
+    let own_index;
+    let index = match opts.index {
+        Some(index) => index,
+        None => {
+            own_index = AssetIndex::build(vec![index_part(set, &user_nodes, &registry)]);
+            &own_index
+        }
+    };
+    let resolved = resolve_set(set, index, &registry);
+    let set = &resolved;
     let mut report = RegenReport { project: user_diags, ..Default::default() };
     let date = project.settings.header_date.then(civil_today);
     let deps = DepGraph::build(set, &registry);
@@ -643,9 +674,12 @@ pub fn plan_set(project: &Project, set: &AssetSet, opts: &RegenOptions) -> (Rege
             continue;
         }
         let rs = rust_file(project, id).unwrap();
+        // The source's `id`: the material's key in `BakedMaterials::by_id` (ADR 0047 §12).
+        let asset = set.assets.get(id).and_then(|a| a.as_ref().ok());
+        let uuid = asset.map_or(AssetUuid::NIL, |a| a.id);
         if r.ok {
             let ir = r.ir.as_ref().unwrap();
-            entries.push(MaterialEntry::from_ir(ir));
+            entries.push(MaterialEntry::from_ir(ir).with_uuid(uuid));
             manifest_materials.push(ManifestMaterial::from_ir(ir));
             if scoped(id) {
                 let mut text = shader_codegen_rust::material_module(ir, &id.source_rel());
@@ -663,8 +697,7 @@ pub fn plan_set(project: &Project, set: &AssetSet, opts: &RegenOptions) -> (Rege
                 && has_marker(&old)
             {
                 keep.insert(rs);
-                let asset = set.assets.get(id).and_then(|a| a.as_ref().ok());
-                entries.push(entry_from_old(id, asset, &old));
+                entries.push(entry_from_old(id, asset, &old).with_uuid(uuid));
                 // Without an old entry (manifest deleted): an empty one, the game keeps the compiled defaults.
                 manifest_materials.push(
                     old_manifest
@@ -846,5 +879,6 @@ fn entry_from_old(id: &AssetId, asset: Option<&Asset>, old: &str) -> MaterialEnt
         main: if pbr { format!("{base}Ext") } else { format!("{base}Material") },
         material: format!("{base}Material"),
         params: old.contains(&format!("pub struct {params}")).then_some(params),
+        uuid: None,
     }
 }

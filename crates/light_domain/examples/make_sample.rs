@@ -12,13 +12,16 @@
 //! (`VK_FORMAT_R8G8B8A8_SRGB`), 6 faces of 4x4, one mip level, no array layers, no supercompression. The faces form a
 //! simple sky: a blue zenith, sides fading from blue to a pale horizon, a dark ground.
 
+use std::collections::BTreeMap;
+use std::path::Path;
+
 use curve_kit::Curve;
 use light_domain::backend::{
-    DirectionalLightDef, Environment, FogDef, FogFalloffDef, LightBackend, curve_ref, environment_ref, save_curve,
-    save_environment, texture_ref,
+    DirectionalLightDef, Environment, FogDef, FogFalloffDef, LIGHT, LightBackend, curve_ref, environment_ref,
+    save_curve, save_environment, texture_ref,
 };
-use project_core::Project;
 use project_core::regen::DomainBackend;
+use project_core::{AssetRef, AssetUuid, DomainId, Project};
 use texture_kit::TextureAsset;
 
 /// KTX2 file identifier: `«KTX 20»\r\n\x1A\n`.
@@ -49,29 +52,46 @@ fn main() {
     let cube = project.assets_dir().join(CUBE_FILE);
     std::fs::create_dir_all(cube.parent().expect("a parent")).expect("textures dir");
     std::fs::write(&cube, sky_cube()).expect("write the cube map");
-    texture_kit::save(&project.root.join(texture_ref(TEXTURE).source_rel()), &TextureAsset::new(CUBE_FILE))
-        .expect("write the Texture asset");
-    save_environment(&project.root.join(environment_ref(ENVIRONMENT).source_rel()), &day_environment())
-        .expect("write the day environment");
-    save_environment(&project.root.join(environment_ref(NIGHT_ENVIRONMENT).source_rel()), &night_environment())
-        .expect("write the night environment");
-    save_curve(&project.root.join(curve_ref(SMOOTH_CURVE).source_rel()), &smooth_curve())
-        .expect("write the smooth curve");
-    let plan = LightBackend.plan(&project, false);
+    write_sources(&project.root).expect("write the Light sources");
+    let plan = LightBackend.plan(&project, &project_core::AssetIndex::build(vec![LightBackend.index(&project)]), false);
     for d in &plan.diagnostics {
         eprintln!("{d}");
     }
     println!("Light assets written ({} diagnostic(s)); now run `cargo run -- regen {dir}`", plan.diagnostics.len());
 }
 
-fn day_environment() -> Environment {
-    Environment { cubemap: Some(TEXTURE.into()), ..Environment::default() }
+/// Writes the Light sources (the Texture asset, the environments, the curve) into the project at `root`.
+fn write_sources(root: &Path) -> std::io::Result<()> {
+    let file = |r: &AssetRef| root.join(r.source_rel());
+    let sky = texture_ref(TEXTURE);
+    let texture = TextureAsset { id: sample_id(&sky), ..TextureAsset::new(CUBE_FILE) };
+    texture_kit::save(&file(&sky), &texture)?;
+    // The environments reference the cube map by its UUID with the D27 path comment (ADR 0047 §3, §5).
+    let names: BTreeMap<AssetUuid, (DomainId, String)> = [(texture.id, (LIGHT, TEXTURE.to_string()))].into();
+    for (path, env) in [(ENVIRONMENT, day_environment()), (NIGHT_ENVIRONMENT, night_environment())] {
+        let r = environment_ref(path);
+        let mut env = Environment { id: sample_id(&r), cubemap: Some(texture.id.to_string()), ..env };
+        save_environment(&file(&r), &mut env, &names)?;
+    }
+    let smooth = curve_ref(SMOOTH_CURVE);
+    save_curve(&file(&smooth), &mut Curve { id: sample_id(&smooth), ..smooth_curve() })
 }
 
+/// The id of the sample's asset `r`: [`AssetUuid::legacy`] of its `source_rel`, the id the v3 migration gave it, so
+/// this example reproduces the migrated sample byte for byte.
+fn sample_id(r: &AssetRef) -> AssetUuid {
+    AssetUuid::legacy(&r.source_rel())
+}
+
+/// The day environment (its cube map is set by `main`).
+fn day_environment() -> Environment {
+    Environment::default()
+}
+
+/// The night environment (its cube map is set by `main`).
 fn night_environment() -> Environment {
     Environment {
         clear_color: [0.02, 0.03, 0.06, 1.0],
-        cubemap: Some(TEXTURE.into()),
         skybox_brightness: 150.0,
         skybox_rotation: 180.0,
         env_intensity: 200.0,
@@ -228,7 +248,7 @@ mod tests {
     use texture_kit::{TextureShape, shape_problem};
 
     fn sample_game() -> std::path::PathBuf {
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/sample_game")
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/sample_game")
     }
 
     /// The level 0 byteOffset (the first level index entry follows the 80-byte header).
@@ -281,20 +301,19 @@ mod tests {
         assert_eq!(image.data.as_deref(), Some(&sky_faces()[..]));
     }
 
-    /// The committed sample files are exactly what this generator writes.
+    /// The committed sample files are exactly what this generator writes, byte for byte (also what the v3
+    /// migration made of the sample, ADR 0047 §14).
     #[test]
     fn sample_files_are_up_to_date() {
         let p = Project::open(sample_game()).unwrap();
         let stale = "stale: rerun `cargo run -p light_domain --example make_sample`";
         assert!(std::fs::read(p.assets_dir().join(CUBE_FILE)).unwrap() == sky_cube(), "{CUBE_FILE} is {stale}");
-        let texture = texture_kit::load(&p.root.join(texture_ref(TEXTURE).source_rel())).unwrap();
-        assert_eq!(texture, TextureAsset::new(CUBE_FILE), "{stale}");
-        let day = light_domain::backend::load_environment(&p.root.join(environment_ref(ENVIRONMENT).source_rel()));
-        assert_eq!(day.unwrap(), day_environment(), "{stale}");
-        let night =
-            light_domain::backend::load_environment(&p.root.join(environment_ref(NIGHT_ENVIRONMENT).source_rel()));
-        assert_eq!(night.unwrap(), night_environment(), "{stale}");
-        let smooth = light_domain::backend::load_curve(&p.root.join(curve_ref(SMOOTH_CURVE).source_rel()));
-        assert_eq!(smooth.unwrap(), smooth_curve(), "{stale}");
+        let dir = tempfile::tempdir().unwrap();
+        write_sources(dir.path()).unwrap();
+        let refs = [texture_ref(TEXTURE), environment_ref(ENVIRONMENT), environment_ref(NIGHT_ENVIRONMENT)];
+        for r in refs.into_iter().chain([curve_ref(SMOOTH_CURVE)]) {
+            let read = |root: &Path| std::fs::read_to_string(root.join(r.source_rel())).unwrap();
+            assert_eq!(read(&p.root), read(dir.path()), "{r} is {stale}");
+        }
     }
 }

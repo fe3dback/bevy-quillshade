@@ -1,5 +1,10 @@
 //! Quillshade project layout (design §4, §4.1): `quillshade/project.ron`, per-domain source / output / module
 //! directories, and the generated umbrella crate location.
+//!
+//! Opening checks the project version first (D28, techdoc §4.4, ADR 0046 "Project version (D28)"): only a project
+//! at [`ProjectVersion::CURRENT`] opens; an older one asks for migration, a newer one is refused. A project without
+//! `project.ron` is new (CURRENT) only while `quillshade/` holds nothing else; beside sources it is v1
+//! ([`crate::version::missing_settings_version`], ADR 0046 "Missing `project.ron`").
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -7,6 +12,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::domain::DomainId;
+use crate::version::{ProjectVersion, missing_settings_version, probe_project_version};
 
 /// Source root inside the game project (`quillshade/<domain>/…`).
 pub const QUILLSHADE_DIR: &str = "quillshade";
@@ -33,7 +39,8 @@ pub struct DomainEntry {
 /// Project-level options stored in `quillshade/project.ron`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProjectSettings {
-    pub format_version: u32,
+    /// The global project version (D28, ADR 0046); v1 spelled this key `format_version`.
+    pub project_version: ProjectVersion,
     /// Add the generation date to autogen headers (breaks byte-for-byte determinism across days).
     #[serde(default)]
     pub header_date: bool,
@@ -44,7 +51,7 @@ pub struct ProjectSettings {
 
 impl Default for ProjectSettings {
     fn default() -> Self {
-        ProjectSettings { format_version: 1, header_date: false, domains: BTreeMap::new() }
+        ProjectSettings { project_version: ProjectVersion::CURRENT, header_date: false, domains: BTreeMap::new() }
     }
 }
 
@@ -62,6 +69,13 @@ pub enum OpenError {
     /// re-enable disabled domains and drop options (design §4.1).
     #[error("cannot read project settings `{}`: {message}", path.display())]
     Settings { path: PathBuf, message: String },
+    /// The project is at an older project version than this build (`to` = [`ProjectVersion::CURRENT`]): the
+    /// Migration Tool upgrades it (techdoc §4.4).
+    #[error("project version {from} is older than this editor ({to}); migrate it first")]
+    NeedsMigration { from: ProjectVersion, to: ProjectVersion },
+    /// The project was written by a newer build (`supported` = [`ProjectVersion::CURRENT`]): refuse to open.
+    #[error("project version {found} is newer than this editor supports ({supported}); update the editor")]
+    TooNew { found: ProjectVersion, supported: ProjectVersion },
 }
 
 /// How the generated `Cargo.toml` depends on Bevy (decision 0019).
@@ -106,7 +120,8 @@ impl Project {
     }
 
     /// Sets up a game crate as a project ("New project" in the editor): `root` must contain `Cargo.toml`;
-    /// `assets/` and `quillshade/` (with default settings) are created if missing.
+    /// `assets/` and `quillshade/` (with default settings) are created if missing. Opens first, so a project that is
+    /// not at [`ProjectVersion::CURRENT`] (also a legacy one without `project.ron`) is refused and never stamped.
     pub fn create(root: impl AsRef<Path>) -> Result<Project, OpenError> {
         let root = root.as_ref();
         let io = |e| OpenError::Io(root.to_path_buf(), e);
@@ -155,7 +170,9 @@ impl Project {
         p.strip_prefix(&self.root).unwrap_or(p).to_string_lossy().replace('\\', "/")
     }
 
-    /// Creates `quillshade/` and a default `project.ron` if missing.
+    /// Creates `quillshade/` and `project.ron` (from [`Project::settings`]) if missing. The settings are at
+    /// [`ProjectVersion::CURRENT`]: [`Project::open`] refuses every other project, including a legacy layout without
+    /// `project.ron` (ADR 0046), so this never stamps an old project current.
     pub fn ensure_layout(&self) -> std::io::Result<()> {
         std::fs::create_dir_all(self.quillshade_dir())?;
         let path = self.settings_path();
@@ -216,13 +233,27 @@ impl Project {
     }
 }
 
-/// Reads `project.ron`: a missing file means defaults, an unreadable or malformed one is an error.
+/// Reads `project.ron` at `path` (`quillshade/project.ron`): an unreadable or malformed one, or one without a
+/// version key, is [`OpenError::Settings`]. The version is probed before the full parse (ADR 0046): an older project
+/// is [`OpenError::NeedsMigration`], a newer one [`OpenError::TooNew`]. A missing file takes its version from what
+/// `quillshade/` holds ([`missing_settings_version`]): defaults for a new project, `NeedsMigration` from v1 beside
+/// sources.
 pub fn read_settings(path: &Path) -> Result<ProjectSettings, OpenError> {
     let err = |message: String| OpenError::Settings { path: path.to_path_buf(), message };
-    match std::fs::read_to_string(path) {
-        Ok(text) => ron::from_str(&text).map_err(|e| err(e.to_string())),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(ProjectSettings::default()),
-        Err(e) => Err(err(e.to_string())),
+    let (version, text) = match std::fs::read_to_string(path) {
+        Ok(text) => (probe_project_version(&text).map_err(|e| err(e.to_string()))?, Some(text)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            (missing_settings_version(path.parent().unwrap_or(Path::new(""))), None)
+        }
+        Err(e) => return Err(err(e.to_string())),
+    };
+    match version.cmp(&ProjectVersion::CURRENT) {
+        std::cmp::Ordering::Less => Err(OpenError::NeedsMigration { from: version, to: ProjectVersion::CURRENT }),
+        std::cmp::Ordering::Greater => Err(OpenError::TooNew { found: version, supported: ProjectVersion::CURRENT }),
+        std::cmp::Ordering::Equal => match text {
+            Some(text) => ron::from_str(&text).map_err(|e| err(e.to_string())),
+            None => Ok(ProjectSettings::default()),
+        },
     }
 }
 
@@ -233,8 +264,9 @@ pub fn save_settings(project: &Project, settings: &ProjectSettings) -> std::io::
     crate::writer::write_atomic(&project.settings_path(), settings_text(settings)?)
 }
 
-/// `project.ron`'s text: struct names, 2-space indent, `\n` line ends, a final newline.
-fn settings_text(settings: &ProjectSettings) -> std::io::Result<String> {
+/// `project.ron`'s canonical text: struct names, 2-space indent, `\n` line ends, a final newline. Shared with the
+/// project migrator (`project_migrate`, ADR 0046), which rewrites `project.ron` in exactly this format.
+pub fn settings_text(settings: &ProjectSettings) -> std::io::Result<String> {
     let cfg = ron::ser::PrettyConfig::new().struct_names(true).indentor("  ".to_string()).new_line("\n".to_string());
     Ok(ron::ser::to_string_pretty(settings, cfg).map_err(std::io::Error::other)? + "\n")
 }
@@ -319,10 +351,11 @@ mod tests {
         std::fs::create_dir(dir.path().join("quillshade")).unwrap();
         std::fs::write(
             dir.path().join("quillshade/project.ron"),
-            "(format_version: 1, header_date: true, domains: {\"light\": (enabled: false), \"nope\": (enabled: false)})",
+            "(project_version: 3, header_date: true, domains: {\"light\": (enabled: false), \"nope\": (enabled: false)})",
         )
         .unwrap();
         let p = Project::open(dir.path()).unwrap();
+        assert_eq!(p.settings.project_version, ProjectVersion::CURRENT);
         assert!(p.settings.header_date);
         assert!(!p.domain_enabled(DomainId::new("light")));
         assert!(p.domain_enabled(DomainId::new("material")));
@@ -333,8 +366,121 @@ mod tests {
         let dir = game("[package]\nname = \"g\"\n");
         let p = Project::open(dir.path()).unwrap();
         assert_eq!(p.settings, ProjectSettings::default());
-        assert_eq!(p.settings.format_version, 1);
+        assert_eq!(p.settings.project_version, ProjectVersion::CURRENT);
         assert!(!p.settings.header_date);
+    }
+
+    /// A game with `quillshade/project.ron` holding `text`.
+    fn game_with_settings(text: &str) -> tempfile::TempDir {
+        let dir = game("[package]\nname = \"g\"\n");
+        std::fs::create_dir(dir.path().join("quillshade")).unwrap();
+        std::fs::write(dir.path().join("quillshade/project.ron"), text).unwrap();
+        dir
+    }
+
+    #[test]
+    fn old_project_needs_migration() {
+        // v1 spells the key `format_version`.
+        let dir = game_with_settings("ProjectSettings(format_version: 1, header_date: true)\n");
+        let err = Project::open(dir.path()).unwrap_err();
+        assert!(
+            matches!(err, OpenError::NeedsMigration { from: ProjectVersion(1), to: ProjectVersion::CURRENT }),
+            "{err}"
+        );
+        let text = err.to_string();
+        assert_eq!(text, "project version v1 is older than this editor (v3); migrate it first");
+        // The new key with an old number is old too; "New project" refuses as well and leaves the file alone.
+        let dir = game_with_settings("ProjectSettings(project_version: 1)\n");
+        let err = Project::open(dir.path()).unwrap_err();
+        assert!(matches!(err, OpenError::NeedsMigration { from: ProjectVersion(1), .. }), "{err}");
+        assert!(matches!(Project::create(dir.path()), Err(OpenError::NeedsMigration { .. })));
+        let kept = std::fs::read_to_string(dir.path().join("quillshade/project.ron")).unwrap();
+        assert_eq!(kept, "ProjectSettings(project_version: 1)\n");
+    }
+
+    /// ADR 0046 "Missing `project.ron`": sources without `project.ron` are a v1 project; opening, "New project" and
+    /// the watcher refuse it and write nothing (the project migrator creates the file).
+    #[test]
+    fn legacy_layout_without_project_ron_needs_migration() {
+        let dir = game("[package]\nname = \"g\"\n");
+        let source = dir.path().join("quillshade/material/rock.material.ron");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::write(&source, "()").unwrap();
+        let v1 = |r: Result<_, OpenError>| {
+            matches!(r, Err(OpenError::NeedsMigration { from: ProjectVersion::FIRST, to: ProjectVersion::CURRENT }))
+        };
+        assert!(v1(Project::open(dir.path()).map(|_| ())));
+        assert!(v1(Project::create(dir.path()).map(|_| ())));
+        assert!(v1(read_settings(&dir.path().join("quillshade/project.ron")).map(|_| ())));
+        assert!(!dir.path().join("quillshade/project.ron").exists(), "never stamped current");
+        // Deleting `project.ron` of an open project with sources: the watcher keeps the old settings.
+        let dir = game("[package]\nname = \"g\"\n");
+        let mut p = Project::create(dir.path()).unwrap();
+        std::fs::write(p.settings_path(), "(project_version: 3, header_date: true)").unwrap();
+        p.reload_settings().unwrap();
+        std::fs::create_dir(p.domain_dir(DomainId::new("light"))).unwrap();
+        std::fs::remove_file(p.settings_path()).unwrap();
+        assert!(v1(p.reload_settings()));
+        assert!(p.settings.header_date);
+    }
+
+    #[test]
+    fn empty_or_missing_quillshade_is_a_new_project() {
+        // No `quillshade/`, an empty one, or one with only hidden entries: a new project at CURRENT.
+        let dir = game("[package]\nname = \"g\"\n");
+        assert_eq!(Project::open(dir.path()).unwrap().settings, ProjectSettings::default());
+        let q = dir.path().join("quillshade");
+        std::fs::create_dir(&q).unwrap();
+        assert_eq!(Project::open(dir.path()).unwrap().settings, ProjectSettings::default());
+        std::fs::write(q.join(".gitignore"), "").unwrap();
+        std::fs::create_dir(q.join(".nodes")).unwrap();
+        assert_eq!(Project::open(dir.path()).unwrap().settings, ProjectSettings::default());
+        // "New project" still writes CURRENT.
+        let p = Project::create(dir.path()).unwrap();
+        let text = std::fs::read_to_string(p.settings_path()).unwrap();
+        assert_eq!(text, "ProjectSettings(\n  project_version: 3,\n  header_date: false,\n)\n");
+        // Once written, sources beside it are an ordinary current project.
+        std::fs::create_dir(p.domain_dir(DomainId::new("material"))).unwrap();
+        assert_eq!(Project::open(dir.path()).unwrap().settings.project_version, ProjectVersion::CURRENT);
+    }
+
+    #[test]
+    fn newer_project_is_refused() {
+        let dir = game_with_settings("ProjectSettings(project_version: 4, some_future_option: true)\n");
+        let err = Project::open(dir.path()).unwrap_err();
+        assert!(
+            matches!(err, OpenError::TooNew { found: ProjectVersion(4), supported: ProjectVersion::CURRENT }),
+            "{err}"
+        );
+        assert_eq!(err.to_string(), "project version v4 is newer than this editor supports (v3); update the editor");
+    }
+
+    #[test]
+    fn both_or_no_version_key_is_a_settings_error() {
+        let dir = game_with_settings("ProjectSettings(format_version: 1, project_version: 2)\n");
+        let err = Project::open(dir.path()).unwrap_err();
+        assert!(matches!(&err, OpenError::Settings { .. }), "{err}");
+        assert!(err.to_string().contains("format_version") && !err.to_string().contains('\n'), "{err}");
+        let dir = game_with_settings("ProjectSettings(header_date: true)\n");
+        let err = Project::open(dir.path()).unwrap_err();
+        assert!(matches!(&err, OpenError::Settings { .. }), "{err}");
+        assert!(err.to_string().contains("project_version"), "{err}");
+    }
+
+    /// ADR 0046: only v1 is spelled `format_version`, and versions start at 1. `format_version: 2` or
+    /// `project_version: 0` is a settings error with a clear message, never an open (or a migration) as some version.
+    #[test]
+    fn impossible_versions_are_a_settings_error() {
+        for (text, needle) in [
+            ("ProjectSettings(format_version: 2)\n", "`format_version: 2` is not a project version"),
+            ("ProjectSettings(format_version: 3, header_date: true)\n", "only v1 is spelled `format_version`"),
+            ("ProjectSettings(project_version: 0)\n", "versions start at 1"),
+        ] {
+            let dir = game_with_settings(text);
+            let err = Project::open(dir.path()).unwrap_err();
+            assert!(matches!(&err, OpenError::Settings { .. }), "{text}: {err}");
+            assert!(err.to_string().contains(needle) && !err.to_string().contains('\n'), "{text}: {err}");
+        }
     }
 
     #[test]
@@ -342,25 +488,34 @@ mod tests {
         let dir = game("[package]\nname = \"g\"\n");
         std::fs::create_dir(dir.path().join("quillshade")).unwrap();
         let path = dir.path().join("quillshade/project.ron");
-        std::fs::write(&path, "(format_version: 1, header_date: tru)").unwrap();
+        std::fs::write(&path, "(project_version: 3, header_date: tru)").unwrap();
         let err = Project::open(dir.path()).unwrap_err();
         assert!(matches!(&err, OpenError::Settings { path, .. } if path.ends_with("quillshade/project.ron")), "{err}");
         let text = err.to_string();
         assert!(text.contains("project.ron") && !text.contains('\n'), "{text}");
         // "New project" on such a directory fails too and leaves the file alone.
         assert!(matches!(Project::create(dir.path()), Err(OpenError::Settings { .. })));
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "(format_version: 1, header_date: tru)");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "(project_version: 3, header_date: tru)");
+        // A document the probe cannot read at all is a settings error as well.
+        std::fs::write(&path, "(project_version: 3, header_date: ").unwrap();
+        assert!(matches!(Project::open(dir.path()), Err(OpenError::Settings { .. })));
     }
 
     #[test]
     fn reload_settings_keeps_the_old_ones_on_error() {
         let dir = game("[package]\nname = \"g\"\n");
         let mut p = Project::create(dir.path()).unwrap();
-        std::fs::write(p.settings_path(), "(format_version: 1, header_date: true)").unwrap();
+        std::fs::write(p.settings_path(), "(project_version: 3, header_date: true)").unwrap();
         p.reload_settings().unwrap();
         assert!(p.settings.header_date);
-        std::fs::write(p.settings_path(), "(format_version: 1, header_date: ").unwrap();
+        std::fs::write(p.settings_path(), "(project_version: 3, header_date: ").unwrap();
         assert!(matches!(p.reload_settings(), Err(OpenError::Settings { .. })));
+        assert!(p.settings.header_date);
+        std::fs::write(p.settings_path(), "(format_version: 1, header_date: false)").unwrap();
+        assert!(matches!(p.reload_settings(), Err(OpenError::NeedsMigration { from: ProjectVersion(1), .. })));
+        assert!(p.settings.header_date);
+        std::fs::write(p.settings_path(), "(project_version: 4)").unwrap();
+        assert!(matches!(p.reload_settings(), Err(OpenError::TooNew { found: ProjectVersion(4), .. })));
         assert!(p.settings.header_date);
         std::fs::remove_file(p.settings_path()).unwrap();
         p.reload_settings().unwrap();
@@ -388,14 +543,14 @@ mod tests {
         let p = Project::create(dir.path()).unwrap();
         assert!(p.assets_dir().is_dir() && p.quillshade_dir().is_dir() && p.settings_path().is_file());
         let text = std::fs::read_to_string(p.settings_path()).unwrap();
-        assert!(text.starts_with("ProjectSettings(\n  format_version: 1,\n"), "{text}");
-        assert!(!text.contains('\r'), "{text}");
+        assert_eq!(text, "ProjectSettings(\n  project_version: 3,\n  header_date: false,\n)\n");
+        assert_eq!(text, settings_text(&ProjectSettings::default()).unwrap());
         assert_eq!(Project::open(dir.path()).unwrap().settings, p.settings);
         // An existing (hand-edited) file is never rewritten.
-        std::fs::write(p.settings_path(), "ProjectSettings(format_version: 1, header_date: true)\n").unwrap();
+        std::fs::write(p.settings_path(), "ProjectSettings(project_version: 3, header_date: true)\n").unwrap();
         Project::create(dir.path()).unwrap();
         let kept = std::fs::read_to_string(p.settings_path()).unwrap();
-        assert_eq!(kept, "ProjectSettings(format_version: 1, header_date: true)\n");
+        assert_eq!(kept, "ProjectSettings(project_version: 3, header_date: true)\n");
     }
 
     #[test]
@@ -407,7 +562,7 @@ mod tests {
         save_settings(&p, &settings).unwrap();
         assert_eq!(read_settings(&p.settings_path()).unwrap(), settings);
         let text = std::fs::read_to_string(p.settings_path()).unwrap();
-        assert!(text.starts_with("ProjectSettings(\n  format_version: 1,\n  header_date: true,\n"), "{text}");
+        assert!(text.starts_with("ProjectSettings(\n  project_version: 3,\n  header_date: true,\n"), "{text}");
         assert!(text.contains("\n    \"material\": DomainEntry(\n      enabled: false,\n"), "{text}");
         assert!(text.ends_with(")\n") && !text.contains('\r'), "{text}");
         let leftovers = std::fs::read_dir(p.quillshade_dir()).unwrap().count();

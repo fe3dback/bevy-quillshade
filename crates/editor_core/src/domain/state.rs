@@ -4,7 +4,7 @@ use std::any::Any;
 use std::path::PathBuf;
 
 use crate::dynval::Payload;
-use project_core::{AssetRef, Diagnostic, DomainId};
+use project_core::{AssetRef, AssetUuid, Diagnostic, DomainId};
 
 use super::TreeAsset;
 use crate::state::editor::Editor;
@@ -80,22 +80,33 @@ pub trait DomainState: DomainHooksFor + Any + Send + Sync {
         Self: Sized,
     {
     }
+    /// Another domain saved assets these assets of the domain (transitively) refer to (ADR 0047 §10, techdoc §4.3):
+    /// regenerate what they generate. Called after the saving domains' [`DomainState::after_save`], once per save
+    /// operation, with the domain's affected assets in path order (see [`Editor::regenerate_affected_by`]). By default
+    /// everything ([`DomainState::generate`]).
+    fn regenerate_affected(editor: &mut Editor, _affected: &[AssetRef])
+    where
+        Self: Sized,
+    {
+        Self::generate(editor);
+    }
     /// The question of the Delete dialog for the domain's asset `r` (what goes with it); `None`: "Delete <file>?".
     fn delete_message(&self, _editor: &Editor, _r: &AssetRef) -> Option<String> {
         None
     }
-    /// Renames / moves the file of the domain's asset `r` to the asset path `new_path` (rewriting what refers to it on
-    /// disk); the renamed asset, or why it failed. Core then rescans, lets the open tabs follow, logs the rename and
-    /// calls [`DomainState::renamed`]. By default the file is moved, nothing else (design §14.4,
-    /// [`crate::state::kinds::rename_file`]).
+    /// Renames / moves the file of the domain's asset `r` to the asset path `new_path`; the renamed asset, or why it
+    /// failed. No reference to it is rewritten: references store its UUID (ADR 0047 §13). Core then rescans, lets the
+    /// open tabs follow, logs the rename and calls [`DomainState::renamed`]. By default the file is moved, nothing else
+    /// (design §14.4, [`crate::state::kinds::rename_file`]).
     fn rename_file(editor: &mut Editor, r: &AssetRef, new_path: &str) -> Result<AssetRef, String>
     where
         Self: Sized,
     {
         crate::state::kinds::rename_file(editor, r, new_path)
     }
-    /// The domain's asset `from` is now `to` ([`DomainState::rename_file`]): what of the domain refers to it follows
-    /// (open documents; core already renamed the navigation history's keys), its output regenerates.
+    /// The domain's asset `from` is now `to` ([`DomainState::rename_file`]): what the domain keeps by path follows
+    /// (e.g. generated-file tabs; core already renamed the open documents and the navigation history's keys), its
+    /// output regenerates.
     fn renamed(_editor: &mut Editor, _from: &AssetRef, _to: &AssetRef)
     where
         Self: Sized,
@@ -121,6 +132,16 @@ pub trait DomainState: DomainHooksFor + Any + Send + Sync {
     where
         Self: Sized,
     {
+    }
+    /// Gives the file of the domain's asset `r` the asset UUID `id` (the UUID quick fixes Regenerate UUID and Assign
+    /// UUID, ADR 0047 §11, §16); why it failed. Core saved an unsaved document of the asset before and rescans after.
+    /// By default the root `id` line is rewritten in place and nothing else changes; a file without one is refused
+    /// ([`crate::state::kinds::set_asset_uuid`]).
+    fn set_asset_uuid(editor: &mut Editor, r: &AssetRef, id: AssetUuid) -> Result<(), String>
+    where
+        Self: Sized,
+    {
+        crate::state::kinds::set_asset_uuid(editor, r, id)
     }
     /// A click on one of the domain's diagnostics (a console/logs row, the editor statusbar's count): open its asset
     /// and show where it is.
@@ -148,11 +169,13 @@ pub struct DomainHooks {
     before_close: fn(&mut Editor, usize),
     rescan: fn(&mut Editor),
     generate: fn(&mut Editor),
+    regenerate_affected: fn(&mut Editor, &[AssetRef]),
     rename_file: fn(&mut Editor, &AssetRef, &str) -> Result<AssetRef, String>,
     renamed: fn(&mut Editor, &AssetRef, &AssetRef),
     before_delete: fn(&mut Editor, &AssetRef),
     delete_file: fn(&mut Editor, &AssetRef) -> Result<(), String>,
     deleted: fn(&mut Editor, &AssetRef),
+    set_asset_uuid: fn(&mut Editor, &AssetRef, AssetUuid) -> Result<(), String>,
     focus_diagnostic: fn(&mut Editor, &Diagnostic),
     files_changed: fn(&mut Editor, &[PathBuf]),
 }
@@ -182,6 +205,10 @@ impl DomainHooks {
         (self.generate)(editor);
     }
 
+    pub fn regenerate_affected(self, editor: &mut Editor, affected: &[AssetRef]) {
+        (self.regenerate_affected)(editor, affected);
+    }
+
     pub fn rename_file(self, editor: &mut Editor, r: &AssetRef, new_path: &str) -> Result<AssetRef, String> {
         (self.rename_file)(editor, r, new_path)
     }
@@ -200,6 +227,10 @@ impl DomainHooks {
 
     pub fn deleted(self, editor: &mut Editor, r: &AssetRef) {
         (self.deleted)(editor, r);
+    }
+
+    pub fn set_asset_uuid(self, editor: &mut Editor, r: &AssetRef, id: AssetUuid) -> Result<(), String> {
+        (self.set_asset_uuid)(editor, r, id)
     }
 
     pub fn focus_diagnostic(self, editor: &mut Editor, diag: &Diagnostic) {
@@ -225,11 +256,13 @@ impl<T: DomainState> DomainHooksFor for T {
             before_close: T::before_close,
             rescan: T::rescan,
             generate: T::generate,
+            regenerate_affected: T::regenerate_affected,
             rename_file: T::rename_file,
             renamed: T::renamed,
             before_delete: T::before_delete,
             delete_file: T::delete_file,
             deleted: T::deleted,
+            set_asset_uuid: T::set_asset_uuid,
             focus_diagnostic: T::focus_diagnostic,
             files_changed: T::files_changed,
         }

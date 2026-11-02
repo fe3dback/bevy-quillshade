@@ -87,7 +87,8 @@ pub(crate) fn select_w(
 }
 
 /// Select of `(stored value, label)` choices with a leading `(none)` (= empty string): named route declarations
-/// (node ids), curve assets (paths), global constants (names), Texture assets, gradient collections (paths).
+/// (node ids), global constants (ids), curve assets, constant tables, Texture assets and gradient collections (their
+/// UUIDs, labelled by path; ADR 0047 §4).
 fn keyed_select(target: PropKey, choices: &[(String, String)], current: &str) -> Box<dyn Scene> {
     let options: Vec<String> =
         std::iter::once("(none)".to_string()).chain(choices.iter().map(|r| r.1.clone())).collect();

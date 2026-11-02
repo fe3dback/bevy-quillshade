@@ -2,7 +2,7 @@
 
 use shader_graph_core::attributes::{PBR_STRUCT, pbr_fields};
 use shader_graph_core::consts::NoConsts;
-use shader_graph_core::ir::{WPO_PIN, build_ir};
+use shader_graph_core::ir::{WORLD_NORMAL_PIN, WPO_PIN, build_ir};
 use shader_graph_core::model::{
     Asset, AssetKind, BlendMode, MaterialKind, Node, PbrOutputMode, PbrSettings, Shading, UnlitSettings,
 };
@@ -215,7 +215,12 @@ fn output_sig(settings: PbrSettings) -> shader_graph_core::Signature {
 fn wrapped_signature() {
     let sig = output_sig(wrapped());
     let ids: Vec<&str> = sig.inputs.iter().map(|p| p.id.as_str()).collect();
-    assert_eq!(ids, ["attributes", WPO_PIN]);
+    assert_eq!(ids, ["attributes", WPO_PIN, WORLD_NORMAL_PIN]);
+    assert_eq!(sig.inputs[2].label, "World Normal");
+    assert!(!sig.inputs[2].inactive);
+    let unlit = output_sig(PbrSettings { shading: Shading::Unlit, ..wrapped() });
+    let inactive: Vec<&str> = unlit.inputs.iter().filter(|p| p.inactive).map(|p| p.id.as_str()).collect();
+    assert_eq!(inactive, [WORLD_NORMAL_PIN]);
     assert_eq!(sig.inputs[0].ty, PinType::MaterialAttributesPbr);
     assert_eq!(sig.inputs[0].label, "Material Attributes");
 }
@@ -236,12 +241,16 @@ fn default_mode_unchanged() {
             ("opacity_mask", true),
             ("normal", false),
             (WPO_PIN, false),
+            (WORLD_NORMAL_PIN, false),
             ("ambient_occlusion", false),
         ]
     );
     let unlit_mask = output_sig(PbrSettings { shading: Shading::Unlit, blend: BlendMode::Mask, ..Default::default() });
     let inactive: Vec<&str> = unlit_mask.inputs.iter().filter(|p| p.inactive).map(|p| p.id.as_str()).collect();
-    assert_eq!(inactive, ["metallic", "specular", "roughness", "opacity", "normal", "ambient_occlusion"]);
+    assert_eq!(
+        inactive,
+        ["metallic", "specular", "roughness", "opacity", "normal", WORLD_NORMAL_PIN, "ambient_occlusion"]
+    );
 }
 
 fn wrapped_graph(settings: PbrSettings) -> Asset {
@@ -262,7 +271,7 @@ fn wrapped_expands_active_fields() {
     for (k, v) in &ir.main.outputs {
         assert_eq!(v, &format!("n_make_attributes.{k}"));
     }
-    assert!(!diags.iter().any(|d| d.code == Code::W103), "{diags:?}");
+    assert!(!diags.iter().any(|d| d.code == Code::I103), "{diags:?}");
     assert!(ir.uses_normal);
 }
 
@@ -290,6 +299,39 @@ fn wrapped_wpo_in_vertex() {
     let (ir, _) = build(&a);
     assert!(ir.vertex.as_ref().expect("vertex stage").outputs.contains_key(WPO_PIN));
     assert!(!ir.main.outputs.contains_key(WPO_PIN));
+}
+
+/// World Normal (both output modes): a vertex-stage output with I103 on the pin, never a fragment output.
+#[test]
+fn world_normal_in_vertex() {
+    for settings in [PbrSettings::default(), wrapped()] {
+        let mut a = pbr(settings);
+        let out = node(&mut a, "out", "output::Pbr3d", &[]);
+        let v = node(&mut a, "v", "stdlib::Constant3Vector", &[("value", Value::Float3([0.0, 1.0, 0.0]))]);
+        a.connect((&v, "out"), (&out, WORLD_NORMAL_PIN));
+        let (ir, diags) = build(&a);
+        let vertex = ir.vertex.as_ref().expect("vertex stage");
+        assert_eq!(vertex.outputs.keys().collect::<Vec<_>>(), [WORLD_NORMAL_PIN], "{settings:?}");
+        assert!(!ir.main.outputs.contains_key(WORLD_NORMAL_PIN));
+        let info: Vec<_> = diags.iter().filter(|d| d.code == Code::I103).collect();
+        assert_eq!(info.len(), 1, "{diags:?}");
+        assert_eq!(info[0].node.as_deref(), Some("out"));
+        assert_eq!(info[0].pin.as_deref(), Some(WORLD_NORMAL_PIN));
+        assert!(info[0].message.contains("ATTRIBUTE_NORMAL"), "{}", info[0].message);
+    }
+}
+
+/// Unlit shading: World Normal is inactive (W102), no vertex stage.
+#[test]
+fn world_normal_inactive_when_unlit() {
+    let mut a = pbr(PbrSettings { shading: Shading::Unlit, ..Default::default() });
+    let out = node(&mut a, "out", "output::Pbr3d", &[]);
+    let v = node(&mut a, "v", "stdlib::Constant3Vector", &[]);
+    a.connect((&v, "out"), (&out, WORLD_NORMAL_PIN));
+    let (ir, diags) = build(&a);
+    assert!(ir.vertex.is_none());
+    assert!(diags.iter().any(|d| d.code == Code::W102 && d.pin.as_deref() == Some(WORLD_NORMAL_PIN)), "{diags:?}");
+    assert!(!diags.iter().any(|d| d.code == Code::I103), "{diags:?}");
 }
 
 /// `mask` and `angle` both used: `mask * angle → color`; `normal` optionally connected.

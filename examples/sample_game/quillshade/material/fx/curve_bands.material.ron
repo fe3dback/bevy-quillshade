@@ -1,5 +1,6 @@
 Asset(
-  format_version: 1,
+  format_version: 2,
+  id: "019b76da-a800-7c36-ada5-5de79099892e",
   kind: Material(Unlit3d(UnlitSettings(
     blend: Opaque,
     two_sided: false,
@@ -48,14 +49,14 @@ Asset(
       kind: "stdlib::SampleCurve",
       pos: (770.0, 135.0),
       params: {
-        "curve": Str("common/pulse"),
+        "curve": Str("019b76da-a800-783e-be72-971715772890"), // common/pulse
       },
     ),
     "n09": Node(
       kind: "stdlib::SampleCurve",
       pos: (770.0, -67.5),
       params: {
-        "curve": Str("common/steps"),
+        "curve": Str("019b76da-a800-7294-83e9-c69a51f99e5e"), // common/steps
         "type": Str("Simple"),
       },
     ),

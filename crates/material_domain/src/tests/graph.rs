@@ -261,7 +261,7 @@ fn output_mode_switch_prunes_edges_and_undoes() {
 
     set_output_mode(&mut e, "Wrapped");
     assert_eq!(output_mode(&e), PbrOutputMode::Wrapped);
-    assert!(pins_into(&e, &out).iter().all(|p| p == WPO_PIN), "{:?}", pins_into(&e, &out));
+    assert!(pins_into(&e, &out).iter().all(|p| p == WPO_PIN || p == WORLD_NORMAL_PIN), "{:?}", pins_into(&e, &out));
     assert!(e.doc().unwrap().asset.nodes[&out].inputs.is_empty());
     e.apply(GraphEdit::Connect { from: (make, "attributes".into()), to: (out.clone(), "attributes".into()) });
     assert!(pins_into(&e, &out).contains("attributes"));
@@ -280,6 +280,7 @@ fn output_mode_switch_prunes_edges_and_undoes() {
     assert_eq!(e.doc().unwrap().asset.nodes[&out].inputs.get("specular"), Some(&Value::Float(0.3)));
 }
 
+/// The vertex-stage pins (World Position Offset, World Normal) exist in both output modes: their wires survive.
 #[test]
 fn wpo_edge_survives_mode_switch() {
     let (_dir, mut e) = project();
@@ -287,15 +288,21 @@ fn wpo_edge_survives_mode_switch() {
     let out = output_node(&e);
     let v3 = add(&mut e, "stdlib::Constant3Vector");
     e.apply(GraphEdit::Connect { from: (v3.clone(), "out".into()), to: (out.clone(), WPO_PIN.into()) });
+    e.apply(GraphEdit::Connect { from: (v3.clone(), "out".into()), to: (out.clone(), WORLD_NORMAL_PIN.into()) });
     set_output_mode(&mut e, "Wrapped");
     assert!(pins_into(&e, &out).contains(WPO_PIN));
+    assert!(pins_into(&e, &out).contains(WORLD_NORMAL_PIN));
     set_output_mode(&mut e, "Default");
     assert!(pins_into(&e, &out).contains(WPO_PIN));
+    assert!(pins_into(&e, &out).contains(WORLD_NORMAL_PIN));
     assert_eq!(shown(&e, &GraphProp::OutputMode), Some(Value::Str("Default".into())));
 }
 
+/// The first node of the active graph whose kind, as the canvas shows it (`function::<path>`, ADR 0047 §4), is
+/// `kind`.
 pub(super) fn node_of(e: &Editor, kind: &str) -> NodeId {
-    e.doc().unwrap().asset.nodes.iter().find(|(_, n)| n.kind == kind).unwrap().0.clone()
+    let view = e.view_of(e.doc().unwrap());
+    view.nodes.iter().find(|(_, n)| n.kind == kind).unwrap().0.clone()
 }
 
 pub(super) fn active_asset(e: &Editor) -> AssetId {
@@ -311,7 +318,7 @@ fn referenced_asset_resolves_targets() {
     assert_eq!(e.referenced_asset(&call), Some(AssetId::new(AssetType::Function, "common/wet_mask")));
     e.apply(Action::OpenAsset(AssetId::new(AssetType::Material, "fx/curve_bands").to_ref()));
     let curve = node_of(&e, "stdlib::SampleCurve");
-    let path = e.doc().unwrap().asset.nodes[&curve].params["curve"].as_str().to_string();
+    let path = param_of(&e, &curve, "curve").unwrap().as_str().to_string();
     assert_eq!(e.referenced_asset(&curve), Some(AssetId::new(AssetType::Curve, path)));
     e.apply(Action::OpenAsset(AssetId::new(AssetType::Material, "fx/global_tint").to_ref()));
     let global = node_of(&e, "stdlib::GlobalConstF32");
@@ -601,8 +608,8 @@ fn preview_suffix_keeps_shared_names_apart() {
     let (_dir, mut e) = project();
     let rock = AssetId::new(AssetType::Material, "env/rock_wet");
     let twin = AssetId::new(AssetType::Material, "props/rock_wet");
-    let asset = assets::load(e.project.as_ref().unwrap(), &rock).unwrap();
-    ops::save(e.project.as_ref().unwrap(), &twin, &asset).unwrap();
+    let mut asset = assets::load(e.project.as_ref().unwrap(), &rock).unwrap();
+    ops::save(e.project.as_ref().unwrap(), &twin, &mut asset).unwrap();
     e.rescan();
     let lerp = add_lerp(&mut e);
     e.apply(MaterialAction::TogglePreview(lerp));

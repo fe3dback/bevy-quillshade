@@ -212,7 +212,7 @@ fn create_empty(project: &Project, r: &AssetRef) -> io::Result<()> {
         let what = format!("`{}` already exists", r.source_rel());
         return Err(io::Error::new(io::ErrorKind::AlreadyExists, what));
     }
-    save(project, r, &TextureAsset::new(""))
+    save(project, r, &mut TextureAsset::new(""))
 }
 
 /// The active tab's Texture asset (or built-in texture) of `D` (`None` while another tab is active).
@@ -332,8 +332,10 @@ pub fn load(project: &Project, r: &AssetRef) -> Result<TextureAsset, String> {
     crate::load(&file(project, r))
 }
 
-/// Writes the Texture asset file of `r` ([`crate::save`]), creating `quillshade/` with its settings first.
-pub fn save(project: &Project, r: &AssetRef, texture: &TextureAsset) -> io::Result<()> {
+/// Writes the Texture asset file of `r` ([`crate::save`]), creating `quillshade/` with its settings first. The
+/// Texture asset gets its asset id first when it has none (ADR 0047 §6), so the caller keeps the id the file now has.
+pub fn save(project: &Project, r: &AssetRef, texture: &mut TextureAsset) -> io::Result<()> {
+    texture.ensure_id();
     project.ensure_layout()?;
     crate::save(&file(project, r), texture)
 }
@@ -380,7 +382,7 @@ pub fn try_create_for_file<D: TextureDomain>(e: &mut Editor, path: &str) -> Resu
         suffixes.iter().any(|&suffix| file(&project, &AssetRef { domain: D::DOMAIN, path: p.into(), suffix }).exists())
     };
     let r = AssetRef { domain: D::DOMAIN, path: new_texture_path_for_file(path, taken), suffix: D::SUFFIX };
-    create(&project, &r, &TextureAsset::new(path), &D::POLICY)?;
+    create(&project, &r, &mut TextureAsset::new(path), &D::POLICY)?;
     e.info(format!("Created {} for assets/{path}", r.source_rel()));
     e.rescan();
     // An image tab of the file offers the creation in its right sidebar.
@@ -390,7 +392,7 @@ pub fn try_create_for_file<D: TextureDomain>(e: &mut Editor, path: &str) -> Resu
 }
 
 /// Writes the new Texture asset `r` (which must not exist yet) for `texture`, whose image path `policy` must take.
-fn create(project: &Project, r: &AssetRef, texture: &TextureAsset, policy: &TexturePolicy) -> Result<(), String> {
+fn create(project: &Project, r: &AssetRef, texture: &mut TextureAsset, policy: &TexturePolicy) -> Result<(), String> {
     project_core::ident::check_path(&r.path)?;
     if file(project, r).exists() {
         return Err(format!("`{}` already exists", r.source_rel()));

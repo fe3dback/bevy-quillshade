@@ -31,6 +31,9 @@ use crate::ops::{Dialog, Editor, GraphProp, Link, MaterialAction, Submit};
 use crate::ui::input::NODE_HOTKEYS;
 use crate::ui::palette::{entries_for, pick_for};
 
+/// Tooltip of a palette entry of a user node or function whose file has no UUID yet (ADR 0047 §16).
+pub const NEEDS_UUID: &str = "needs a UUID (AE004)";
+
 /// Material's graph: materials and functions on the bevy_noodle canvas.
 pub struct MaterialGraph;
 
@@ -82,7 +85,9 @@ impl GraphDomain for MaterialGraph {
     /// of the node's value and of unconnected inputs, the previewed node's pulse (decision 0022).
     fn node_look(ctx: &GraphCtxRef, d: &Doc, id: &str) -> NodeLook {
         let m = ctx.editor.domains.material();
-        let asset = &d.asset;
+        // Kinds and reference values as paths (ADR 0047 §4).
+        let view = ctx.editor.view_of(d);
+        let asset = view.as_ref();
         let Some(n) = asset.nodes.get(id) else { return NodeLook::default() };
         let routes = route_declarations(asset, &m.registry);
         let def = m.registry.get(&n.kind);
@@ -153,11 +158,12 @@ impl GraphDomain for MaterialGraph {
         look
     }
 
-    /// The active graph's diagnostics by node; `W102` does not colour a pin label.
+    /// The active graph's diagnostics by node; `W102` does not colour a pin label, info diagnostics (`I103`) mark
+    /// nothing (spec §13).
     fn diagnostics(ctx: &GraphCtxRef, _d: &Doc) -> Vec<DiagMark> {
         let mut out = Vec::new();
         for (node, diags) in ctx.editor.node_diags() {
-            for diag in diags {
+            for diag in diags.iter().filter(|d| !d.is_info()) {
                 let pin = diag.pin.clone().filter(|_| diag.code != Code::W102);
                 out.push(DiagMark { node: node.clone(), pin, error: diag.is_error() });
             }
@@ -169,7 +175,7 @@ impl GraphDomain for MaterialGraph {
     fn can_connect(ctx: &GraphCtxRef, d: &Doc, from: &PinRef, to: &PinRef) -> Result<(), String> {
         let m = ctx.editor.domains.material();
         let error = connection_error(
-            &d.asset,
+            &ctx.editor.view_of(d),
             (&from.node, &from.pin),
             (&to.node, &to.pin),
             &m.registry,
@@ -222,7 +228,8 @@ impl GraphDomain for MaterialGraph {
     }
 
     /// [`entries_for`]; after a wire from an output the Named Route declaration wins ties (design §6.4), and picking
-    /// one opens its rename dialog.
+    /// one opens its rename dialog. A user node or function whose file has no UUID yet is listed disabled: a graph
+    /// can only reference it by its UUID (ADR 0047 §16, AE004).
     fn palette(ctx: &GraphCtxRef, _d: &Doc, link: Option<&PinRef>) -> Vec<PaletteEntry> {
         let link = link.map(link_of);
         let registry = &ctx.editor.domains.material().registry;
@@ -239,6 +246,7 @@ impl GraphDomain for MaterialGraph {
                     keywords: e.keywords,
                     description: e.description,
                     lead: from_output && route,
+                    disabled: ctx.editor.stored_kind(&entry.kind).is_none().then(|| NEEDS_UUID.to_string()),
                     pick: Arc::new(move |pos| pick_for(route, &entry, (pos.x, pos.y), link.clone())),
                 }
             })
@@ -277,7 +285,8 @@ impl GraphDomain for MaterialGraph {
     }
 
     fn previews(ctx: &GraphCtxRef, d: &Doc, node: &str) -> Vec<PreviewRow> {
-        let Some(n) = d.asset.nodes.get(node) else { return Vec::new() };
+        let view = ctx.editor.view_of(d);
+        let Some(n) = view.nodes.get(node) else { return Vec::new() };
         let def = ctx.editor.domains.material().registry.get(&n.kind);
         def.map(|def| crate::ui::node_preview::previews(def.as_ref(), &node.to_string())).unwrap_or_default()
     }

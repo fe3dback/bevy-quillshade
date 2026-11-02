@@ -1,37 +1,50 @@
+use super::consts_ops::ref_values;
 use super::*;
-use shader_graph_core::registry::{curve_refs, gradient_refs, texture_refs};
+use project_core::AssetUuid;
+use shader_graph_core::registry::{gradient_refs, texture_refs};
 
 /// Material's side of the core asset flows (rename, move, delete, focus a diagnostic).
 pub trait MaterialAssets {
     /// The Delete dialog's question for `r`: what goes with the asset (generated files, constants nodes read).
     fn material_delete_message(&self, r: &AssetRef) -> Option<String>;
 
-    /// Renames / moves `r`'s file: references to it in other assets are rewritten on disk ([`ops::rename`]).
+    /// Renames / moves `r`'s file ([`ops::rename`]): no other file changes, references store its UUID (ADR 0047 §13).
     fn material_rename_file(&mut self, r: &AssetRef, new_path: &str) -> Result<AssetRef, String>;
 
     /// Asset `from` is now `to` (core renamed the file, rescanned and let the open documents and the navigation
-    /// history follow): the statusbar's WESL line count follows, open graphs calling a renamed function or referring
-    /// to a renamed curve / Texture asset / gradient collection follow the rewrite, autogen regenerates.
+    /// history follow): the statusbar's WESL line count and the generated files' tabs follow, autogen regenerates.
+    /// Open graphs referring to it are left alone: they store its UUID and show its new path through the resolved
+    /// view (ADR 0047 §13); their D27 path comments follow on their next save.
     fn material_renamed(&mut self, from: &AssetRef, to: &AssetRef);
+
+    /// What a reference to `r` stores ([`ref_values`]: its UUID and path), kept for [`Self::material_deleted`]: the
+    /// index forgets the UUID when core rescans after the delete.
+    fn material_before_delete(&mut self, r: &AssetRef);
 
     /// Deletes `r`'s file: references to it in other assets are cleared on disk ([`ops::delete`]).
     fn material_delete_file(&mut self, r: &AssetRef) -> Result<(), String>;
 
     /// Asset `r` was deleted (core rescanned): open graphs referring to a deleted Texture asset / gradient collection /
-    /// constant table follow the rewrite, autogen regenerates.
+    /// constant table follow the clearing (matched by the values [`Self::material_before_delete`] kept), autogen
+    /// regenerates.
     fn material_deleted(&mut self, r: &AssetRef);
 
-    /// `ops::rename` / `ops::delete` rewrote the references to asset `target` (found by `refs`) on disk; open graph
-    /// documents follow: clean ones reload the rewritten file, dirty ones get the same `rewrite` as an edit (unsaved
+    /// `ops::delete` cleared the references naming the deleted asset (`names`, found by `refs`) on disk; open graph
+    /// documents follow: clean ones reload the rewritten file, dirty ones get the same `clear` as an edit (unsaved
     /// edits stay unsaved). Call after [`Self::rescan`].
-    fn follow_ref_rewrite(
+    fn follow_ref_clear(
         &mut self,
         refs: fn(&Asset, &Registry) -> Vec<(NodeId, String, String)>,
-        target: &str,
-        rewrite: impl Fn(&mut Asset, &Registry),
+        names: &[String],
+        clear: impl Fn(&mut Asset, &Registry),
     );
 
     fn show_file(&mut self, id: &AssetId, lang: Option<&'static str>);
+
+    /// Gives the file of `r` (any Material kind, user nodes included) the asset id `id` through its canonical writer
+    /// ([`ops::set_asset_uuid`], labelled by the editor's index; the UUID quick fixes, ADR 0047 §16). A rewritten user
+    /// node re-registers, so its UUID resolves at once.
+    fn material_set_asset_uuid(&mut self, r: &AssetRef, id: AssetUuid) -> Result<(), String>;
 
     /// Opens the asset of a diagnostic (a console/logs row, the editor statusbar's count) and selects its node
     /// (`MaterialState`'s `focus_diagnostic` hook).
@@ -82,40 +95,12 @@ impl MaterialAssets for Editor {
                 }
             }
         }
-        if id.ty == AssetType::Function {
-            let (old_kind, new_kind) =
-                (format!("{FUNCTION_PREFIX}{}", id.path), format!("{FUNCTION_PREFIX}{}", new_id.path));
-            for d in self.tabs.iter_mut().filter_map(Tab::get_mut::<Doc>) {
-                if !d.asset.nodes.values().any(|n| n.kind == old_kind) {
-                    continue;
-                }
-                if d.is_dirty() {
-                    d.edit(|a| {
-                        for n in a.nodes.values_mut().filter(|n| n.kind == old_kind) {
-                            n.kind = new_kind.clone();
-                        }
-                    });
-                } else if let Some(Ok(a)) = self.domains.material().disk.assets.get(&d.id) {
-                    d.reload(a.clone());
-                }
-            }
-        }
-        match id.ty {
-            AssetType::Curve => self.follow_ref_rewrite(curve_refs, &id.path, |a, r| {
-                ops::rename_curve_refs(a, r, &id.path, &new_id.path);
-            }),
-            AssetType::Texture => self.follow_ref_rewrite(texture_refs, &id.path, |a, r| {
-                ops::rename_texture_refs(a, r, &id.path, &new_id.path);
-            }),
-            AssetType::Gradients => self.follow_ref_rewrite(gradient_refs, &id.path, |a, r| {
-                ops::rename_gradient_refs(a, r, &id.path, &new_id.path);
-            }),
-            AssetType::Consts => self.follow_ref_rewrite(const_table_refs, &id.path, |a, r| {
-                ops::rename_const_table_refs(a, r, &id.path, &new_id.path);
-            }),
-            _ => {}
-        }
         self.regenerate();
+    }
+
+    fn material_before_delete(&mut self, r: &AssetRef) {
+        let names = AssetId::from_ref(r).map(|id| ref_values(&self.asset_index, id.ty, &id.path));
+        self.domains.material_mut().deleting = names.unwrap_or_default();
     }
 
     fn material_delete_file(&mut self, r: &AssetRef) -> Result<(), String> {
@@ -127,41 +112,51 @@ impl MaterialAssets for Editor {
 
     fn material_deleted(&mut self, r: &AssetRef) {
         let Some(id) = AssetId::from_ref(r) else { return };
-        let id = &id;
-        self.domains.material_mut().wesl_lines.remove(id);
+        let names = std::mem::take(&mut self.domains.material_mut().deleting);
+        let names = &names;
+        self.domains.material_mut().wesl_lines.remove(&id);
         match id.ty {
-            AssetType::Texture => self.follow_ref_rewrite(texture_refs, &id.path, |a, r| {
-                ops::clear_texture_refs(a, r, &id.path);
+            AssetType::Texture => self.follow_ref_clear(texture_refs, names, |a, r| {
+                ops::clear_texture_refs(a, r, names);
             }),
             // The slot parameters of the same nodes are zeroed too (gradient design §6).
-            AssetType::Gradients => self.follow_ref_rewrite(gradient_refs, &id.path, |a, r| {
-                ops::clear_gradient_refs(a, r, &id.path);
+            AssetType::Gradients => self.follow_ref_clear(gradient_refs, names, |a, r| {
+                ops::clear_gradient_refs(a, r, names);
             }),
-            AssetType::Consts => self.follow_ref_rewrite(const_table_refs, &id.path, |a, r| {
-                ops::clear_const_table_refs(a, r, &id.path);
+            AssetType::Consts => self.follow_ref_clear(const_table_refs, names, |a, r| {
+                ops::clear_const_table_refs(a, r, names);
             }),
             _ => {}
         }
         self.regenerate();
     }
 
-    fn follow_ref_rewrite(
+    fn follow_ref_clear(
         &mut self,
         refs: fn(&Asset, &Registry) -> Vec<(NodeId, String, String)>,
-        target: &str,
-        rewrite: impl Fn(&mut Asset, &Registry),
+        names: &[String],
+        clear: impl Fn(&mut Asset, &Registry),
     ) {
         let registry = &self.domains.material().registry;
         for d in self.tabs.iter_mut().filter_map(Tab::get_mut::<Doc>) {
-            if !refs(&d.asset, registry).iter().any(|r| r.2 == target) {
+            if !refs(&d.asset, registry).iter().any(|r| names.contains(&r.2)) {
                 continue;
             }
             if d.is_dirty() {
-                d.edit(|a| rewrite(a, registry));
+                d.edit(|a| clear(a, registry));
             } else if let Some(Ok(a)) = self.domains.material().disk.assets.get(&d.id) {
                 d.reload(a.clone());
             }
         }
+    }
+
+    fn material_set_asset_uuid(&mut self, r: &AssetRef, id: AssetUuid) -> Result<(), String> {
+        let project = self.project.clone().ok_or("no project is open")?;
+        ops::set_asset_uuid(&project, r, id, &self.asset_index).map_err(|e| e.to_string())?;
+        if r.suffix.is_empty() {
+            self.material_files_changed(&[project.root.join(r.source_rel())]);
+        }
+        Ok(())
     }
 
     fn show_file(&mut self, id: &AssetId, lang: Option<&'static str>) {

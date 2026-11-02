@@ -166,7 +166,7 @@ fn palette_named_route_declaration_opens_rename() {
 #[test]
 fn named_routes_in_the_editor() {
     let (_dir, mut e) = project();
-    e.apply(Action::OpenAsset(AssetId::new(AssetType::Material, "env/rock_wet").to_ref()));
+    e.apply(Action::OpenAsset(AssetId::new(AssetType::Material, "env/water").to_ref()));
     e.apply(MaterialAction::AddNode {
         kind: "stdlib::NamedRoute".into(),
         pos: (0.0, 0.0),

@@ -1050,7 +1050,9 @@ fn update_light_previews(world: &mut World) {
         world.get_resource::<Editor>().and_then(|editor| {
             if let Some(doc) = editor.active_doc::<EnvironmentDoc>() {
                 let handle = doc.preview_handle()?;
-                let env = doc.env.clone();
+                let mut env = doc.env.clone();
+                // A cube map stored by UUID shows the texture at its current path (ADR 0047 §4).
+                env.cubemap = env.cubemap.map(|c| super::state::cubemap_path(editor, &c).to_string());
                 let skybox_blend = PreviewSkyboxBlend::from_single(&env);
                 return handle.is_alive().then(|| (handle.id(), ENVIRONMENT_VIEW, env, skybox_blend));
             }
@@ -1211,6 +1213,8 @@ pub fn interpolate_environments(from: &Environment, to: &Environment, raw_t: f32
 
     Environment {
         format_version: ENVIRONMENT_FORMAT_VERSION,
+        // A blend of two environments is no asset.
+        id: project_core::AssetUuid::NIL,
         clear_color,
         cubemap,
         skybox_brightness,

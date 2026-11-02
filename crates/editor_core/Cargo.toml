@@ -18,6 +18,7 @@ resvg = { workspace = true }
 icon-rs = { workspace = true }
 rfd = { workspace = true }
 project_core = { workspace = true }
+project_migrate = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

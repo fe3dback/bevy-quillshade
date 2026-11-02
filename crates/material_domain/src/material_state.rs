@@ -46,6 +46,8 @@ pub struct MaterialState {
     /// [`Editor::project_generation`] the per-project fields belong to: a rescan after the project was opened or
     /// closed starts them over.
     pub(crate) loaded: u64,
+    /// What a reference to the asset being deleted stores (its UUID and path), from `before_delete` to `deleted`.
+    pub(crate) deleting: Vec<String>,
 }
 
 impl Default for MaterialState {
@@ -66,6 +68,7 @@ impl Default for MaterialState {
             tabs_closed: false,
             moves: Vec::new(),
             loaded: 0,
+            deleting: Vec::new(),
         }
     }
 }
@@ -133,12 +136,22 @@ impl DomainState for MaterialState {
         editor.material_renamed(from, to);
     }
 
+    fn before_delete(editor: &mut Editor, r: &AssetRef) {
+        editor.material_before_delete(r);
+    }
+
     fn delete_file(editor: &mut Editor, r: &AssetRef) -> Result<(), String> {
         editor.material_delete_file(r)
     }
 
     fn deleted(editor: &mut Editor, r: &AssetRef) {
         editor.material_deleted(r);
+    }
+
+    /// Load, set, canonical save for every kind, user nodes included (ADR 0047 §16: a hand-formatted `.nodes` file
+    /// may have no `id` line to rewrite).
+    fn set_asset_uuid(editor: &mut Editor, r: &AssetRef, id: project_core::AssetUuid) -> Result<(), String> {
+        editor.material_set_asset_uuid(r, id)
     }
 
     fn focus_diagnostic(editor: &mut Editor, diag: &project_core::Diagnostic) {

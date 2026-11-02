@@ -8,6 +8,9 @@ pub enum LoadError {
     Parse(String),
     #[error("format_version {found} is newer than supported {supported}; update the editor")]
     TooNew { found: u32, supported: u32 },
+    /// A file of an older format generation (ADR 0046): the Migration Tool upgrades it, the loaders do not.
+    #[error("format_version {found} is older than this editor (format_version {current}); run `shader-editor migrate`")]
+    TooOld { found: u32, current: u32 },
     #[error("unsupported format_version {0}")]
     Unsupported(u32),
 }
@@ -41,6 +44,17 @@ impl<'de> Deserialize<'de> for VersionProbe {
     }
 }
 
+/// Checks a probed `format_version` against the only one `current` this build reads (ADR 0046: older files are
+/// upgraded by the Migration Tool, never by the loaders).
+pub fn check_version(found: u32, current: u32) -> Result<(), LoadError> {
+    match found {
+        v if v == current => Ok(()),
+        v if v > current => Err(LoadError::TooNew { found: v, supported: current }),
+        0 => Err(LoadError::Unsupported(0)),
+        v => Err(LoadError::TooOld { found: v, current }),
+    }
+}
+
 /// Reads `format_version` of any struct-named RON document.
 pub fn probe_version(text: &str) -> Result<u32, LoadError> {
     let probe: VersionProbe = ron::Options::default().from_str(text).map_err(|e| LoadError::Parse(e.to_string()))?;
@@ -56,5 +70,18 @@ mod tests {
         assert_eq!(probe_version("Asset(format_version: 3, kind: Function)").unwrap(), 3);
         assert_eq!(probe_version("Curve(format_version: 1)").unwrap(), 1);
         assert!(matches!(probe_version("garbage"), Err(LoadError::Parse(_))));
+    }
+
+    #[test]
+    fn checks_versions() {
+        assert!(check_version(2, 2).is_ok());
+        assert!(matches!(check_version(3, 2), Err(LoadError::TooNew { found: 3, supported: 2 })));
+        assert!(matches!(check_version(0, 2), Err(LoadError::Unsupported(0))));
+        let older = check_version(1, 2).unwrap_err();
+        assert!(matches!(older, LoadError::TooOld { found: 1, current: 2 }));
+        assert_eq!(
+            older.to_string(),
+            "format_version 1 is older than this editor (format_version 2); run `shader-editor migrate`"
+        );
     }
 }

@@ -14,10 +14,11 @@ use crate::doc_kind::{DocCtx, TabDoc};
 use crate::message::{Level, Message};
 use crate::tab::{Tab, TabKey};
 use project_core::watch::ProjectWatcher;
-use project_core::{AssetRef, DomainId, Project};
+use project_core::{AssetIndex, AssetRef, Diagnostic, DomainId, Project};
 
 use crate::domain::{DomainList, DomainStates};
 use crate::nav::NavHistory;
+use crate::state::migration::MigrationSession;
 
 /// Counters the UI watches to know what to redraw.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -45,6 +46,13 @@ pub struct Editor {
     /// The files of each domain's registered asset kinds (the default Project tree rows, design §14.4); re-read by
     /// [`Editor::rescan`].
     pub kind_files: BTreeMap<DomainId, Vec<AssetRef>>,
+    /// Every editor-owned asset of the project by UUID (ADR 0047 §10, techdoc §4.2): rebuilt from every compiled-in
+    /// backend at the start of [`Editor::rescan`] (so the domains' rescans resolve against it) and refreshed for the
+    /// saved tab's domain after every save ([`Editor::refresh_index_domain`]); empty without a project.
+    pub asset_index: AssetIndex,
+    /// The index's diagnostics (`AE001`–`AE004`, ADR 0047 §8) of the enabled domains, kept with
+    /// [`Editor::asset_index`]: merged into the console/logs, the editor statusbar and the mainbar's error count.
+    pub index_diagnostics: Vec<Diagnostic>,
     /// The game's files under `assets/` some domain shows (the Game Assets tree, design §8.1): paths relative to
     /// `assets/`, sorted; refreshed on open and by `Editor::poll_watcher`.
     pub game_files: Vec<String>,
@@ -59,6 +67,8 @@ pub struct Editor {
     pub messages: Vec<Message>,
     /// The console/logs shows every domain, not only the active one (design §6.4); session only.
     pub console_all: bool,
+    /// The console/logs also lists info diagnostics (`I…` codes, spec §13); session only.
+    pub console_info: bool,
     /// The domain whose hook is running ([`Editor::with_domain`]): the console/logs lines it writes are tagged with it.
     pub(crate) msg_domain: Option<DomainId>,
     /// Collapsed folders per sidebar tree.
@@ -87,6 +97,9 @@ pub struct Editor {
     /// Set when [`DocCtx::saved_settings`] updated [`Project::settings`], so [`Editor::apply`] or
     /// [`Editor::files_changed`] synchronizes enabled domains.
     pub(crate) settings_changed: bool,
+    /// The Migration Tool (ADR 0046): set instead of [`Editor::project`] when the project to open is older than this
+    /// editor. While it is `Some`, [`Editor::apply`] ignores every action but the Migration Tool's and quitting.
+    pub migration: Option<MigrationSession>,
 }
 
 /// An editor without domains (core tests).
@@ -106,11 +119,14 @@ impl Editor {
             domain_list: domains,
             folders: BTreeMap::new(),
             kind_files: BTreeMap::new(),
+            asset_index: AssetIndex::default(),
+            index_diagnostics: Vec::new(),
             game_files: Vec::new(),
             tabs: Vec::new(),
             active: None,
             active_domain: None,
             console_all: false,
+            console_info: false,
             last_tabs: BTreeMap::new(),
             messages: Vec::new(),
             msg_domain: None,
@@ -129,6 +145,7 @@ impl Editor {
             clipboards: Clipboards::default(),
             pick_folder: false,
             settings_changed: false,
+            migration: None,
         }
     }
 
@@ -235,6 +252,7 @@ impl Editor {
         // Lent to the document for the call.
         ctx.clipboards = std::mem::take(&mut self.clipboards);
         ctx.crates = list.crate_contributions();
+        ctx.index = &self.asset_index;
         let out = f(tab.doc_mut(), &mut ctx);
         self.clipboards = std::mem::take(&mut ctx.clipboards);
         let saved_settings = ctx.saved_settings.take();
@@ -265,7 +283,8 @@ impl Editor {
 
     // ---- saving ----
 
-    /// Writes tab `i`'s document; `false` (with an error dialog) when that fails, or for a read-only tab.
+    /// Writes tab `i`'s document; `false` (with an error dialog) when that fails, or for a read-only tab. The index
+    /// part of the tab's domain is re-read after a successful save.
     pub fn save(&mut self, i: usize) -> bool {
         if self.project.is_none() || self.tabs.get(i).is_none_or(|t| t.doc().is_read_only()) {
             return false;
@@ -280,6 +299,7 @@ impl Editor {
             return false;
         }
         self.info(format!("Saved {name}"));
+        self.refresh_index_domain(self.tabs[i].domain);
         self.ui.tabs += 1;
         true
     }
@@ -313,6 +333,84 @@ impl Editor {
         self.with_doc_ctx(i, |doc, ctx| doc.reload_from_disk(ctx).is_ok()).unwrap_or(false)
     }
 
+    // ---- asset index (ADR 0047 §10) ----
+
+    /// Rebuilds [`Editor::asset_index`] from every compiled-in backend's part (enabled or not, so a reference into a
+    /// disabled domain is detectable, ADR 0047 §9), and its diagnostics; an empty index without a project.
+    pub fn refresh_index(&mut self) {
+        let list = self.domain_list.clone();
+        self.asset_index = match &self.project {
+            Some(p) => AssetIndex::build(list.backends().iter().map(|b| b.index(p)).collect()),
+            None => AssetIndex::default(),
+        };
+        self.refresh_index_diagnostics();
+    }
+
+    /// Re-reads `domain`'s part of [`Editor::asset_index`] (after a save), keeping every other domain's; nothing for
+    /// a domain without a backend.
+    pub fn refresh_index_domain(&mut self, domain: DomainId) {
+        let Some(p) = &self.project else { return };
+        let Some(backend) = self.domain_list.backends().iter().find(|b| b.id() == domain) else { return };
+        let part = backend.index(p);
+        self.asset_index.replace_domain(part);
+        self.refresh_index_diagnostics();
+    }
+
+    /// Cross-domain follow-up of one save operation that wrote the assets `saved` (ADR 0047 §10, techdoc §4.3): every
+    /// enabled domain with assets in [`AssetIndex::affected`] of `saved` gets [`DomainState::regenerate_affected`]
+    /// with them, in domain order. What a saving domain reaches from its own saved assets without leaving the domain
+    /// is not handed over (its [`DomainState::after_save`] regenerates that), nor are the saved assets themselves, so
+    /// a domain hears only of references that cross a domain boundary somewhere on the way.
+    ///
+    /// [`DomainState::regenerate_affected`]: crate::domain::DomainState::regenerate_affected
+    /// [`DomainState::after_save`]: crate::domain::DomainState::after_save
+    pub fn regenerate_affected_by(&mut self, saved: &BTreeSet<AssetRef>) {
+        let mut own: BTreeSet<AssetRef> = BTreeSet::new();
+        for domain in saved.iter().map(|r| r.domain).collect::<BTreeSet<_>>() {
+            let mine = saved.iter().filter(|r| r.domain == domain).cloned().collect();
+            own.extend(affected_within(&self.asset_index, mine, domain));
+        }
+        let mut by_domain: BTreeMap<DomainId, Vec<AssetRef>> = BTreeMap::new();
+        for r in self.asset_index.affected(saved).into_iter().filter(|r| !own.contains(r)) {
+            by_domain.entry(r.domain).or_default().push(r);
+        }
+        for (domain, affected) in by_domain {
+            if self.domain_enabled(domain) {
+                self.with_domain(domain, |e, s| s.regenerate_affected(e, &affected));
+            }
+        }
+    }
+
+    /// [`Editor::index_diagnostics`] from the current index; the console/logs redraws when they changed.
+    fn refresh_index_diagnostics(&mut self) {
+        let diagnostics = self.project.as_ref().map(|p| self.asset_index.diagnostics(p)).unwrap_or_default();
+        if diagnostics != self.index_diagnostics {
+            self.index_diagnostics = diagnostics;
+            self.ui.log += 1;
+        }
+    }
+
+    /// The index diagnostics of `domain`, those of the asset `active` first (console/logs order).
+    pub fn index_diagnostics_of(&self, domain: DomainId, active: Option<&AssetRef>) -> Vec<Diagnostic> {
+        let mut out: Vec<Diagnostic> =
+            self.index_diagnostics.iter().filter(|d| d.domain == Some(domain)).cloned().collect();
+        if let Some(active) = active {
+            let rel = active.source_rel();
+            out.sort_by_key(|d| d.asset.as_deref() != Some(rel.as_str()));
+        }
+        out
+    }
+
+    /// The file whose UUID `r` duplicates (the winner, ADR 0047 §8) when `r` is a duplicate loser.
+    pub fn duplicate_winner(&self, r: &AssetRef) -> Option<&AssetRef> {
+        self.asset_index.duplicates().find_map(|(_, files)| files[1..].contains(r).then(|| &files[0]))
+    }
+
+    /// Whether `r` is a current-format file without a valid UUIDv7 `id` (`AE004`).
+    pub fn lacks_uuid(&self, r: &AssetRef) -> bool {
+        self.asset_index.missing_ids().any(|(m, _)| m == r)
+    }
+
     // ---- user config ----
 
     pub fn save_tabs_to_config(&mut self) {
@@ -337,4 +435,21 @@ impl Editor {
             self.push_msg(Level::Warning, msg);
         }
     }
+}
+
+/// `changed` plus every asset of `domain` that (transitively) refers to it through `domain`'s assets only: what
+/// [`AssetIndex::affected`] gives when the walk never leaves the domain.
+fn affected_within(index: &AssetIndex, changed: BTreeSet<AssetRef>, domain: DomainId) -> BTreeSet<AssetRef> {
+    let mut todo: Vec<AssetRef> = changed.iter().cloned().collect();
+    let mut out = changed;
+    while let Some(r) = todo.pop() {
+        // Only the winner of a duplicate UUID is referred to (ADR 0047 §8).
+        let Some(id) = index.ref_id_of(&r) else { continue };
+        for referrer in index.refs_to(id).filter(|x| x.domain == domain) {
+            if out.insert(referrer.clone()) {
+                todo.push(referrer.clone());
+            }
+        }
+    }
+    out
 }

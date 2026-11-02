@@ -82,7 +82,13 @@ impl MaterialRegen for Editor {
         self.refresh_functions();
         let set = self.overridden_set();
         let list = self.domain_list.clone();
-        let opts = RegenOptions { dry_run: true, crates: list.crate_contributions(), ..Default::default() };
+        // UUID references resolve against the editor's index (ADR 0047 §4).
+        let opts = RegenOptions {
+            dry_run: true,
+            crates: list.crate_contributions(),
+            index: Some(&self.asset_index),
+            ..Default::default()
+        };
         // A Texture tab's Properties list its problems and hold no text field: redraw them when those changed.
         let texture = self.texture_doc().filter(|t| !t.is_internal()).map(|t| t.id());
         let before = texture.as_ref().and_then(|id| self.domains.material().diags.get(id).cloned());
@@ -113,7 +119,8 @@ impl MaterialRegen for Editor {
             scope: Scope::All,
             compile_check: self.domains.material().bevy.as_ref(),
             crates: list.crate_contributions(),
-            ..Default::default()
+            index: Some(&self.asset_index),
+            dry_run: false,
         };
         match shader_project::regen::regenerate_set(&project, &set, &opts) {
             Ok(report) => {
@@ -183,7 +190,8 @@ impl MaterialRegen for Editor {
             scope: Scope::Affected([id.clone()].into()),
             compile_check: self.domains.material().bevy.as_ref(),
             crates: list.crate_contributions(),
-            ..Default::default()
+            index: Some(&self.asset_index),
+            dry_run: false,
         };
         let ok = match shader_project::regen::regenerate_set(&project, set, &opts) {
             Ok(report) => {

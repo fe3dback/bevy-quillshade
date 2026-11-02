@@ -64,7 +64,7 @@ impl Editor {
     /// dialog at a time).
     ///
     /// [`TabDoc::changed_on_disk`]: crate::doc_kind::TabDoc::changed_on_disk
-    fn follow_disk_changes(&mut self) {
+    pub(crate) fn follow_disk_changes(&mut self) {
         for i in 0..self.tabs.len() {
             let Some(project) = &self.project else { return };
             let tab = &self.tabs[i];

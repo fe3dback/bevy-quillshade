@@ -1,0 +1,107 @@
+Asset(
+  format_version: 2,
+  id: "019b76da-a800-795a-abf2-2fdf2064b92a",
+  kind: Material(Unlit3d(UnlitSettings(
+    blend: Opaque,
+    two_sided: false,
+  ))),
+  name: "all_refs",
+  nodes: {
+    "n01": Node(
+      kind: "output::Unlit3d",
+      pos: (1260.0, 0.0),
+      params: {},
+    ),
+    "n02": Node(
+      kind: "stdlib::SampleCurve",
+      pos: (0.0, 0.0),
+      params: {
+        "curve": Str("019b76da-a800-783e-be72-971715772890"), // common/pulse
+      },
+    ),
+    "n03": Node(
+      kind: "stdlib::SampleCurve",
+      pos: (0.0, 135.0),
+      params: {
+        "curve": Str("common/missing"),
+      },
+    ),
+    "n04": Node(
+      kind: "stdlib::GlobalConstF32",
+      pos: (0.0, 270.0),
+      params: {
+        "const": Int(1001),
+        "table": Str("019b76da-a800-7125-8de2-e524cab316e1"), // common/tuning
+      },
+    ),
+    "n05": Node(
+      kind: "stdlib::TextureSample",
+      pos: (0.0, 405.0),
+      params: {
+        "texture": Str("019b76da-a800-757b-9426-3431e10d8887"), // textures/rock
+      },
+    ),
+    "n06": Node(
+      kind: "param::TextureObject",
+      pos: (0.0, 540.0),
+      params: {
+        "default": Str("@internal/default"),
+        "name": Str("atlas"),
+      },
+    ),
+    "n07": Node(
+      kind: "stdlib::SampleGradient",
+      pos: (0.0, 675.0),
+      params: {
+        "collection": Str("019b76da-a800-7236-9c55-fbb62d9f20ab"), // common/terrain
+        "gradient": Int(1007),
+      },
+    ),
+    "n08": Node(
+      kind: "function::019b76da-a800-7b67-92df-a65e013d4ada", // common/layer
+      pos: (420.0, 0.0),
+      params: {},
+    ),
+    "n09": Node(
+      kind: "function::common/missing",
+      pos: (420.0, 270.0),
+      params: {},
+    ),
+    "n10": Node(
+      kind: "user::019b76da-a800-7c9d-a24f-a55383a7ae80", // .nodes/soft_clamp
+      pos: (840.0, 0.0),
+      params: {},
+    ),
+    "n11": Node(
+      kind: "user::missing",
+      pos: (840.0, 270.0),
+      params: {},
+    ),
+    "n12": Node(
+      kind: "stdlib::TextureSample",
+      pos: (420.0, 540.0),
+      params: {
+        "texture": Str(""),
+      },
+    ),
+  },
+  edges: [
+    Edge(
+      from: ("n10", "out"),
+      to: ("n01", "color"),
+    ),
+    Edge(
+      from: ("n02", "out"),
+      to: ("n08", "t"),
+    ),
+    Edge(
+      from: ("n08", "result"),
+      to: ("n10", "x"),
+    ),
+  ],
+  comments: [],
+  meta: Meta(
+    description: "",
+    tags: [],
+  ),
+)

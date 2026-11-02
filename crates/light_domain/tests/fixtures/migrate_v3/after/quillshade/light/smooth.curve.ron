@@ -1,0 +1,11 @@
+Curve(
+  format_version: 2,
+  id: "019b76da-a800-7c6a-bf59-e563ad5994f2",
+  name: "smooth",
+  points: [
+    (0.0, 0.0),
+    (0.25, 0.15),
+    (0.75, 0.85),
+    (1.0, 1.0),
+  ],
+)

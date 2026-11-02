@@ -87,8 +87,10 @@ fn status_of_graph_counts_nodes_and_diagnostics() {
     assert_eq!(status.counts, vec![wesl_lines(generated.lines().count())]);
     let own: Vec<&Diagnostic> = e.domains.material().diags.get(&rock).into_iter().flatten().collect();
     assert_eq!(status.errors, own.iter().filter(|d| d.is_error()).count());
-    assert_eq!(status.warnings, own.iter().filter(|d| !d.is_error()).count());
+    // Info diagnostics (rock_wet's I103) are not counted.
+    assert_eq!(status.warnings, own.iter().filter(|d| !d.is_error() && !d.is_info()).count());
     assert!(status.warnings > 0, "{own:?}");
+    assert!(own.iter().any(|d| d.is_info()), "{own:?}");
 
     e.apply(Action::RegenAll);
     let wesl = std::fs::read_to_string(dir.path().join("assets/quillshade/material/autogen/dir_env/mat_rock_wet.wesl"))
@@ -190,11 +192,11 @@ fn keep_mine_takes_the_file_as_saved_baseline() {
     // Both files change outside the editor.
     let mut asset = assets::load(&project, &rock).unwrap();
     asset.add_node(shader_graph_core::model::Node::new("stdlib::Sine", (0.0, 0.0)));
-    ops::save(&project, &rock, &asset).unwrap();
+    ops::save(&project, &rock, &mut asset).unwrap();
     let mut curve = assets::load_curve(&project, &pulse).unwrap();
     curve.points.push((0.25, 0.75));
     curve.normalize();
-    ops::save_curve(&project, &pulse, &curve).unwrap();
+    ops::save_curve(&project, &pulse, &mut curve).unwrap();
     let (rock_edit, pulse_edit) = (e.tabs[0].get::<Doc>().unwrap().asset.clone(), e.curve_doc().unwrap().curve.clone());
     e.apply(Action::KeepMine(asset_key(&rock)));
     e.apply(Action::KeepMine(asset_key(&pulse)));

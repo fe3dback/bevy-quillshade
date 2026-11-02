@@ -4,7 +4,8 @@ use std::fmt;
 
 use crate::domain::DomainId;
 
-/// An asset of any domain. `path` is domain-relative and has no suffix (`env/rock_wet`).
+/// An asset of any domain. `path` is domain-relative and has no suffix (`env/rock_wet`). An empty `suffix` is a kind
+/// without one: Material user nodes, `path` = `.nodes/soft_clamp` (ADR 0047 §16).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct AssetRef {
     pub domain: DomainId,
@@ -13,8 +14,12 @@ pub struct AssetRef {
 }
 
 impl AssetRef {
-    /// `quillshade/<domain>/<path>.<suffix>.ron`, relative to the project root.
+    /// `quillshade/<domain>/<path>.<suffix>.ron` (`quillshade/<domain>/<path>.ron` for an empty suffix), relative to
+    /// the project root.
     pub fn source_rel(&self) -> String {
+        if self.suffix.is_empty() {
+            return format!("quillshade/{}/{}.ron", self.domain, self.path);
+        }
         format!("quillshade/{}/{}.{}.ron", self.domain, self.path, self.suffix)
     }
 }
@@ -52,5 +57,13 @@ mod tests {
         assert_eq!(parse("quillshade/light/a.curve.ron", d, SUFFIXES), None);
         assert_eq!(parse("quillshade/material/a.unknown.ron", d, SUFFIXES), None);
         assert_eq!(parse("quillshade/materialx/a.curve.ron", d, SUFFIXES), None);
+    }
+
+    /// ADR 0047 §16: a kind without a suffix (user nodes) is `<path>.ron`.
+    #[test]
+    fn empty_suffix() {
+        let r = AssetRef { domain: DomainId::new("material"), path: ".nodes/soft_clamp".into(), suffix: "" };
+        assert_eq!(r.source_rel(), "quillshade/material/.nodes/soft_clamp.ron");
+        assert_eq!(parse(&r.source_rel(), r.domain, SUFFIXES), None);
     }
 }

@@ -1,0 +1,82 @@
+Asset(
+  format_version: 2,
+  id: "019b76da-a800-74c6-aca2-b7e261c52918",
+  kind: Material(Unlit3d(UnlitSettings(
+    blend: Opaque,
+    two_sided: false,
+  ))),
+  name: "user_node",
+  nodes: {
+    "n01": Node(
+      kind: "output::Unlit3d",
+      pos: (1050.0, 0.0),
+      params: {},
+    ),
+    "n02": Node(
+      kind: "param::Color",
+      pos: (0.0, 0.0),
+      params: {
+        "name": Str("tint"),
+      },
+    ),
+    "n03": Node(
+      kind: "stdlib::TextureCoordinate",
+      pos: (0.0, 202.5),
+      params: {},
+    ),
+    "n04": Node(
+      kind: "stdlib::BreakOutFloat2",
+      pos: (210.0, 202.5),
+      params: {},
+    ),
+    "n05": Node(
+      kind: "stdlib::Multiply",
+      pos: (420.0, 202.5),
+      params: {},
+      inputs: {
+        "b": Float(4.0),
+      },
+    ),
+    "n06": Node(
+      kind: "stdlib::Multiply",
+      pos: (630.0, 67.5),
+      params: {},
+    ),
+    "n07": Node(
+      kind: "user::019b76da-a800-7c9d-a24f-a55383a7ae80", // .nodes/soft_clamp
+      pos: (840.0, 67.5),
+      params: {},
+    ),
+  },
+  edges: [
+    Edge(
+      from: ("n07", "out"),
+      to: ("n01", "color"),
+    ),
+    Edge(
+      from: ("n03", "out"),
+      to: ("n04", "v"),
+    ),
+    Edge(
+      from: ("n04", "x"),
+      to: ("n05", "a"),
+    ),
+    Edge(
+      from: ("n02", "rgb"),
+      to: ("n06", "a"),
+    ),
+    Edge(
+      from: ("n05", "out"),
+      to: ("n06", "b"),
+    ),
+    Edge(
+      from: ("n06", "out"),
+      to: ("n07", "x"),
+    ),
+  ],
+  comments: [],
+  meta: Meta(
+    description: "",
+    tags: [],
+  ),
+)

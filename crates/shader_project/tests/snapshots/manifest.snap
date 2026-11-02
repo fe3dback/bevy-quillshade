@@ -72,7 +72,7 @@ BakedManifest(
     "env/rock_wet": (
       params: {
         "inp_speed": Float(1.0),
-        "inp_tint": Color((0.9, 0.85, 0.8, 1.0)),
+        "inp_tint": Color((0.6288158, 0.14549951, 0.65770394, 1.0)),
         "inp_wetness": Float(0.3),
       },
       textures: {
@@ -144,6 +144,13 @@ BakedManifest(
       },
       textures: {},
       layout: "SG_LAYOUT_7c5d798f",
+    ),
+    "fx/user_node": (
+      params: {
+        "inp_tint": Color((1.0, 1.0, 1.0, 1.0)),
+      },
+      textures: {},
+      layout: "SG_LAYOUT_6fa6538c",
     ),
     "kw/loop/type": (
       params: {

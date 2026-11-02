@@ -1,11 +1,13 @@
 //! Core's defaults for the domains' asset kinds (design §14.4): what every kind registered with
 //! `DomainRegistrar::asset_kind` gets without code of its domain — its files as Project tree rows, its source path as a
-//! tab key, renaming / moving and deleting its files. A domain overrides each through its hooks (Material does:
-//! `DomainState::tree_items`, `rename_file`, `delete_file`, its own `parse_tab`).
+//! tab key, renaming / moving and deleting its files, giving a file a new asset UUID. A domain overrides each through
+//! its hooks (Material does: `DomainState::tree_items`, `rename_file`, `delete_file`, `set_asset_uuid`, its own
+//! `parse_tab`).
 
 use std::collections::BTreeSet;
 
-use project_core::{AssetRef, Diagnostic, DomainId, Project};
+use project_core::asset_index::rewrite_root_id;
+use project_core::{AssetRef, AssetUuid, Diagnostic, DomainId, Project};
 
 use super::editor::Editor;
 use crate::domain::{DomainList, TreeAsset};
@@ -89,4 +91,16 @@ pub fn rename_file(editor: &mut Editor, r: &AssetRef, new_path: &str) -> Result<
 pub fn delete_file(editor: &mut Editor, r: &AssetRef) -> Result<(), String> {
     let project = editor.project.as_ref().ok_or("no project is open")?;
     std::fs::remove_file(project.root.join(r.source_rel())).map_err(|e| e.to_string())
+}
+
+/// The default [`crate::domain::DomainState::set_asset_uuid`] (ADR 0047 §16): replaces the UUID of the root `id` line of
+/// `r`'s file in place ([`rewrite_root_id`]), everything else byte for byte. Refused, with the file untouched, when it
+/// has no such line.
+pub fn set_asset_uuid(editor: &mut Editor, r: &AssetRef, id: AssetUuid) -> Result<(), String> {
+    let project = editor.project.as_ref().ok_or("no project is open")?;
+    let file = project.root.join(r.source_rel());
+    let text = std::fs::read_to_string(&file).map_err(|e| e.to_string())?;
+    let text = rewrite_root_id(&text, id)
+        .ok_or_else(|| format!("`{r}` has no `id` line to rewrite; open and save it in the editor to assign one"))?;
+    project_core::writer::write_atomic(&file, text).map_err(|e| e.to_string())
 }

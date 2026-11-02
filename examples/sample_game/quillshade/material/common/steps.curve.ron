@@ -1,5 +1,6 @@
 Curve(
-  format_version: 1,
+  format_version: 2,
+  id: "019b76da-a800-7294-83e9-c69a51f99e5e",
   name: "steps",
   points: [
     (0.0, 0.2),

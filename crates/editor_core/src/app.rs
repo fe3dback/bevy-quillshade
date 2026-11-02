@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::action::{Action, Actions, Unsaved};
+use crate::action::{Action, Actions, MigrationAction, Unsaved};
 use crate::config::UserConfig;
 use crate::menu::MainMenu;
 use crate::{external, fixes};
@@ -17,11 +17,12 @@ use bevy::window::{WindowResized, WindowResolution};
 
 use crate::domain::{DomainList, EditorDomain};
 use crate::state::editor::Editor;
+use crate::state::migration::MigrationPhase;
 use crate::ui::shell::UiPlugin;
 
 /// Project to open at startup (CLI argument, else the most recent one); without one the welcome screen shows.
 #[derive(Resource, Default)]
-struct StartupProject(Option<PathBuf>);
+pub(crate) struct StartupProject(pub(crate) Option<PathBuf>);
 
 /// Window size forced from the command line (`--width` / `--height`): the saved size in the user config is kept.
 #[derive(Resource)]
@@ -36,7 +37,7 @@ pub struct EditorCorePlugin;
 impl Plugin for EditorCorePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Actions>()
-            .add_systems(Update, (poll_watcher, apply_actions, crate::preview::sync_previews).chain());
+            .add_systems(Update, (poll_watcher, poll_migration, apply_actions, crate::preview::sync_previews).chain());
         let Some(editor) = app.world().get_resource::<Editor>() else {
             panic!("EditorCorePlugin needs the Editor resource (Editor::new with the domain list) inserted first");
         };
@@ -75,6 +76,14 @@ fn poll_watcher(mut editor: ResMut<Editor>, time: Res<Time>, mut since: Local<f3
     if *since > 0.5 {
         *since = 0.0;
         editor.bypass_change_detection().poll_watcher();
+    }
+}
+
+/// Drains the Migration Tool's background run (ADR 0046) into its session: progress, log lines, the result. The
+/// editor counts as changed only when something arrived.
+pub(crate) fn poll_migration(mut editor: ResMut<Editor>) {
+    if editor.migration.as_ref().is_some_and(|s| s.is_running()) && editor.bypass_change_detection().poll_migration() {
+        editor.set_changed();
     }
 }
 
@@ -174,7 +183,7 @@ fn remember_window_size(mut resized: MessageReader<WindowResized>, mut editor: R
     }
 }
 
-fn open_startup_project(editor: Res<Editor>, startup: Res<StartupProject>, mut actions: ResMut<Actions>) {
+pub(crate) fn open_startup_project(editor: Res<Editor>, startup: Res<StartupProject>, mut actions: ResMut<Actions>) {
     let path = startup.0.clone().or_else(|| editor.config.recent_projects.first().cloned());
     if let Some(p) = path {
         actions.push(Action::OpenProject(p));
@@ -182,16 +191,24 @@ fn open_startup_project(editor: Res<Editor>, startup: Res<StartupProject>, mut a
 }
 
 /// Debug aid, core half: `SHADER_EDITOR_SCREENSHOT=out.png` saves a screenshot after a few seconds and quits;
-/// `SHADER_EDITOR_DEMO=about|quick_start[:N]|open_project|welcome|menu[:name]|tab_menu|settings_dirty` additionally
-/// opens that popup before the shot (`menu`: the main menu's File, `menu:view`: its View, …; `welcome`: closes the
-/// project; `settings_dirty`: edits the active Project Settings tab without saving). The
+/// `SHADER_EDITOR_DEMO=about|quick_start[:N]|open_project|welcome|menu[:name]|tab_menu|settings_dirty|duplicate_uuid`
+/// additionally opens that popup before the shot (`menu`: the main menu's File, `menu:view`: its View, …; `welcome`:
+/// closes the project; `settings_dirty`: edits the active Project Settings tab without saving; `duplicate_uuid`:
+/// focuses the first `AE001` of the asset index, i.e. its Regenerate UUID dialog, ADR 0047 §11;
+/// `duplicate_uuid_fix`: the same, then presses the dialog's Regenerate UUID button on frame 170). The
 /// domains add their own `SHADER_EDITOR_OPEN` / `SHADER_EDITOR_SELECT` / `SHADER_EDITOR_DEMO` values on the same frames
 /// (the asset opens on frame 2, popups on frame 150). `SHADER_EDITOR_DOMAIN=<id>` switches to that domain on frame 2,
 /// after the domains' `SHADER_EDITOR_OPEN` (this system runs after [`apply_actions`], so the switch applies next
 /// frame).
+///
+/// The Migration Tool (ADR 0046; the project passed on the command line is older than the editor, so the modal is
+/// open from the start): `SHADER_EDITOR_DEMO=migration_dry_run` presses Dry run and `migration_run` presses Migrate
+/// on frame 150 (the shot shows the log, resp. the result); `migration_open` presses Migrate on frame 150 and Open
+/// project once the run is done (from frame 200), so the shot shows the migrated project opened normally.
 fn debug_screenshot(
     mut frames: Local<u32>,
     mut actions: ResMut<Actions>,
+    editor: Res<Editor>,
     list: Res<DomainList>,
     menus: Query<(Entity, &MainMenu)>,
     mut commands: Commands,
@@ -232,11 +249,32 @@ fn debug_screenshot(
                     actions.push(set_action(&Enabled(first).into(), Bool(false), false));
                 }
             }
+            Ok("duplicate_uuid" | "duplicate_uuid_fix") => {
+                match editor.index_diagnostics.iter().find(|d| d.code == "AE001") {
+                    Some(d) => actions.push(Action::FocusDiagnostic(d.clone())),
+                    None => error!("SHADER_EDITOR_DEMO=duplicate_uuid: the project has no duplicate asset UUID"),
+                }
+            }
+            Ok("migration_dry_run") => actions.push(MigrationAction::DryRun),
+            Ok("migration_run" | "migration_open") => actions.push(MigrationAction::Run),
             Ok("tab_menu") => {
                 crate::ui::dialog::open_icon_menu(&mut commands, Vec2::new(260.0, 60.0), crate::ui::tabs::tab_menu(0))
             }
             _ => {}
         }
+    }
+    if *frames == 170
+        && std::env::var("SHADER_EDITOR_DEMO").as_deref() == Ok("duplicate_uuid_fix")
+        && let Some(crate::action::Dialog::Confirm { buttons, .. }) = &editor.dialog
+        && let Some((_, fix)) = buttons.last()
+    {
+        actions.push(fix.clone());
+    }
+    if (200..240).contains(&*frames)
+        && std::env::var("SHADER_EDITOR_DEMO").as_deref() == Ok("migration_open")
+        && editor.migration.as_ref().is_some_and(|s| matches!(s.phase, MigrationPhase::Done { .. }))
+    {
+        actions.push(MigrationAction::Open);
     }
     if *frames == 240 {
         commands

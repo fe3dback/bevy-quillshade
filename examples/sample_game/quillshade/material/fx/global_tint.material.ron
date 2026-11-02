@@ -1,5 +1,6 @@
 Asset(
-  format_version: 1,
+  format_version: 2,
+  id: "019b76da-a800-7bd6-9883-09fe5ca761db",
   kind: Material(Unlit3d(UnlitSettings(
     blend: Opaque,
     two_sided: false,
@@ -16,7 +17,7 @@ Asset(
       pos: (0.0, 0.0),
       params: {
         "const": Int(1001),
-        "table": Str("common/tuning"),
+        "table": Str("019b76da-a800-7125-8de2-e524cab316e1"), // common/tuning
       },
     ),
     "n03": Node(
@@ -24,7 +25,7 @@ Asset(
       pos: (0.0, 135.0),
       params: {
         "const": Int(1002),
-        "table": Str("common/tuning"),
+        "table": Str("019b76da-a800-7125-8de2-e524cab316e1"), // common/tuning
       },
     ),
     "n04": Node(
@@ -42,7 +43,7 @@ Asset(
       pos: (0.0, 270.0),
       params: {
         "const": Int(1003),
-        "table": Str("common/tuning"),
+        "table": Str("019b76da-a800-7125-8de2-e524cab316e1"), // common/tuning
       },
     ),
     "n06": Node(
@@ -60,7 +61,7 @@ Asset(
       pos: (0.0, 607.5),
       params: {
         "const": Int(1004),
-        "table": Str("common/tuning"),
+        "table": Str("019b76da-a800-7125-8de2-e524cab316e1"), // common/tuning
       },
     ),
     "n09": Node(
@@ -83,7 +84,7 @@ Asset(
       pos: (630.0, 675.0),
       params: {
         "const": Int(1005),
-        "table": Str("common/tuning"),
+        "table": Str("019b76da-a800-7125-8de2-e524cab316e1"), // common/tuning
       },
     ),
     "n13": Node(
@@ -104,7 +105,7 @@ Asset(
       pos: (1050.0, 67.5),
       params: {
         "const": Int(1006),
-        "table": Str("common/tuning"),
+        "table": Str("019b76da-a800-7125-8de2-e524cab316e1"), // common/tuning
       },
     ),
     "n16": Node(

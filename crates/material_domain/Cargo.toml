@@ -18,6 +18,7 @@ shader_graph_core = { workspace = true }
 shader_stdlib = { workspace = true }
 shader_project = { workspace = true }
 project_core = { workspace = true }
+project_migrate = { workspace = true }
 editor_core = { workspace = true }
 node_graph_base = { workspace = true }
 curve_kit = { workspace = true, features = ["editor"] }

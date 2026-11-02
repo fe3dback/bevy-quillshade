@@ -14,12 +14,16 @@ pub(super) fn drop_file(e: &mut Editor, path: &str, pos: (f32, f32), node: Optio
     e.apply(MaterialAction::Drop { item, pos, node: node.map(String::from) });
 }
 
+/// The nodes of the active graph whose kind, as the canvas shows it (`function::<path>`, ADR 0047 §4), is `kind`.
 pub(super) fn nodes_of(e: &Editor, kind: &str) -> Vec<NodeId> {
-    e.doc().unwrap().asset.nodes.iter().filter(|(_, n)| n.kind == kind).map(|(k, _)| k.clone()).collect()
+    let view = e.view_of(e.doc().unwrap());
+    view.nodes.iter().filter(|(_, n)| n.kind == kind).map(|(k, _)| k.clone()).collect()
 }
 
+/// Param `key` of `node` in the active graph's resolved view (ADR 0047 §4): a reference reads as the target's path,
+/// whether the source stores the path or the UUID.
 pub(super) fn param_of(e: &Editor, node: &str, key: &str) -> Option<Value> {
-    e.doc().unwrap().asset.nodes[node].params.get(key).cloned()
+    e.view_of(e.doc().unwrap()).nodes[node].params.get(key).cloned()
 }
 
 pub(super) fn open_rock_wet(e: &mut Editor) {
@@ -534,7 +538,7 @@ fn history_and_reload_leave_easy_for_custom_sampler() {
     e.apply(Action::Save);
     assert!(texture_doc(&e).easy && !e.is_dirty());
     let file = dir.path().join("quillshade/material/textures/sprite.texture.ron");
-    let text = "TextureAsset(\n  format_version: 1,\n  path: \"textures/sprite.png\",\n  settings: TextureSettings(\n    \
+    let text = "TextureAsset(\n  format_version: 2,\n  path: \"textures/sprite.png\",\n  settings: TextureSettings(\n    \
                 sampler: Some(SamplerSettings(\n      lod_max_clamp: 4.0,\n    )),\n  ),\n)\n";
     std::fs::write(&file, text).unwrap();
     e.apply(Action::Reload(asset_key(&id)));

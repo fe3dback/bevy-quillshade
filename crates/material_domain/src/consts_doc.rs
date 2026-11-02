@@ -151,7 +151,7 @@ impl ConstsDoc {
     }
 
     pub fn undo(&mut self) -> bool {
-        let done = self.history.undo(&mut self.table);
+        let done = self.history.undo_keeping(&mut self.table, |m| &mut m.id);
         if done {
             self.after_history();
         }
@@ -159,7 +159,7 @@ impl ConstsDoc {
     }
 
     pub fn redo(&mut self) -> bool {
-        let done = self.history.redo(&mut self.table);
+        let done = self.history.redo_keeping(&mut self.table, |m| &mut m.id);
         if done {
             self.after_history();
         }

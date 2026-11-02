@@ -3,6 +3,8 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
+use project_core::AssetUuid;
+
 use crate::consts::{ConstLookup, ConstType, GlobalConsts};
 use crate::curve::{Interp, curve_fn_alias};
 use crate::diag::{Code, Diagnostic};
@@ -402,7 +404,7 @@ impl Builtin {
         }
     }
 
-    /// Vertex attribute a mesh may lack (W103).
+    /// Vertex attribute a mesh may lack (I103).
     pub fn optional_attribute(self) -> Option<&'static str> {
         match self {
             Builtin::Uv1 => Some("UV_1"),
@@ -1101,6 +1103,8 @@ pub struct NodeAction {
 #[derive(Clone, Default)]
 pub struct Registry {
     defs: BTreeMap<String, Arc<dyn NodeDef>>,
+    /// Kinds defined by an asset file (user nodes), by the asset's UUID (ADR 0047 §16).
+    asset_kinds: BTreeMap<AssetUuid, String>,
 }
 
 /// Kind prefix of project function calls (`function::{sub}/{name}`).
@@ -1121,6 +1125,24 @@ impl Registry {
     pub fn register_arc(&mut self, def: Arc<dyn NodeDef>) {
         let id = def.info().id.clone();
         self.defs.insert(id, def);
+    }
+
+    /// Records that the node kind `kind` is defined by the asset `id` (a user node, ADR 0047 §16); the first
+    /// registration of a UUID wins, like the lexicographically smaller file of a duplicate UUID in the `AssetIndex`.
+    pub fn register_asset_kind(&mut self, id: AssetUuid, kind: &str) {
+        self.asset_kinds.entry(id).or_insert_with(|| kind.to_string());
+    }
+
+    /// The node kind defined by the asset `id` (see [`Registry::register_asset_kind`]).
+    pub fn asset_kind(&self, id: AssetUuid) -> Option<&str> {
+        self.asset_kinds.get(&id).map(String::as_str)
+    }
+
+    /// The UUIDs of the assets defining the node kind `kind`, in UUID order (the reverse of
+    /// [`Registry::asset_kind`]): what a graph stores to reference it (ADR 0047 §16). Empty for a kind no asset with
+    /// an id defines.
+    pub fn kind_assets<'a>(&'a self, kind: &'a str) -> impl Iterator<Item = AssetUuid> + 'a {
+        self.asset_kinds.iter().filter(move |(_, k)| *k == kind).map(|(id, _)| *id)
     }
 
     pub fn get(&self, kind: &str) -> Option<&Arc<dyn NodeDef>> {

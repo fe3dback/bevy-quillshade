@@ -454,6 +454,7 @@ dependencies = [
  "material_domain",
  "node_graph_base",
  "project_core",
+ "project_migrate",
  "shader_project",
  "tempfile",
  "texture_kit",
@@ -2659,6 +2660,7 @@ dependencies = [
  "bevy_enhanced_input",
  "icon-rs",
  "project_core",
+ "project_migrate",
  "resvg",
  "rfd",
  "ron",
@@ -3783,10 +3785,12 @@ dependencies = [
  "image",
  "ktx2",
  "project_core",
+ "project_migrate",
  "rfd",
  "ron",
  "ruzstd",
  "serde",
+ "shader_project",
  "tempfile",
  "texture_kit",
 ]
@@ -3898,6 +3902,7 @@ dependencies = [
  "icon-rs",
  "node_graph_base",
  "project_core",
+ "project_migrate",
  "resvg",
  "ron",
  "serde",
@@ -4879,6 +4884,18 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "toml",
+ "uuid",
+]
+
+[[package]]
+name = "project_migrate"
+version = "0.3.0"
+dependencies = [
+ "project_core",
+ "ron",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -5366,8 +5383,12 @@ version = "0.3.0"
 dependencies = [
  "insta",
  "ktx2",
+ "light_domain",
  "png",
  "project_core",
+ "project_migrate",
+ "ron",
+ "serde",
  "shader_codegen_rust",
  "shader_codegen_wesl",
  "shader_graph_core",
@@ -5380,6 +5401,7 @@ dependencies = [
 name = "shader_stdlib"
 version = "0.3.0"
 dependencies = [
+ "project_core",
  "ron",
  "serde",
  "shader_graph_core",

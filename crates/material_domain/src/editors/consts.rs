@@ -119,7 +119,7 @@ impl TabDoc for ConstsDoc {
 
     fn save(&mut self, ctx: &mut DocCtx) -> std::io::Result<()> {
         let project = project_of(ctx)?;
-        ops::save_consts(project, &self.id, &self.table).map_err(io_error)?;
+        ops::save_consts(project, &self.id, &mut self.table).map_err(io_error)?;
         self.mark_saved();
         Ok(())
     }

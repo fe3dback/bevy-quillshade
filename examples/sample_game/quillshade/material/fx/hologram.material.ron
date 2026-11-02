@@ -1,5 +1,6 @@
 Asset(
-  format_version: 1,
+  format_version: 2,
+  id: "019b76da-a800-7944-befc-7d739007bf84",
   kind: Material(Unlit3d(UnlitSettings(
     blend: Add,
     two_sided: true,

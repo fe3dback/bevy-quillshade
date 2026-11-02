@@ -129,7 +129,8 @@ The material type is chosen at creation and stored in the file; changing the typ
 
 ```markdown
 Asset(
-  format_version: 1,
+  format_version: 2,
+  id: "019b76da-a800-75c1-939b-7e0a98afeaba",
   kind: Material(Pbr3d(blend: Opaque, two_sided: false, shading: Lit)),
   name: "rock_wet",
   nodes: { "n1": Node(kind: "stdlib::TextureSample", pos: (120, 40), params: {...}),
@@ -142,6 +143,7 @@ Asset(
 
 - Node identifiers are stable (ULID/UUID) and never reused; positions are stored so that the VCS diff is readable (keys sorted, `ron` with `PrettyConfig`, fixed field order).
 - A node `kind` is a string path (`stdlib::Add`, `param::Scalar`, `function::{sub}/{name}`, `output::Pbr3d`), which allows adding nodes without changing the format.
+- **Asset identity (project v3, ADR 0047)**: every editor-owned source has a top-level `id` (UUIDv7) right after `format_version`. References to other sources hold the target's UUID, not its path: `function::<uuid>` and `user::<uuid>` kinds, `Str("<uuid>")` in curve / constant table / texture / gradient collection params (sub-items keep their numeric local id), Light `cubemap: Some("<uuid>")`; the editor appends `// <path>` to every such line on save. Game files under `assets/` stay path-addressed. Codegen resolves UUIDs to paths first, so generated names still derive from paths.
 - Node parameters (`params`) are typed by the node description from the registry (section 7); an unknown node is a load error with a hint, and the file is not corrupted.
 - `format_version` MUST be increased on incompatible changes; the editor MUST be able to migrate from every previous version.
 
@@ -196,9 +198,12 @@ Pin types follow UE semantics: f32 scalar and vectors with implicit widening, pl
 | Opacity Mask | `Float` | 1.0 | `alpha_discard` cutoff (active when blend = Mask) |
 | Normal | `Float3` | vertex normal | `pbr_input.N` (tangent space → world via TBN) |
 | World Position Offset | `Float3` | 0 | vertex shader, offset of `world_position` |
+| World Normal | `Float3` | vertex normal | vertex shader, replaces `out.world_normal` (inactive when Shading = Unlit) |
 | Ambient Occlusion | `Float` | 1.0 | `pbr_input.diffuse_occlusion` |
 
 Node settings (not pins): Blend Mode (`Opaque | Mask | Blend | Add | Multiply`), Two Sided, Shading (`Lit | Unlit`). Inactive pins are dimmed.
+
+World Position Offset and World Normal are evaluated in the vertex stage (also in `Wrapped` output mode, where they sit next to the Material Attributes pin; neither is an attributes field). World Normal replaces the geometric normal, e.g. to morph normals between terrain LODs: Bevy builds `pbr_input.world_normal` / `N` from it, so the tangent-space Normal pin still applies on top of it (TBN re-orthogonalized against the new normal), the fragment `VertexNormalWS` reads it (slope masks follow it), and the prepass / deferred normals get it too. The vertex-stage `VertexNormalWS` still reads the mesh normal. A mesh without normals keeps its vertex normal (info `I103` on the pin). The node preview drops the override, like the offset.
 
 **`MaterialOutput (Unlit3d)`**: `Color: Float3`, `Opacity: Float`, `Opacity Mask: Float`, `World Position Offset: Float3`. **`MaterialOutput (Sprite2d)`**: `Color: Float4` (defaults to `sample_final_color(uv)`), `UV override: Float2`.
 
@@ -233,7 +238,7 @@ The layout is as in the UE5 Material Editor: asset browser on the left, canvas i
 
 **Panels and functions:**
 
-1. **Project / asset browser**: the `shaders/` tree with subdirectories; create a material (choosing the type), a function, a folder; rename, move (drag), delete (with confirmation and removal of autogen); open in a tab. The "Show generated WESL/Rust" context menu opens the file in an external program.
+1. **Project / asset browser**: the `shaders/` tree with subdirectories; create a material (choosing the type), a function, a folder; rename, move (drag), delete (with confirmation and removal of autogen); open in a tab. Since project v3 (ADR 0047) rename and move only move the file: references are UUIDs, so no referrer is rewritten (also when the file is renamed outside the editor); delete clears texture, gradient collection and constant table references. A duplicate UUID (a copied file) offers "Regenerate UUID" in the row menu. The "Show generated WESL/Rust" context menu opens the file in an external program.
 2. **Canvas** (bevy\_noodle): pan/zoom, box select, drag, connecting by dragging from a port, auto-conversions on connect, reroute points, comment frames, minimap, auto-layout of the selection, highlighting of compatible ports while dragging a wire. Several tabs with open assets.
 3. **Node palette / search**: on RMB on the canvas or `Tab` — a popup with search by name, category and synonyms (UE-like: "\*" = Multiply, "lerp", "+"). When invoked from a dragged wire — filtered by compatible type, with auto-connect.
 4. **Properties**: parameters of the selected node (default values, parameter name, groups, output node settings); asset properties (type, blend mode, description).
@@ -294,7 +299,7 @@ Rules:
 
 - **Bindings**: the parameter uniform struct is always `@binding(100)`; textures/samplers are pairs `101/102`, `103/104`, … in parameter declaration order. `Unlit3d`/`Sprite2d` use the same numbering. Uniform struct fields are ordered by decreasing size (vec4, vec3+pad, vec2, f32), a `Bool` field → `u32`; the struct is padded to a multiple of 16 bytes.
 - **Normal**: if the Normal pin is connected, `pbr_input.N = apply_normal_mapping(...)`/TBN from `in.world_tangent` is generated; a mesh without tangents — a warning.
-- **World Position Offset**: when the pin is connected, a `@vertex fn vertex(...)` is also generated, repeating the stock `bevy_pbr::render::mesh::vertex` with the offset added; otherwise no vertex shader is generated.
+- **World Position Offset / World Normal**: when either pin is connected, a `@vertex fn vertex(...)` is also generated, repeating the stock `bevy_pbr::render::mesh::vertex` with the offset added and / or `out.world_normal = normalize(...)` (guarded by `VERTEX_NORMALS` and, in the prepass, by a normal / deferred prepass); otherwise no vertex shader is generated.
 - **Functions**: each project function → `fn {name}(args...) -> T` (or a `{Name}Out` struct with several outputs) in `autogen/functions/{sub}/{name}.wesl`; materials import them by the relative path `super::…`. Functions are not inlined.
 - **Stdlib**: `autogen/stdlib/{module}.wesl` is regenerated on every project regeneration from the editor's resources; the stdlib version is written into the header.
 - **Import paths**: resolution of relative `super::` imports between files in `assets/` MUST be verified on Bevy 0.20 at the very start of the work (spike, section 16); if Bevy's resolver does not support it, a fallback is allowed — inlining stdlib/functions into the material file with deduplication.
@@ -342,7 +347,7 @@ pub struct RockWetExt {
 impl MaterialExtension for RockWetExt {
     fn fragment_shader() -> ShaderRef { SHADER_PATH.into() }
     fn deferred_fragment_shader() -> ShaderRef { SHADER_PATH.into() }
-    // fn vertex_shader() — only if the graph uses World Position Offset
+    // fn vertex_shader() — only if the graph uses World Position Offset or World Normal
 }
 
 pub type RockWetMaterial = ExtendedMaterial<StandardMaterial, RockWetExt>;
@@ -398,9 +403,13 @@ Validation runs on every graph change (live highlighting) and before codegen (bl
 | E008 | error | An autogen file without the AUTOGENERATED marker blocks the write |
 | W101 | warning | Node without influence on the output (dead branch) — not included in codegen |
 | W102 | warning | Output pin inactive under the current Blend Mode (e.g. Opacity with Opaque) |
-| W103 | warning | A vertex attribute that the mesh may lack is used (uv1, tangent, color) |
+| I103 | info | A vertex attribute that the mesh may lack is used (uv1, tangent, color); a mesh without it gets a default value |
 | W104 | warning | Vector truncation on auto-conversion (`Float4 → Float2`) |
 | W105 | warning | crates/shaders is not listed in \[workspace.members\] of the root Cargo.toml — a line to paste is shown, generation is not blocked |
+| AE001 | error | Duplicate asset UUID (a copied file), at every file but the one with the smallest path; references resolve to that one; quick fix "Regenerate UUID" (ADR 0047) |
+| AE002 | error | Dangling reference: a UUID no asset has (the domain's own "does not exist" error is shown too) |
+| AE003 | error | Reference into a disabled domain (first used by the Data domain) |
+| AE004 | error | A current-format asset without a valid UUIDv7 `id`; saving it in the editor or the quick fix "Assign UUID" assigns one. An `id` that is not a UUID at all is a load error (`E009` / `LE009`) |
 
 Behavior:
 
@@ -408,6 +417,7 @@ Behavior:
 - `wesl`/naga compile errors after generation (which should not happen, but) are shown in the log with the line of the generated file and a back-reference to the node via a `line → node id` map.
 - I/O errors (no permissions, disk) — a modal message; the graph stays unsaved, no data is lost.
 - The CLI returns a non-zero code on any error and prints messages in the `path:node:code: text` format, suitable for CI.
+- Info diagnostics (`I…` codes) never block and never change the CLI's exit code; they are not marked on the canvas (the node's Problems list shows them dimmed), and the console/logs hides them unless its "Info" checkbox is on (its title still counts them).
 
 ## 14. Architecture (recommendation)
 
@@ -421,7 +431,7 @@ The editor and the CLI contain no generation logic — both call the core; the g
 - `shader_stdlib` registers nodes in the core registry through a single trait `NodeDef { id, category, inputs, outputs, params, emit(&IrCtx) -> WeslExpr }`; user nodes from `shaders/.nodes/*.ron` use the same trait through a data-driven implementation.
 - `shader_editor_app`: Bevy 0.20 + `bevy_noodle` (feature `default_style`, `scene` for undo/copy/save), Feathers for the panels. "Model ↔ bevy\_noodle entities" sync is one-way: the core model is the source of truth, the canvas is rebuilt on `EditApplied`.
 - If bevy\_noodle needs changes (e.g. type labels on ports, pin color scheme, search panel), the library is vendored into `vendor/bevy_noodle` as a path dependency; patches go in separate commits with descriptions for an upstream PR.
-- One `shader-editor` binary with subcommands: no arguments — GUI; `regen <project>`, `check <project>` (validation without writing), `diff <project>` (what would change).
+- One `shader-editor` binary with subcommands: no arguments — GUI; `regen <project>`, `check <project>` (validation without writing), `diff <project>` (what would change), `migrate <project> [--dry-run]` (upgrade an older project to the editor's project version, then regenerate everything; decision 0046). `regen` / `check` / `diff` refuse an older project with exit code 2 and a hint to run `migrate`.
 
 ## 15. Testing and quality control
 

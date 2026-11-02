@@ -8,6 +8,7 @@ use bevy::asset::io::{
     AssetReader, AssetReaderError, AssetSource, AssetSourceBuilder, AssetSourceId, ErasedAssetReader, PathStream,
     Reader, VecReader,
 };
+use bevy::asset::uuid::Uuid;
 use bevy::asset::{AssetLoadFailedEvent, LoadState};
 use bevy::image::{CompressedImageFormats, ImageLoader, ImageSampler};
 use bevy::prelude::*;
@@ -406,6 +407,34 @@ fn handles_by_path() {
     assert_eq!(tex.get("@internal/default"), Some(&tex.internal.default));
     assert_eq!(tex.get("textures/nope"), None);
     assert_eq!(tex.by_path.len(), compiled().textures.len());
+}
+
+/// The UUID `id` of `quillshade/material/<path>.material.ron`: its top-level `id: "…"` line.
+fn source_uuid(path: &str) -> Uuid {
+    let file = format!("quillshade/material/{path}.material.ron");
+    let text = std::fs::read_to_string(&file).unwrap_or_else(|e| panic!("{file}: {e}"));
+    let id = text
+        .lines()
+        .find_map(|l| l.strip_prefix("  id: \"")?.strip_suffix("\","))
+        .unwrap_or_else(|| panic!("{file} has no top-level `id`"));
+    Uuid::parse_str(id).unwrap_or_else(|e| panic!("{file}: `{id}`: {e}"))
+}
+
+/// ADR 0047 §12: every material is reachable by the UUID of its source file, for game data that names materials by
+/// id (renames and moves keep it).
+#[test]
+fn handles_by_id() {
+    let app = app(None);
+    let baked = app.world().resource::<BakedMaterials>();
+    assert_eq!(baked.by_id.len(), baked.by_path.len(), "every sample material has an id");
+    for (path, handle) in &baked.by_path {
+        assert_eq!(baked.by_id.get(&source_uuid(path)), Some(handle), "{path}");
+    }
+    let rock = source_uuid("env/rock_wet");
+    assert_eq!(baked.get_by_id::<RockWetMaterial>(rock), Some(baked.env.rock_wet.clone()));
+    assert_eq!(baked.get_by_id::<HologramMaterial>(source_uuid("fx/hologram")), Some(baked.fx.hologram.clone()));
+    assert_eq!(baked.get_by_id::<HologramMaterial>(rock), None, "another material type");
+    assert_eq!(baked.get_by_id::<RockWetMaterial>(Uuid::nil()), None);
 }
 
 /// Decision 0029: another fixed texture node wired in (another `ft_*` name at the same binding, same layout) is

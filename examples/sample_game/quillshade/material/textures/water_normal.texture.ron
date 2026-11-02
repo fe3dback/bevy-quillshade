@@ -1,5 +1,6 @@
 TextureAsset(
-  format_version: 1,
+  format_version: 2,
+  id: "019b76da-a800-7ff7-b9c3-0ec5e8b29c1c",
   path: "textures/water_normal.ktx2",
   settings: TextureSettings(
     is_srgb: false,

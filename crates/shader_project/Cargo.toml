@@ -11,6 +11,9 @@ shader_stdlib = { workspace = true }
 shader_codegen_wesl = { workspace = true }
 shader_codegen_rust = { workspace = true }
 project_core = { workspace = true }
+project_migrate = { workspace = true }
+serde = { workspace = true }
+ron = { workspace = true }
 thiserror = { workspace = true }
 png = { workspace = true }
 
@@ -18,6 +21,8 @@ png = { workspace = true }
 tempfile = { workspace = true }
 insta = { workspace = true }
 ktx2 = { workspace = true }
+# The v3 migration test regenerates a copy of the sample game with every backend.
+light_domain = { workspace = true }
 
 # `cargo test` runs the generator's unit tests too.
 [[example]]

@@ -1,3 +1,4 @@
 ProjectSettings(
-    format_version: 1,
+  project_version: 3,
+  header_date: false,
 )

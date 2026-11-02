@@ -76,7 +76,7 @@ cargo build --release --no-default-features
 my_game/
   Cargo.toml                 # yours: the editor never edits it
   quillshade/
-    project.ron              # optional: which domains are enabled
+    project.ron              # project version and enabled domains (required; written by the editor)
     material/                # your graphs: *.material.ron, *.function.ron, *.texture.ron, ...
     light/                   # environments, curves and cube maps: *.environment.ron, *.curve.ron, *.texture.ron
   assets/quillshade/material/autogen/    # generated WESL + baked.ron (do not edit)
@@ -84,6 +84,45 @@ my_game/
   assets/quillshade/light/autogen/       # generated light baked.ron (do not edit)
   crates/quillshade/         # generated Rust crate, one module per domain (do not edit)
 ```
+
+#### Upgrading a project
+
+`project.ron` records the project version. When a newer editor opens an older project, the **Migration Tool** opens
+over the window and the rest of the editor is unavailable until it is done: it shows the version step (e.g.
+`v1 -> v2`), the steps and the source files each one rewrites, grouped by domain, and a warning when the project has
+uncommitted git changes. **Dry run** lists the plan and writes nothing, **Migrate** rewrites the sources and then
+regenerates every domain (a progress bar and a log follow the run), and **Open project** then opens the project.
+Rewriting `project.ron` keeps every setting but not its comments or keys the editor does not know. **Commit first** so
+the migration can be reviewed and reverted; an interrupted or failed migration resumes where it stopped on the next
+run. A project newer than the editor is refused. The same engine runs headless:
+`shader-editor migrate my_game [--dry-run]`. Upgrading to project version 3 gives every source an asset UUID (see
+below) and rewrites references to use it; the generated code does not change.
+
+#### Asset identity: UUIDs
+
+Every source file the editor owns (materials, functions, curves, constant tables, gradient collections, Texture assets,
+environments and user nodes in `quillshade/material/.nodes/`) has an `id` line with a UUID that the editor writes
+(never write or change one by hand), and references between sources use that UUID. The editor adds the target's path
+as a comment on every such line, so files stay readable in a diff:
+
+```ron
+      kind: "function::019b76da-a800-79a4-861e-ba527e418587", // common/tex_layer
+      ...
+      kind: "stdlib::SampleCurve",
+      params: {
+        "curve": Str("019b76da-a800-783e-be72-971715772890"), // common/pulse
+```
+
+- **Rename and move freely**, in the editor or outside it (`git mv`, a file manager, an IDE): references keep working,
+  nothing is rewritten, and the comments catch up on the next save. Generated Rust names follow the path, so renaming
+  a material renames its field in `BakedMaterials` (the game gets a compile error, as intended).
+- **Copying a file** outside the editor copies its UUID too: the copy is reported as `AE001` (duplicate asset UUID)
+  and references keep pointing at the file whose path sorts first (usually the original). Click the error in the console (or
+  use **Regenerate UUID** in the Project tree's menu of the copy) to give the copy a new UUID.
+- A source without a valid `id` (e.g. a hand-written user node) is `AE004`: click the error for the **Assign UUID**
+  quick fix (saving an asset in the editor assigns one too). Graphs can use a user node only once it has a UUID.
+- A reference to a UUID that no file has is `AE002` (e.g. the target was deleted). Game files under `assets/`
+  (images) are still referenced by path.
 
 ### 2. Cargo.toml
 
@@ -124,7 +163,8 @@ regenerates WESL shaders and a typed Rust crate that the game hot-reloads.
 </p>
 
 - **Three material kinds**: PBR 3D (an `ExtendedMaterial` over `StandardMaterial`, so shadows, prepass and deferred
-  work out of the box), Unlit 3D and Sprite 2D. World Position Offset is supported too.
+  work out of the box), Unlit 3D and Sprite 2D. World Position Offset and a vertex-stage World Normal
+  override (PBR) are supported too.
 - **130+ built-in nodes**: math, vectors, colors, coordinates, textures, noise, masks and more. Implicit type
   conversions are applied on the wires.
 - **Material Attributes**: make, break and blend whole PBR layers to build layered materials.
@@ -139,10 +179,15 @@ regenerates WESL shaders and a typed Rust crate that the game hot-reloads.
 - **Comfortable canvas**: comments, named routes, auto-layout, minimap, node preview, copy / paste,
   undo / redo, Back / Forward navigation.
 - **Live validation**: errors and warnings are pinned to their node and pin, and an error blocks only its own asset.
+  Informational notes (`I103`, a vertex attribute a mesh may lack) never block, are not pinned on the canvas, and show
+  in the console only with its "Info" checkbox on.
 - **Readable output**: view the generated WESL and Rust right in the editor. The game gets typed material structs and
   baked material and texture handles, and hot-reloads both the shaders and the baked values.
 - **Headless CLI**: `regen`, `check` and `diff` for CI; `--domain <id>` (`material`, `light`; repeatable) limits a
   run to those domains (default: all), e.g. `shader-editor check my_game --domain light`.
+  `migrate <project> [--dry-run]` upgrades an older project and regenerates it (exit `0` done or up to date, `1`
+  migration error, `2` not a project or too new); on an older project `regen` / `check` / `diff` exit `2` with
+  `` hint: run `shader-editor migrate <path>` ``.
 
 <table>
   <tr>
@@ -175,6 +220,8 @@ fn spawn(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, baked: Res<Ba
 // Sprite2d: (Sprite::from_image(image), SpriteMaterial(baked.ui.dissolve.clone())).
 // By id, e.g. from your own asset data (None for an unknown id or another type):
 // baked.get::<RockWetMaterial>("env/rock_wet"), tex.get("textures/rock_albedo").
+// By asset UUID (the `id` of the .material.ron; survives renames):
+// baked.get_by_id::<RockWetMaterial>(uuid), or the untyped baked.by_id map.
 ```
 
 #### Planned

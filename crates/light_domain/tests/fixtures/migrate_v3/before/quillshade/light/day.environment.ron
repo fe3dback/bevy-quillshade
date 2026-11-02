@@ -1,0 +1,2 @@
+// The day, by hand: the step rewrites it in the canonical format (comments are not kept).
+Environment(format_version: 1, cubemap: Some("skies/clear"), ev100: 12.5)

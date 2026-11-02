@@ -14,6 +14,7 @@ use editor_core::action::Actions;
 use editor_core::search::search_indices_leading;
 use editor_core::state::editor::Editor;
 use editor_core::theme::{TEXT, TEXT_DIM, text};
+use editor_core::tooltip::Tooltip;
 use editor_core::ui::HoverRow;
 use editor_core::ui::shell::ROW_ACTIVE;
 
@@ -179,11 +180,18 @@ fn filter<G: GraphDomain>(mut palette: ResMut<Palette<G>>, inputs: Query<&Editab
     palette.highlight = 0;
 }
 
-fn pick<G>(palette: &mut Palette<G>, actions: &mut Actions, i: usize) {
-    if let Some(e) = palette.results.get(i).and_then(|r| palette.entries.get(*r)) {
+/// Picks result row `i` and closes the palette; a disabled entry ([`PaletteEntry::disabled`]) does nothing. Returns
+/// whether the palette closed.
+fn pick<G>(palette: &mut Palette<G>, actions: &mut Actions, i: usize) -> bool {
+    let entry = palette.results.get(i).and_then(|r| palette.entries.get(*r));
+    if entry.is_some_and(|e| e.disabled.is_some()) {
+        return false;
+    }
+    if let Some(e) = entry {
         actions.push((e.pick)(palette.graph));
     }
     palette.open = false;
+    true
 }
 
 fn keys<G: GraphDomain>(
@@ -205,8 +213,9 @@ fn keys<G: GraphDomain>(
         palette.highlight = (palette.highlight + n - 1) % n;
     } else if keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::NumpadEnter) {
         let i = palette.highlight;
-        pick(&mut palette, &mut actions, i);
-        focus.clear();
+        if pick(&mut palette, &mut actions, i) {
+            focus.clear();
+        }
     }
 }
 
@@ -250,14 +259,20 @@ fn rows<G: GraphDomain>(
         let Some(e) = palette.entries.get(*r) else { continue };
         let base = if i == palette.highlight { ROW_ACTIVE } else { Color::NONE };
         let (name, cat, row, hover) = (e.name.clone(), e.category.clone(), PaletteRow(i), HoverRow { base });
-        commands.spawn_scene(bsn! {
-            Node { flex_direction: FlexDirection::Row, padding: UiRect::axes(px(8), px(3)), column_gap: px(8), border_radius: BorderRadius::all(px(3)) }
-            BackgroundColor(base)
-            row
-            hover
-            ChildOf(list)
-            Children [ @text(name, TEXT, 13.0) -- Node { flex_grow: 1.0 } -- @text(cat, TEXT_DIM, 11.0) ]
-        });
+        let ink = if e.disabled.is_some() { TEXT_DIM } else { TEXT };
+        let row = commands
+            .spawn_scene(bsn! {
+                Node { flex_direction: FlexDirection::Row, padding: UiRect::axes(px(8), px(3)), column_gap: px(8), border_radius: BorderRadius::all(px(3)) }
+                BackgroundColor(base)
+                row
+                hover
+                ChildOf(list)
+                Children [ @text(name, ink, 13.0) -- Node { flex_grow: 1.0 } -- @text(cat, TEXT_DIM, 11.0) ]
+            })
+            .id();
+        if let Some(why) = &e.disabled {
+            commands.entity(row).insert(Tooltip(why.clone()));
+        }
     }
 }
 

@@ -76,8 +76,8 @@ fn project() -> (tempfile::TempDir, Editor) {
     std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname = \"g\"\n").unwrap();
     std::fs::create_dir_all(dir.path().join("assets")).unwrap();
     let p = Project::open(dir.path()).unwrap();
-    curve_kit::editor::save(&p, &x("a"), &Curve::ramp("x")).unwrap();
-    curve_kit::editor::save(&p, &x("b"), &Curve::new("x", vec![(0.0, 1.0), (0.5, 0.2), (1.0, 1.0)])).unwrap();
+    curve_kit::editor::save(&p, &x("a"), &mut Curve::ramp("x")).unwrap();
+    curve_kit::editor::save(&p, &x("b"), &mut Curve::new("x", vec![(0.0, 1.0), (0.5, 0.2), (1.0, 1.0)])).unwrap();
     let mut e = Editor::new(domains());
     e.open_project(dir.path()).unwrap();
     (dir, e)

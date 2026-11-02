@@ -9,7 +9,7 @@ use crate::action::{Action, CloseTabs, Dialog, Submit, TabAction, Unsaved, ViewR
 use crate::domain::{TOOL_KEY_PREFIX, ToolId};
 use crate::dynval::Payload;
 use crate::tab::{Tab, TabKey};
-use project_core::{AssetRef, DomainId, Project};
+use project_core::{AssetRef, DomainId, OpenError, Project};
 
 use super::editor::Editor;
 use super::kinds;
@@ -18,8 +18,16 @@ use crate::nav::{NavDir, NavEntry, Reach};
 impl Editor {
     // ---- project ----
 
+    /// Opens the project at `path` in place of the open one (without asking about unsaved changes: see
+    /// [`Editor::switch_project`]). A project older than this editor does not open: the Migration Tool starts instead
+    /// ([`Editor::migration`], ADR 0046; the open project closes, the recent projects stay as they are) and this
+    /// returns `Ok`. Any other open error (a too-new project, no project) is returned for the caller to show.
     pub fn open_project(&mut self, path: &Path) -> Result<(), String> {
-        let project = Project::open(path).map_err(|e| e.to_string())?;
+        let project = match Project::open(path) {
+            Ok(project) => project,
+            Err(OpenError::NeedsMigration { .. }) => return self.start_migration(path),
+            Err(e) => return Err(e.to_string()),
+        };
         project.ensure_layout().map_err(|e| format!("cannot create quillshade/: {e}"))?;
         for id in self.domain_list.real_ids() {
             if let Err(e) = std::fs::create_dir_all(project.domain_dir(id)) {
@@ -81,10 +89,12 @@ impl Editor {
         }
     }
 
-    /// Re-reads the project's files: each enabled domain's Project tree folders and the files of its asset kinds
+    /// Re-reads the project's files: the asset index first ([`Editor::refresh_index`], so the domains' rescans resolve
+    /// against it, ADR 0047 §10), each enabled domain's Project tree folders and the files of its asset kinds
     /// ([`super::kinds::scan`]), then every domain's [`DomainState::rescan`](crate::domain::DomainState::rescan)
-    /// (also without a project: the domains go back to their empty state).
+    /// (also without a project: the index empties and the domains go back to their empty state).
     pub fn rescan(&mut self) {
+        self.refresh_index();
         self.folders.clear();
         self.kind_files.clear();
         if let Some(p) = &self.project {
@@ -456,14 +466,15 @@ impl Editor {
 
     /// Opens the project at `path` in place of the open one. With unsaved tabs `Ask` asks Cancel / Discard / Save
     /// first, as closing tabs does; a path that is no project shows its error without asking. The Open project
-    /// dialog it came from (a recent project, the field) has done its job and closes.
+    /// dialog it came from (a recent project, the field) has done its job and closes. A project older than this editor
+    /// goes the same way and starts the Migration Tool where it would have opened (ADR 0046).
     pub fn switch_project(&mut self, path: &Path, unsaved: Unsaved) {
         if let Some(Dialog::Input { submit: Submit::OpenProject, .. }) = self.dialog {
             self.dialog = None;
         }
-        if let Err(e) = Project::open(path) {
-            self.io_error("Cannot open project", e.to_string());
-            return;
+        match Project::open(path) {
+            Ok(_) | Err(OpenError::NeedsMigration { .. }) => {}
+            Err(e) => return self.io_error("Cannot open project", e.to_string()),
         }
         if self.is_dirty() {
             match unsaved {

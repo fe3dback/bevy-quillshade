@@ -367,8 +367,9 @@ pub fn hold_keyboard_while<R: Resource>(app: &mut App, holds: fn(&R) -> bool) {
     );
 }
 
-/// Whether the user is typing: a text field has the focus ([`typing_into`]), a dialog or a context menu
-/// ([`MenuRoot`]) is open, something holds the keyboard ([`KeyboardHold`]: the palette), or the focus is in a popup
+/// Whether the user is typing: a text field has the focus ([`typing_into`]), a dialog, the Migration Tool (ADR 0046)
+/// or a context menu ([`MenuRoot`]) is open, something holds the keyboard ([`KeyboardHold`]: the palette), or the
+/// focus is in a popup
 /// ([`Popups`]: a main or context menu, a Feathers select's list, the color picker). Also while a focused button or checkbox takes a key it presses with ([`PRESS_KEYS`]), or a
 /// focused list one of its keys ([`LIST_KEYS`]).
 #[derive(SystemParam)]
@@ -390,6 +391,7 @@ impl Typing<'_, '_> {
         let held = self.mouse.as_ref().is_some_and(|m| m.pressed(MouseButton::Left));
         let focus = self.focus.as_ref().and_then(|f| f.get());
         self.editor.dialog.is_some()
+            || self.editor.migration.is_some()
             || self.hold.as_ref().is_some_and(|h| h.0)
             || !self.menus.is_empty()
             || focus.is_some_and(|f| self.popups.contains(f))

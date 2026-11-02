@@ -110,7 +110,9 @@ impl NodePreview for ConstPreview {
     }
 
     fn key(editor: &Editor, doc: &Doc, node: &NodeId) -> Option<GlobalConst> {
-        let n = doc.asset.nodes.get(node)?;
+        // Reference values as paths (ADR 0047 §4).
+        let view = editor.view_of(doc);
+        let n = view.nodes.get(node)?;
         let def = editor.domains.material().registry.get(&n.kind)?;
         let params = editor.domains.material().registry.resolved_params(&n.kind, &n.params);
         let table = def

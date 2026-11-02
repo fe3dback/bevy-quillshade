@@ -111,6 +111,32 @@ impl<T> History<T> {
         true
     }
 
+    /// [`Self::undo`] leaving what `part` picks of `current` as it is: state that is no part of the undo history, like
+    /// an asset's id (ADR 0047 §6: the first save mints it in place, without an undo step; a snapshot from before that
+    /// save must not bring "no id" back, or the next save would mint a different UUID and the references stored
+    /// meanwhile would dangle). The snapshot pushed for redo carries it too.
+    pub fn undo_keeping<K: Clone>(&mut self, current: &mut T, part: impl Fn(&mut T) -> &mut K) -> bool
+    where
+        T: Clone,
+    {
+        Self::keeping(current, part, |c| self.undo(c))
+    }
+
+    /// [`Self::redo`] leaving what `part` picks of `current` as it is ([`Self::undo_keeping`]).
+    pub fn redo_keeping<K: Clone>(&mut self, current: &mut T, part: impl Fn(&mut T) -> &mut K) -> bool
+    where
+        T: Clone,
+    {
+        Self::keeping(current, part, |c| self.redo(c))
+    }
+
+    fn keeping<K: Clone>(current: &mut T, part: impl Fn(&mut T) -> &mut K, step: impl FnOnce(&mut T) -> bool) -> bool {
+        let kept = part(current).clone();
+        let done = step(current);
+        *part(current) = kept;
+        done
+    }
+
     /// Runs `f` on every stored state, undo and redo alike (a reference the model follows, e.g. a renamed asset, must
     /// not come back with an undo).
     pub fn for_each_snapshot(&mut self, mut f: impl FnMut(&mut T))
@@ -169,5 +195,20 @@ mod tests {
         assert_eq!(cur, 30, "the redo state");
         assert!(h.undo(&mut cur) && h.undo(&mut cur));
         assert_eq!(cur, 10, "the oldest undo state");
+    }
+
+    /// A part kept out of the history (an asset id minted by a save) survives undo and redo.
+    #[test]
+    fn kept_part_survives_undo_and_redo() {
+        let mut h = History::<(u32, u32)>::default();
+        h.record(Some((0, 1)), None);
+        let mut cur = (0, 2);
+        cur.0 = 42;
+        assert!(h.undo_keeping(&mut cur, |c| &mut c.0));
+        assert_eq!(cur, (42, 1));
+        assert!(h.redo_keeping(&mut cur, |c| &mut c.0));
+        assert_eq!(cur, (42, 2));
+        assert!(h.undo(&mut cur));
+        assert_eq!(cur, (42, 1), "the redo snapshot carries it too");
     }
 }

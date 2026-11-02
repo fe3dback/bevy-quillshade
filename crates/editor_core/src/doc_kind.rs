@@ -5,9 +5,10 @@
 //! ([`crate::tab::Tab::get`]). Edits reach the document as [`TabAction`]s ([`TabDoc::apply`]).
 
 use std::any::Any;
+use std::sync::LazyLock;
 
 use project_core::umbrella::CrateContribution;
-use project_core::{AssetRef, Diagnostic, Project, ProjectSettings};
+use project_core::{AssetIndex, AssetRef, Diagnostic, Project, ProjectSettings};
 
 use crate::action::{Handled, TabAction};
 use crate::clipboard::Clipboards;
@@ -110,7 +111,13 @@ pub struct DocCtx<'a> {
     /// Set by a save that wrote `quillshade/project.ron` (the Project Settings tool): the editor makes them the open
     /// project's settings after the call.
     pub saved_settings: Option<ProjectSettings>,
+    /// The project's [`AssetIndex`] ([`crate::state::editor::Editor::asset_index`], ADR 0047 §10; empty in a context
+    /// made with [`DocCtx::new`]): what writers label their D27 path comments with.
+    pub index: &'a AssetIndex,
 }
+
+/// The index of a context made with [`DocCtx::new`].
+static EMPTY_INDEX: LazyLock<AssetIndex> = LazyLock::new(AssetIndex::default);
 
 impl<'a> DocCtx<'a> {
     pub fn new(project: Option<&'a Project>, domain: &'a mut dyn Any, messages: &'a mut Vec<Message>) -> Self {
@@ -124,6 +131,7 @@ impl<'a> DocCtx<'a> {
             clipboards: Clipboards::default(),
             crates: &[],
             saved_settings: None,
+            index: &EMPTY_INDEX,
         }
     }
 
@@ -145,6 +153,9 @@ pub struct StatusCtx<'a> {
     pub diagnostics: &'a [Diagnostic],
     /// The state of the tab's domain (`()` when the domain keeps none).
     pub domain: &'a dyn Any,
+    /// The project's [`AssetIndex`] (empty in [`StatusCtx::default`]): what a document resolves the UUID references
+    /// it shows through (ADR 0047 §4).
+    pub index: &'a AssetIndex,
 }
 
 impl StatusCtx<'_> {
@@ -156,7 +167,7 @@ impl StatusCtx<'_> {
 
 impl Default for StatusCtx<'_> {
     fn default() -> Self {
-        StatusCtx { diagnostics: &[], domain: &() }
+        StatusCtx { diagnostics: &[], domain: &(), index: &EMPTY_INDEX }
     }
 }
 
@@ -172,10 +183,11 @@ pub struct StatusInfo {
 }
 
 impl StatusInfo {
-    /// Errors / warnings counted from `ctx`.
+    /// Errors / warnings counted from `ctx`; info diagnostics are not counted.
     pub fn new(dirty: bool, ctx: &StatusCtx, counts: Vec<String>) -> StatusInfo {
         let errors = ctx.diagnostics.iter().filter(|d| d.is_error()).count();
-        StatusInfo { dirty, errors, warnings: ctx.diagnostics.len() - errors, counts }
+        let warnings = ctx.diagnostics.iter().filter(|d| d.is_warning()).count();
+        StatusInfo { dirty, errors, warnings, counts }
     }
 }
 
@@ -189,8 +201,9 @@ mod tests {
             Diagnostic::error("E006", "missing"),
             Diagnostic::warning("W101", "unused"),
             Diagnostic::warning("W104", "truncated"),
+            Diagnostic::info("I103", "uv1"),
         ];
-        let ctx = StatusCtx { diagnostics: &diagnostics, domain: &() };
+        let ctx = StatusCtx { diagnostics: &diagnostics, ..StatusCtx::default() };
         let status = StatusInfo::new(true, &ctx, vec!["3 points".into()]);
         assert_eq!(status, StatusInfo { dirty: true, errors: 1, warnings: 2, counts: vec!["3 points".into()] });
         assert_eq!(StatusInfo::new(false, &StatusCtx::default(), Vec::new()), StatusInfo::default());
@@ -206,7 +219,7 @@ mod tests {
         ctx.defer(5u8);
         assert_eq!(ctx.deferred, [Payload::new(5u8)]);
         assert_eq!(state, 8);
-        let ctx = StatusCtx { diagnostics: &[], domain: &state };
+        let ctx = StatusCtx { domain: &state, ..StatusCtx::default() };
         assert_eq!(ctx.domain::<u32>(), Some(&8));
         assert!(ctx.domain::<i32>().is_none());
     }

@@ -1,5 +1,6 @@
 TextureAsset(
-  format_version: 1,
+  format_version: 2,
+  id: "019b76da-a800-7bbb-869e-d9578e3a856f",
   path: "textures/atlas.png",
   settings: TextureSettings(
     sampler: Some(SamplerSettings()),

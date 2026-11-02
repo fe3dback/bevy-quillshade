@@ -2,9 +2,11 @@
 
 use shader_graph_core::attributes::{pbr_field_active, pbr_fields};
 use shader_graph_core::ident::input_ident;
-use shader_graph_core::ir::WPO_PIN;
+use shader_graph_core::ir::{WORLD_NORMAL_PIN, WPO_PIN};
 use shader_graph_core::registry::{NodeRole, Operand, ParamDef, ParamKind, PinDef, Registry};
-use shader_graph_core::{AssetKind, BlendMode, Code, MaterialKind, PbrOutputMode, PbrSettings, PinType, SigCtx, Value};
+use shader_graph_core::{
+    AssetKind, BlendMode, Code, EmitCtx, MaterialKind, PbrOutputMode, PbrSettings, PinType, Shading, SigCtx, Value,
+};
 
 use crate::def::{def, pin_out, sig};
 
@@ -32,12 +34,30 @@ fn pbr_settings(c: &SigCtx) -> PbrSettings {
     }
 }
 
+/// World Normal of `output::Pbr3d` (vertex stage, like World Position Offset): replaces `out.world_normal`, so the
+/// tangent-space Normal pin and the fragment `VertexNormalWS` build on it. Not a Material Attributes field, for the
+/// same reason as the offset (`shader_graph_core::attributes`). Inactive for unlit shading, like Normal (spec §7.3).
+fn world_normal_pin(s: &PbrSettings) -> PinDef {
+    out_pin(WORLD_NORMAL_PIN, "World Normal", PinType::Float3, "vertex normal").inactive(s.shading == Shading::Unlit)
+}
+
+/// I103 on a connected World Normal: the override is written only when the mesh has normals.
+fn world_normal_info(c: &mut EmitCtx) {
+    if c.is_connected(WORLD_NORMAL_PIN) {
+        c.diag_pin(
+            Code::I103,
+            WORLD_NORMAL_PIN,
+            "World Normal requires mesh normals (ATTRIBUTE_NORMAL); meshes without them keep the vertex normal",
+        );
+    }
+}
+
 fn opacity_inactive(b: BlendMode) -> bool {
     matches!(b, BlendMode::Opaque | BlendMode::Mask)
 }
 
 /// Records every connected input of a sink node as an output value.
-fn emit_sink(c: &mut shader_graph_core::EmitCtx) {
+fn emit_sink(c: &mut EmitCtx) {
     let pins: Vec<String> = c.sig.inputs.iter().map(|p| p.id.clone()).collect();
     for p in pins {
         if c.is_connected(&p) {
@@ -58,7 +78,7 @@ pub fn register(r: &mut Registry) {
                     let wpo = out_pin(WPO_PIN, "World Position Offset", PinType::Float3, "0");
                     if s.output == PbrOutputMode::Wrapped {
                         let attrs = out_pin("attributes", "Material Attributes", PinType::MaterialAttributesPbr, "StandardMaterial");
-                        return sig(vec![attrs, wpo], vec![]);
+                        return sig(vec![attrs, wpo, world_normal_pin(&s)], vec![]);
                     }
                     let field = |id: &str, label: &str, ty: PinType, implicit: &str| {
                         out_pin(id, label, ty, implicit).inactive(!pbr_field_active(id, &s))
@@ -74,6 +94,7 @@ pub fn register(r: &mut Registry) {
                             field("opacity_mask", "Opacity Mask", PinType::Float, "1.0"),
                             field("normal", "Normal", PinType::Float3, "vertex normal"),
                             wpo,
+                            world_normal_pin(&s),
                             field("ambient_occlusion", "Ambient Occlusion", PinType::Float, "1.0"),
                         ],
                         vec![],
@@ -86,7 +107,7 @@ pub fn register(r: &mut Registry) {
                     };
                     if s.output == PbrOutputMode::Wrapped {
                         // The struct expands into the per-field keys of `Default` mode, so the templates and the
-                        // preview stay unchanged. Unconnected = nothing written (decision 0023); no W103 here,
+                        // preview stay unchanged. Unconnected = nothing written (decision 0023); no I103 here,
                         // the normal is always written.
                         if c.is_connected("attributes") {
                             let v = c.input("attributes");
@@ -94,19 +115,23 @@ pub fn register(r: &mut Registry) {
                                 c.set_output(f.id, format!("{v}.{}", f.id));
                             }
                         }
-                        if c.is_connected(WPO_PIN) {
-                            let v = c.input(WPO_PIN);
-                            c.set_output(WPO_PIN, v);
+                        for pin in [WPO_PIN, WORLD_NORMAL_PIN] {
+                            if c.is_connected(pin) {
+                                let v = c.input(pin);
+                                c.set_output(pin, v);
+                            }
                         }
+                        world_normal_info(c);
                         return;
                     }
                     if c.is_connected("normal") {
                         c.diag_pin(
-                            Code::W103,
+                            Code::I103,
                             "normal",
                             "Normal requires mesh tangents (ATTRIBUTE_TANGENT); meshes without them keep the vertex normal",
                         );
                     }
+                    world_normal_info(c);
                     emit_sink(c);
                 },
             ),

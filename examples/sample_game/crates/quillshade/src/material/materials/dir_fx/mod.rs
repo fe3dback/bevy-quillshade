@@ -3,10 +3,12 @@ pub mod mat_coords;
 pub mod mat_curve_bands;
 pub mod mat_global_tint;
 pub mod mat_hologram;
+pub mod mat_user_node;
 
 pub(crate) fn register(app: &mut bevy::prelude::App) {
     mat_coords::register(app);
     mat_curve_bands::register(app);
     mat_global_tint::register(app);
     mat_hologram::register(app);
+    mat_user_node::register(app);
 }

@@ -12,9 +12,11 @@ use editor_core::menu::MenuEntry;
 use editor_core::ui::icons::{IconId, IconRef};
 use project_core::regen::DomainBackend;
 use project_core::{AssetRef, DomainId, Project};
+use project_migrate::DomainMigrator;
 use shader_graph_core::model::{MaterialKind, PbrSettings, SpriteSettings, UnlitSettings};
 use shader_project::backend::MaterialBackend;
 use shader_project::layout::MATERIAL;
+use shader_project::migrate::MaterialMigrator;
 use shader_project::{AssetId, AssetType, ops};
 
 use crate::curve::MaterialCurve;
@@ -52,6 +54,11 @@ impl EditorDomain for MaterialDomain {
     /// The CLI's generator: it finds the Bevy sources for `--compile` itself.
     fn backend(&self) -> Option<Box<dyn DomainBackend>> {
         Some(Box::new(MaterialBackend::discovering()))
+    }
+
+    /// The v3 step (ADR 0047 §14): asset UUIDs and references by UUID in every Material source.
+    fn migrator(&self) -> Option<Box<dyn DomainMigrator>> {
+        Some(Box::new(MaterialMigrator))
     }
 
     fn register(&self, r: &mut DomainRegistrar) {

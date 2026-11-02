@@ -98,6 +98,7 @@ impl Plugin for UiPlugin {
             tabs::TabsPlugin,
             log::LogPlugin,
             dialog::DialogPlugin,
+            super::migration::MigrationPlugin,
             icons::IconsPlugin,
             tooltip::TooltipPlugin,
             areas::AreasPlugin,

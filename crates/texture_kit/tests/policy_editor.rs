@@ -111,9 +111,9 @@ fn project(list: Arc<DomainList>) -> (tempfile::TempDir, Editor) {
         std::fs::copy(format!("{SAMPLES}/{from}"), textures.join(to)).unwrap();
     }
     let p = Project::open(dir.path()).unwrap();
-    texture_kit::editor::save(&p, &tex::<Plain>("t"), &TextureAsset::new("textures/a.png")).unwrap();
-    texture_kit::editor::save(&p, &tex::<Cube>("t"), &TextureAsset::new("textures/a.ktx2")).unwrap();
-    texture_kit::editor::save(&p, &tex::<Cube>("u"), &TextureAsset::new("textures/b.ktx2")).unwrap();
+    texture_kit::editor::save(&p, &tex::<Plain>("t"), &mut TextureAsset::new("textures/a.png")).unwrap();
+    texture_kit::editor::save(&p, &tex::<Cube>("t"), &mut TextureAsset::new("textures/a.ktx2")).unwrap();
+    texture_kit::editor::save(&p, &tex::<Cube>("u"), &mut TextureAsset::new("textures/b.ktx2")).unwrap();
     let mut e = Editor::new(list);
     e.open_project(dir.path()).unwrap();
     (dir, e)
@@ -338,7 +338,9 @@ fn created_ids_mirror_folders_and_avoid_clashes() {
     let b = try_create_for_file::<Plain>(&mut e, "textures/a.ktx2").unwrap();
     assert_eq!(b.path, "textures/a_2");
     assert_eq!(texture_kit::new_texture_path_for_file("a.ktx2", taken), "textures/a_3");
-    assert_eq!(texture_kit::editor::load(&project, &b).unwrap(), TextureAsset::new("textures/a.ktx2"));
+    let created = texture_kit::editor::load(&project, &b).unwrap();
+    assert!(created.id.is_v7(), "a created Texture asset has its UUID (ADR 0047 §6)");
+    assert_eq!(created, TextureAsset { id: created.id, ..TextureAsset::new("textures/a.ktx2") });
 }
 
 /// Review Focus 4 (design §14.4): kit edits carry their domain. A `plain` texture edit queued before switching to a
@@ -400,8 +402,8 @@ fn shared_cubemap_preview_across_domains() {
     }
     std::fs::write(dir.path().join("assets/textures/sky.ktx2"), ktx).unwrap();
     let p = Project::open(dir.path()).unwrap();
-    texture_kit::editor::save(&p, &tex::<Plain>("sky"), &TextureAsset::new("textures/sky.ktx2")).unwrap();
-    texture_kit::editor::save(&p, &tex::<Cube>("sky"), &TextureAsset::new("textures/sky.ktx2")).unwrap();
+    texture_kit::editor::save(&p, &tex::<Plain>("sky"), &mut TextureAsset::new("textures/sky.ktx2")).unwrap();
+    texture_kit::editor::save(&p, &tex::<Cube>("sky"), &mut TextureAsset::new("textures/sky.ktx2")).unwrap();
 
     let mut app = app(editor);
     act(&mut app, Action::Rescan);

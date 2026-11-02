@@ -1,16 +1,18 @@
 //! The Light backend (design §9.2) on temporary projects: environment files, cube-map Texture assets through the
-//! texture kit's rules, the L-prefixed diagnostics, the generated module and the reference rewrite of a renamed or
-//! deleted texture.
+//! texture kit's rules, the L-prefixed diagnostics, the generated module, the cube maps cleared when their texture
+//! is deleted and the references kept valid through a rename (ADR 0047 §13).
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use curve_kit::Curve;
 use light_domain::backend::{
-    Environment, LIGHT, LightAssets, LightBackend, curve_ref, environment_ref, load_curve, load_environment,
-    rewrite_texture_refs, save_curve, save_environment, texture_ref, to_pascal_case, validate,
+    Environment, LIGHT, LightAssets, LightBackend, clear_texture_refs, curve_ref, environment_ref, load_curve,
+    load_environment, save_curve, save_environment, texture_ref, texture_ref_names, to_pascal_case, validate,
 };
+use project_core::asset_index::IndexedRef;
 use project_core::regen::{DomainBackend, run};
-use project_core::{Diagnostic, Level, Project};
+use project_core::{AssetIndex, AssetUuid, Diagnostic, DomainId, Level, Project};
 use texture_kit::{SamplerSettings, TextureAsset};
 
 /// A game crate whose workspace has `crates/quillshade`, with an empty `assets/`.
@@ -42,15 +44,18 @@ fn file(p: &Project, rel: String) -> PathBuf {
     p.root.join(rel)
 }
 
-/// Light Texture asset `path` on the game file `image`.
+/// Light Texture asset `path` on the game file `image`, with an id (a fresh one unless `t` has one), as every
+/// editor writer saves it.
 fn texture(p: &Project, path: &str, t: &TextureAsset) {
-    texture_kit::save(&file(p, texture_ref(path).source_rel()), t).unwrap();
+    let mut t = t.clone();
+    t.ensure_id();
+    texture_kit::save(&file(p, texture_ref(path).source_rel()), &t).unwrap();
 }
 
 /// Environment `path` showing the cube map `cubemap`.
 fn environment(p: &Project, path: &str, cubemap: Option<&str>) {
-    let env = Environment { cubemap: cubemap.map(str::to_string), ..Environment::default() };
-    save_environment(&file(p, environment_ref(path).source_rel()), &env).unwrap();
+    let mut env = Environment { cubemap: cubemap.map(str::to_string), ..Environment::default() };
+    save_environment(&file(p, environment_ref(path).source_rel()), &mut env, &AssetIndex::default()).unwrap();
 }
 
 /// A valid cube map: `textures/sky` on `assets/textures/sky.ktx2` (6 faces).
@@ -75,7 +80,7 @@ fn read(path: &Path) -> String {
 #[test]
 fn environment_round_trips() {
     let (_d, p) = project();
-    let env = Environment {
+    let mut env = Environment {
         cubemap: Some("textures/sky".into()),
         skybox_brightness: 500.0,
         env_intensity: 2.5,
@@ -83,14 +88,14 @@ fn environment_round_trips() {
     };
     let path = file(&p, environment_ref("outdoor/day").source_rel());
     assert!(path.ends_with("quillshade/light/outdoor/day.environment.ron"), "{}", path.display());
-    save_environment(&path, &env).unwrap();
+    save_environment(&path, &mut env, &AssetIndex::default()).unwrap();
     let text = read(&path);
-    assert!(text.starts_with("Environment(\n  format_version: 1,\n"), "{text}");
+    assert!(text.starts_with(&format!("Environment(\n  format_version: 2,\n  id: \"{}\",\n", env.id)), "{text}");
     assert!(text.contains("\n  cubemap: Some(\"textures/sky\"),\n"), "{text}");
     assert!(text.ends_with(")\n") && !text.contains('\r'), "{text}");
     assert_eq!(load_environment(&path).unwrap(), env);
     // Missing fields take their defaults; a newer format is refused.
-    let defaults = Environment::from_ron("Environment(format_version: 1)").unwrap();
+    let defaults = Environment::from_ron("Environment(format_version: 2)").unwrap();
     assert_eq!(defaults, Environment::default());
     assert_eq!((defaults.cubemap, defaults.skybox_brightness, defaults.env_intensity), (None, 2500.0, 2500.0));
     assert_eq!(defaults.lights.len(), 3);
@@ -170,7 +175,7 @@ fn environment_with_legacy_env_rotation_loads() {
     let (_d, p) = project();
     let path = file(&p, environment_ref("old").source_rel());
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(&path, "Environment(format_version: 1, skybox_rotation: 90.0, env_rotation: 180.0)").unwrap();
+    std::fs::write(&path, "Environment(format_version: 2, skybox_rotation: 90.0, env_rotation: 180.0)").unwrap();
     let env = load_environment(&path).unwrap();
     assert_eq!(env.skybox_rotation, 90.0);
 }
@@ -265,26 +270,72 @@ fn codegen_lists_environments() {
     assert!(module.contains("pub const ENVIRONMENTS: &[&str] = &[];"), "{module}");
 }
 
+/// Deleting a texture clears the cube maps naming it — by its UUID, or by its path in a hand-written file — and no
+/// other.
 #[test]
-fn rename_and_delete_texture_rewrite_refs() {
+fn delete_texture_clears_refs_by_uuid() {
     let (_d, p) = project();
     sky(&p);
-    environment(&p, "a", Some("textures/sky"));
+    let index = AssetIndex::build(vec![LightBackend.index(&p)]);
+    let uuid = index.id_of(&texture_ref("textures/sky")).unwrap().to_string();
+    environment(&p, "a", Some(&uuid));
     environment(&p, "sub/b", Some("textures/sky"));
     environment(&p, "c", Some("textures/other"));
     environment(&p, "d", None);
     let cubemap = |path: &str| load_environment(&file(&p, environment_ref(path).source_rel())).unwrap().cubemap;
-    let renamed = rewrite_texture_refs(&p, "textures/sky", Some("textures/sky2")).unwrap();
-    assert_eq!(renamed, ["a", "sub/b"]);
-    assert_eq!(cubemap("a").as_deref(), Some("textures/sky2"));
-    assert_eq!(cubemap("sub/b").as_deref(), Some("textures/sky2"));
-    assert_eq!(cubemap("c").as_deref(), Some("textures/other"));
-    assert_eq!(cubemap("d"), None);
-    let cleared = rewrite_texture_refs(&p, "textures/sky2", None).unwrap();
+    let names = texture_ref_names("textures/sky", &index);
+    assert_eq!(names, ["textures/sky".to_string(), uuid]);
+    std::fs::remove_file(file(&p, texture_ref("textures/sky").source_rel())).unwrap();
+    let cleared = clear_texture_refs(&p, &names).unwrap();
     assert_eq!(cleared, ["a", "sub/b"]);
     assert_eq!((cubemap("a"), cubemap("sub/b")), (None, None));
     assert_eq!(cubemap("c").as_deref(), Some("textures/other"));
-    assert!(rewrite_texture_refs(&p, "textures/none", None).unwrap().is_empty());
+    assert_eq!(cubemap("d"), None);
+    assert!(clear_texture_refs(&p, &names).unwrap().is_empty());
+}
+
+/// Renaming or moving a Light texture outside the editor (`std::fs::rename`) keeps the environments valid: no
+/// source changes, the project generates without errors, and the generated module names the new path.
+#[test]
+fn external_rename_regenerates_cleanly() {
+    let (_d, p) = project();
+    uuid_form(&p);
+    let day = file(&p, environment_ref("day").source_rel());
+    let before = read(&day);
+    std::fs::create_dir_all(file(&p, texture_ref("moved/sky").source_rel()).parent().unwrap()).unwrap();
+    std::fs::rename(
+        file(&p, texture_ref("textures/sky").source_rel()),
+        file(&p, texture_ref("moved/sky").source_rel()),
+    )
+    .unwrap();
+    let report = run(&p, &[&LightBackend], &[], false, false).unwrap();
+    assert!(!report.has_errors(), "{:?}", report.diagnostics);
+    let index = AssetIndex::build(vec![LightBackend.index(&p)]);
+    assert!(index.diagnostics(&p).is_empty(), "{:?}", index.diagnostics(&p));
+    assert_eq!(read(&day), before, "the environment is not rewritten");
+    let manifest = read(&p.root.join("assets/quillshade/light/autogen/baked.ron"));
+    assert!(manifest.contains("cubemap: Some(\"moved/sky\")"), "{manifest}");
+}
+
+/// ADR 0047 §11, techdoc §10 Phase 1 Done-when 3, Light half: a copied environment has its original's UUID — AE001
+/// at the copy (the later path) only, and the project still generates both. (A copied Texture asset is LE011 as well:
+/// a game file has one Texture asset.)
+#[test]
+fn copied_file_is_reported_as_duplicate() {
+    let (_d, p) = project();
+    uuid_form(&p);
+    let (day, copy) = (environment_ref("day"), environment_ref("day_copy"));
+    std::fs::copy(file(&p, day.source_rel()), file(&p, copy.source_rel())).unwrap();
+    let index = AssetIndex::build(vec![LightBackend.index(&p)]);
+    let diags = index.diagnostics(&p);
+    let at: Vec<_> = diags.iter().map(|d| (d.code.as_str(), d.asset.clone())).collect();
+    assert_eq!(at, [("AE001", Some(copy.source_rel()))], "{diags:?}");
+    assert!(diags[0].message.contains(&format!("as `{}`", day.source_rel())), "{}", diags[0].message);
+    let report = run(&p, &[&LightBackend], &[], false, false).unwrap();
+    let errors: Vec<_> = report.diagnostics.iter().filter(|d| d.level == Level::Error).collect();
+    assert!(errors.iter().all(|d| d.code == "AE001"), "AE001 blocks nothing: {errors:?}");
+    let manifest = read(&p.root.join("assets/quillshade/light/autogen/baked.ron"));
+    assert_eq!(manifest.matches("cubemap: Some(\"textures/sky\")").count(), 2, "{manifest}");
 }
 
 /// The sample game's Light assets (`day` and `night` on the `sky` cube map, plus the `smooth` curve) plan without
@@ -293,7 +344,7 @@ fn rename_and_delete_texture_rewrite_refs() {
 fn sample_game_light_is_clean() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/sample_game");
     let p = Project::open(&dir).unwrap();
-    let plan = LightBackend.plan(&p, false);
+    let plan = LightBackend.plan(&p, &project_core::AssetIndex::build(vec![LightBackend.index(&p)]), false);
     assert!(plan.diagnostics.is_empty(), "{:?}", plan.diagnostics);
     let module = String::from_utf8(plan.output.files[0].bytes.clone()).unwrap();
     assert!(module.contains("pub const ENVIRONMENTS: &[&str] = &[\n    \"day\",\n    \"night\",\n];"), "{module}");
@@ -313,9 +364,9 @@ fn pascal_case_collisions_and_reserved_names_are_le002() {
     environment(&p, "none", Some("textures/sky"));
     environment(&p, "transitioning", Some("textures/sky"));
 
-    save_curve(&file(&p, curve_ref("linear").source_rel()), &Curve::ramp("linear")).unwrap();
-    save_curve(&file(&p, curve_ref("ease_in/out").source_rel()), &Curve::ramp("out")).unwrap();
-    save_curve(&file(&p, curve_ref("ease/in_out").source_rel()), &Curve::ramp("in_out")).unwrap();
+    save_curve(&file(&p, curve_ref("linear").source_rel()), &mut Curve::ramp("linear")).unwrap();
+    save_curve(&file(&p, curve_ref("ease_in/out").source_rel()), &mut Curve::ramp("out")).unwrap();
+    save_curve(&file(&p, curve_ref("ease/in_out").source_rel()), &mut Curve::ramp("in_out")).unwrap();
 
     let all = diagnostics(&p);
     let le002: Vec<_> = with_code(&all, "LE002").into_iter().map(|d| d.asset.as_deref().unwrap_or("")).collect();
@@ -338,17 +389,17 @@ fn pascal_case_collisions_and_reserved_names_are_le002() {
 fn curve_validation_reports_le003_and_lw103() {
     let (_d, p) = project();
     let ok_path = file(&p, curve_ref("smooth").source_rel());
-    save_curve(&ok_path, &Curve::new("smooth", vec![(0.0, 0.0), (0.5, 0.7), (1.0, 1.0)])).unwrap();
+    save_curve(&ok_path, &mut Curve::new("smooth", vec![(0.0, 0.0), (0.5, 0.7), (1.0, 1.0)])).unwrap();
     assert_eq!(load_curve(&ok_path).unwrap().name, "smooth");
 
     let jump_path = file(&p, curve_ref("jump").source_rel());
-    save_curve(&jump_path, &Curve::new("jump", vec![(0.0, 0.2), (1.0, 1.0)])).unwrap();
+    save_curve(&jump_path, &mut Curve::new("jump", vec![(0.0, 0.2), (1.0, 1.0)])).unwrap();
 
     let scaled_path = file(&p, curve_ref("scaled").source_rel());
     let mut scaled = Curve::ramp("scaled");
     scaled.min = 0.0;
     scaled.max = 2.0;
-    save_curve(&scaled_path, &scaled).unwrap();
+    save_curve(&scaled_path, &mut scaled).unwrap();
 
     let mut assets = LightAssets::load(&p);
     let mut bad = Curve::ramp("bad");
@@ -424,4 +475,176 @@ fn setup() {
     assert!(lw102[1].message.contains("`DistanceFog`"));
     assert!(lw102[2].message.contains("`Exposure`"));
     assert!(lw102[3].message.contains("`ClearColor`"));
+}
+
+/// The Light test project in the UUID form (`legacy` ids, the cube map stored as the texture's UUID with its D27
+/// comment): `day` on `textures/sky`, `night` without a cube map, the `smooth` curve.
+fn uuid_form(p: &Project) {
+    let mut curve = Curve::ramp("smooth");
+    curve.id = AssetUuid::legacy(&curve_ref("smooth").source_rel());
+    save_curve(&file(p, curve_ref("smooth").source_rel()), &mut curve).unwrap();
+    game_file(p, "textures/sky.ktx2", &ktx2(0, 0, 6));
+    let sky = AssetUuid::legacy(&texture_ref("textures/sky").source_rel());
+    let t = TextureAsset { id: sky, ..TextureAsset::new("textures/sky.ktx2") };
+    texture(p, "textures/sky", &t);
+    let index = AssetIndex::build(vec![LightBackend.index(p)]);
+    for (path, cubemap) in [("day", Some(sky.to_string())), ("night", None)] {
+        let mut env = Environment {
+            id: AssetUuid::legacy(&environment_ref(path).source_rel()),
+            cubemap,
+            ..Environment::default()
+        };
+        save_environment(&file(p, environment_ref(path).source_rel()), &mut env, &index).unwrap();
+    }
+}
+
+/// The project of [`uuid_form`] with the cube map stored as the texture's path (as written by hand; the resolve seam
+/// passes a path through) and the ids minted on save.
+fn path_form(p: &Project) {
+    save_curve(&file(p, curve_ref("smooth").source_rel()), &mut Curve::ramp("smooth")).unwrap();
+    sky(p);
+    environment(p, "day", Some("textures/sky"));
+    environment(p, "night", None);
+}
+
+/// An environment gets an id on its first save and keeps it, and its cube map UUID carries the D27 path comment;
+/// the annotated text reads back to the same environment. Older formats ask for the Migration Tool.
+#[test]
+fn uuid_environment_round_trips_with_path_comment() {
+    let (_d, p) = project();
+    let (sky, gone) = (AssetUuid::new_v7(), AssetUuid::new_v7());
+    let names: BTreeMap<AssetUuid, (DomainId, String)> = [(sky, (LIGHT, "textures/sky".to_string()))].into();
+    let path = file(&p, environment_ref("day").source_rel());
+    let mut env = Environment { cubemap: Some(sky.to_string()), ..Environment::default() };
+    assert!(env.id.is_nil());
+    save_environment(&path, &mut env, &names).unwrap();
+    let id = env.id;
+    assert!(id.is_v7(), "the first save mints the id");
+    let text = read(&path);
+    assert!(text.starts_with(&format!("Environment(\n  format_version: 2,\n  id: \"{id}\",\n")), "{text}");
+    assert!(text.contains(&format!("\n  cubemap: Some(\"{sky}\"), // textures/sky\n")), "{text}");
+    assert_eq!(load_environment(&path).unwrap(), env);
+    save_environment(&path, &mut env, &names).unwrap();
+    assert_eq!(env.id, id, "a later save keeps it");
+    env.cubemap = Some(gone.to_string());
+    save_environment(&path, &mut env, &names).unwrap();
+    assert!(read(&path).contains(&format!("\n  cubemap: Some(\"{gone}\"), // (missing)\n")));
+    assert!(Environment::from_ron("Environment(format_version: 3)").unwrap_err().contains("newer"));
+    let older = Environment::from_ron("Environment(format_version: 1)").unwrap_err();
+    assert!(older.contains("older than this editor") && older.contains("shader-editor migrate"), "{older}");
+}
+
+/// The Light index part lists the environments, curves and textures with their ids and the cube map references
+/// located at `cubemap` (a cube map written by hand as a path is no edge); a file without an id is AE004, a cube map
+/// UUID that names nothing AE002.
+#[test]
+fn index_part_lists_uuid_assets_and_cube_map_refs() {
+    let (_d, p) = project();
+    uuid_form(&p);
+    environment(&p, "by_path", Some("textures/sky"));
+    let part = LightBackend.index(&p);
+    assert_eq!(part.domain, LIGHT);
+    let listed: Vec<String> = part.assets.iter().map(|a| a.asset.source_rel()).collect();
+    assert_eq!(
+        listed,
+        [
+            "quillshade/light/by_path.environment.ron",
+            "quillshade/light/day.environment.ron",
+            "quillshade/light/night.environment.ron",
+            "quillshade/light/smooth.curve.ron",
+            "quillshade/light/textures/sky.texture.ron",
+        ],
+        "in path order"
+    );
+    let by_path = part.assets.iter().find(|a| a.asset == environment_ref("by_path")).unwrap();
+    assert!(by_path.refs.is_empty(), "{:?}", by_path.refs);
+    let sky = AssetUuid::legacy(&texture_ref("textures/sky").source_rel());
+    let day = part.assets.iter().find(|a| a.asset == environment_ref("day")).unwrap();
+    assert_eq!(day.id, Ok(AssetUuid::legacy(&environment_ref("day").source_rel())));
+    assert_eq!(day.refs, [IndexedRef { to: sky, sub: None, location: Some("cubemap".into()) }]);
+    let index = AssetIndex::build(vec![part]);
+    assert!(index.diagnostics(&p).is_empty(), "{:?}", index.diagnostics(&p));
+    assert_eq!(index.refs_to(sky).collect::<Vec<_>>(), [&environment_ref("day")]);
+
+    // An environment without an id (hand-written) and one on a UUID that names nothing.
+    let gone = AssetUuid::new_v7();
+    let write = |path: &str, text: String| std::fs::write(file(&p, environment_ref(path).source_rel()), text).unwrap();
+    write("no_id", "Environment(format_version: 2)".into());
+    let dusk = AssetUuid::legacy(&environment_ref("dusk").source_rel());
+    write("dusk", format!("Environment(format_version: 2, id: \"{dusk}\", cubemap: Some(\"{gone}\"))"));
+    let index = AssetIndex::build(vec![LightBackend.index(&p)]);
+    let codes: Vec<(String, Option<String>)> = index.diagnostics(&p).into_iter().map(|d| (d.code, d.asset)).collect();
+    assert_eq!(
+        codes,
+        [
+            ("AE002".to_string(), Some("quillshade/light/dusk.environment.ron".to_string())),
+            ("AE004".to_string(), Some("quillshade/light/no_id.environment.ron".to_string())),
+        ]
+    );
+}
+
+/// The resolve seam: a cube map that is the UUID of a Light Texture asset becomes its path; a path, a dangling UUID
+/// and the UUID of another kind (a curve) pass through unchanged.
+#[test]
+fn resolve_turns_texture_uuids_into_paths_and_passes_the_rest_through() {
+    let (_d, p) = project();
+    uuid_form(&p);
+    let smooth = AssetUuid::legacy(&curve_ref("smooth").source_rel());
+    let gone = AssetUuid::new_v7();
+    let mut assets = LightAssets::load(&p);
+    for (path, cubemap) in
+        [("path", "textures/sky".to_string()), ("gone", gone.to_string()), ("curve", smooth.to_string())]
+    {
+        let env = Environment { cubemap: Some(cubemap), ..Environment::default() };
+        assets.environments.insert(path.into(), env);
+    }
+    let index = AssetIndex::build(vec![assets.index_part()]);
+    let mut resolved = assets.clone();
+    resolved.resolve(&index);
+    let cubemap = |path: &str| resolved.environments[path].cubemap.clone();
+    assert_eq!(cubemap("day").as_deref(), Some("textures/sky"));
+    assert_eq!(cubemap("night"), None);
+    assert_eq!(cubemap("path").as_deref(), Some("textures/sky"));
+    assert_eq!(cubemap("gone"), Some(gone.to_string()));
+    assert_eq!(cubemap("curve"), Some(smooth.to_string()));
+    let mut local = assets.clone();
+    local.resolve_locally();
+    assert_eq!(local.environments, resolved.environments);
+    // Nothing else changes; resolving twice is resolving once.
+    assert_eq!((resolved.textures.clone(), resolved.curves.clone()), (assets.textures, assets.curves));
+    let once = resolved.environments.clone();
+    resolved.resolve(&index);
+    assert_eq!(resolved.environments, once);
+    // An unresolved UUID is LE001, named by its UUID.
+    let all = validate(&p, &resolved);
+    let le001: Vec<&str> = with_code(&all, "LE001").iter().map(|d| d.message.as_str()).collect();
+    assert_eq!(le001.len(), 2, "{all:?}");
+    assert!(le001.iter().all(|m| m.contains("is not the UUID of a Light Texture asset")), "{le001:?}");
+}
+
+/// The UUID form generates exactly what the path form generates (module and manifest): the cube map resolves to the
+/// path, and neither the source `format_version` nor the asset ids reach generated files (ADR 0047 §15).
+#[test]
+fn uuid_sources_generate_like_path_sources() {
+    let generate = |write: fn(&Project)| {
+        let (dir, p) = project();
+        write(&p);
+        let report = run(&p, &[&LightBackend], &[], false, false).unwrap();
+        assert!(!report.has_errors(), "{:?}", report.diagnostics);
+        let out: BTreeMap<String, Vec<u8>> =
+            ["crates/quillshade/src/light/mod.rs", "assets/quillshade/light/autogen/baked.ron"]
+                .into_iter()
+                .map(|rel| (rel.to_string(), std::fs::read(p.root.join(rel)).unwrap()))
+                .collect();
+        (dir, out)
+    };
+    let (_a, paths) = generate(path_form);
+    let (_b, uuids) = generate(uuid_form);
+    assert_eq!(paths.keys().collect::<Vec<_>>(), uuids.keys().collect::<Vec<_>>());
+    for (rel, bytes) in &paths {
+        assert!(uuids[rel] == *bytes, "{rel} differs:\n{}", String::from_utf8_lossy(&uuids[rel]));
+    }
+    let manifest = String::from_utf8(uuids["assets/quillshade/light/autogen/baked.ron"].clone()).unwrap();
+    assert!(manifest.contains("cubemap: Some(\"textures/sky\")") && !manifest.contains("id:"), "{manifest}");
+    assert!(!manifest.contains("format_version: 2"), "{manifest}");
 }

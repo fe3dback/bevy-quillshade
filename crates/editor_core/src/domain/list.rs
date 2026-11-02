@@ -2,6 +2,7 @@
 //! [`Editor`] (an `Arc`) and the Bevy app (a resource).
 
 use std::fmt;
+use std::sync::Arc;
 
 use crate::editors::EditorKinds;
 use crate::menu::MainMenu;
@@ -9,7 +10,9 @@ use crate::preview::PreviewCallbacks;
 use crate::tab::TabKey;
 use bevy::prelude::Resource;
 use project_core::DomainId;
+use project_core::regen::DomainBackend;
 use project_core::umbrella::CrateContribution;
+use project_migrate::DomainMigrator;
 
 use super::registrar::{AssetKindDef, DomainDef, DomainRegistrar, EditorDomain, GameAssetsDef};
 use super::{DomainState, DomainStates, ProjectDomain, ToolDef};
@@ -20,6 +23,10 @@ use crate::state::editor::Editor;
 pub struct DomainList {
     domains: Vec<DomainDef>,
     crates: Vec<CrateContribution>,
+    /// The real domains' migrators (ADR 0046).
+    migrators: Vec<Arc<dyn DomainMigrator>>,
+    /// The domains' generators, in registration order (the headless regen after a migration, ADR 0046).
+    backends: Vec<Arc<dyn DomainBackend>>,
 }
 
 impl fmt::Debug for DomainList {
@@ -47,7 +54,8 @@ impl DomainList {
         for d in &domains {
             assert!(d.id() != DomainId::PROJECT, "the domain id `{}` is reserved", DomainId::PROJECT);
         }
-        let mut list = DomainList::default();
+        let migrators = domains.iter().filter_map(|d| d.migrator()).map(Arc::from).collect();
+        let mut list = DomainList { migrators, ..DomainList::default() };
         for d in domains.iter().map(Box::as_ref).chain([project]) {
             let id = d.id();
             assert!(list.get(id).is_none(), "domain `{id}` registered twice");
@@ -58,7 +66,10 @@ impl DomainList {
                 !(def.legacy_tab_keys && list.domains.iter().any(|o| o.legacy_tab_keys)),
                 "two domains claim the legacy tab keys"
             );
-            list.crates.extend(d.backend().map(|b| b.crate_contribution()));
+            if let Some(backend) = d.backend() {
+                list.crates.push(backend.crate_contribution());
+                list.backends.push(Arc::from(backend));
+            }
             list.domains.push(def);
         }
         list.kind_defs(); // panics on two different editor kinds with one view id
@@ -126,6 +137,20 @@ impl DomainList {
     /// project domain, which has none). The editor and the CLI build `crates/quillshade` from this same list.
     pub fn crate_contributions(&self) -> &[CrateContribution] {
         &self.crates
+    }
+
+    /// The real domains' migrators (techdoc §4.4, ADR 0046 "Registration"), in registration order; the built-in
+    /// project migrator is not among them (the orchestrator appends it). Shared (`Arc`) so the list stays `Clone`
+    /// and a migration can run on a background thread.
+    pub fn migrators(&self) -> &[Arc<dyn DomainMigrator>] {
+        &self.migrators
+    }
+
+    /// The domains' generators ([`EditorDomain::backend`]), in registration order: what the CLI's `regen` runs. The
+    /// Migration Tool regenerates the migrated project with them on its thread (ADR 0046). Shared (`Arc`) like
+    /// [`DomainList::migrators`].
+    pub fn backends(&self) -> &[Arc<dyn DomainBackend>] {
+        &self.backends
     }
 
     /// The Game Assets definitions, with their domains.

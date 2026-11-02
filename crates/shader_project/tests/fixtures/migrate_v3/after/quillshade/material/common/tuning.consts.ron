@@ -1,0 +1,19 @@
+GlobalConsts(
+  format_version: 2,
+  id: "019b76da-a800-7125-8de2-e524cab316e1",
+  name: "tuning",
+  consts: [
+    GlobalConst(
+      id: 1001,
+      name: "glow_amount",
+      ty: F32,
+      value: Float(0.35),
+    ),
+    GlobalConst(
+      id: 1002,
+      name: "tint",
+      ty: Vec3,
+      value: Float3((0.1, 0.2, 0.3)),
+    ),
+  ],
+)

@@ -1,5 +1,6 @@
 Asset(
-  format_version: 1,
+  format_version: 2,
+  id: "019b76da-a800-7876-a94e-cc00b88e5383",
   kind: Material(Pbr3d(PbrSettings(
     blend: Blend,
     two_sided: false,
@@ -16,7 +17,7 @@ Asset(
       kind: "param::TextureObject",
       pos: (0.0, 405.0),
       params: {
-        "default": Str("textures/water_normal"),
+        "default": Str("019b76da-a800-7ff7-b9c3-0ec5e8b29c1c"), // textures/water_normal
         "name": Str("normals"),
       },
     ),

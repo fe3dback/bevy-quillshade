@@ -1,4 +1,5 @@
 TextureAsset(
-  format_version: 1,
+  format_version: 2,
+  id: "019b76da-a800-7be2-ae7e-b1bf8b8ec3c1",
   path: "textures/sky_cube.ktx2",
 )

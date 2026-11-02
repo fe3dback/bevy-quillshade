@@ -82,17 +82,21 @@ fn init_text(mut q: Query<(&InitText, &mut EditableText), Added<InitText>>) {
 
 /// Ensures newly spawned [`FeathersSelect`] widgets keep single-line captions/rows (`LineBreak::NoWrap`) and a gap
 /// before the chevron inside [`FeathersMenuButton`].
+///
+/// Writes in place, never through `Commands`: a select spawned last frame can be despawned again this frame by a
+/// redraw system (a right sidebar rebuild on a tab switch or an edit) that is not ordered against this one, and a
+/// queued insert applied after that despawn panicked depending on the schedule's order of the two command buffers.
+/// `TextLayout` is a required component of `Text`, so every caption already has one.
 fn style_select_widgets(
     q_select: Query<Entity, Added<FeathersSelect>>,
     q_children: Query<&Children>,
-    q_text: Query<(), With<Text>>,
+    mut q_text: Query<&mut TextLayout, With<Text>>,
     mut q_btn: Query<&mut Node, With<FeathersMenuButton>>,
-    mut commands: Commands,
 ) {
     for select_ent in &q_select {
         for desc in q_children.iter_descendants(select_ent) {
-            if q_text.contains(desc) {
-                commands.entity(desc).insert(TextLayout::linebreak(LineBreak::NoWrap));
+            if let Ok(mut layout) = q_text.get_mut(desc) {
+                *layout = TextLayout::linebreak(LineBreak::NoWrap);
             }
             if let Ok(mut node) = q_btn.get_mut(desc) {
                 node.column_gap = px(6);

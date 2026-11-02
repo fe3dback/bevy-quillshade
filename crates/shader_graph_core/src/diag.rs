@@ -43,8 +43,8 @@ pub enum Code {
     W101,
     /// Output pin inactive for the current blend mode.
     W102,
-    /// Vertex attribute that a mesh may lack.
-    W103,
+    /// Vertex attribute that a mesh may lack (info: most meshes have it, and a missing one gets a default value).
+    I103,
     /// Vector truncated by an implicit conversion.
     W104,
     /// `crates/quillshade` is not listed in `[workspace.members]`.
@@ -69,6 +69,21 @@ pub enum Code {
 }
 
 impl Code {
+    /// Severity of the code: `E…` errors, `I…` infos, every other code a warning.
+    pub fn level(self) -> Level {
+        if self.is_error() {
+            Level::Error
+        } else if self.is_info() {
+            Level::Info
+        } else {
+            Level::Warning
+        }
+    }
+
+    pub fn is_info(self) -> bool {
+        matches!(self, Code::I103)
+    }
+
     pub fn is_error(self) -> bool {
         matches!(
             self,
@@ -130,6 +145,10 @@ impl Diagnostic {
         self.code.is_error()
     }
 
+    pub fn is_info(&self) -> bool {
+        self.code.is_info()
+    }
+
     /// Domain-neutral form; its `Display` is identical to this one.
     pub fn to_generic(&self, domain: DomainId) -> project_core::Diagnostic {
         let location = match (&self.node, &self.pin) {
@@ -140,7 +159,7 @@ impl Diagnostic {
         project_core::Diagnostic {
             domain: Some(domain),
             code: self.code.to_string(),
-            level: if self.is_error() { Level::Error } else { Level::Warning },
+            level: self.code.level(),
             message: self.message.clone(),
             asset: self.asset.clone(),
             location,
@@ -202,6 +221,19 @@ mod tests {
             let g = d.to_generic(DomainId::new("material"));
             assert_eq!(g.to_string(), d.to_string());
             assert_eq!(g.is_error(), d.is_error());
+            assert_eq!(g.level, d.code.level());
         }
+    }
+
+    #[test]
+    fn code_levels() {
+        assert_eq!(Code::E003.level(), Level::Error);
+        assert_eq!(Code::W104.level(), Level::Warning);
+        assert_eq!(Code::I103.level(), Level::Info);
+        assert!(Code::I103.is_info() && !Code::I103.is_error());
+        let g = Diagnostic::new(Code::I103, "uv1").to_generic(DomainId::new("material"));
+        assert_eq!(g.level, Level::Info);
+        assert!(g.is_info() && !g.is_error());
+        assert_eq!(g.to_string(), "-:-:I103: uv1");
     }
 }

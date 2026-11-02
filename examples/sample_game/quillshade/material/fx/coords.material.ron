@@ -1,5 +1,6 @@
 Asset(
-  format_version: 1,
+  format_version: 2,
+  id: "019b76da-a800-72cd-8984-39eefb8c9668",
   kind: Material(Unlit3d(UnlitSettings(
     blend: Opaque,
     two_sided: false,
@@ -15,7 +16,7 @@ Asset(
       kind: "param::TextureObject",
       pos: (0.0, 0.0),
       params: {
-        "default": Str("textures/atlas"),
+        "default": Str("019b76da-a800-7bbb-869e-d9578e3a856f"), // textures/atlas
         "name": Str("atlas"),
       },
     ),

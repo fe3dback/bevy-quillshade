@@ -1,8 +1,15 @@
 //! Open document: the model (source of truth), undo/redo history, clipboard ops.
 //!
 //! Pure data, no Bevy: the canvas is rebuilt from [`Doc::asset`] after every edit.
+//!
+//! [`Doc::asset`] holds references as the source stores them (ADR 0047 §4: target UUIDs, or paths written by
+//! hand); everything that *shows* them — titles, signatures, previews, properties, "open referenced asset" — reads
+//! [`Doc::resolved`], the same graph with every known UUID replaced by the target's current path.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Arc, Mutex, PoisonError};
+
+use project_core::asset_index::AssetIndex;
 
 use shader_graph_core::consts::NoConsts;
 use shader_graph_core::ir::{with_routes, would_create_cycle};
@@ -53,6 +60,31 @@ pub struct Doc {
     /// [`Doc::reload`] dropped unsaved edits the generated files were written from (decision 0022): the material
     /// regenerates from disk (`Editor::material_after_apply`).
     pub restore_from_disk: bool,
+    /// [`Doc::resolved`]'s last result.
+    resolved: ResolvedCache,
+}
+
+/// The last resolved view of a [`Doc`], keyed by `(revision, index generation)`: every model change bumps the
+/// revision and every index rebuild (rescan, save, rename, a user node reload) gets a new generation.
+#[derive(Default)]
+struct ResolvedCache(Mutex<Option<((u64, u64), Arc<Asset>)>>);
+
+impl ResolvedCache {
+    fn get(&self) -> std::sync::MutexGuard<'_, Option<((u64, u64), Arc<Asset>)>> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+impl Clone for ResolvedCache {
+    fn clone(&self) -> Self {
+        ResolvedCache(Mutex::new(self.get().clone()))
+    }
+}
+
+impl std::fmt::Debug for ResolvedCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ResolvedCache")
+    }
 }
 
 impl Doc {
@@ -72,7 +104,26 @@ impl Doc {
             regen_from_memory: false,
             preview_seen: asset_preview,
             restore_from_disk: false,
+            resolved: ResolvedCache::default(),
         }
+    }
+
+    /// The resolved view of [`Doc::asset`] (ADR 0047 §4): function and user node kinds and reference params with
+    /// a UUID of `index` become the target's current path (a user node's `user::<ident>`, found in `registry`);
+    /// paths, `@internal/*` and dangling UUIDs stay. Node ids, wires and everything else are the model's, so the
+    /// view answers every read that looks at kinds or reference values. Cached until the next model change or
+    /// index rebuild.
+    pub fn resolved(&self, index: &AssetIndex, registry: &Registry) -> Arc<Asset> {
+        let key = (self.revision, index.generation());
+        let mut cache = self.resolved.get();
+        if let Some((k, view)) = &*cache
+            && *k == key
+        {
+            return view.clone();
+        }
+        let view = Arc::new(shader_project::resolve::resolve_asset(&self.asset, index, registry));
+        *cache = Some((key, view.clone()));
+        view
     }
 
     pub fn is_dirty(&self) -> bool {
@@ -126,7 +177,7 @@ impl Doc {
     }
 
     pub fn undo(&mut self) -> bool {
-        let done = self.history.undo(&mut self.asset);
+        let done = self.history.undo_keeping(&mut self.asset, |m| &mut m.id);
         if done {
             self.after_history();
         }
@@ -134,7 +185,7 @@ impl Doc {
     }
 
     pub fn redo(&mut self) -> bool {
-        let done = self.history.redo(&mut self.asset);
+        let done = self.history.redo_keeping(&mut self.asset, |m| &mut m.id);
         if done {
             self.after_history();
         }

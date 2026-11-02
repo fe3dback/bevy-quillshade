@@ -125,10 +125,12 @@ impl NodePreview for TexturePreview {
     }
 
     fn key(editor: &Editor, doc: &Doc, node: &NodeId) -> Option<TextureKey> {
-        let n = doc.asset.nodes.get(node)?;
+        // Reference values as paths (ADR 0047 §4).
+        let view = editor.view_of(doc);
+        let n = view.nodes.get(node)?;
         // A texture wired into `tex` wins over the property: one hop to a node naming its texture (TextureObject,
         // a texture parameter); any other source (reroute, function input, …) leaves the property's texture.
-        let wired = doc.asset.edge_into(node, TEX_PIN).and_then(|e| doc.asset.nodes.get(&e.from.0));
+        let wired = view.edge_into(node, TEX_PIN).and_then(|e| view.nodes.get(&e.from.0));
         let n = match wired {
             Some(src)
                 if editor
@@ -262,9 +264,10 @@ mod tests {
         e.apply(Action::OpenAsset(AssetId::new(AssetType::Material, "env/rock_wet").to_ref()));
         let graph = e.active.unwrap();
         let node = {
-            let d = e.doc().unwrap();
+            // The node stores the texture's UUID; its resolved view names the path (ADR 0047 §4).
+            let view = e.view_of(e.doc().unwrap());
             let albedo = Value::Str("textures/rock_albedo".into());
-            d.asset.nodes.iter().find(|(_, n)| n.params.get("default") == Some(&albedo)).unwrap().0.clone()
+            view.nodes.iter().find(|(_, n)| n.params.get("default") == Some(&albedo)).unwrap().0.clone()
         };
         let revision = e.doc().unwrap().revision;
 

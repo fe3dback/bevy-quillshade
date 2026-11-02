@@ -116,7 +116,13 @@ fn texture_rows<D: TextureDomain>(editor: &Editor, t: &TextureDoc<D>) -> Vec<Box
     let problems = if t.is_internal() { Vec::new() } else { D::problems(editor, &t.aref) };
     if !problems.is_empty() {
         let rows = problems.iter().map(|diag| -> Box<dyn Scene> {
-            let c = if diag.is_error() { ERROR } else { WARN };
+            let c = if diag.is_error() {
+                ERROR
+            } else if diag.is_info() {
+                TEXT_DIM
+            } else {
+                WARN
+            };
             Box::new(text(format!("{}: {}", diag.code, diag.message), c, 12.0))
         });
         out.push(subpane_box("Problems", rows.collect()));

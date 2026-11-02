@@ -1,0 +1,9 @@
+Curve(
+  format_version: 1,
+  name: "pulse",
+  points: [
+    (0.0, 0.0),
+    (0.5, 1.0),
+    (1.0, 0.0),
+  ],
+)

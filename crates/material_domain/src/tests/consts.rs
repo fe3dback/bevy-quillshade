@@ -173,9 +173,12 @@ fn breaking_const_edits_ask_and_clear_references() {
     assert!(e.consts_doc().unwrap().table.get_by_id(FANCY_STRIPES_ID).is_none());
 }
 
+/// The references store the table's UUID (ADR 0047 §13: delete matches by UUID); an open clean user reloads the
+/// cleared file.
 #[test]
 fn deleting_a_table_clears_the_references_to_its_constants() {
     let (_dir, mut e) = project();
+    e.apply(Action::OpenAsset(global_tint().to_ref()));
     e.apply(Action::DeleteDialog(tuning().to_ref()));
     let Some(Dialog::Confirm { message, .. }) = &e.dialog else { panic!("no dialog") };
     assert!(message.contains("fx/global_tint.material.ron (6 nodes)"), "{message}");
@@ -184,6 +187,8 @@ fn deleting_a_table_clears_the_references_to_its_constants() {
     assert!(!tuning().file(e.project.as_ref().unwrap()).exists());
     let on_disk = assets::load(e.project.as_ref().unwrap(), &global_tint()).unwrap();
     assert!(const_refs(&on_disk, &e.domains.material().registry).is_empty());
+    let open = e.tabs[e.doc_index(&global_tint()).unwrap()].get::<Doc>().unwrap();
+    assert!(const_refs(&open.asset, &e.domains.material().registry).is_empty() && !open.is_dirty());
     e.validate();
     assert!(e.domains.material().diags[&global_tint()].iter().all(|d| d.code == Code::W106));
 }
@@ -192,12 +197,15 @@ fn deleting_a_table_clears_the_references_to_its_constants() {
 fn consts_tabs_are_restored_and_follow_renames() {
     let (dir, mut e) = project();
     e.apply(Action::OpenAsset(tuning().to_ref()));
+    let user = global_tint().file(e.project.as_ref().unwrap());
+    let before = std::fs::read(&user).unwrap();
     e.rename(&tuning().to_ref(), "settings/tuning");
+    assert_eq!(std::fs::read(&user).unwrap(), before, "the users store the table's UUID: not rewritten");
     let moved = AssetId::new(AssetType::Consts, "settings/tuning");
     assert_eq!(e.consts_doc().map(|c| &c.id), Some(&moved));
     assert!(
         e.domains.material().diags.values().flatten().all(|d| !d.is_error()),
-        "table references are rewritten: users are unaffected"
+        "table references stay valid: users are unaffected"
     );
     e.save_tabs_to_config();
     let config = e.config.clone();

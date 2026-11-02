@@ -2,7 +2,7 @@
 //! (`quillshade/material/**/*.{material,function,curve,consts,texture,gradients}.ron`).
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use shader_graph_core::consts::GlobalConsts;
 use shader_graph_core::curve::Curve;
@@ -137,9 +137,14 @@ pub fn id_from_source_rel(rel: &str) -> Option<AssetId> {
 
 /// Lists all editor assets under `quillshade/material/` (hidden directories skipped), sorted.
 pub fn scan(project: &Project) -> Vec<AssetId> {
-    let root = project.material_dir();
+    scan_dir(&project.material_dir())
+}
+
+/// [`scan`] of the Material source root `root` (`quillshade/material/` of a project at any project version: the
+/// Migration Tool has no [`Project`]).
+pub fn scan_dir(root: &Path) -> Vec<AssetId> {
     let mut out = Vec::new();
-    let mut stack = vec![root.clone()];
+    let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
         let Ok(rd) = std::fs::read_dir(&dir) else { continue };
         for e in rd.flatten() {
@@ -150,7 +155,7 @@ pub fn scan(project: &Project) -> Vec<AssetId> {
             }
             if p.is_dir() {
                 stack.push(p);
-            } else if let Ok(rel) = p.strip_prefix(&root)
+            } else if let Ok(rel) = p.strip_prefix(root)
                 && let Some(id) = id_from_rel(&rel.to_string_lossy())
             {
                 out.push(id);
@@ -233,22 +238,67 @@ pub fn validate_path(id: &AssetId) -> Vec<Diagnostic> {
     out
 }
 
-/// Registers user nodes from `quillshade/material/.nodes/*.ron`; returns load problems.
-pub fn load_user_nodes(project: &Project, registry: &mut Registry) -> Vec<Diagnostic> {
-    let dir = project.material_dir().join(USER_NODES_DIR);
-    let mut diags = Vec::new();
-    let Ok(rd) = std::fs::read_dir(&dir) else { return diags };
+/// One `quillshade/material/.nodes/*.ron` file (ADR 0047 §16).
+#[derive(Debug, Clone)]
+pub struct UserNodeFile {
+    /// `material` + `.nodes/<name>` + empty suffix.
+    pub asset: project_core::AssetRef,
+    pub node: Result<UserNode, String>,
+}
+
+/// The [`project_core::AssetRef`] of the user node file `quillshade/material/.nodes/<name>.ron`.
+pub fn user_node_ref(name: &str) -> project_core::AssetRef {
+    project_core::AssetRef { domain: crate::layout::MATERIAL, path: format!("{USER_NODES_DIR}/{name}"), suffix: "" }
+}
+
+/// The `.nodes/*.ron` files under the Material source root `root` (`quillshade/material/`), sorted.
+pub fn user_node_paths(root: &Path) -> Vec<PathBuf> {
+    let Ok(rd) = std::fs::read_dir(root.join(USER_NODES_DIR)) else { return Vec::new() };
     let mut files: Vec<PathBuf> =
         rd.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "ron")).collect();
     files.sort();
-    for f in files {
-        let rel = project.rel(&f);
-        match std::fs::read_to_string(&f).map_err(|e| e.to_string()).and_then(|t| UserNode::from_ron(&t)) {
-            Ok(n) => n.register(registry),
+    files
+}
+
+/// Loads every `quillshade/material/.nodes/*.ron` file, sorted by path.
+pub fn user_node_files(project: &Project) -> Vec<UserNodeFile> {
+    user_node_paths(&project.material_dir())
+        .into_iter()
+        .filter_map(|f| {
+            let name = f.file_stem()?.to_str()?.to_string();
+            let node = std::fs::read_to_string(&f).map_err(|e| e.to_string()).and_then(|t| UserNode::from_ron(&t));
+            Some(UserNodeFile { asset: user_node_ref(&name), node })
+        })
+        .collect()
+}
+
+/// Registers the user nodes from `quillshade/material/.nodes/*.ron` in path order; returns the loaded files and the
+/// load problems (E009): a file that does not load, and a node whose `ident` an earlier file already registered
+/// (that later file is not registered).
+pub fn load_user_nodes(project: &Project, registry: &mut Registry) -> (Vec<UserNodeFile>, Vec<Diagnostic>) {
+    let files = user_node_files(project);
+    let mut diags = Vec::new();
+    let mut idents: BTreeMap<&str, &project_core::AssetRef> = BTreeMap::new();
+    for f in &files {
+        let rel = f.asset.source_rel();
+        match &f.node {
+            Ok(n) => match idents.get(n.ident.as_str()) {
+                Some(first) => diags.push(
+                    Diagnostic::new(
+                        Code::E009,
+                        format!("user node: duplicate user node ident `{}` (already defined by `{first}`)", n.ident),
+                    )
+                    .in_asset(rel),
+                ),
+                None => {
+                    idents.insert(&n.ident, &f.asset);
+                    n.clone().register(registry);
+                }
+            },
             Err(e) => diags.push(Diagnostic::new(Code::E009, format!("user node: {e}")).in_asset(rel)),
         }
     }
-    diags
+    (files, diags)
 }
 
 /// Loaded project assets.

@@ -597,10 +597,12 @@ fn texture_thumbnail_shows_the_image_and_na_without_rebuild() {
     std::fs::copy(sample, textures.join("rock_albedo.ktx2")).unwrap();
     app.add_plugins(NodePreviewsPlugin);
     act(&mut app, Action::OpenAsset(AssetId::new(AssetType::Material, "env/rock_wet").to_ref()));
+    // The nodes store the textures' UUIDs; the resolved view names their paths (ADR 0047 §4).
     let node = |app: &App, default: &str| {
-        let d = app.world().resource::<Editor>().doc().unwrap();
+        let e = app.world().resource::<Editor>();
+        let view = e.view_of(e.doc().unwrap());
         let v = Value::Str(default.into());
-        d.asset.nodes.iter().find(|(_, n)| n.params.get("default") == Some(&v)).unwrap().0.clone()
+        view.nodes.iter().find(|(_, n)| n.params.get("default") == Some(&v)).unwrap().0.clone()
     };
     let (albedo, normal) = (node(&app, "textures/rock_albedo"), node(&app, "textures/rock_normal"));
     // (row root, "n/a" visible, image tint, image width) of `node`'s thumbnail.
@@ -923,12 +925,14 @@ fn gestures_app() -> (tempfile::TempDir, App) {
     })
 }
 
-/// The canvas entity of the first node of `kind`, and its header (title bar).
+/// The canvas entity of the first node of `kind` (as the canvas shows it: `function::<path>`, ADR 0047 §4), and its
+/// header (title bar).
 fn node_and_header(app: &mut App, kind: &str) -> (Entity, Entity) {
     use material_domain::canvas::NodeHeader;
     let id = {
-        let d = app.world().resource::<Editor>().doc().unwrap();
-        d.asset.nodes.iter().find(|(_, n)| n.kind == kind).unwrap_or_else(|| panic!("no {kind}")).0.clone()
+        let e = app.world().resource::<Editor>();
+        let view = e.view_of(e.doc().unwrap());
+        view.nodes.iter().find(|(_, n)| n.kind == kind).unwrap_or_else(|| panic!("no {kind}")).0.clone()
     };
     let w = app.world_mut();
     let node = w.query::<(Entity, &NodeKey)>().iter(w).find(|(_, k)| k.0 == id).unwrap().0;

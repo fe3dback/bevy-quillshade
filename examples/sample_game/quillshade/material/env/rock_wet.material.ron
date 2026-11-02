@@ -1,5 +1,6 @@
 Asset(
-  format_version: 1,
+  format_version: 2,
+  id: "019b76da-a800-75c1-939b-7e0a98afeaba",
   kind: Material(Pbr3d(PbrSettings(
     blend: Mask,
     two_sided: false,
@@ -58,7 +59,7 @@ Asset(
       kind: "param::TextureSample2D",
       pos: (-136.09784, -988.7245),
       params: {
-        "default": Str("textures/rock_albedo"),
+        "default": Str("019b76da-a800-77a0-a990-734147946a3b"), // textures/rock_albedo
         "name": Str("albedo"),
       },
     ),
@@ -66,7 +67,7 @@ Asset(
       kind: "param::TextureSample2D",
       pos: (1533.1292, -16.522425),
       params: {
-        "default": Str("textures/rock_normal"),
+        "default": Str("019b76da-a800-7dd9-a0f8-f66d660c9441"), // textures/rock_normal
         "name": Str("normal_map"),
         "sampler_type": Str("Normal"),
       },
@@ -106,7 +107,7 @@ Asset(
       params: {},
     ),
     "n08": Node(
-      kind: "function::common/wet_mask",
+      kind: "function::019b76da-a800-79e3-85cf-762ae6aca37f", // common/wet_mask
       pos: (519.6215, -1006.14874),
       params: {},
     ),
