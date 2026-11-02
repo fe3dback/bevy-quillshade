@@ -107,7 +107,7 @@ impl GraphDomain for MaterialGraph {
             };
         }
         let mut look = NodeLook {
-            title: node_title_in(&m.registry, &m.functions, asset, id, &routes),
+            title: node_title_in(&m.registry, &m.functions, asset, id, &routes, &|t| ctx.editor.const_table(t)),
             header: header_color(&m.registry, asset, id, &routes),
             emphasis,
             comment,

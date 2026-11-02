@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use project_core::asset_index::AssetIndex;
 
-use shader_graph_core::consts::NoConsts;
+use shader_graph_core::consts::{GlobalConsts, NoConsts};
 use shader_graph_core::ir::{with_routes, would_create_cycle};
 use shader_graph_core::model::{Asset, Edge, Frame, Node, NodeId, Preview, new_node_id};
 use shader_graph_core::registry::{
@@ -339,7 +339,8 @@ impl Doc {
         let id = format!("c{}", new_node_id());
         // `bounds` of an empty set is the whole graph.
         let around = if nodes.is_empty() { None } else { bounds(&self.asset, nodes) };
-        let rect = around.map(|(x0, y0, x1, y1)| (x0 - 30.0, y0 - 50.0, x1 - x0 + 260.0, y1 - y0 + 220.0));
+        // Node positions are top-left corners: 60 px left of them and 100 px above (room for the title).
+        let rect = around.map(|(x0, y0, x1, y1)| (x0 - 60.0, y0 - 100.0, x1 - x0 + 320.0, y1 - y0 + 320.0));
         let fid = id.clone();
         self.edit(|a| {
             a.comments.push(Frame {
@@ -403,16 +404,18 @@ pub fn has_label(kind: &str) -> bool {
 }
 
 pub fn node_title(registry: &Registry, functions: &BTreeMap<String, FunctionSig>, asset: &Asset, id: &str) -> String {
-    node_title_in(registry, functions, asset, id, &route_declarations(asset, registry))
+    node_title_in(registry, functions, asset, id, &route_declarations(asset, registry), &|_| None)
 }
 
-/// [`node_title`] with the asset's [`route_declarations`] already at hand (a canvas rebuild computes them once).
-pub(crate) fn node_title_in(
+/// [`node_title`] with the asset's [`route_declarations`] already at hand (a canvas rebuild computes them once) and
+/// `consts` looking up a constant table by path: a `Global*` node is titled by its constant's name.
+pub(crate) fn node_title_in<'a>(
     registry: &Registry,
     functions: &BTreeMap<String, FunctionSig>,
     asset: &Asset,
     id: &str,
     routes: &[(NodeId, String)],
+    consts: &dyn Fn(&str) -> Option<&'a GlobalConsts>,
 ) -> String {
     let Some(n) = asset.nodes.get(id) else { return String::new() };
     let Some(def) = registry.get(&n.kind) else { return format!("? {}", n.kind) };
@@ -431,10 +434,31 @@ pub(crate) fn node_title_in(
         _ if has_label(&n.kind) && !n.label.is_empty() => n.label.clone(),
         _ if n.kind.starts_with("stdlib::Constant") => params.get("value").map(short).unwrap_or(name),
         _ => {
+            // Global*: the constant's name and its table's (`roughness (tuning)`), from the table as `consts` has it
+            // (the canvas rebuilds on graph revisions and tab switches, so a constant renamed in its table's tab shows
+            // on the way back); unset or unknown, the table's name as below.
+            let table = def
+                .params()
+                .into_iter()
+                .find(|p| p.kind == ParamKind::GlobalConsts)
+                .and_then(|t| params.get(&t.id))
+                .map(Value::as_str)
+                .filter(|t| !t.is_empty());
+            let cid = def
+                .params()
+                .into_iter()
+                .find(|p| matches!(p.kind, ParamKind::GlobalConst(_)))
+                .and_then(|c| params.get(&c.id))
+                .and_then(|v| u32::try_from(v.as_i32()).ok())
+                .filter(|c| *c != 0);
+            if let (Some(table), Some(cid)) = (table, cid)
+                && let Some(c) = consts(table).and_then(|t| t.get_by_id(cid))
+            {
+                return format!("{} ({})", c.name, table.rsplit('/').next().unwrap_or(table));
+            }
             // Sample Curve: the curve's name (decision 0015); Global*: the constant table's name (decision 0017);
-            // texture nodes: the Texture asset's name; Sample Gradient: the collection's name (the gradient's or
-            // constant's name shows in its properties: the canvas rebuilds only on graph revisions, not on edits of
-            // the collection or table).
+            // texture nodes: the Texture asset's name; Sample Gradient: the collection's name (the gradient's name
+            // shows in its properties: the canvas rebuilds only on graph revisions, not on edits of the collection).
             let curve = def
                 .params()
                 .into_iter()

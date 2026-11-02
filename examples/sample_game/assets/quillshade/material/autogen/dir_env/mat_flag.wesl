@@ -2,8 +2,10 @@
 // bevy 0.20, stdlib v1
 import bevy_pbr::render::{pbr_fragment::pbr_input_from_standard_material, pbr_functions::alpha_discard};
 @if(PREPASS_PIPELINE)
-import bevy_pbr::{prepass::io::{Vertex, UncompressedVertex, VertexOutput, FragmentOutput, decompress_vertex}, deferred::functions::deferred_output};
-@else
+import bevy_pbr::prepass::io::{Vertex, UncompressedVertex, VertexOutput, decompress_vertex};
+@if(PREPASS_PIPELINE && PREPASS_FRAGMENT)
+import bevy_pbr::{prepass::io::FragmentOutput, deferred::functions::deferred_output};
+@if(!PREPASS_PIPELINE)
 import bevy_pbr::render::{forward_io::{Vertex, UncompressedVertex, VertexOutput, FragmentOutput, decompress_vertex}, pbr_functions::{apply_pbr_lighting, main_pass_post_lighting_processing}};
 import bevy_pbr::render::{mesh_bindings::mesh, mesh_functions, skinning, morph, view_transformations::position_world_to_clip};
 import bevy_pbr::render::mesh_view_bindings::globals;
@@ -18,6 +20,7 @@ struct FlagParams { inp_color: vec4<f32>, inp_strength: f32, _pad0: f32, _pad1: 
 const_assert material_layout_changed__rebuild_the_game;
 @if(PREPASS_PIPELINE) @group(0) @binding(1) var<uniform> sg_prepass_globals: Globals;
 
+@if(!PREPASS_PIPELINE || PREPASS_FRAGMENT)
 @fragment
 fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> FragmentOutput {
     var pbr_input = pbr_input_from_standard_material(in, is_front);

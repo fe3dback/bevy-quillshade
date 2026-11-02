@@ -275,3 +275,21 @@ fn const_node_props_reset_const_on_table_change() {
     e.apply(set_value(const_prop.clone(), Value::Str(GLOW_AMOUNT_ID.to_string()), false));
     assert_eq!(shown(&e, &const_prop), Some(Value::Int(GLOW_AMOUNT_ID as i32)));
 }
+
+#[test]
+fn global_const_nodes_are_titled_by_their_constant() {
+    let (_dir, mut e) = project();
+    e.apply(Action::OpenAsset(global_tint().to_ref()));
+    let node = e.doc().unwrap().asset.nodes.iter().find(|(_, n)| n.kind == "stdlib::GlobalConstF32").unwrap().0.clone();
+    let title = |e: &Editor| crate::editors::graph::title(e, &e.doc_view().unwrap().1, &node);
+    assert_eq!(title(&e), "glow_amount (tuning)");
+    // A rename in the table's tab shows before it is saved.
+    let g = e.doc_index(&global_tint()).unwrap();
+    e.apply(Action::OpenAsset(tuning().to_ref()));
+    set(&mut e, ConstsProp::Name(GLOW_AMOUNT_ID), Value::Str("glow".into()));
+    e.apply(Action::ActivateTab(g));
+    assert_eq!(title(&e), "glow (tuning)");
+    // No constant picked: the table's name, as before.
+    e.apply(set_value(GraphProp::Param { node: node.clone(), key: "const".into() }, Value::Int(0), false));
+    assert_eq!(title(&e), "tuning (GlobalConstF32)");
+}

@@ -267,15 +267,7 @@ pub(crate) fn asset_subpanes(editor: &Editor, d: &Doc) -> Vec<Box<dyn Scene>> {
     // Exclusive node preview (decision 0022); its mode is the editor topbar's group (design §5.4).
     let status = match &d.asset.preview.node {
         Some(n) if d.asset.nodes.contains_key(n) => {
-            format!(
-                "Previewing: {}",
-                crate::doc::node_title(
-                    &editor.domains.material().registry,
-                    &editor.domains.material().functions,
-                    &editor.view_of(d),
-                    n
-                )
-            )
+            format!("Previewing: {}", title(editor, &editor.view_of(d), n))
         }
         Some(n) => format!("Previewed node `{n}` does not exist (ignored)"),
         // ASCII dash: the UI font has no em dash glyph.
@@ -332,6 +324,13 @@ pub(crate) fn reference_choices(editor: &Editor, ty: AssetType, shown: &str) -> 
 
 /// One selected node: what it is (title, kind, label, the asset it refers to), its parameters, input defaults and
 /// problems.
+/// [`crate::doc::node_title`] of node `id` of `view`, a `Global*` node's by its constant's name.
+pub(crate) fn title(editor: &Editor, view: &Asset, id: &str) -> String {
+    let m = editor.domains.material();
+    let routes = crate::doc::route_declarations(view, &m.registry);
+    crate::doc::node_title_in(&m.registry, &m.functions, view, id, &routes, &|t| editor.const_table(t))
+}
+
 pub(crate) fn node_subpanes(editor: &Editor, id: &str) -> Vec<Box<dyn Scene>> {
     let mut out = Vec::new();
     // Kinds and reference values as paths (ADR 0047 §4).
@@ -344,11 +343,7 @@ pub(crate) fn node_subpanes(editor: &Editor, id: &str) -> Vec<Box<dyn Scene>> {
     };
     let info = def.info();
     let mut node: Vec<Box<dyn Scene>> = Vec::new();
-    node.push(Box::new(text(
-        crate::doc::node_title(&editor.domains.material().registry, &editor.domains.material().functions, &view, id),
-        TEXT,
-        15.0,
-    )));
+    node.push(Box::new(text(title(editor, &view, id), TEXT, 15.0)));
     node.push(Box::new(text(format!("{} | {}", info.category, n.kind), TEXT_DIM, 11.0)));
     if !info.description.is_empty() {
         node.push(Box::new(text(info.description.clone(), TEXT_DIM, 12.0)));

@@ -1295,7 +1295,7 @@ fn gradient_binding_compiles_directly_and_through_functions() {
     files.add(&main, mat_wesl);
     files.enable(mat.layout_feature());
     let kind = *mat.kind.material().unwrap();
-    for v in check::variants_for(&kind) {
+    for v in check::variants_for(&kind, mat.vertex.is_some()) {
         if let Err(e) = check::compile(&bevy, &files, &main, *v) {
             panic!("{v:?}: {e}");
         }

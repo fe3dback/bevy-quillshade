@@ -74,6 +74,21 @@ impl FrameResizeHandle {
         }
     }
 
+    /// Places this hit zone in its frame at canvas `zoom`: it reaches [`FRAME_RESIZE_OUT`] past the border and
+    /// [`FRAME_RESIZE_IN`] ([`FRAME_RESIZE_IN_TOP`] at the top) into the frame, in window px whatever the zoom; an
+    /// edge zone spans between its corner zones.
+    pub fn place(self, node: &mut Node, zoom: f32) {
+        let window = |v: f32| px(v / zoom.max(0.01));
+        // One axis: (near inset, far inset, size).
+        let axis = |near: bool, far: bool, near_in: f32, far_in: f32| match (near, far) {
+            (true, false) => (window(-FRAME_RESIZE_OUT), Val::Auto, window(FRAME_RESIZE_OUT + near_in)),
+            (false, true) => (Val::Auto, window(-FRAME_RESIZE_OUT), window(FRAME_RESIZE_OUT + far_in)),
+            _ => (window(near_in), window(far_in), Val::Auto),
+        };
+        (node.left, node.right, node.width) = axis(self.left, self.right, FRAME_RESIZE_IN, FRAME_RESIZE_IN);
+        (node.top, node.bottom, node.height) = axis(self.top, self.bottom, FRAME_RESIZE_IN_TOP, FRAME_RESIZE_IN);
+    }
+
     /// Applies a graph-space drag `delta` to `initial` `(x, y, w, h)`, snapping the moved edge(s) to [`GRID_SNAP`] and
     /// clamping width and height to [`MIN_FRAME_SIZE`].
     pub fn apply(self, initial: (f32, f32, f32, f32), delta: Vec2) -> (f32, f32, f32, f32) {
@@ -265,6 +280,7 @@ impl<G: GraphDomain> Plugin for CanvasPlugin<G> {
                     sync_selection::<G>,
                     rebuild_canvas::<G>,
                     frame_colors::<G>,
+                    size_frame_handles::<G>,
                     sync_inline_fields::<G>,
                     collect_marks::<G>,
                     highlight_diagnostics::<G>,
@@ -645,51 +661,49 @@ fn frame_look(c: Color) -> (SelectedBorderColor, BackgroundColor) {
 
 /// Height (graph px) of a comment frame's title strip, one 16 px line.
 const FRAME_TITLE_HEIGHT: f32 = 20.0;
-/// Thickness (graph px) of a comment frame's edge resize hit strip.
-const FRAME_RESIZE_EDGE: f32 = 8.0;
-/// Size (graph px) of a comment frame's corner resize handle.
-const FRAME_RESIZE_CORNER: f32 = 14.0;
+/// How far (window px, at any zoom) a comment frame's resize hit zones reach past its border.
+const FRAME_RESIZE_OUT: f32 = 10.0;
+/// How far (window px, at any zoom) the left, right and bottom resize hit zones reach into the frame.
+const FRAME_RESIZE_IN: f32 = 20.0;
+/// How far (window px) the top resize hit zones reach into the frame: little, the title strip lies under them.
+const FRAME_RESIZE_IN_TOP: f32 = 4.0;
+/// Size (graph px) of the grip mark drawn at a comment frame's bottom-right corner.
+const FRAME_GRIP: f32 = 14.0;
 
-fn frame_resize_handle(handle: FrameResizeHandle, owner: GraphOf, color: Color) -> impl Scene {
-    let edge = px(FRAME_RESIZE_EDGE);
-    let corner = px(FRAME_RESIZE_CORNER);
-    let inset = px(-2.0);
-    let (left, right, width) = match (handle.left, handle.right) {
-        (true, false) => (inset, Val::Auto, if handle.top || handle.bottom { corner } else { edge }),
-        (false, true) => (Val::Auto, inset, if handle.top || handle.bottom { corner } else { edge }),
-        _ => (corner, corner, Val::Auto),
-    };
-    let (top, bottom, height) = match (handle.top, handle.bottom) {
-        (true, false) => (inset, Val::Auto, if handle.left || handle.right { corner } else { edge }),
-        (false, true) => (Val::Auto, inset, if handle.left || handle.right { corner } else { edge }),
-        _ => (corner, corner, Val::Auto),
-    };
-    let (border, border_color) = if handle.right && handle.bottom {
-        let g = color.with_alpha(0.55);
-        (
-            UiRect { right: px(2.0), bottom: px(2.0), ..default() },
-            BorderColor { top: Color::NONE, left: Color::NONE, right: g, bottom: g },
-        )
-    } else {
-        (UiRect::DEFAULT, BorderColor::all(Color::NONE))
-    };
+/// The grip mark at a comment frame's bottom-right corner: drawn only, its hit zone is the corner's
+/// [`FrameResizeHandle`].
+#[derive(Component, Clone, Copy, Debug, Default)]
+struct FrameGrip;
+
+/// A resize hit zone of a comment frame, placed at zoom 1 ([`size_frame_handles`] follows the canvas zoom).
+fn frame_resize_handle(handle: FrameResizeHandle, owner: GraphOf) -> impl Scene {
+    let mut node = Node { position_type: PositionType::Absolute, ..default() };
+    handle.place(&mut node, 1.0);
     bsn! {
-        Node {
-            position_type: PositionType::Absolute,
-            left: left,
-            right: right,
-            top: top,
-            bottom: bottom,
-            width: width,
-            height: height,
-            border: border,
-            border_radius: BorderRadius::bottom_right(px(6.0)),
-        }
-        border_color
+        node
         EntityCursor::System({ handle.cursor() })
         handle
         owner
         TabIndex(-1)
+    }
+}
+
+fn frame_grip(color: Color) -> impl Scene {
+    let g = color.with_alpha(0.55);
+    let border = UiRect { right: px(2.0), bottom: px(2.0), ..default() };
+    bsn! {
+        Node {
+            position_type: PositionType::Absolute,
+            right: px(-2.0),
+            bottom: px(-2.0),
+            width: px(FRAME_GRIP),
+            height: px(FRAME_GRIP),
+            border: border,
+            border_radius: BorderRadius::bottom_right(px(6.0)),
+        }
+        BorderColor { top: Color::NONE, left: Color::NONE, right: g, bottom: g }
+        FrameGrip
+        Pickable::IGNORE
     }
 }
 
@@ -714,6 +728,9 @@ fn frame_scene(f: &FrameView, canvas: Entity, owner: GraphOf) -> impl Scene {
         key
         owner
         ZIndex(-1)
+        // Only the title strip and the resize zones pick: a click on the body acts on the canvas under it (box
+        // select, deselect, the palette).
+        Pickable::IGNORE
         Node {
             width: px(w),
             height: px(h),
@@ -734,21 +751,23 @@ fn frame_scene(f: &FrameView, canvas: Entity, owner: GraphOf) -> impl Scene {
             Node { width: percent(100), min_height: px(FRAME_TITLE_HEIGHT) }
             FrameTitleStrip
             --
-            @frame_resize_handle(h_l, owner, c)
+            @frame_resize_handle(h_l, owner)
             --
-            @frame_resize_handle(h_r, owner, c)
+            @frame_resize_handle(h_r, owner)
             --
-            @frame_resize_handle(h_t, owner, c)
+            @frame_resize_handle(h_t, owner)
             --
-            @frame_resize_handle(h_b, owner, c)
+            @frame_resize_handle(h_b, owner)
             --
-            @frame_resize_handle(h_tl, owner, c)
+            @frame_resize_handle(h_tl, owner)
             --
-            @frame_resize_handle(h_tr, owner, c)
+            @frame_resize_handle(h_tr, owner)
             --
-            @frame_resize_handle(h_bl, owner, c)
+            @frame_resize_handle(h_bl, owner)
             --
-            @frame_resize_handle(h_br, owner, c)
+            @frame_resize_handle(h_br, owner)
+            --
+            @frame_grip(c)
         ]
     }
 }
@@ -1542,7 +1561,8 @@ fn sync_selection<G: GraphDomain>(
         }
     }
     // Frames selected together with nodes (design §4.5): while a selection box is dragged, those it fully encloses
-    // (bevy_noodle selects every frame it touches); afterwards the marked ones as long as they stay selected.
+    // (bevy_noodle selects only those too, by laid-out rect; this checks the model's); afterwards the marked ones as
+    // long as they stay selected.
     let marked = match boxes.get(ec.canvas) {
         Ok((b, view)) => {
             let area = Rect::from_corners(view.canvas_to_graph(b.0.min), view.canvas_to_graph(b.0.max));
@@ -1575,7 +1595,7 @@ fn frame_colors<G: GraphDomain>(
     editor: Res<Editor>,
     mut frames: Query<(&FrameKey, &GraphOf, &mut SelectedBorderColor, &mut BackgroundColor, &Children)>,
     mut titles: Query<&mut TextColor>,
-    mut grips: Query<(&FrameResizeHandle, &mut BorderColor)>,
+    mut grips: Query<&mut BorderColor, With<FrameGrip>>,
 ) {
     if !editor.is_changed() {
         return;
@@ -1592,14 +1612,26 @@ fn frame_colors<G: GraphDomain>(
             if let Ok(mut t) = titles.get_mut(*child) {
                 t.set_if_neq(TextColor(c));
             }
-            if let Ok((h, mut bc)) = grips.get_mut(*child)
-                && h.right
-                && h.bottom
-            {
+            if let Ok(mut bc) = grips.get_mut(*child) {
                 let g = c.with_alpha(0.55);
                 bc.set_if_neq(BorderColor { top: Color::NONE, left: Color::NONE, right: g, bottom: g });
             }
         }
+    }
+}
+
+/// Comment frame resize zones keep their window size at any canvas zoom ([`FrameResizeHandle::place`]).
+fn size_frame_handles<G: GraphDomain>(
+    ec: Option<Res<EditorCanvas<G>>>,
+    views: Query<&CanvasView>,
+    mut handles: Query<(&FrameResizeHandle, &GraphOf, &mut Node)>,
+) {
+    let Some(ec) = ec else { return };
+    let Ok(view) = views.get(ec.canvas) else { return };
+    for (handle, _, mut node) in handles.iter_mut().filter(|(_, g, _)| g.0 == G::VIEW) {
+        let mut placed = node.clone();
+        handle.place(&mut placed, view.zoom);
+        node.set_if_neq(placed);
     }
 }
 
@@ -1793,6 +1825,22 @@ mod tests {
         let o = node_outline(false, false, Some(true), 0.0).unwrap();
         assert_eq!((o.width, o.color), (px(2), ERROR));
         assert!(node_outline(false, false, None, 0.0).is_none());
+    }
+
+    #[test]
+    fn frame_resize_zones_keep_their_window_size_at_any_zoom() {
+        let place = |h: FrameResizeHandle, zoom: f32| {
+            let mut n = Node::default();
+            h.place(&mut n, zoom);
+            [n.left, n.right, n.top, n.bottom, n.width, n.height]
+        };
+        let right = FrameResizeHandle { right: true, ..default() };
+        // 10 px past the border, 20 px in: 30 window px, i.e. 60 graph px at zoom 0.5; spans between the corners.
+        assert_eq!(place(right, 1.0), [Val::Auto, px(-10.0), px(4.0), px(20.0), px(30.0), Val::Auto]);
+        assert_eq!(place(right, 0.5), [Val::Auto, px(-20.0), px(8.0), px(40.0), px(60.0), Val::Auto]);
+        // The top zones reach only 4 px in, over the title strip.
+        let top_left = FrameResizeHandle { left: true, top: true, ..default() };
+        assert_eq!(place(top_left, 2.0), [px(-5.0), Val::Auto, px(-5.0), Val::Auto, px(15.0), px(7.0)]);
     }
 
     #[test]

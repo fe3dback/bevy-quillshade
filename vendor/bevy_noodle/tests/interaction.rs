@@ -491,6 +491,38 @@ fn additive_box_selection_shrinks_back_to_what_was_selected() {
     assert_eq!(selected(w, Vec2::new(50.0, 20.0)), EntityHashSet::from_iter([a]));
 }
 
+#[test]
+fn a_box_selects_a_frame_only_when_it_holds_all_of_it() {
+    let mut app = app();
+    let w = app.world_mut();
+    let (canvas, content) = graph(w);
+    let frame_size = ComputedNode { size: Vec2::splat(200.0), ..default() };
+    let frame =
+        w.spawn((GraphNode, NodeFrame, NodePosition(Vec2::ZERO), Node::default(), frame_size, ChildOf(content)));
+    let frame = frame.id();
+    let size = ComputedNode { size: Vec2::splat(10.0), ..default() };
+    let [a, b] = [20.0, 100.0].map(|x| {
+        let at = NodePosition(Vec2::new(x, 50.0));
+        w.spawn((GraphNode, at, Node::default(), size, ChildOf(content))).id()
+    });
+    // The canvas is centred on the window's origin: window = local - (200, 150).
+    let window = |local: Vec2| local - Vec2::new(200.0, 150.0);
+    let button = PointerButton::Primary;
+    let selected = |w: &mut World, start: Vec2, to: Vec2| {
+        pointer_at(w, canvas, window(start), DragStart { button, hit: hit() });
+        let (distance, delta) = (to - start, to - start);
+        pointer_at(w, canvas, window(to), Drag { button, distance, delta });
+        let mut selected = w.query_filtered::<Entity, With<Selected>>();
+        selected.iter(w).collect::<EntityHashSet>()
+    };
+    // Inside the frame: its nodes only.
+    assert_eq!(selected(w, Vec2::new(10.0, 40.0), Vec2::new(40.0, 70.0)), EntityHashSet::from_iter([a]));
+    // Across one edge: still not the frame.
+    assert_eq!(selected(w, Vec2::new(-10.0, 40.0), Vec2::new(150.0, 70.0)), EntityHashSet::from_iter([a, b]));
+    // All of it: the frame too.
+    assert_eq!(selected(w, Vec2::new(-10.0, -10.0), Vec2::new(210.0, 210.0)), EntityHashSet::from_iter([frame, a, b]));
+}
+
 // Moving edges: with a `move_wires_keys` key held, a drag from a connected
 // port lifts its edges instead of dragging a new wire.
 

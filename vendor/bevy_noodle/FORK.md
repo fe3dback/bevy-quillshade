@@ -189,6 +189,15 @@ identical to upstream.
 - Docs: README ("Reach", "Style"), CHANGELOG (Unreleased), the style module table, the field's, `PortHoverStyle`'s,
   `PortSize`'s and `PortDot`'s docs.
 
+### Box selection holds frames whole (shader editor comment frames)
+
+- A selection box selects a node it touches, but a `NodeFrame` only when the box holds all of it
+  (`interaction.rs`, `on_drag`'s `Gesture::Box`). Upstream selected every frame the box touched, so a box drawn
+  around a few nodes inside a comment frame selected the frame too, and dragging those nodes moved the frame and
+  carried every other node inside it.
+- Test: `tests/interaction.rs` (`a_box_selects_a_frame_only_when_it_holds_all_of_it`: inside, across one edge, all
+  of it).
+
 ### Doc examples compile only (shader editor CI)
 
 - The two runnable doc examples (`style::kit` module docs, `style::EdgeStyle`) are `no_run`, like the README's. In the

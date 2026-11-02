@@ -457,7 +457,7 @@ fn add_comment_with_selection_wraps_it() {
     e.apply(GraphEdit::AddComment(Some((5000.0, 5000.0))));
     let f = new_frame(&e, &before);
     let (x0, y0, x1, y1) = (pa.0.min(pb.0), pa.1.min(pb.1), pa.0.max(pb.0), pa.1.max(pb.1));
-    assert_eq!(f.rect, (x0 - 30.0, y0 - 50.0, x1 - x0 + 260.0, y1 - y0 + 220.0));
+    assert_eq!(f.rect, (x0 - 60.0, y0 - 100.0, x1 - x0 + 320.0, y1 - y0 + 320.0));
     let mut members = vec![a, b];
     members.sort();
     assert_eq!(f.nodes, members);

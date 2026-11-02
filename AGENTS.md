@@ -313,18 +313,19 @@ Setting `SHADER_EDITOR_SCREENSHOT=/abs/path/to/out.png` activates the frame-driv
     `git -C /tmp/qs-mig init -q` (untracked files) shows the git "uncommitted changes" warning. The current sample is already v3, so the copy above only exercises the project-file steps; for a realistic v2 → v3 run (33 files) use the last v2 sample: `rm -rf /tmp/qs-mig-v2 && mkdir /tmp/qs-mig-v2 && git archive 234951e examples/sample_game | tar -x -C /tmp/qs-mig-v2` and pass `/tmp/qs-mig-v2/examples/sample_game`.
 - **`SHADER_EDITOR_INPUT=<gesture>`** (Frames 160–200):
   - Shell gestures: `menu_click`, `menu_close`, `hover`, `tab[:N]`.
-  - Material gestures: `drag`, `rmb_click`, `rmb_pan`, `mmb_pan`, `slider`, `color`, `pin_rmb`, `node_rmb`, `node_dblclick`, `frame_dblclick`, `hover`, `curve_drag`, `curve_add`, `texture_zoom`, `drop_game_file`, `ctrl_drag_wire`, `ctrl_wire_hold`, `wire_drag`, `wire_hold`, `alt_click`, `box_delete`, `box_delete_partial`, `type_field`.
+  - Material gestures: `drag`, `rmb_click`, `rmb_pan`, `mmb_pan`, `slider`, `color`, `pin_rmb`, `node_rmb`, `node_dblclick`, `frame_dblclick`, `hover`, `curve_drag`, `curve_add`, `texture_zoom`, `drop_game_file`, `ctrl_drag_wire`, `ctrl_wire_hold`, `wire_drag`, `wire_hold`, `alt_click`, `box_delete`, `box_delete_partial`, `type_field`, `frame_lmb`, `frame_rmb`, `frame_resize`, `box_drag`.
 - **Auxiliary `SHADER_EDITOR_INPUT_*` Environment Variables**:
-  - **`SHADER_EDITOR_INPUT_NODE=<id>`**: Target node ID for `drag`, `node_rmb`, `node_dblclick`, or drop target for `drop_game_file` (default: canvas center / first unselected node).
+  - **`SHADER_EDITOR_INPUT_NODE=<id>`**: Target node ID for `drag`, `box_drag`, `node_rmb`, `node_dblclick`, or drop target for `drop_game_file` (default: canvas center / first unselected node).
   - **`SHADER_EDITOR_INPUT_PIN=<node>.<pin>`**: Target or source pin for `hover`, `pin_rmb`, `alt_click`, `wire_drag`, `wire_hold`, `ctrl_drag_wire`, and `ctrl_wire_hold` (default: topmost connected input).
   - **`SHADER_EDITOR_INPUT_TO=<node>.<pin>`**: Destination pin for `wire_drag`, `wire_hold`, `ctrl_drag_wire`, and `ctrl_wire_hold` (default: nearest pin of the same direction on another node).
   - **`SHADER_EDITOR_INPUT_AT=<spec>`**:
     - `header` (with `node_dblclick`): Double-clicks the node's header strip (opens referenced file, rename dialog, or node comment dialog).
     - `<dx>,<dy>` (with wire drags): Ends the drag that many logical px from the start pin on empty canvas.
     - `to:<dx>,<dy>` (with wire drags): Ends the drag that many logical px from the target pin (tests snap radius).
+    - `<dx>,<dy>` (with `frame_lmb` / `frame_rmb`): Clicks the frame body that many logical px from its top-left corner (default `40,50`); with `frame_resize`: starts the 60×40 px drag that far from its bottom-right corner (default `5,5`, just outside).
   - **`SHADER_EDITOR_INPUT_FILE=<path>`**: Source tree row for `drop_game_file` — either a Game Assets path under `assets/` or a Project asset path `quillshade/material/<path>.<kind>.ron` (e.g. `quillshade/material/common/pulse.curve.ron`).
   - **`SHADER_EDITOR_INPUT_TIP=<prefix>`**: Target widget for `hover` whose tooltip starts with `<prefix>` (default without `PIN` or `TIP`: the secondbar's Back button).
-  - **`SHADER_EDITOR_INPUT_FRAME=<id>`**: Target comment frame ID for `frame_dblclick`, `box_delete`, and `box_delete_partial` (default: first comment frame).
+  - **`SHADER_EDITOR_INPUT_FRAME=<id>`**: Target comment frame ID for `frame_dblclick`, `frame_lmb`, `frame_rmb`, `frame_resize`, `box_delete`, and `box_delete_partial` (default: first comment frame).
   - **`SHADER_EDITOR_INPUT_MENU=<name>`**: Target mainbar menu (`file`, `edit`, `view`, `assets`, `help`) for `menu_click` and `menu_close` (default: `file`).
   - **`SHADER_EDITOR_INPUT_TRACE=1`**: Enables verbose per-step trace logging during scripted input playback.
 

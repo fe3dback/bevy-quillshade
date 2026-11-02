@@ -340,8 +340,12 @@ pub fn material(ir: &Ir, ctx: &GenCtx) -> Generated {
             w.line("import bevy_pbr::render::{pbr_fragment::pbr_input_from_standard_material, pbr_functions::alpha_discard};");
             w.line("@if(PREPASS_PIPELINE)");
             if ir.vertex.is_some() {
-                w.line("import bevy_pbr::{prepass::io::{Vertex, UncompressedVertex, VertexOutput, FragmentOutput, decompress_vertex}, deferred::functions::deferred_output};");
-                w.line("@else");
+                // The module is also the prepass vertex shader: a prepass without a fragment stage (depth only,
+                // shadows) has no `PREPASS_FRAGMENT` and no `prepass::io::FragmentOutput` (see `pbr_fragment`).
+                w.line("import bevy_pbr::prepass::io::{Vertex, UncompressedVertex, VertexOutput, decompress_vertex};");
+                w.line("@if(PREPASS_PIPELINE && PREPASS_FRAGMENT)");
+                w.line("import bevy_pbr::{prepass::io::FragmentOutput, deferred::functions::deferred_output};");
+                w.line("@if(!PREPASS_PIPELINE)");
                 w.line("import bevy_pbr::render::{forward_io::{Vertex, UncompressedVertex, VertexOutput, FragmentOutput, decompress_vertex}, pbr_functions::{apply_pbr_lighting, main_pass_post_lighting_processing}};");
             } else {
                 w.line(
@@ -391,9 +395,16 @@ pub fn material(ir: &Ir, ctx: &GenCtx) -> Generated {
     w.finish()
 }
 
+/// Fragment shader (forward and deferred). With a vertex stage the module is also `prepass_vertex_shader`, compiled
+/// for prepasses without a fragment stage too (depth-only `DepthPrepass`, shadow maps), where Bevy defines neither
+/// `PREPASS_FRAGMENT` nor `prepass::io::FragmentOutput`: the entry point is left out there, otherwise the whole module
+/// fails and the mesh is missing from the depth prepass (DepthFade, SceneDepth) and from the shadow maps.
 fn pbr_fragment(ir: &Ir, kind: &MaterialKind, normal: bool, imports: &mut Imports, w: &mut Writer) {
     let o = &ir.main.outputs;
     let blend = kind.blend();
+    if ir.vertex.is_some() {
+        w.line("@if(!PREPASS_PIPELINE || PREPASS_FRAGMENT)");
+    }
     w.line("@fragment");
     w.line("fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> FragmentOutput {");
     w.line("    var pbr_input = pbr_input_from_standard_material(in, is_front);");

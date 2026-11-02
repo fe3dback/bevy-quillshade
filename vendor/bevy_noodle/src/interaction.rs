@@ -534,7 +534,7 @@ fn on_drag(
     mut drag: On<PointerDrag>,
     mut ctx: Ctx,
     mut wires: Query<(Option<&mut PendingWire>, Option<&mut MovingEdges>, &mut WireTarget, Option<&WireCandidates>)>,
-    nodes: Query<(&NodePosition, &ComputedNode)>,
+    nodes: Query<(&NodePosition, &ComputedNode, Has<NodeFrame>)>,
     kept: Query<&KeptSelection>,
     dragged: Query<&NodeDrag>,
     positions: Query<&NodePosition>,
@@ -597,10 +597,16 @@ fn on_drag(
             };
             let rect = Rect::from_corners(start, end);
             let area = Rect::from_corners(view.canvas_to_graph(rect.min), view.canvas_to_graph(rect.max));
+            // A node is hit when the box touches it, a frame only when the box
+            // holds all of it (a box drawn inside a frame picks its nodes alone).
             let hits = ctx.graph.nodes_in(canvas).filter(|n| {
-                nodes.get(*n).is_ok_and(|(p, c)| {
+                nodes.get(*n).is_ok_and(|(p, c, frame)| {
                     let size = c.size() * c.inverse_scale_factor();
-                    !area.intersect(Rect::from_corners(p.0, p.0 + size)).is_empty()
+                    let r = Rect::from_corners(p.0, p.0 + size);
+                    match frame {
+                        true => area.contains(r.min) && area.contains(r.max),
+                        false => !area.intersect(r).is_empty(),
+                    }
                 })
             });
             let kept = kept.get(canvas).into_iter().flat_map(|k| k.0.iter().copied());

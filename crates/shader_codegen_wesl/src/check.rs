@@ -96,6 +96,10 @@ pub enum Variant {
     Forward3dPrepass,
     /// 3D deferred (prepass pipeline).
     Deferred3d,
+    /// 3D prepass pipeline without a fragment stage: a camera with only `DepthPrepass`, and shadow maps. Bevy
+    /// compiles the material module for it only as `prepass_vertex_shader`, i.e. for a PBR material with a vertex
+    /// stage.
+    DepthPrepass3d,
     /// 2D sprite / mesh2d.
     Sprite2d,
 }
@@ -132,6 +136,7 @@ impl Variant {
                 "DEFERRED_PREPASS",
                 "NORMAL_PREPASS_OR_DEFERRED_PREPASS",
             ]),
+            Variant::DepthPrepass3d => f.extend(["VERTEX_UVS", "VERTEX_UVS_A", "VERTEX_TANGENTS", "PREPASS_PIPELINE"]),
             Variant::Sprite2d => f.extend(["VERTEX_UVS", "VERTEX_COLORS"]),
         }
         let group = if self == Variant::Sprite2d { 2 } else { 3 };
@@ -246,9 +251,17 @@ pub fn compile_with(
     Ok(wgsl)
 }
 
-/// Variants a material of the given kind is compiled with by Bevy.
-pub fn variants_for(kind: &shader_graph_core::MaterialKind) -> &'static [Variant] {
+/// Variants a material of the given kind is compiled with by Bevy; `vertex`: it has a vertex stage (World Position
+/// Offset, World Normal).
+pub fn variants_for(kind: &shader_graph_core::MaterialKind, vertex: bool) -> &'static [Variant] {
     match kind {
+        shader_graph_core::MaterialKind::Pbr3d(_) if vertex => &[
+            Variant::Forward3d,
+            Variant::Forward3dBare,
+            Variant::Forward3dPrepass,
+            Variant::Deferred3d,
+            Variant::DepthPrepass3d,
+        ],
         shader_graph_core::MaterialKind::Pbr3d(_) => {
             &[Variant::Forward3d, Variant::Forward3dBare, Variant::Forward3dPrepass, Variant::Deferred3d]
         }

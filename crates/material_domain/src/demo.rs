@@ -2,6 +2,7 @@
 //! `SHADER_EDITOR_INPUT=drag|rmb_click|rmb_pan|mmb_pan|slider|color|pin_rmb|node_rmb|node_dblclick|frame_dblclick`
 //! `|hover|curve_drag|curve_add|texture_zoom|drop_game_file`
 //! `|ctrl_drag_wire|ctrl_wire_hold|wire_drag|wire_hold|alt_click|box_delete|box_delete_partial|type_field`
+//! `|frame_lmb|frame_rmb|frame_resize|box_drag`
 //! (with `SHADER_EDITOR_SCREENSHOT` and `SHADER_EDITOR_OPEN`; `SHADER_EDITOR_ZOOM=<f32>` sets the canvas zoom
 //! first). `slider` drags the topmost number input with a soft limit (an inline ranged field on a node wholly inside
 //! the visible canvas, or the Hue of a selected comment in the right sidebar) across most of its on-screen width and
@@ -30,7 +31,13 @@
 //! them log the wires at both pins before and after (decision 0032).
 //! `box_delete` drags a selection box from 20 px outside the first comment frame (or `SHADER_EDITOR_INPUT_FRAME`) to
 //! 20 px past its far corner and presses Delete, `box_delete_partial` the same with a box ending in the frame's
-//! middle; both log frames, node count and selection before and after (design §4.5). `type_field` clicks the
+//! middle; both log frames, node count and selection before and after (design §4.5). `frame_lmb` / `frame_rmb`
+//! click the body of the first comment frame (or `SHADER_EDITOR_INPUT_FRAME`) 40, 50 px (or
+//! `SHADER_EDITOR_INPUT_AT=<dx>,<dy>`) from its top-left corner, `frame_resize` drags from 5, 5 px (or `<dx>,<dy>`)
+//! past its bottom-right corner by 60, 40 px; they log frames, selection and the palette before and after.
+//! `box_drag` box-selects `SHADER_EDITOR_INPUT_NODE` (default: the first unselected node) with a box just around it
+//! and drags it by 60, 40 px; it logs frames and node positions before and after (a frame the box only touches stays).
+//! `type_field` clicks the
 //! right sidebar's Description field of an open graph, types `ab` and logs the focus and the field's text.
 //! The shell's gestures (`menu_click`, `menu_close`, `tab[:N]`, `hover` off a pin) are `editor_core::demo`'s. The
 //! input
@@ -98,6 +105,14 @@ fn frames_log(editor: &Editor) -> String {
         d.selection,
         d.enclosed_frames
     )
+}
+
+/// Comment frame rects, the selected frame and whether the palette is open.
+fn frame_state(editor: &Editor, palette: bool) -> String {
+    let Some(d) = editor.doc() else { return String::new() };
+    let rects: Vec<_> = d.asset.comments.iter().map(|f| (f.id.as_str(), f.rect)).collect();
+    let moved: Vec<_> = d.asset.nodes.iter().map(|(k, n)| (k.as_str(), n.pos)).collect();
+    format!("rects {rects:?} selected frame {:?} palette {palette} nodes {moved:?}", d.selected_frame)
 }
 
 /// Property widgets (inline editors on canvas nodes and the right sidebar's): what they edit, where they are, which
@@ -444,6 +459,48 @@ pub fn scripted_input(
                 all.extend(hold.filter(|_| !name.ends_with("_hold")).map(|k| Step::Key(k, false)));
                 all
             }
+            "box_drag" => {
+                let Some((key, _, t, c)) = unselected else { return };
+                s.node = Some(key.0.clone());
+                // A box just around the node (inside its comment frame), then a drag of the node.
+                let (at, half) = (logical(t, c), c.size() * c.inverse_scale_factor() * view.zoom / 2.0);
+                let (from, to) = (at - half - 6.0, at + half + 6.0);
+                info!("demo {name}: {} {}", frames_log(&editor), frame_state(&editor, palette.open));
+                let mut steps = drag(from, MouseButton::Left, to - from);
+                steps.extend([Step::Wait, Step::Wait]);
+                steps.extend(drag(at, MouseButton::Left, Vec2::new(60.0, 40.0)));
+                steps
+            }
+            "frame_lmb" | "frame_rmb" | "frame_resize" => {
+                let wanted = std::env::var("SHADER_EDITOR_INPUT_FRAME").ok();
+                let frame =
+                    frames.iter().filter(|f| wanted.as_ref().is_none_or(|w| *w == f.0.0)).min_by_key(|f| &f.0.0);
+                let Some((_, t, c)) = frame else {
+                    error!("demo {name}: no comment frame {wanted:?}");
+                    return;
+                };
+                let half = c.size() * c.inverse_scale_factor() * view.zoom / 2.0;
+                let centre = logical(t, c);
+                // `SHADER_EDITOR_INPUT_AT=<dx>,<dy>`: from the frame's top-left corner (clicks) or bottom-right corner
+                // (`frame_resize`).
+                let offset = std::env::var("SHADER_EDITOR_INPUT_AT").ok().and_then(|v| {
+                    let (x, y) = v.split_once(',')?;
+                    Some(Vec2::new(x.trim().parse().ok()?, y.trim().parse().ok()?))
+                });
+                info!("demo {name}: {} {}", frames_log(&editor), frame_state(&editor, palette.open));
+                match name.as_str() {
+                    "frame_resize" => drag(
+                        centre + half + offset.unwrap_or(Vec2::splat(5.0)),
+                        MouseButton::Left,
+                        Vec2::new(60.0, 40.0),
+                    ),
+                    _ => {
+                        let button = if name == "frame_lmb" { MouseButton::Left } else { MouseButton::Right };
+                        let at = centre - half + offset.unwrap_or(Vec2::new(40.0, 50.0));
+                        vec![Step::Move(at), Step::Press(button), Step::Wait, Step::Release(button)]
+                    }
+                }
+            }
             "box_delete" | "box_delete_partial" => {
                 let wanted = std::env::var("SHADER_EDITOR_INPUT_FRAME").ok();
                 let frame =
@@ -490,6 +547,11 @@ pub fn scripted_input(
     if s.frame > START {
         match s.steps.pop() {
             Some(step) => emit.play(step),
+            None if s.frame == START + 40
+                && (name == "box_drag" || name.starts_with("frame_") && name != "frame_dblclick") =>
+            {
+                info!("demo {name}: {} {}", frames_log(&editor), frame_state(&editor, palette.open));
+            }
             None if s.frame == START + 40 && name.starts_with("box_delete") => {
                 info!("demo {name}: {}", frames_log(&editor));
             }

@@ -608,8 +608,9 @@ pub fn plan_set(project: &Project, set: &AssetSet, opts: &RegenOptions) -> (Rege
             if !r.ok || id.ty != AssetType::Material {
                 continue;
             }
-            let kind = *r.ir.as_ref().and_then(|i| i.kind.material()).expect("material IR");
-            for v in check::variants_for(&kind) {
+            let ir = r.ir.as_ref().expect("material IR");
+            let kind = *ir.kind.material().expect("material IR");
+            for v in check::variants_for(&kind, ir.vertex.is_some()) {
                 if let Err(e) = check::compile(bevy, &files, &paths::material_module(&id.path), *v) {
                     r.diagnostics.push(
                         Diagnostic::new(Code::E010, format!("generated WESL failed to compile: {e}"))
