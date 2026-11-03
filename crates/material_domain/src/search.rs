@@ -72,7 +72,7 @@ pub fn entries(
             name: info.name.clone(),
             category: info.category.clone(),
             keywords: info.keywords.clone(),
-            description: info.description.clone(),
+            description: editor_core::ui::rich_text::plain(&info.description),
             params: Vec::new(),
         });
     }

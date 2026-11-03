@@ -44,19 +44,13 @@ pub fn register(r: &mut Registry) {
             PinType::Float3 => ParamKind::Float3,
             _ => ParamKind::Float4,
         };
-        r.register(
-            def(id, name, CAT_CONST)
-                .kw(kw)
-                .desc("Literal value inlined into WESL.")
-                .param(ParamDef::new("value", "Value", kind, default))
-                .build(
-                    move |_| sig(vec![], vec![pin_out("out", "", ty)]),
-                    move |c| {
-                        let lit = c.param("value").wesl_literal(ty);
-                        c.alias("out", Operand::Value(lit));
-                    },
-                ),
-        );
+        r.register(def(id, name, CAT_CONST).kw(kw).param(ParamDef::new("value", "Value", kind, default)).build(
+            move |_| sig(vec![], vec![pin_out("out", "", ty)]),
+            move |c| {
+                let lit = c.param("value").wesl_literal(ty);
+                c.alias("out", Operand::Value(lit));
+            },
+        ));
     }
 
     for (id, name, b, ty, kw) in [
@@ -92,9 +86,6 @@ pub fn register(r: &mut Registry) {
     r.register(
         def("stdlib::Toggle", "Toggle", CAT_CONST)
             .kw(&["toggle", "bool", "switch", "0", "1", "float"])
-            .desc(
-                "Constant toggle that outputs `f32` `0.0` (unchecked) or `1.0` (checked) for branchless shader math (`Multiply`, `Lerp`).\n\nNote: For compile-time branch pruning with `If`, use `CompileBool` or `CompileBoolParameter`. For a runtime `bool` (`true`/`false`) with `RuntimeIf`, use `RuntimeBool` or `RuntimeBoolParameter`.",
-            )
             .param(ParamDef::new("value", "Value", ParamKind::Bool, Value::Bool(false)))
             .build(
                 |_| sig(vec![], vec![pin_out("out", "", PinType::Float)]),
@@ -108,9 +99,6 @@ pub fn register(r: &mut Registry) {
     r.register(
         def("stdlib::RuntimeBool", "RuntimeBool", CAT_CONST)
             .kw(&["runtimeBool", "bool", "true", "false", "constant"])
-            .desc(
-                "Constant runtime `bool` (`true` or `false`) emitted into WESL for runtime GPU logic (`RuntimeIf`, `And`, `Or`, `Not`).\n\nNote: For compile-time branch pruning that strips the unused branch from WESL with `If`, use `CompileBool` or `CompileBoolParameter`. For a `0.0`/`1.0` `f32` value, use `Toggle`.",
-            )
             .param(ParamDef::new("value", "Value", ParamKind::Bool, Value::Bool(false)))
             .build(
                 |_| sig(vec![], vec![pin_out("out", "", PinType::RuntimeBool)]),
@@ -124,9 +112,6 @@ pub fn register(r: &mut Registry) {
     r.register(
         def("stdlib::CompileBool", "CompileBool", CAT_CONST)
             .kw(&["compileBool", "compileFlag", "flag", "static", "branch"])
-            .desc(
-                "Editor-only compile-time boolean flag (`CompileBool`) for `If` and compile-time logic (`CompileAnd`, `CompileOr`, `CompileNot`). Evaluated during shader compilation so the inactive branch is completely stripped from WESL.\n\nNote: To expose a named compile flag that future Material Instances can override to generate a separate shader variant, use `CompileBoolParameter`. For runtime GPU logic, use `RuntimeBool`.",
-            )
             .param(ParamDef::new("value", "Value", ParamKind::Bool, Value::Bool(false)))
             .build(
                 |_| sig(vec![], vec![pin_out("out", "", PinType::CompileBool)]),
@@ -148,62 +133,49 @@ pub const GLOBAL_CONST_PARAM: &str = "const";
 
 /// Nodes reading a constant of a global constant table; its value is inlined as a literal (decision 0017).
 fn register_globals(r: &mut Registry) {
-    for (id, name, ty, kw, desc) in [
+    for (id, name, ty, kw) in [
         (
             "stdlib::GlobalConstF32",
             "GlobalConstF32",
             ConstType::F32,
             &["global", "const", "scalar", "float", "f32"][..],
-            "Value of an f32 global constant.",
         ),
-        (
-            "stdlib::GlobalConstVec2",
-            "GlobalConstVec2",
-            ConstType::Vec2,
-            &["global", "const", "vec2", "float2"][..],
-            "Value of a vec2 global constant.",
-        ),
+        ("stdlib::GlobalConstVec2", "GlobalConstVec2", ConstType::Vec2, &["global", "const", "vec2", "float2"][..]),
         (
             "stdlib::GlobalConstVec3",
             "GlobalConstVec3",
             ConstType::Vec3,
             &["global", "const", "vec3", "float3", "color", "rgb"][..],
-            "Value of a vec3 global constant.",
         ),
         (
             "stdlib::GlobalConstVec4",
             "GlobalConstVec4",
             ConstType::Vec4,
             &["global", "const", "vec4", "float4", "rgba"][..],
-            "Value of a vec4 global constant.",
         ),
         (
             "stdlib::GlobalToggle",
             "GlobalToggle",
             ConstType::Toggle,
             &["global", "const", "table", "toggle", "switch", "0", "1"][..],
-            "Reads a global `toggle` constant (`0.0` or `1.0` `f32`) from a `.consts.ron` table for branchless math (such as `Multiply` or `Lerp`).\n\nNote: To strip an entire shader branch at compile time with `If`, use `GlobalCompileBool`. For a runtime `bool` (`true`/`false`) with `RuntimeIf`, use `GlobalRuntimeBool`.",
         ),
         (
             "stdlib::GlobalRuntimeBool",
             "GlobalRuntimeBool",
             ConstType::RuntimeBool,
             &["global", "const", "table", "runtimeBool", "bool", "flag"][..],
-            "Reads a global `runtimeBool` constant (`true` or `false`) from a `.consts.ron` table for runtime GPU logic (`RuntimeIf`, `And`, `Or`, `Not`).\n\nNote: Both branches of `RuntimeIf` still execute on the GPU. To strip an inactive branch at compile time with `If`, use `GlobalCompileBool`. For a `0.0`/`1.0` `f32` value, use `GlobalToggle`.",
         ),
         (
             "stdlib::GlobalCompileBool",
             "GlobalCompileBool",
             ConstType::CompileBool,
             &["global", "const", "table", "compileBool", "compileFlag", "flag", "static"][..],
-            "Reads a global `compileBool` flag from a `.consts.ron` table. Editor-only and evaluated during shader compilation: never appears in WESL, and allows `If` to completely discard the inactive shader branch.\n\nNote: For runtime GPU boolean logic (`RuntimeIf`), use `GlobalRuntimeBool`. For a `0.0`/`1.0` `f32` multiplier, use `GlobalToggle`.",
         ),
     ] {
         let pin = ty.pin_type();
         r.register(
             def(id, name, CAT_CONST)
                 .kw(kw)
-                .desc(desc)
                 .param(ParamDef::new(
                     GLOBAL_CONST_TABLE_PARAM,
                     "Table",
@@ -293,7 +265,6 @@ fn declare(c: &mut shader_graph_core::EmitCtx, ty: ParamType) -> String {
 fn register_parameters(r: &mut Registry) {
     let mut b = def("param::Scalar", "ScalarParameter", CAT_PARAM)
         .kw(&["s", "scalar parameter", "float parameter", "uniform"])
-        .desc("Scalar set from the game (uniform field, constructor argument).")
         .role(NodeRole::Parameter);
     for p in common_params("scalar") {
         b = b.param(p);
@@ -359,9 +330,6 @@ fn register_parameters(r: &mut Registry) {
 
     let mut b = def("param::RuntimeBool", "RuntimeBoolParameter", CAT_PARAM)
         .kw(&["bool", "runtimeBool", "switch", "toggle", "uniform", "parameter"])
-        .desc(
-            "Uniform `RuntimeBool` material parameter (`bool` on the Rust material, `u32` in the GPU uniform buffer) that can be changed at runtime in-game without recompiling the shader. Used with `RuntimeIf`, `And`, `Or`, `Not`.\n\nNote: Runtime branching evaluates both branches on the GPU. For static feature switches that strip the inactive branch at compile time (and generate a dedicated WESL shader variant when overridden in a Material Instance), use `CompileBoolParameter` with `If`.",
-        )
         .role(NodeRole::Parameter);
     for p in common_params("flag") {
         b = b.param(p);
@@ -377,9 +345,6 @@ fn register_parameters(r: &mut Registry) {
 
     let b = def("param::CompileBool", "CompileBoolParameter", CAT_PARAM)
         .kw(&["compileBool", "compileFlag", "static switch", "feature", "permutation", "instance", "parameter"])
-        .desc(
-            "Named compile-time boolean parameter (`CompileBool`) used with `If` (`CompileAnd`, `CompileOr`, `CompileNot`). Evaluated at compile time to strip the inactive branch from the generated WESL shader (uses no GPU uniform slot). Overriding this flag in a future Material Instance will compile a separate WESL shader variant.\n\nNote: Cannot be toggled dynamically per frame without shader compilation. For dynamic in-game switches, use `RuntimeBoolParameter` with `RuntimeIf`.",
-        )
         .role(NodeRole::Parameter)
         .param(ParamDef::new("name", "Name", ParamKind::Str, Value::Str("flag".into())))
         .param(ParamDef::new("default", "Default", ParamKind::Bool, Value::Bool(false)));
@@ -394,7 +359,6 @@ fn register_parameters(r: &mut Registry) {
 
     let mut b = def("param::TextureObject", "TextureObjectParameter", CAT_PARAM)
         .kw(&["texture object", "texture parameter", "tex"])
-        .desc("Texture handle set from the game; connect to TextureSample.")
         .role(NodeRole::Parameter);
     for p in common_params("texture") {
         b = b.param(p);

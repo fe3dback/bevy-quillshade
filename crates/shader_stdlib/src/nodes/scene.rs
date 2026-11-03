@@ -12,11 +12,6 @@ pub fn register(r: &mut Registry) {
     r.register(
         def("stdlib::SceneDepth", "SceneDepth", CAT)
             .kw(&["depth", "scene depth", "depth buffer", "prepass", "z buffer"])
-            .desc(
-                "Depth of the opaque scene at a viewport UV (the current pixel when unconnected), read from the depth \
-                 prepass: linear distance along the view direction, like PixelDepth, and the raw reverse-Z value. \
-                 Needs `DepthPrepass` on the camera, otherwise reads as infinitely far (raw 0).",
-            )
             .build(
                 |_| {
                     sig(
@@ -44,11 +39,6 @@ pub fn register(r: &mut Registry) {
     r.register(
         def("stdlib::DepthFade", "DepthFade", CAT)
             .kw(&["depth fade", "soft particles", "shoreline", "intersection", "soft edge"])
-            .desc(
-                "Opacity times 0 where the surface touches the scene behind it, rising to 1 at Fade Distance in front \
-                 of it (soft particles, shorelines). Use it in a translucent material; needs `DepthPrepass` on the \
-                 camera, otherwise outputs Opacity.",
-            )
             .build(
                 |_| {
                     sig(

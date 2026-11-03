@@ -1,6 +1,6 @@
 //! The editor's window (design §6, §8): the shell ([`shell`]), the per-kind areas ([`areas`]), the secondbar
 //! ([`tabs`]), the sidebar trees ([`browser`], [`tree`]), the console/logs ([`log`]), dialogs and menus ([`dialog`],
-//! [`menu`]), the Migration Tool modal ([`migration`], ADR 0046), the welcome screen ([`welcome`]), and the building
+//! [`menu`]), help text markup ([`rich_text`]), the Migration Tool modal ([`migration`], ADR 0046), the welcome screen ([`welcome`]), and the building
 //! blocks: icons, property widgets, Feathers widgets.
 
 pub mod areas;
@@ -11,6 +11,7 @@ pub mod log;
 pub mod menu;
 pub mod migration;
 pub mod props;
+pub mod rich_text;
 pub mod shell;
 pub mod tabs;
 pub mod text_view;

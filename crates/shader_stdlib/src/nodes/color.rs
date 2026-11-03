@@ -35,8 +35,8 @@ fn color_in() -> PinDef {
 }
 
 /// Node `color` + scalar inputs → `out = func(color, inputs…)`.
-fn adjust(r: &mut Registry, name: &str, kw: &[&str], desc: &str, func: &'static str, ins: fn() -> Vec<PinDef>) {
-    r.register(def(&format!("stdlib::{name}"), name, CAT).kw(kw).desc(desc).build(
+fn adjust(r: &mut Registry, name: &str, kw: &[&str], func: &'static str, ins: fn() -> Vec<PinDef>) {
+    r.register(def(&format!("stdlib::{name}"), name, CAT).kw(kw).build(
         move |_| {
             let mut pins = vec![color_in()];
             pins.extend(ins());
@@ -55,7 +55,6 @@ pub fn register(r: &mut Registry) {
         r.register(
             def(&format!("stdlib::Make{space}"), &format!("Make{space}"), CAT)
                 .kw(&["make", "compose", "color space", "to rgb", sfx])
-                .desc(&format!("Linear RGB color from {space} components (hues in turns, 0..1)."))
                 .build(
                     move |_| {
                         let ins = comps.iter().map(|(id, label, d)| pin_in(id, label, PinType::Float, *d)).collect();
@@ -71,7 +70,6 @@ pub fn register(r: &mut Registry) {
         r.register(
             def(&format!("stdlib::Break{space}"), &format!("Break{space}"), CAT)
                 .kw(&["break", "split", "color space", "from rgb", sfx])
-                .desc(&format!("{space} components of a linear RGB color (hues in turns, 0..1)."))
                 .build(
                     move |_| {
                         let outs = comps.iter().map(|(id, label, _)| pin_out(id, label, PinType::Float)).collect();
@@ -89,48 +87,26 @@ pub fn register(r: &mut Registry) {
         );
     }
 
-    for (name, func, from, to) in [
-        ("LinearToSRGB", "sg_linear_to_srgb", "linear", "sRGB-encoded"),
-        ("SRGBToLinear", "sg_srgb_to_linear", "sRGB-encoded", "linear"),
-    ] {
-        let desc = format!("Converts a {from} color to {to} values (sRGB transfer function).");
-        adjust(r, name, &["srgb", "linear", "gamma", "encode", "decode"], &desc, func, Vec::new);
+    for (name, func) in [("LinearToSRGB", "sg_linear_to_srgb"), ("SRGBToLinear", "sg_srgb_to_linear")] {
+        adjust(r, name, &["srgb", "linear", "gamma", "encode", "decode"], func, Vec::new);
     }
 
-    adjust(
-        r,
-        "HueShift",
-        &["hue", "shift", "rotate", "color variation"],
-        "Rotates the hue (OKLCh) by Shift turns, keeping lightness and chroma.",
-        "sg_hue_shift",
-        || vec![pin_in("shift", "Shift", PinType::Float, 0.0).range(0.0, 1.0)],
-    );
-    adjust(
-        r,
-        "Saturation",
-        &["saturation", "chroma", "vibrance"],
-        "Scales the chroma (OKLCh): 0 is gray, 1 unchanged.",
-        "sg_saturation",
-        || vec![pin_in("saturation", "Saturation", PinType::Float, 1.0).range(0.0, 2.0)],
-    );
-    adjust(
-        r,
-        "Lightness",
-        &["lightness", "brightness", "darken", "lighten"],
-        "Perceived lightness (OKLab L) times Scale plus Offset, keeping hue and chroma.",
-        "sg_lightness",
-        || {
-            vec![
-                pin_in("scale", "Scale", PinType::Float, 1.0).range(0.0, 2.0),
-                pin_in("offset", "Offset", PinType::Float, 0.0).range(-1.0, 1.0),
-            ]
-        },
-    );
+    adjust(r, "HueShift", &["hue", "shift", "rotate", "color variation"], "sg_hue_shift", || {
+        vec![pin_in("shift", "Shift", PinType::Float, 0.0).range(0.0, 1.0)]
+    });
+    adjust(r, "Saturation", &["saturation", "chroma", "vibrance"], "sg_saturation", || {
+        vec![pin_in("saturation", "Saturation", PinType::Float, 1.0).range(0.0, 2.0)]
+    });
+    adjust(r, "Lightness", &["lightness", "brightness", "darken", "lighten"], "sg_lightness", || {
+        vec![
+            pin_in("scale", "Scale", PinType::Float, 1.0).range(0.0, 2.0),
+            pin_in("offset", "Offset", PinType::Float, 0.0).range(-1.0, 1.0),
+        ]
+    });
     adjust(
         r,
         "HueSaturationLightness",
         &["hsl", "hue", "saturation", "lightness", "adjust", "color variation"],
-        "Hue shift (turns), chroma scale and lightness scale in one OKLCh conversion.",
         "sg_hue_saturation_lightness",
         || {
             vec![
@@ -140,88 +116,49 @@ pub fn register(r: &mut Registry) {
             ]
         },
     );
-    adjust(
-        r,
-        "Colorize",
-        &["colorize", "tint", "toning"],
-        "Takes hue and chroma from Tint, keeping the lightness (OKLab), blended by Amount.",
-        "sg_colorize",
-        || {
-            vec![
-                PinDef::new("tint", "Tint", F3).default(Value::Float3([0.6, 0.3, 0.1])),
-                pin_in("amount", "Amount", PinType::Float, 1.0).range(0.0, 1.0),
-            ]
-        },
-    );
-    adjust(
-        r,
-        "Contrast",
-        &["contrast"],
-        "Scales sRGB-encoded values around Pivot by Amount (1 = unchanged).",
-        "sg_contrast",
-        || {
-            vec![
-                pin_in("amount", "Amount", PinType::Float, 1.0).range(0.0, 2.0),
-                pin_in("pivot", "Pivot", PinType::Float, 0.5).range(0.0, 1.0),
-            ]
-        },
-    );
-    adjust(
-        r,
-        "Gamma",
-        &["gamma", "midtones"],
-        "Raises sRGB-encoded values to 1 / Gamma: above 1 brightens the midtones.",
-        "sg_gamma",
-        || vec![pin_in("gamma", "Gamma", PinType::Float, 1.0).range(0.1, 3.0)],
-    );
-    adjust(
-        r,
-        "Levels",
-        &["levels", "remap", "black point", "white point"],
-        "Photoshop Levels over sRGB-encoded values: input range, midtone gamma, output range.",
-        "sg_levels",
-        || {
-            vec![
-                pin_in("in_black", "In Black", PinType::Float, 0.0).range(0.0, 1.0),
-                pin_in("in_white", "In White", PinType::Float, 1.0).range(0.0, 1.0),
-                pin_in("gamma", "Gamma", PinType::Float, 1.0).range(0.1, 3.0),
-                pin_in("out_black", "Out Black", PinType::Float, 0.0).range(0.0, 1.0),
-                pin_in("out_white", "Out White", PinType::Float, 1.0).range(0.0, 1.0),
-            ]
-        },
-    );
+    adjust(r, "Colorize", &["colorize", "tint", "toning"], "sg_colorize", || {
+        vec![
+            PinDef::new("tint", "Tint", F3).default(Value::Float3([0.6, 0.3, 0.1])),
+            pin_in("amount", "Amount", PinType::Float, 1.0).range(0.0, 1.0),
+        ]
+    });
+    adjust(r, "Contrast", &["contrast"], "sg_contrast", || {
+        vec![
+            pin_in("amount", "Amount", PinType::Float, 1.0).range(0.0, 2.0),
+            pin_in("pivot", "Pivot", PinType::Float, 0.5).range(0.0, 1.0),
+        ]
+    });
+    adjust(r, "Gamma", &["gamma", "midtones"], "sg_gamma", || {
+        vec![pin_in("gamma", "Gamma", PinType::Float, 1.0).range(0.1, 3.0)]
+    });
+    adjust(r, "Levels", &["levels", "remap", "black point", "white point"], "sg_levels", || {
+        vec![
+            pin_in("in_black", "In Black", PinType::Float, 0.0).range(0.0, 1.0),
+            pin_in("in_white", "In White", PinType::Float, 1.0).range(0.0, 1.0),
+            pin_in("gamma", "Gamma", PinType::Float, 1.0).range(0.1, 3.0),
+            pin_in("out_black", "Out Black", PinType::Float, 0.0).range(0.0, 1.0),
+            pin_in("out_white", "Out White", PinType::Float, 1.0).range(0.0, 1.0),
+        ]
+    });
 
-    r.register(
-        def("stdlib::Exposure", "Exposure", CAT)
-            .kw(&["exposure", "stops", "ev", "brightness"])
-            .desc("Multiplies the linear color by 2^Stops.")
-            .build(
-                |_| {
-                    sig(
-                        vec![color_in(), pin_in("stops", "Stops", PinType::Float, 0.0).range(-4.0, 4.0)],
-                        vec![pin_out("out", "", F3)],
-                    )
-                },
-                |c| {
-                    let e = format!("({} * exp2({}))", c.input("color"), c.input("stops"));
-                    c.define("out", e);
-                },
-            ),
-    );
+    r.register(def("stdlib::Exposure", "Exposure", CAT).kw(&["exposure", "stops", "ev", "brightness"]).build(
+        |_| {
+            sig(
+                vec![color_in(), pin_in("stops", "Stops", PinType::Float, 0.0).range(-4.0, 4.0)],
+                vec![pin_out("out", "", F3)],
+            )
+        },
+        |c| {
+            let e = format!("({} * exp2({}))", c.input("color"), c.input("stops"));
+            c.define("out", e);
+        },
+    ));
 
-    adjust(
-        r,
-        "Grayscale",
-        &["grayscale", "greyscale", "monochrome", "black and white"],
-        "Gray of the same perceived lightness (OKLab L).",
-        "sg_grayscale",
-        Vec::new,
-    );
+    adjust(r, "Grayscale", &["grayscale", "greyscale", "monochrome", "black and white"], "sg_grayscale", Vec::new);
 
     r.register(
         def("stdlib::Desaturation", "Desaturation", CAT)
             .kw(&["grayscale", "greyscale", "saturation", "luminance"])
-            .desc("Blends toward the weighted gray of the sRGB-encoded channels by Fraction.")
             .param(ParamDef::new("luminance", "Luminance Factors", ParamKind::Float3, Value::Float3([0.3, 0.59, 0.11])))
             .build(
                 |_| {
@@ -239,23 +176,13 @@ pub fn register(r: &mut Registry) {
             ),
     );
 
-    adjust(
-        r,
-        "Sepia",
-        &["sepia", "vintage", "old photo"],
-        "Classic sepia tone of the sRGB-encoded color, blended by Amount.",
-        "sg_sepia",
-        || vec![pin_in("amount", "Amount", PinType::Float, 1.0).range(0.0, 1.0)],
-    );
-    adjust(r, "Invert", &["invert", "negative"], "Negative of the sRGB-encoded color.", "sg_invert", Vec::new);
-    adjust(
-        r,
-        "Posterize",
-        &["posterize", "quantize", "bands", "toon"],
-        "Steps levels per sRGB-encoded channel (at least 2).",
-        "sg_posterize",
-        || vec![pin_in("steps", "Steps", PinType::Float, 4.0).range(2.0, 16.0)],
-    );
+    adjust(r, "Sepia", &["sepia", "vintage", "old photo"], "sg_sepia", || {
+        vec![pin_in("amount", "Amount", PinType::Float, 1.0).range(0.0, 1.0)]
+    });
+    adjust(r, "Invert", &["invert", "negative"], "sg_invert", Vec::new);
+    adjust(r, "Posterize", &["posterize", "quantize", "bands", "toon"], "sg_posterize", || {
+        vec![pin_in("steps", "Steps", PinType::Float, 4.0).range(2.0, 16.0)]
+    });
 
     let modes: Vec<String> =
         ["Burn", "Darken", "Difference", "Dodge", "HardLight", "Lighten", "Multiply", "Overlay", "Screen", "SoftLight"]
@@ -265,7 +192,6 @@ pub fn register(r: &mut Registry) {
     r.register(
         def("stdlib::Blend", "Blend", CAT)
             .kw(&["blend", "overlay", "screen", "soft light", "burn", "dodge", "darken", "lighten", "photoshop"])
-            .desc("Photoshop blend mode of Blend over Base on sRGB-encoded values, mixed in by Opacity.")
             .param(ParamDef::new("mode", "Mode", ParamKind::Enum(modes), Value::Str("Overlay".into())))
             .build(
                 |_| {
@@ -304,10 +230,6 @@ pub fn register(r: &mut Registry) {
     r.register(
         def(SAMPLE_GRADIENT_KIND, "Sample Gradient", CAT)
             .kw(&["gradient", "ramp", "color curve", "palette", "lut", "atlas"])
-            .desc(
-                "Linear RGBA color of a gradient of a gradient collection at T (0..1). Without a gradient: white \
-                 (W111).",
-            )
             .param(ParamDef::new(
                 GRADIENT_COLLECTION_PARAM,
                 "Collection",

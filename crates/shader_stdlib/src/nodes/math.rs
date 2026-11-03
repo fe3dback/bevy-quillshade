@@ -110,24 +110,19 @@ pub fn register(r: &mut Registry) {
         ("Round", "Round", &["rint", "nearest"][..], "round"),
         ("Truncate", "Truncate", &["trunc", "int", "to int"][..], "trunc"),
     ] {
-        r.register(
-            def(&format!("stdlib::{id}"), name, CAT)
-                .kw(kw)
-                .desc("Float output keeps the input type; `Int` output converts the first component.")
-                .build(
-                    |c| {
-                        let (ins, ty, _) = poly_ins(c, &[("x", "", 0.0)]);
-                        sig(ins, vec![poly_out("out", ty), pin_out("int", "Int", PinType::Int)])
-                    },
-                    move |c| {
-                        let x = c.input("x");
-                        let ty = c.out_type("out");
-                        c.define("out", format!("{func}({x})"));
-                        let first = if ty == PinType::Float { c.var("out") } else { format!("{}.x", c.var("out")) };
-                        c.define("int", format!("i32({first})"));
-                    },
-                ),
-        );
+        r.register(def(&format!("stdlib::{id}"), name, CAT).kw(kw).build(
+            |c| {
+                let (ins, ty, _) = poly_ins(c, &[("x", "", 0.0)]);
+                sig(ins, vec![poly_out("out", ty), pin_out("int", "Int", PinType::Int)])
+            },
+            move |c| {
+                let x = c.input("x");
+                let ty = c.out_type("out");
+                c.define("out", format!("{func}({x})"));
+                let first = if ty == PinType::Float { c.var("out") } else { format!("{}.x", c.var("out")) };
+                c.define("int", format!("i32({first})"));
+            },
+        ));
     }
 
     r.register(def("stdlib::Clamp", "Clamp", CAT).kw(&["limit"]).build(
@@ -187,35 +182,30 @@ pub fn register(r: &mut Registry) {
         },
     ));
 
-    r.register(
-        def("stdlib::Remap", "Remap", CAT)
-            .kw(&["remap value range", "map range", "fit", "range"])
-            .desc("Maps Value from ValueRange (in min/max) to TargetRange (out min/max).")
-            .build(
-                |c| {
-                    let (mut ins, ty, _) = poly_ins(c, &[("x", "Value", 0.0)]);
-                    ins.extend([
-                        pin_in("in_min", "In Min", PinType::Float, 0.0),
-                        pin_in("in_max", "In Max", PinType::Float, 1.0),
-                        pin_in("out_min", "Out Min", PinType::Float, 0.0),
-                        pin_in("out_max", "Out Max", PinType::Float, 1.0),
-                    ]);
-                    sig(ins, vec![poly_out("out", ty)])
-                },
-                |c| {
-                    let f = c.stdlib("math", &dim_fn("sg_remap", c.out_type("out")));
-                    let e = format!(
-                        "{f}({}, {}, {}, {}, {})",
-                        c.input("x"),
-                        c.input("in_min"),
-                        c.input("in_max"),
-                        c.input("out_min"),
-                        c.input("out_max")
-                    );
-                    c.define("out", e);
-                },
-            ),
-    );
+    r.register(def("stdlib::Remap", "Remap", CAT).kw(&["remap value range", "map range", "fit", "range"]).build(
+        |c| {
+            let (mut ins, ty, _) = poly_ins(c, &[("x", "Value", 0.0)]);
+            ins.extend([
+                pin_in("in_min", "In Min", PinType::Float, 0.0),
+                pin_in("in_max", "In Max", PinType::Float, 1.0),
+                pin_in("out_min", "Out Min", PinType::Float, 0.0),
+                pin_in("out_max", "Out Max", PinType::Float, 1.0),
+            ]);
+            sig(ins, vec![poly_out("out", ty)])
+        },
+        |c| {
+            let f = c.stdlib("math", &dim_fn("sg_remap", c.out_type("out")));
+            let e = format!(
+                "{f}({}, {}, {}, {}, {})",
+                c.input("x"),
+                c.input("in_min"),
+                c.input("in_max"),
+                c.input("out_min"),
+                c.input("out_max")
+            );
+            c.define("out", e);
+        },
+    ));
 }
 
 /// `1.0` literal of the given float type.

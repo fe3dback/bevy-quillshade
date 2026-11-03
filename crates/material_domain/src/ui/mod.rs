@@ -2,7 +2,7 @@
 //! `DomainRegistrar::doc_view`), node preview kinds, the palette's entries, the placement keys and the
 //! Material property widgets (the canvas, its gestures and the palette popup are `node_graph_base`'s). The window shell and the core panels are in [`editor_core::ui`], re-exported here.
 
-pub use editor_core::ui::{areas, browser, dialog, log, tabs, welcome};
+pub use editor_core::ui::{areas, browser, dialog, log, rich_text, tabs, welcome};
 pub mod const_preview;
 pub mod consts_view;
 pub mod curve_preview;

@@ -34,6 +34,7 @@ use crate::ui::icons::{IconId, IconRef};
 use crate::ui::props::{
     Choices, GradientSlots, SlotEntry, checkbox_row, labeled, pin_kind, select_w, text_area, text_w, value_row,
 };
+use crate::ui::rich_text::rich_text;
 use crate::ui::widgets::{Caption, GroupButton, button_group, subpane_box};
 use crate::ui::{TEXT, TEXT_DIM, button, icon_button, text};
 use crate::util::text::plural;
@@ -346,7 +347,11 @@ pub(crate) fn node_subpanes(editor: &Editor, id: &str) -> Vec<Box<dyn Scene>> {
     node.push(Box::new(text(title(editor, &view, id), TEXT, 15.0)));
     node.push(Box::new(text(format!("{} | {}", info.category, n.kind), TEXT_DIM, 11.0)));
     if !info.description.is_empty() {
-        node.push(Box::new(text(info.description.clone(), TEXT_DIM, 12.0)));
+        // Spaced from the kind line above and the label / comment below.
+        node.push(Box::new(bsn! {
+            Node { margin: UiRect::vertical(px(4)) }
+            Children [ @rich_text(&info.description) ]
+        }));
     }
     if crate::doc::has_label(&n.kind) {
         let target = GraphProp::NodeLabel(id.to_string());

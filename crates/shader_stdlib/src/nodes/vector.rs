@@ -34,7 +34,6 @@ pub fn register(r: &mut Registry) {
     r.register(
         def("stdlib::NormalStrength", "NormalStrength", CAT)
             .kw(&["normal intensity", "flatten normal", "bump strength"])
-            .desc("Scales a tangent-space normal: X and Y times Strength, then normalized (0 = flat, 1 = unchanged).")
             .build(
                 |_| {
                     sig(

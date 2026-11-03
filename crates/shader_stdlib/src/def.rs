@@ -50,9 +50,10 @@ pub struct DefBuilder {
     actions: Vec<NodeAction>,
 }
 
+/// Builder of node `id`; its help text comes from [`crate::docs`].
 pub fn def(id: &str, name: &str, category: &str) -> DefBuilder {
     DefBuilder {
-        info: NodeInfo::new(id, name, category),
+        info: NodeInfo::new(id, name, category).describe(crate::docs::doc(id)),
         role: NodeRole::Normal,
         params: Vec::new(),
         actions: Vec::new(),
@@ -62,11 +63,6 @@ pub fn def(id: &str, name: &str, category: &str) -> DefBuilder {
 impl DefBuilder {
     pub fn kw(mut self, kw: &[&str]) -> Self {
         self.info = self.info.keywords(kw);
-        self
-    }
-
-    pub fn desc(mut self, d: &str) -> Self {
-        self.info = self.info.describe(d);
         self
     }
 

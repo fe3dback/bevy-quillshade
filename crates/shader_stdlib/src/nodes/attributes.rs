@@ -12,7 +12,6 @@ pub fn register(r: &mut Registry) {
     r.register(
         def("stdlib::MakeMaterialAttributesPbr", "MakeMaterialAttributes (PBR)", CAT)
             .kw(&["material attributes", "make", "pack", "layer", "pbr"])
-            .desc("Packs PBR inputs into one Material Attributes value. Unconnected fields use fixed defaults.")
             .build(
                 |_| {
                     let ins = pbr_fields().into_iter().map(|f| PinDef::new(f.id, f.label, f.ty).default(f.default));
@@ -28,7 +27,6 @@ pub fn register(r: &mut Registry) {
     r.register(
         def("stdlib::BreakMaterialAttributesPbr", "BreakMaterialAttributes (PBR)", CAT)
             .kw(&["material attributes", "break", "unpack", "split", "layer", "pbr"])
-            .desc("Splits a Material Attributes value into its PBR fields.")
             .build(
                 |_| {
                     let outs = pbr_fields().into_iter().map(|f| pin_out(f.id, f.label, f.ty));

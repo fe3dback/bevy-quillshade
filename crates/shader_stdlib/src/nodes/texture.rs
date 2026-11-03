@@ -161,10 +161,6 @@ pub fn register(r: &mut Registry) {
     r.register(
         def("stdlib::TextureSample", "TextureSample", CAT)
             .kw(&["t", "texture", "sample", "tex2d", "sampler"])
-            .desc(
-                "Samples the Texture property, or the texture connected to Tex (it wins). Without either: the default \
-                 texture (W110). Unconnected UVs use uv0.",
-            )
             .param(texture_param())
             .param(mip_mode_param())
             .param(sampler_type_param())
@@ -191,7 +187,6 @@ pub fn register(r: &mut Registry) {
     r.register(
         def("stdlib::TextureObject", "TextureObject", CAT)
             .kw(&["texture object", "tex"])
-            .desc("A Texture asset of the project as a Texture2D (TextureSample, TextureSize, function inputs, …).")
             .param(texture_param())
             .action(texture_convert(
                 "Convert to Parameter",
@@ -237,56 +232,50 @@ pub fn register(r: &mut Registry) {
         },
     ));
 
-    r.register(
-        def("stdlib::FlipBook", "FlipBook", CAT)
-            .kw(&["flipbook", "atlas", "sprite sheet", "animation"])
-            .desc("Samples one cell of a texture atlas; Phase 0..1 selects the frame (defaults to fract(Time)).")
-            .build(
-                |_| {
-                    let mut outs = sample_outputs();
-                    outs.push(pin_out("uv", "UV", PinType::Float2));
-                    sig(
-                        vec![
-                            PinDef::new("tex", "Texture", PinType::Texture2D).required(),
-                            pin_in("rows", "Rows", PinType::Float, 4.0),
-                            pin_in("columns", "Columns", PinType::Float, 4.0),
-                            pin_in("phase", "Phase", PinType::Float, 0.0).implicit("fract(time)"),
-                            pin_in("uv", "UVs", PinType::Float2, 0.0).implicit("uv0"),
-                        ],
-                        outs,
-                    )
-                },
-                |c| {
-                    let Some((t, s)) = texture_in(c) else { return };
-                    let base_uv = implicit_uv(c, "uv");
-                    let phase = if c.is_connected("phase") {
-                        c.input("phase")
-                    } else {
-                        format!("fract({})", implicit_time(c, "phase"))
-                    };
-                    let f = c.stdlib("uv", "sg_flipbook_uv");
-                    c.define("uv", format!("{f}({base_uv}, {}, {}, {phase})", c.input("rows"), c.input("columns")));
-                    let uv = c.var("uv");
-                    let call = if c.stage == Stage::Vertex {
-                        format!("textureSampleLevel({t}, {s}, {uv}, 0.0)")
-                    } else {
-                        // Grad sampling avoids mip seams at cell borders.
-                        format!("textureSampleGrad({t}, {s}, {uv}, dpdx({base_uv}), dpdy({base_uv}))")
-                    };
-                    c.define("rgba", call);
-                    let v = c.var("rgba");
-                    c.alias("rgb", Operand::Value(format!("{v}.rgb")));
-                    for ch in ["r", "g", "b", "a"] {
-                        c.alias(ch, Operand::Value(format!("{v}.{ch}")));
-                    }
-                },
-            ),
-    );
+    r.register(def("stdlib::FlipBook", "FlipBook", CAT).kw(&["flipbook", "atlas", "sprite sheet", "animation"]).build(
+        |_| {
+            let mut outs = sample_outputs();
+            outs.push(pin_out("uv", "UV", PinType::Float2));
+            sig(
+                vec![
+                    PinDef::new("tex", "Texture", PinType::Texture2D).required(),
+                    pin_in("rows", "Rows", PinType::Float, 4.0),
+                    pin_in("columns", "Columns", PinType::Float, 4.0),
+                    pin_in("phase", "Phase", PinType::Float, 0.0).implicit("fract(time)"),
+                    pin_in("uv", "UVs", PinType::Float2, 0.0).implicit("uv0"),
+                ],
+                outs,
+            )
+        },
+        |c| {
+            let Some((t, s)) = texture_in(c) else { return };
+            let base_uv = implicit_uv(c, "uv");
+            let phase = if c.is_connected("phase") {
+                c.input("phase")
+            } else {
+                format!("fract({})", implicit_time(c, "phase"))
+            };
+            let f = c.stdlib("uv", "sg_flipbook_uv");
+            c.define("uv", format!("{f}({base_uv}, {}, {}, {phase})", c.input("rows"), c.input("columns")));
+            let uv = c.var("uv");
+            let call = if c.stage == Stage::Vertex {
+                format!("textureSampleLevel({t}, {s}, {uv}, 0.0)")
+            } else {
+                // Grad sampling avoids mip seams at cell borders.
+                format!("textureSampleGrad({t}, {s}, {uv}, dpdx({base_uv}), dpdy({base_uv}))")
+            };
+            c.define("rgba", call);
+            let v = c.var("rgba");
+            c.alias("rgb", Operand::Value(format!("{v}.rgb")));
+            for ch in ["r", "g", "b", "a"] {
+                c.alias(ch, Operand::Value(format!("{v}.{ch}")));
+            }
+        },
+    ));
 
     r.register(
         def("stdlib::NormalFromHeightmap", "NormalFromHeightmap", CAT)
             .kw(&["height", "bump", "normal from height"])
-            .desc("Tangent-space normal from a grayscale height texture (red channel).")
             .build(
                 |_| {
                     sig(
@@ -310,7 +299,6 @@ pub fn register(r: &mut Registry) {
     r.register(
         def("stdlib::SpriteTexture", "SpriteTexture", CAT)
             .kw(&["sprite", "sprite texture", "2d", "sample sprite"])
-            .desc("Sprite2d only: samples the sprite image (flip/slice/atlas applied), without tint.")
             .build(
                 |_| sig(vec![pin_in("uv", "UVs", PinType::Float2, 0.0).implicit("uv0")], sample_outputs()),
                 |c| {

@@ -63,9 +63,6 @@ pub fn register(r: &mut Registry) {
     r.register(
         def("stdlib::If", "If", CAT)
             .kw(&["if", "compile if", "compileIf", "compileFlag", "compileBool", "static switch", "branch", "select"])
-            .desc(
-                "Compile-time conditional branch (`If`): evaluates `Condition` (`CompileBool`) during shader compilation, emits only the active branch (`True` or `False`), and completely strips the inactive branch (along with any parameters, textures, or functions used only there) from the generated WESL shader. Overriding its compile flag in a future Material Instance compiles a separate WESL shader variant.\n\nNote: Requires a `CompileBool` condition. For dynamic per-pixel or uniform branching evaluated on the GPU at runtime (which executes both branches and is not free), use `RuntimeIf` with a `RuntimeBool`.",
-            )
             .role(NodeRole::CompileIf)
             .build(
                 |c| {
@@ -94,9 +91,6 @@ pub fn register(r: &mut Registry) {
     r.register(
         def("stdlib::RuntimeIf", "RuntimeIf", CAT)
             .kw(&["runtime if", "runtimeIf", "select", "switch", "bool if", "ternary", "branch"])
-            .desc(
-                "Runtime GPU conditional (`RuntimeIf`): selects between `True` and `False` inside the shader using WGSL `select(false_value, true_value, cond)` with a `RuntimeBool` condition. Both input branches are evaluated on the GPU every frame (not free).\n\nNote: When the condition does not change per pixel or at runtime, prefer `If` with a `CompileBool` to strip the unused branch at compile time with zero GPU cost.",
-            )
             .build(
                 |c| {
                     let attrs = PinType::MaterialAttributesPbr;
@@ -115,10 +109,7 @@ pub fn register(r: &mut Registry) {
                 },
                 |c| {
                     let e = if c.out_type("out") == PinType::MaterialAttributesPbr {
-                        let f = c.stdlib(
-                            shader_graph_core::attributes::MODULE,
-                            shader_graph_core::attributes::LERP_FN,
-                        );
+                        let f = c.stdlib(shader_graph_core::attributes::MODULE, shader_graph_core::attributes::LERP_FN);
                         format!(
                             "{f}({}, {}, select(0.0f, 1.0f, {}))",
                             c.input("false_value"),
@@ -136,9 +127,6 @@ pub fn register(r: &mut Registry) {
     r.register(
         def("stdlib::RuntimeCompareIf", "RuntimeCompareIf", CAT)
             .kw(&["compare if", "runtime compare if", "three way", "threshold", "a vs b", "if"])
-            .desc(
-                "Runtime three-way scalar comparison (`RuntimeCompareIf`): compares floats `A` and `B` on the GPU (`|A - B| <= Threshold` selects `A == B`, otherwise `A > B` or `A < B`). All three branches are evaluated on the GPU at runtime (not free).\n\nNote: For boolean conditions use `RuntimeIf` (runtime GPU select with `RuntimeBool`) or `If` (compile-time branch pruning with `CompileBool`).",
-            )
             .param(ParamDef::new(
                 "threshold",
                 "Equals Threshold",
@@ -168,53 +156,45 @@ pub fn register(r: &mut Registry) {
     );
 
     r.register(
-        def("stdlib::CompileAnd", "CompileAnd", CAT)
-            .kw(&["compile and", "and", "logic", "compileBool", "&&"])
-            .desc(
-                "Compile-time logical AND (`A && B`) on `CompileBool` flags. Evaluated during shader compilation to drive `If` without emitting any WESL code.\n\nNote: For runtime GPU boolean logic on `RuntimeBool` values, use `And`.",
-            )
-            .build(
-                |_| {
-                    sig(
-                        vec![PinDef::new("a", "A", PinType::CompileBool), PinDef::new("b", "B", PinType::CompileBool)],
-                        vec![pin_out("out", "", PinType::CompileBool)],
-                    )
-                },
-                |c| {
-                    let v = c.compile_bool("a") && c.compile_bool("b");
-                    c.define_compile_bool("out", v);
-                },
-            ),
+        def("stdlib::CompileAnd", "CompileAnd", CAT).kw(&["compile and", "and", "logic", "compileBool", "&&"]).build(
+            |_| {
+                sig(
+                    vec![PinDef::new("a", "A", PinType::CompileBool), PinDef::new("b", "B", PinType::CompileBool)],
+                    vec![pin_out("out", "", PinType::CompileBool)],
+                )
+            },
+            |c| {
+                let v = c.compile_bool("a") && c.compile_bool("b");
+                c.define_compile_bool("out", v);
+            },
+        ),
     );
 
     r.register(
-        def("stdlib::CompileOr", "CompileOr", CAT)
-            .kw(&["compile or", "or", "logic", "compileBool", "||"])
-            .desc(
-                "Compile-time logical OR (`A || B`) on `CompileBool` flags. Evaluated during shader compilation to drive `If` without emitting any WESL code.\n\nNote: For runtime GPU boolean logic on `RuntimeBool` values, use `Or`.",
-            )
-            .build(
-                |_| {
-                    sig(
-                        vec![PinDef::new("a", "A", PinType::CompileBool), PinDef::new("b", "B", PinType::CompileBool)],
-                        vec![pin_out("out", "", PinType::CompileBool)],
-                    )
-                },
-                |c| {
-                    let v = c.compile_bool("a") || c.compile_bool("b");
-                    c.define_compile_bool("out", v);
-                },
-            ),
+        def("stdlib::CompileOr", "CompileOr", CAT).kw(&["compile or", "or", "logic", "compileBool", "||"]).build(
+            |_| {
+                sig(
+                    vec![PinDef::new("a", "A", PinType::CompileBool), PinDef::new("b", "B", PinType::CompileBool)],
+                    vec![pin_out("out", "", PinType::CompileBool)],
+                )
+            },
+            |c| {
+                let v = c.compile_bool("a") || c.compile_bool("b");
+                c.define_compile_bool("out", v);
+            },
+        ),
     );
 
     r.register(
         def("stdlib::CompileNot", "CompileNot", CAT)
             .kw(&["compile not", "not", "invert", "logic", "compileBool", "!"])
-            .desc(
-                "Compile-time logical NOT (`!A`) on a `CompileBool` flag. Evaluated during shader compilation to drive `If` without emitting any WESL code.\n\nNote: For runtime GPU boolean inversion on a `RuntimeBool` value, use `Not`.",
-            )
             .build(
-                |_| sig(vec![PinDef::new("a", "", PinType::CompileBool)], vec![pin_out("out", "", PinType::CompileBool)]),
+                |_| {
+                    sig(
+                        vec![PinDef::new("a", "", PinType::CompileBool)],
+                        vec![pin_out("out", "", PinType::CompileBool)],
+                    )
+                },
                 |c| {
                     let v = !c.compile_bool("a");
                     c.define_compile_bool("out", v);
@@ -222,23 +202,11 @@ pub fn register(r: &mut Registry) {
             ),
     );
 
-    for (id, name, op, kw, desc) in [
-        (
-            "And",
-            "And",
-            "&&",
-            &["logic", "bool", "runtimeBool", "runtime and", "&&"][..],
-            "Runtime GPU logical AND (`A && B`) on `RuntimeBool` values, emitted into WESL for use with `RuntimeIf`.\n\nNote: Cannot drive compile-time `If`. For compile-time flag combinations on `CompileBool`, use `CompileAnd`.",
-        ),
-        (
-            "Or",
-            "Or",
-            "||",
-            &["logic", "bool", "runtimeBool", "runtime or", "||"][..],
-            "Runtime GPU logical OR (`A || B`) on `RuntimeBool` values, emitted into WESL for use with `RuntimeIf`.\n\nNote: Cannot drive compile-time `If`. For compile-time flag combinations on `CompileBool`, use `CompileOr`.",
-        ),
+    for (id, name, op, kw) in [
+        ("And", "And", "&&", &["logic", "bool", "runtimeBool", "runtime and", "&&"][..]),
+        ("Or", "Or", "||", &["logic", "bool", "runtimeBool", "runtime or", "||"][..]),
     ] {
-        r.register(def(&format!("stdlib::{id}"), name, CAT).kw(kw).desc(desc).build(
+        r.register(def(&format!("stdlib::{id}"), name, CAT).kw(kw).build(
             |_| {
                 sig(
                     vec![PinDef::new("a", "A", PinType::RuntimeBool), PinDef::new("b", "B", PinType::RuntimeBool)],
@@ -252,26 +220,18 @@ pub fn register(r: &mut Registry) {
         ));
     }
     r.register(
-        def("stdlib::Not", "Not", CAT)
-            .kw(&["logic", "bool", "runtimeBool", "runtime not", "!", "invert"])
-            .desc(
-                "Runtime GPU logical NOT (`!A`) on a `RuntimeBool` value, emitted into WESL for use with `RuntimeIf`.\n\nNote: Cannot drive compile-time `If`. For compile-time flag inversion on `CompileBool`, use `CompileNot`.",
-            )
-            .build(
-                |_| sig(vec![PinDef::new("a", "", PinType::RuntimeBool)], vec![pin_out("out", "", PinType::RuntimeBool)]),
-                |c| {
-                    let e = format!("!({})", c.input("a"));
-                    c.define("out", e);
-                },
-            ),
+        def("stdlib::Not", "Not", CAT).kw(&["logic", "bool", "runtimeBool", "runtime not", "!", "invert"]).build(
+            |_| sig(vec![PinDef::new("a", "", PinType::RuntimeBool)], vec![pin_out("out", "", PinType::RuntimeBool)]),
+            |c| {
+                let e = format!("!({})", c.input("a"));
+                c.define("out", e);
+            },
+        ),
     );
     let ops: Vec<String> = [">", ">=", "<", "<=", "==", "!="].iter().map(|s| s.to_string()).collect();
     r.register(
         def("stdlib::Compare", "Compare", CAT)
             .kw(&["logic", "greater", "less", "equal", ">", "<", "runtimeBool"])
-            .desc(
-                "Runtime GPU scalar comparison (`>`, `>=`, `<`, `<=`, `==`, `!=`) producing a `RuntimeBool` for `RuntimeIf`, `And`, `Or`, `Not`.\n\nNote: Evaluated per pixel on the GPU and outputs `RuntimeBool`. It cannot drive compile-time `If` (which requires a `CompileBool` known at compile time).",
-            )
             .param(ParamDef::new("op", "Operation", ParamKind::Enum(ops), Value::Str(">".into())))
             .build(
                 |_| {
@@ -314,7 +274,6 @@ pub fn register(r: &mut Registry) {
     r.register(
         def("stdlib::WorldAlignedBlend", "WorldAlignedBlend", CAT)
             .kw(&["slope", "angle", "world aligned", "terrain"])
-            .desc("Mask of surfaces facing Up (1) vs steep ones (0), and the slope angle in degrees.")
             .build(
                 |_| {
                     sig(
@@ -373,7 +332,6 @@ pub fn register(r: &mut Registry) {
     r.register(
         def("stdlib::FractalNoise", "FractalNoise", CAT)
             .kw(&["noise", "fbm", "fractal", "octaves", "turbulence", "ridged", "mask"])
-            .desc("Several octaves of value / Perlin noise in 0..1: FBM, Turbulence (|noise|) or Ridged (ridges and valleys).")
             .param(ParamDef::new(
                 "function",
                 "Function",
@@ -425,10 +383,6 @@ pub fn register(r: &mut Registry) {
     r.register(
         def("stdlib::Voronoi", "Voronoi", CAT)
             .kw(&["voronoi", "cellular", "worley", "cells", "cracks", "border", "mask"])
-            .desc(
-                "Cellular noise in cell units: F1 / F2 = distance to the nearest / second nearest point, Border = \
-                 distance to the cell edge (equal-width lines), Cell = random 0..1 per cell.",
-            )
             .build(
                 |_| {
                     sig(
@@ -462,7 +416,6 @@ pub fn register(r: &mut Registry) {
     r.register(
         def("stdlib::DomainWarp", "DomainWarp", CAT)
             .kw(&["warp", "domain warp", "distort", "displace", "noise"])
-            .desc("Position displaced by up to Strength along a Perlin FBM; feed it into the Position of a noise node.")
             .build(
                 |_| {
                     sig(
@@ -495,7 +448,6 @@ pub fn register(r: &mut Registry) {
     r.register(
         def("stdlib::Checkerboard", "Checkerboard", CAT)
             .kw(&["checker", "checkerboard", "chess", "tiles", "pattern", "mask"])
-            .desc("Checkerboard of Size squares: Mask 0 / 1 and Color A / B. Triplanar in world space, or on a UV.")
             .param(mapping_param())
             .build(
                 |c| {
@@ -524,10 +476,6 @@ pub fn register(r: &mut Registry) {
     r.register(
         def("stdlib::Grid", "Grid", CAT)
             .kw(&["grid", "lines", "pristine grid", "pattern", "mask"])
-            .desc(
-                "Anti-aliased grid lines (1 on the lines) every Cell Size, Line Width in cells per axis. Triplanar in \
-                 world space, or on a UV. Fragment stage only.",
-            )
             .param(mapping_param())
             .build(
                 |c| {
@@ -554,10 +502,6 @@ pub fn register(r: &mut Registry) {
     r.register(
         def("stdlib::BlockoutGrid", "BlockoutGrid", CAT)
             .kw(&["blockout", "prototype", "grid", "checker", "level design", "greybox"])
-            .desc(
-                "Level-design blockout color: Floor Color on surfaces facing up / down, Wall Color elsewhere, \
-                 checkered by Cell Size and Cell Size / 10 cubes, with Line Color grid lines. Fragment stage only.",
-            )
             .build(
                 |_| {
                     sig(
@@ -594,7 +538,6 @@ pub fn register(r: &mut Registry) {
     r.register(
         def(FUNCTION_CALL_KIND, "FunctionCall", CAT)
             .kw(&["function", "call", "material function"])
-            .desc("Calls a project function (kind `function::{path}`).")
             .build(function_call_sig, function_call_emit),
     );
 
@@ -605,7 +548,6 @@ pub fn register(r: &mut Registry) {
     r.register(
         def("stdlib::Custom", "Custom", CAT)
             .kw(&["custom", "code", "hlsl", "wesl", "wgsl"])
-            .desc("Hand-written WESL body. Inputs are `name: Type` pairs separated by commas; body may `return` or be an expression.")
             .param(ParamDef::new("inputs", "Inputs", ParamKind::Str, Value::Str("a: Float3, b: Float".into())))
             .param(ParamDef::new(
                 "output_type",
@@ -670,7 +612,6 @@ pub fn register(r: &mut Registry) {
     r.register(
         def("stdlib::NamedRoute", "Named Route", CAT)
             .kw(&["named reroute", "declaration", "teleport", "wireless", "route"])
-            .desc("Wire end with a name; Named Route Usage nodes output its input anywhere in this graph.")
             .role(NodeRole::RouteDeclaration)
             .param(ParamDef::new("name", "Name", ParamKind::Str, Value::Str("route".into())))
             .build(pass_through_sig, pass_through),
@@ -678,7 +619,6 @@ pub fn register(r: &mut Registry) {
     r.register(
         def("stdlib::NamedRouteUsage", "Named Route Usage", CAT)
             .kw(&["named reroute", "usage", "teleport", "wireless", "route"])
-            .desc("Outputs the input of the chosen Named Route.")
             .role(NodeRole::RouteUsage)
             .param(ParamDef::new(ROUTE_PARAM, "Route", ParamKind::Route, Value::Str(String::new())))
             .build(pass_through_sig, pass_through),
@@ -688,7 +628,6 @@ pub fn register(r: &mut Registry) {
     r.register(
         def(SAMPLE_CURVE_KIND, "Sample Curve", CAT)
             .kw(&["curve", "float curve", "ramp", "falloff", "easing", "spline", "catmull"])
-            .desc("Value of a curve asset at T (0..1). Simple: linear between points; Catmull-Rom: smooth.")
             .param(ParamDef::new(CURVE_PARAM, "Curve", ParamKind::Curve, Value::Str(String::new())))
             .param(ParamDef::new(
                 "type",
