@@ -1355,7 +1355,9 @@ fn poll_hdr_file_dialogs(
     if let Some(rx) = pending.as_ref() {
         match rx.try_recv() {
             Err(std::sync::mpsc::TryRecvError::Empty) => {
-                if let Some(doc) = editor.active_doc_mut::<HdrConverterDoc>() {
+                if editor.active_doc::<HdrConverterDoc>().is_some_and(|d| d.pick_import || d.pick_export)
+                    && let Some(doc) = editor.active_doc_mut::<HdrConverterDoc>()
+                {
                     doc.pick_import = false;
                     doc.pick_export = false;
                 }
@@ -1368,6 +1370,9 @@ fn poll_hdr_file_dialogs(
         *pending = None;
     }
 
+    if !editor.active_doc::<HdrConverterDoc>().is_some_and(|d| d.pick_import || d.pick_export) {
+        return;
+    }
     let project_root = editor.project.as_ref().map(|p| p.root.clone());
     let Some(doc) = editor.active_doc_mut::<HdrConverterDoc>() else { return };
     let want_import = std::mem::take(&mut doc.pick_import);

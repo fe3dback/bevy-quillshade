@@ -6,15 +6,15 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::marker::PhantomData;
 
-use bevy::feathers::controls::NumberInputValue;
+use bevy::feathers::controls::{ColorInputValue, NumberInputValue};
 use bevy::input_focus::InputFocus;
 use bevy::input_focus::tab_navigation::TabIndex;
 use bevy::picking::cursor::EntityCursor;
 use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
 use bevy::text::{EditableText, TextReadWriteMode};
-use bevy::ui::Selected;
 use bevy::ui::ui_transform::UiGlobalTransform;
+use bevy::ui::{Checked, Selected};
 use bevy::ui_widgets::popover::Popover;
 use bevy::window::SystemCursorIcon;
 use bevy_noodle::prelude::GraphEdit as NoodleEdit;
@@ -30,7 +30,7 @@ use editor_core::state::editor::Editor;
 use editor_core::tab::{TabKey, ViewKindId};
 use editor_core::theme::ACCENT;
 use editor_core::ui::icons::{IconId, icon};
-use editor_core::ui::props::PropField;
+use editor_core::ui::props::{PropField, linear_color};
 
 use crate::domain::{GraphCtxRef, GraphDomain, active};
 use crate::edit::{GraphEdit, PinKey};
@@ -181,15 +181,15 @@ struct NodeCommentBox(String);
 #[derive(Component, Default, Clone, Debug)]
 struct NodeCommentText(String);
 
-/// Structural look of a node on the canvas (excluding its position and comment text, which update in place).
+/// Structural look of a node on the canvas (excluding its position, title/header, and comment text, which update in
+/// place).
 #[derive(Clone, Debug, PartialEq)]
 struct NodeStructure {
-    title: String,
-    header: Color,
     shape: NodeShape,
     pins: Vec<PinLook>,
     inline_pins: Vec<String>,
     has_body: bool,
+    body_tag: u64,
     wide: bool,
     note: Option<String>,
     emphasis: crate::view::Emphasis,
@@ -198,12 +198,11 @@ struct NodeStructure {
 impl NodeStructure {
     fn from_look(look: &NodeLook) -> Self {
         NodeStructure {
-            title: look.title.clone(),
-            header: look.header,
             shape: look.shape,
             pins: look.pins.clone(),
             inline_pins: look.inline.iter().map(|(id, _)| id.clone()).collect(),
             has_body: look.body.is_some(),
+            body_tag: look.body_tag,
             wide: look.wide,
             note: look.note.clone(),
             emphasis: look.emphasis,
@@ -212,13 +211,14 @@ impl NodeStructure {
 }
 
 /// Snapshot of the spawned canvas structure of `G`: when unchanged for the same document, [`rebuild_canvas`]
-/// updates positions, comments, frames and selection in place without despawning entities or replaying edges.
+/// updates positions, titles/headers, comments, frames and selection in place without despawning entities or
+/// replaying edges.
 #[derive(Clone, Debug, PartialEq)]
 struct CanvasStructure {
     nodes: Vec<(String, NodeStructure)>,
     edges: Vec<(PinKey, PinKey)>,
     frames: Vec<String>,
-    props: Vec<(Entity, Option<PropValue>)>,
+    props: Vec<Option<PropValue>>,
 }
 
 /// The canvas of `G` and what it shows.
@@ -794,15 +794,20 @@ pub fn idle<G: GraphDomain>(world: &mut World) -> bool {
     let pressed = world
         .get_resource::<ButtonInput<MouseButton>>()
         .is_some_and(|b| b.any_pressed([MouseButton::Left, MouseButton::Right, MouseButton::Middle]));
-    !wires && !pressed && !inline_editing(world)
+    let scrubbing = world.get_resource::<Editor>().and_then(active::<G>).is_some_and(G::is_scrubbing);
+    !wires && !pressed && !scrubbing && !inline_editing(world)
 }
 
-/// While the rebuild waits (see [`inline_editing`]), number fields on nodes still show the model: a color
-/// picker or another field may be changing their value. The field being typed into is left alone.
+/// Keeps inline value widgets (number inputs, color pickers, checkboxes) on canvas nodes in sync with the model
+/// without respawning the canvas; the field currently being typed into is left alone.
+#[allow(clippy::too_many_arguments)]
 fn sync_inline_fields<G: GraphDomain>(
     editor: Res<Editor>,
     focus: Option<Res<InputFocus>>,
     fields: Query<(Entity, &PropField, &NumberInputValue)>,
+    pickers: Query<(Entity, &PropField, &ColorInputValue)>,
+    checks: Query<(Entity, &PropField, Has<Checked>), (Without<NumberInputValue>, Without<ColorInputValue>)>,
+    texts: Query<(&EditableText, Option<&TextReadWriteMode>)>,
     parents: Query<&ChildOf>,
     owners: Query<&GraphOf>,
     graph: GraphQuery,
@@ -812,7 +817,11 @@ fn sync_inline_fields<G: GraphDomain>(
         return;
     }
     let ours = |node: Entity| owners.get(node).is_ok_and(|g| g.0 == G::VIEW);
-    let typing = focus.and_then(|f| f.get()).and_then(|f| parents.get(f).ok()).map(ChildOf::parent);
+    let typing = focus
+        .and_then(|f| f.get())
+        .filter(|&f| texts.get(f).is_ok_and(|(_, mode)| typing_into(mode, false)))
+        .and_then(|f| parents.get(f).ok())
+        .map(ChildOf::parent);
     for (e, field, shown) in &fields {
         if Some(e) == typing || !graph.node_of(e).is_some_and(ours) {
             continue;
@@ -824,6 +833,34 @@ fn sync_inline_fields<G: GraphDomain>(
         };
         if *shown != want {
             commands.entity(e).try_insert(want);
+        }
+    }
+    for (e, field, shown) in &pickers {
+        if !graph.node_of(e).is_some_and(ours) {
+            continue;
+        }
+        let Some(v) = editor.current_value(&field.target) else { continue };
+        let mut rgba = v.floats();
+        if rgba.len() < 3 {
+            rgba.resize(3, 1.0);
+        }
+        let want = linear_color(&rgba);
+        let (a, b) = (shown.0.to_linear().to_f32_array(), want.to_linear().to_f32_array());
+        if a.iter().zip(b).any(|(x, y)| (x - y).abs() > 1e-5) {
+            commands.entity(e).try_insert(ColorInputValue(want));
+        }
+    }
+    for (e, field, checked) in &checks {
+        if !graph.node_of(e).is_some_and(ours) {
+            continue;
+        }
+        let Some(PropValue::Bool(want)) = editor.current_value(&field.target) else { continue };
+        if checked != want {
+            if want {
+                commands.entity(e).try_insert(Checked);
+            } else {
+                commands.entity(e).try_remove::<Checked>();
+            }
         }
     }
 }
@@ -854,33 +891,31 @@ fn inline_editing(world: &mut World) -> bool {
     popovers.into_iter().any(|e| in_node(world, e))
 }
 
-/// Current [`PropValue`] of every [`PropField`] inside a node of `own` on the canvas, sorted by entity.
-fn canvas_prop_values(world: &mut World, own: GraphOf) -> Vec<(Entity, Option<PropValue>)> {
-    let in_our_node = |world: &World, mut e: Entity| loop {
-        if world.get::<NodeKey>(e).is_some() {
-            return world.get::<GraphOf>(e) == Some(&own);
-        }
-        match world.get::<ChildOf>(e) {
-            Some(parent) => e = parent.parent(),
-            None => return false,
-        }
-    };
-    let fields: Vec<(Entity, editor_core::dynval::PropKey)> = world
+/// Current values of all inline [`PropField`]s on the canvas of `own`, in deterministic order.
+fn canvas_prop_values(world: &mut World, own: GraphOf) -> Vec<Option<PropValue>> {
+    let targets: Vec<_> = world
         .query::<(Entity, &PropField)>()
         .iter(world)
-        .filter(|(e, _)| in_our_node(world, *e))
-        .map(|(e, f)| (e, f.target.clone()))
+        .filter(|&(mut e, _)| {
+            loop {
+                if world.get::<GraphOf>(e).is_some_and(|g| *g == own) {
+                    return true;
+                }
+                match world.get::<ChildOf>(e) {
+                    Some(parent) => e = parent.parent(),
+                    None => return false,
+                }
+            }
+        })
+        .map(|(_, f)| f.target.clone())
         .collect();
     let editor = world.resource::<Editor>();
-    let mut out: Vec<(Entity, Option<PropValue>)> =
-        fields.into_iter().map(|(e, k)| (e, editor.current_value(&k))).collect();
-    out.sort_by_key(|(e, _)| *e);
-    out
+    targets.iter().map(|t| editor.current_value(t)).collect()
 }
 
 /// Rebuilds the canvas when the active document or its revision changed (and no gesture is running).
-/// When the active document and its structural node/edge/frame topology and inline property values are unchanged,
-/// updates node positions, node comments, comment frames and selection in place without despawning entities or
+/// When the active document and its structural node/edge/frame topology are unchanged, updates node positions,
+/// node titles/headers, node comments, comment frames and selection in place without despawning entities or
 /// replaying edges.
 pub fn rebuild_canvas<G: GraphDomain>(world: &mut World) {
     let Some(ec) = world.get_resource::<EditorCanvas<G>>() else { return };
@@ -895,31 +930,25 @@ pub fn rebuild_canvas<G: GraphDomain>(world: &mut World) {
         return;
     }
 
-    // Collect everything from the model first (observers below read `Editor`).
+    // Collect structural look from the model first; build BSN scenes only when a full spawn is needed.
     let own = GraphOf(G::VIEW);
+    let props = canvas_prop_values(world, own);
     let editor = world.resource::<Editor>();
-    let mut scenes: Vec<Box<dyn Scene>> = Vec::new();
+    let mut looks: Vec<(NodeView, NodeLook)> = Vec::new();
     let mut node_specs: Vec<(String, NodeStructure)> = Vec::new();
-    let mut node_positions: HashMap<String, Vec2> = HashMap::new();
-    let mut node_comments: HashMap<String, String> = HashMap::new();
     let mut frames: Vec<FrameView> = Vec::new();
     let mut edges = Vec::new();
     let (mut selection, mut frame_sel, mut enclosed, mut previewed) = (BTreeSet::new(), None, BTreeSet::new(), None);
     if let Some(d) = active::<G>(editor) {
         let ctx = GraphCtxRef { editor };
         let view = G::view(d);
-        for f in &view.frames {
-            scenes.push(Box::new(frame_scene(f, canvas, own)));
-        }
-        for n in &view.nodes {
+        for n in view.nodes {
             let look = G::node_look(&ctx, d, &n.id);
             if look.emphasis.pulse {
                 previewed = Some(n.id.clone());
             }
             node_specs.push((n.id.clone(), NodeStructure::from_look(&look)));
-            node_positions.insert(n.id.clone(), n.pos);
-            node_comments.insert(n.id.clone(), look.comment.clone().unwrap_or_default());
-            scenes.push(node_scene(n, look, G::previews(&ctx, d, &n.id), canvas, own));
+            looks.push((n, look));
         }
         frames = view.frames;
         edges = view.edges;
@@ -928,28 +957,59 @@ pub fn rebuild_canvas<G: GraphDomain>(world: &mut World) {
         enclosed = view.enclosed_frames.clone();
     }
 
-    let current_props = canvas_prop_values(world, own);
     let frame_ids: Vec<String> = frames.iter().map(|f| f.id.clone()).collect();
-    let incremental = same_doc
-        && want.is_some()
-        && world.resource::<EditorCanvas<G>>().structure.as_ref().is_some_and(|s| {
-            s.nodes == node_specs && s.edges == edges && s.frames == frame_ids && s.props == current_props
-        });
+    let incremental =
+        same_doc
+            && want.is_some()
+            && world.resource::<EditorCanvas<G>>().structure.as_ref().is_some_and(|s| {
+                s.nodes == node_specs && s.edges == edges && s.frames == frame_ids && s.props == props
+            });
 
     if incremental {
-        for (_, k, _, mut pos) in world
-            .query::<(Entity, &NodeKey, &GraphOf, &mut NodePosition)>()
+        let look_map: HashMap<&str, (&NodeView, &NodeLook)> =
+            looks.iter().map(|(n, l)| (n.id.as_str(), (n, l))).collect();
+        let mut header_updates: Vec<(Entity, &str, Color)> = Vec::new();
+        for (_, k, _, mut pos, children) in world
+            .query::<(Entity, &NodeKey, &GraphOf, &mut NodePosition, Option<&Children>)>()
             .iter_mut(world)
-            .filter(|(_, _, g, _)| **g == own)
+            .filter(|(_, _, g, ..)| **g == own)
         {
-            if let Some(&want_pos) = node_positions.get(&k.0) {
-                pos.set_if_neq(NodePosition(want_pos));
+            if let Some((nv, look)) = look_map.get(k.0.as_str()) {
+                pos.set_if_neq(NodePosition(nv.pos));
+                if let Some(children) = children {
+                    for &child in children {
+                        header_updates.push((child, look.title.as_str(), look.header));
+                    }
+                }
+            }
+        }
+        let mut nested_text_updates: Vec<(Entity, String)> = Vec::new();
+        for (child, want_title, want_header) in header_updates {
+            if world.get::<NodeHeader>(child).is_some() {
+                if let Some(mut bg) = world.get_mut::<BackgroundColor>(child) {
+                    bg.set_if_neq(BackgroundColor(want_header));
+                }
+                if let Some(mut t) = world.get_mut::<Text>(child) {
+                    if t.0 != want_title {
+                        t.0 = want_title.to_string();
+                    }
+                } else if let Some(children) = world.get::<Children>(child) {
+                    for &gc in children {
+                        nested_text_updates.push((gc, want_title.to_string()));
+                    }
+                }
+            }
+        }
+        for (gc, want_title) in nested_text_updates {
+            if let Some(mut t) = world.get_mut::<Text>(gc) {
+                t.set_if_neq(Text(want_title));
             }
         }
         for (box_key, _, mut node) in
             world.query::<(&NodeCommentBox, &GraphOf, &mut Node)>().iter_mut(world).filter(|(_, g, _)| **g == own)
         {
-            let empty = node_comments.get(&box_key.0).is_none_or(String::is_empty);
+            let empty =
+                look_map.get(box_key.0.as_str()).and_then(|(_, l)| l.comment.as_deref()).is_none_or(str::is_empty);
             let want_display = if empty { Display::None } else { Display::Flex };
             if node.display != want_display {
                 node.display = want_display;
@@ -958,8 +1018,11 @@ pub fn rebuild_canvas<G: GraphDomain>(world: &mut World) {
         for (text_key, _, mut text) in
             world.query::<(&NodeCommentText, &GraphOf, &mut Text)>().iter_mut(world).filter(|(_, g, _)| **g == own)
         {
-            let want_text = node_comments.get(&text_key.0).cloned().unwrap_or_default();
-            text.set_if_neq(Text(want_text));
+            let want_text =
+                look_map.get(text_key.0.as_str()).and_then(|(_, l)| l.comment.as_deref()).unwrap_or_default();
+            if text.0 != want_text {
+                text.0 = want_text.to_string();
+            }
         }
         let frame_map: HashMap<&str, &FrameView> = frames.iter().map(|f| (f.id.as_str(), f)).collect();
         let mut title_updates: Vec<(Entity, String, Color)> = Vec::new();
@@ -1012,6 +1075,20 @@ pub fn rebuild_canvas<G: GraphDomain>(world: &mut World) {
             }
         }
     } else {
+        let mut scenes: Vec<Box<dyn Scene>> = Vec::with_capacity(frames.len() + looks.len());
+        {
+            let editor = world.resource::<Editor>();
+            if let Some(d) = active::<G>(editor) {
+                let ctx = GraphCtxRef { editor };
+                for f in &frames {
+                    scenes.push(Box::new(frame_scene(f, canvas, own)));
+                }
+                for (n, look) in looks {
+                    let previews = G::previews(&ctx, d, &n.id);
+                    scenes.push(node_scene(&n, look, previews, canvas, own));
+                }
+            }
+        }
         if let Some(mut r) = world.get_resource_mut::<ActiveFrameResize<G>>() {
             r.active = None;
         }
@@ -1136,10 +1213,16 @@ impl<G> Default for CanvasMarks<G> {
 
 /// Fills [`CanvasMarks`] (empty while `G` is not active).
 fn collect_marks<G: GraphDomain>(editor: Res<Editor>, mut out: ResMut<CanvasMarks<G>>) {
+    if !editor.is_changed() && !out.is_added() {
+        return;
+    }
     let marks = match active::<G>(&editor) {
         Some(d) => G::diagnostics(&GraphCtxRef { editor: &editor }, d),
         None => Vec::new(),
     };
+    if out.marks == marks {
+        return;
+    }
     let mut worst: HashMap<String, bool> = HashMap::new();
     for m in &marks {
         *worst.entry(m.node.clone()).or_default() |= m.error;
@@ -1182,9 +1265,10 @@ pub fn node_outlines<G: GraphDomain>(
 fn highlight_diagnostics<G: GraphDomain>(
     editor: Res<Editor>,
     marks: Res<CanvasMarks<G>>,
+    added_labels: Query<(), Added<PinLabel>>,
     mut labels: Query<(&PinLabel, &GraphOf, &mut TextColor)>,
 ) {
-    if active::<G>(&editor).is_none() {
+    if active::<G>(&editor).is_none() || (!marks.is_changed() && added_labels.is_empty()) {
         return;
     }
     for (label, _, mut color) in labels.iter_mut().filter(|(_, g, _)| g.0 == G::VIEW) {
@@ -1541,10 +1625,16 @@ fn sync_selection<G: GraphDomain>(
     ec: Option<Res<EditorCanvas<G>>>,
     editor: Res<Editor>,
     selected: Query<(Option<&NodeKey>, Option<&FrameKey>, &GraphOf), With<Selected>>,
+    added_selected: Query<(), Added<Selected>>,
+    mut removed_selected: RemovedComponents<Selected>,
     boxes: Query<(&SelectionBox, &CanvasView)>,
     mut actions: ResMut<Actions>,
 ) {
+    let changed_selection = !added_selected.is_empty() || removed_selected.read().count() > 0;
     let Some(ec) = ec else { return };
+    if !changed_selection && !boxes.contains(ec.canvas) && !editor.is_changed() && !ec.is_changed() {
+        return;
+    }
     let Some(d) = active::<G>(&editor) else { return };
     if ec.shown != shown_key::<G>(&editor) {
         return;
@@ -1629,9 +1719,22 @@ fn size_frame_handles<G: GraphDomain>(
     let Some(ec) = ec else { return };
     let Ok(view) = views.get(ec.canvas) else { return };
     for (handle, _, mut node) in handles.iter_mut().filter(|(_, g, _)| g.0 == G::VIEW) {
-        let mut placed = node.clone();
+        let mut placed = Node::default();
         handle.place(&mut placed, view.zoom);
-        node.set_if_neq(placed);
+        if node.left != placed.left
+            || node.right != placed.right
+            || node.top != placed.top
+            || node.bottom != placed.bottom
+            || node.width != placed.width
+            || node.height != placed.height
+        {
+            node.left = placed.left;
+            node.right = placed.right;
+            node.top = placed.top;
+            node.bottom = placed.bottom;
+            node.width = placed.width;
+            node.height = placed.height;
+        }
     }
 }
 

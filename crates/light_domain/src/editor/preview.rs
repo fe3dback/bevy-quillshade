@@ -135,6 +135,8 @@ fn light_debug_screenshot(mut frames: Local<u32>, mut actions: ResMut<editor_cor
 pub struct LightPreviewSessions {
     pub sessions: BTreeMap<u64, LightPreviewSession>,
     used_layers: BTreeSet<usize>,
+    shared_meshes: Option<[Handle<Mesh>; 5]>,
+    shared_materials: Option<[Handle<StandardMaterial>; 13]>,
 }
 
 impl LightPreviewSessions {
@@ -346,59 +348,104 @@ pub fn start_light_preview(world: &mut World, id: u64) {
     let mut materials_out = Vec::new();
 
     if world.contains_resource::<Assets<Mesh>>() && world.contains_resource::<Assets<StandardMaterial>>() {
-        let (ground_mesh, center_mesh, side_mesh, box_mesh) = {
-            let mut meshes = world.resource_mut::<Assets<Mesh>>();
-            (
-                meshes.add(super::preview_terrain::terrain_mesh()),
-                meshes.add(Sphere::new(0.85).mesh().ico(5).unwrap()),
-                meshes.add(Sphere::new(0.7).mesh().ico(5).unwrap()),
-                meshes.add(Cuboid::new(1.2, 1.8, 1.2)),
-            )
-        };
-        meshes_out.extend([ground_mesh.clone(), center_mesh.clone(), side_mesh.clone(), box_mesh.clone()]);
-
-        let (ground_mat, dielectric_mat, chrome_mat, glossy_mat, box_mat) = {
-            let mut materials = world.resource_mut::<Assets<StandardMaterial>>();
-            (
-                materials.add(StandardMaterial {
-                    base_color: Color::LinearRgba(LinearRgba::rgb(0.35, 0.35, 0.35)),
-                    perceptual_roughness: 0.85,
-                    metallic: 0.0,
-                    ..default()
-                }),
-                materials.add(StandardMaterial {
-                    base_color: Color::LinearRgba(LinearRgba::rgb(0.8, 0.8, 0.8)),
-                    perceptual_roughness: 0.45,
-                    metallic: 0.0,
-                    ..default()
-                }),
-                materials.add(StandardMaterial {
-                    base_color: Color::WHITE,
-                    perceptual_roughness: 0.05,
-                    metallic: 1.0,
-                    ..default()
-                }),
-                materials.add(StandardMaterial {
-                    base_color: Color::srgb(0.22, 0.48, 0.88),
-                    perceptual_roughness: 0.15,
-                    metallic: 0.0,
-                    ..default()
-                }),
-                materials.add(StandardMaterial {
-                    base_color: Color::LinearRgba(LinearRgba::rgb(0.55, 0.55, 0.58)),
-                    perceptual_roughness: 0.6,
-                    metallic: 0.0,
-                    ..default()
-                }),
-            )
-        };
-        materials_out.extend([
-            ground_mat.clone(),
-            dielectric_mat.clone(),
-            chrome_mat.clone(),
-            glossy_mat.clone(),
-            box_mat.clone(),
+        let cached_meshes = world.resource::<LightPreviewSessions>().shared_meshes.clone().filter(|handles| {
+            let meshes = world.resource::<Assets<Mesh>>();
+            handles.iter().all(|h| meshes.contains(h.id()))
+        });
+        let [ground_mesh, center_mesh, side_mesh, box_mesh, small_mesh] = cached_meshes.unwrap_or_else(|| {
+            let handles = {
+                let mut meshes = world.resource_mut::<Assets<Mesh>>();
+                [
+                    meshes.add(super::preview_terrain::terrain_mesh()),
+                    meshes.add(Sphere::new(0.85).mesh().ico(5).unwrap()),
+                    meshes.add(Sphere::new(0.7).mesh().ico(5).unwrap()),
+                    meshes.add(Cuboid::new(1.2, 1.8, 1.2)),
+                    meshes.add(Sphere::new(SMALL_SPHERE_RADIUS).mesh().ico(4).unwrap()),
+                ]
+            };
+            world.resource_mut::<LightPreviewSessions>().shared_meshes = Some(handles.clone());
+            handles
+        });
+        meshes_out.extend([
+            ground_mesh.clone(),
+            center_mesh.clone(),
+            side_mesh.clone(),
+            box_mesh.clone(),
+            small_mesh.clone(),
         ]);
+
+        let cached_materials = world.resource::<LightPreviewSessions>().shared_materials.clone().filter(|handles| {
+            let materials = world.resource::<Assets<StandardMaterial>>();
+            handles.iter().all(|h| materials.contains(h.id()))
+        });
+        let shared_mats = cached_materials.unwrap_or_else(|| {
+            // Aluminum (neutral F0) so only the roughness changes: 1.0 blurs the sky away, 0.0 is a mirror.
+            let ramp = [1.0, 0.8, 0.6, 0.4, 0.2, 0.0].map(|roughness| StandardMaterial {
+                base_color: Color::LinearRgba(LinearRgba::rgb(0.913, 0.922, 0.924)),
+                perceptual_roughness: roughness,
+                metallic: 1.0,
+                ..default()
+            });
+            let handles = {
+                let mut materials = world.resource_mut::<Assets<StandardMaterial>>();
+                [
+                    materials.add(StandardMaterial {
+                        base_color: Color::LinearRgba(LinearRgba::rgb(0.35, 0.35, 0.35)),
+                        perceptual_roughness: 0.85,
+                        metallic: 0.0,
+                        ..default()
+                    }),
+                    materials.add(StandardMaterial {
+                        base_color: Color::LinearRgba(LinearRgba::rgb(0.8, 0.8, 0.8)),
+                        perceptual_roughness: 0.45,
+                        metallic: 0.0,
+                        ..default()
+                    }),
+                    materials.add(StandardMaterial {
+                        base_color: Color::WHITE,
+                        perceptual_roughness: 0.05,
+                        metallic: 1.0,
+                        ..default()
+                    }),
+                    materials.add(StandardMaterial {
+                        base_color: Color::srgb(0.22, 0.48, 0.88),
+                        perceptual_roughness: 0.15,
+                        metallic: 0.0,
+                        ..default()
+                    }),
+                    materials.add(StandardMaterial {
+                        base_color: Color::LinearRgba(LinearRgba::rgb(0.55, 0.55, 0.58)),
+                        perceptual_roughness: 0.6,
+                        metallic: 0.0,
+                        ..default()
+                    }),
+                    materials.add(ramp[0].clone()),
+                    materials.add(ramp[1].clone()),
+                    materials.add(ramp[2].clone()),
+                    materials.add(ramp[3].clone()),
+                    materials.add(ramp[4].clone()),
+                    materials.add(ramp[5].clone()),
+                    // Gold
+                    materials.add(StandardMaterial {
+                        base_color: Color::LinearRgba(LinearRgba::rgb(1.0, 0.766, 0.336)),
+                        perceptual_roughness: 0.25,
+                        metallic: 1.0,
+                        ..default()
+                    }),
+                    // Iron
+                    materials.add(StandardMaterial {
+                        base_color: Color::LinearRgba(LinearRgba::rgb(0.562, 0.565, 0.578)),
+                        perceptual_roughness: 0.4,
+                        metallic: 1.0,
+                        ..default()
+                    }),
+                ]
+            };
+            world.resource_mut::<LightPreviewSessions>().shared_materials = Some(handles.clone());
+            handles
+        });
+        materials_out.extend(shared_mats.iter().cloned());
+        let [ground_mat, dielectric_mat, chrome_mat, glossy_mat, box_mat, ref small_mats @ ..] = shared_mats;
 
         // 1. Landscape: flat studio floor, mountains behind the depth boxes, lowlands behind the camera. It does not
         // cast shadows so distant peaks never darken the calibrated spheres.
@@ -446,44 +493,13 @@ pub fn start_light_preview(world: &mut World, id: u64) {
         }
         // 6. Front row of small spheres resting on the floor: a metal roughness ramp (1.0 fully rough -> 0.0 mirror,
         // 20% steps), then gold and iron; base colors are measured linear F0 (Real-Time Rendering 4th ed., table 9.2).
-        let small_mesh =
-            world.resource_mut::<Assets<Mesh>>().add(Sphere::new(SMALL_SPHERE_RADIUS).mesh().ico(4).unwrap());
-        meshes_out.push(small_mesh.clone());
-        // Aluminum (neutral F0) so only the roughness changes: 1.0 blurs the sky away, 0.0 is a mirror.
-        let ramp = [1.0, 0.8, 0.6, 0.4, 0.2, 0.0].map(|roughness| StandardMaterial {
-            base_color: Color::LinearRgba(LinearRgba::rgb(0.913, 0.922, 0.924)),
-            perceptual_roughness: roughness,
-            metallic: 1.0,
-            ..default()
-        });
-        let metals = [
-            // Gold
-            StandardMaterial {
-                base_color: Color::LinearRgba(LinearRgba::rgb(1.0, 0.766, 0.336)),
-                perceptual_roughness: 0.25,
-                metallic: 1.0,
-                ..default()
-            },
-            // Iron
-            StandardMaterial {
-                base_color: Color::LinearRgba(LinearRgba::rgb(0.562, 0.565, 0.578)),
-                perceptual_roughness: 0.4,
-                metallic: 1.0,
-                ..default()
-            },
-        ];
         // The row faces the default camera: centered between it and the orbit target, perpendicular to its yaw.
         let toward_camera = Vec3::new(DEFAULT_YAW.sin(), 0.0, DEFAULT_YAW.cos());
         let along = Vec3::new(DEFAULT_YAW.cos(), 0.0, -DEFAULT_YAW.sin());
         let center = Vec3::new(0.0, -1.0 + SMALL_SPHERE_RADIUS, 0.0) + toward_camera * 1.6;
-        let mats: Vec<_> = {
-            let mut materials = world.resource_mut::<Assets<StandardMaterial>>();
-            ramp.into_iter().chain(metals).map(|mat| materials.add(mat)).collect()
-        };
-        for (i, mat) in mats.into_iter().enumerate() {
+        for (i, mat) in small_mats.iter().cloned().enumerate() {
             // Leave a wider gap between the dielectric ramp and the metals.
             let offset = (i as f32 - 3.5) * 0.55 + if i >= 6 { 0.15 } else { -0.15 };
-            materials_out.push(mat.clone());
             world.spawn((
                 PreviewEntity(id),
                 render_layer.clone(),
@@ -571,16 +587,6 @@ pub fn clean_light_preview(world: &mut World, id: u64) {
         }
         if let Some((_, ibl)) = session.procedural_ibl {
             images.remove(ibl.id());
-        }
-    }
-    if let Some(mut meshes) = world.get_resource_mut::<Assets<Mesh>>() {
-        for m in session.meshes {
-            meshes.remove(m.id());
-        }
-    }
-    if let Some(mut materials) = world.get_resource_mut::<Assets<StandardMaterial>>() {
-        for mat in session.materials {
-            materials.remove(mat.id());
         }
     }
 }

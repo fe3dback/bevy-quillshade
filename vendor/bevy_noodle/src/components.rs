@@ -419,12 +419,29 @@ impl EdgeHitbox {
         CubicSegment::new_bezier(self.points)
     }
 
+    /// Whether `point` lies within `radius` of the bounding box of the curve's
+    /// control points (which encloses the cubic Bézier curve).
+    pub(crate) fn within_aabb(&self, point: Vec2, radius: f32) -> bool {
+        let [p0, p1, p2, p3] = self.points;
+        let min = p0.min(p1).min(p2).min(p3) - Vec2::splat(radius);
+        let max = p0.max(p1).max(p2).max(p3) + Vec2::splat(radius);
+        point.cmpge(min).all() && point.cmple(max).all()
+    }
+
     /// Distance from `point` to the curve, sampled like the default wire shader.
     pub fn distance(&self, point: Vec2) -> f32 {
-        let samples: Vec<Vec2> = self.curve().iter_positions(32).collect();
-        let ends = samples.iter().zip(samples.iter().skip(1));
-        let segments = ends.map(|(&a, &b)| Segment2d::new(a, b));
-        segments.map(|s| s.closest_point(point).distance(point)).fold(f32::MAX, f32::min)
+        let curve = self.curve();
+        let mut iter = curve.iter_positions(32);
+        let Some(mut prev) = iter.next() else {
+            return f32::MAX;
+        };
+        let mut best = f32::MAX;
+        for next in iter {
+            let d = Segment2d::new(prev, next).closest_point(point).distance(point);
+            best = best.min(d);
+            prev = next;
+        }
+        best
     }
 }
 

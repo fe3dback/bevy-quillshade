@@ -153,6 +153,9 @@ fn pick_folder(
 }
 
 fn copy_to_clipboard(mut editor: ResMut<Editor>, clipboard: Option<ResMut<bevy::clipboard::Clipboard>>) {
+    if editor.copy_text.is_none() {
+        return;
+    }
     let Some(text) = editor.copy_text.take() else { return };
     match clipboard.map(|mut c| c.set_text(text)) {
         Some(Ok(())) => editor.info("Copied to the clipboard"),

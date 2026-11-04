@@ -266,6 +266,27 @@ fn place(node: &mut Node, rect: Option<Rect>) {
     (node.width, node.height) = (px(rect.width()), px(rect.height()));
 }
 
+/// Like [`place`], but only dereferences `Mut<Node>` when a field differs so
+/// unchanged frames do not mark `Changed<Node>` and trigger UI layout.
+fn place_if_neq(node: &mut Mut<'_, Node>, rect: Option<Rect>) {
+    let display = if rect.is_some() { Display::Flex } else { Display::None };
+    let rect = rect.unwrap_or_default();
+    let (left, top) = (px(rect.min.x), px(rect.min.y));
+    let (width, height) = (px(rect.width()), px(rect.height()));
+    if node.position_type != PositionType::Absolute
+        || node.display != display
+        || node.left != left
+        || node.top != top
+        || node.width != width
+        || node.height != height
+    {
+        node.position_type = PositionType::Absolute;
+        node.display = display;
+        (node.left, node.top) = (left, top);
+        (node.width, node.height) = (width, height);
+    }
+}
+
 /// Replaces an asset only when it changed, so unchanged frames upload nothing.
 fn update<M: Asset + PartialEq>(assets: &mut Assets<M>, handle: &Handle<M>, value: M) {
     if assets.get(handle) != Some(&value)
@@ -310,7 +331,7 @@ fn draw_edges(
         // Not laid out (yet, or any more) or not styled: hidden and not pickable.
         let (Some(geometry), Some(style), Some(content)) = (geometry, style, content) else {
             if let Some((mut node, ..)) = visual.and_then(|v| visuals.get_mut(v).ok()) {
-                place(&mut node, None);
+                place_if_neq(&mut node, None);
             }
             if hitbox.is_some() {
                 commands.entity(entity).try_remove::<EdgeHitbox>();
@@ -380,7 +401,7 @@ fn draw_edges(
             commands.spawn((node, z, Pickable::IGNORE, wire));
             continue;
         };
-        place(&mut node, shown);
+        place_if_neq(&mut node, shown);
         update(&mut materials, &handle.0, material);
         z_index.set_if_neq(z);
         if parent.parent() != content {
@@ -434,7 +455,7 @@ fn draw_selection_boxes(
     for (canvas, style, selection, visual) in &canvases {
         let rect = selection.map(|s| s.0);
         if let Some(mut node) = visual.and_then(|v| nodes.get_mut(v.0).ok()) {
-            place(&mut node, rect);
+            place_if_neq(&mut node, rect);
             continue;
         }
         let mut node = Node { border: UiRect::all(px(1)), ..default() };

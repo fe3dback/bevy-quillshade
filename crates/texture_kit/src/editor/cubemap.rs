@@ -93,6 +93,8 @@ marker! {
 pub struct CubeMapPreviewSessions {
     pub sessions: BTreeMap<u64, CubeMapPreviewSession>,
     used_layers: BTreeSet<usize>,
+    sphere_mesh: Option<Handle<Mesh>>,
+    sphere_material: Option<Handle<StandardMaterial>>,
 }
 
 impl CubeMapPreviewSessions {
@@ -134,7 +136,15 @@ impl CubeMapPreviewSession {
 
 /// Returns the [`PreviewCallbacks`] registered with `editor_core` for [`CUBEMAP_PREVIEW_KIND`].
 pub fn preview_callbacks() -> PreviewCallbacks {
-    PreviewCallbacks { kind: CUBEMAP_PREVIEW_KIND, start: start_cubemap_preview, clean: clean_cubemap_preview }
+    PreviewCallbacks { kind: CUBEMAP_PREVIEW_KIND, start: init_cubemap_preview, clean: clean_cubemap_preview }
+}
+
+/// Initializes [`CubeMapPreviewSessions`] when a texture preview handle becomes active; the actual 3D studio is
+/// spawned lazily by [`start_cubemap_preview`] only when the texture is a 6-face cube map viewed in 3D mode.
+fn init_cubemap_preview(world: &mut World, _id: u64) {
+    if !world.contains_resource::<CubeMapPreviewSessions>() {
+        world.init_resource::<CubeMapPreviewSessions>();
+    }
 }
 
 /// Ensures the asset stores and session resource needed by [`start_cubemap_preview`] exist in both windowed and
@@ -179,16 +189,35 @@ pub fn start_cubemap_preview(world: &mut World, id: u64) {
         images.add(img)
     });
 
-    let sphere_mesh =
-        world.get_resource_mut::<Assets<Mesh>>().map(|mut meshes| meshes.add(Sphere::new(1.15).mesh().ico(5).unwrap()));
-    let sphere_material = world.get_resource_mut::<Assets<StandardMaterial>>().map(|mut materials| {
-        materials.add(StandardMaterial {
-            base_color: Color::srgb(0.5, 0.5, 0.5),
-            metallic: 0.25,
-            perceptual_roughness: 0.5,
-            ..default()
-        })
-    });
+    let sphere_mesh = world
+        .resource::<CubeMapPreviewSessions>()
+        .sphere_mesh
+        .clone()
+        .filter(|h| world.get_resource::<Assets<Mesh>>().is_some_and(|m| m.contains(h.id())))
+        .or_else(|| {
+            let h = world
+                .get_resource_mut::<Assets<Mesh>>()
+                .map(|mut meshes| meshes.add(Sphere::new(1.15).mesh().ico(5).unwrap()))?;
+            world.resource_mut::<CubeMapPreviewSessions>().sphere_mesh = Some(h.clone());
+            Some(h)
+        });
+    let sphere_material = world
+        .resource::<CubeMapPreviewSessions>()
+        .sphere_material
+        .clone()
+        .filter(|h| world.get_resource::<Assets<StandardMaterial>>().is_some_and(|m| m.contains(h.id())))
+        .or_else(|| {
+            let h = world.get_resource_mut::<Assets<StandardMaterial>>().map(|mut materials| {
+                materials.add(StandardMaterial {
+                    base_color: Color::srgb(0.5, 0.5, 0.5),
+                    metallic: 0.25,
+                    perceptual_roughness: 0.5,
+                    ..default()
+                })
+            })?;
+            world.resource_mut::<CubeMapPreviewSessions>().sphere_material = Some(h.clone());
+            Some(h)
+        });
 
     let mut sphere_cmd =
         world.spawn((PreviewEntity(id), render_layer.clone(), Transform::IDENTITY, Visibility::Inherited));
@@ -253,16 +282,6 @@ pub fn clean_cubemap_preview(world: &mut World, id: u64) {
         && let Some(rtt) = session.rtt_image
     {
         images.remove(rtt.id());
-    }
-    if let Some(mut meshes) = world.get_resource_mut::<Assets<Mesh>>()
-        && let Some(mesh) = session.sphere_mesh
-    {
-        meshes.remove(mesh.id());
-    }
-    if let Some(mut materials) = world.get_resource_mut::<Assets<StandardMaterial>>()
-        && let Some(mat) = session.sphere_material
-    {
-        materials.remove(mat.id());
     }
 }
 

@@ -3,6 +3,7 @@
 //! Pure data, no Bevy: the view rebuilds from [`ConstsDoc::table`] when [`ConstsDoc::layout`] changes.
 
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, PoisonError};
 
 use shader_graph_core::Value;
 use shader_graph_core::consts::{ConstType, GlobalConst, GlobalConsts};
@@ -15,6 +16,41 @@ use crate::history::{History, MergeKey};
 fn next_layout() -> u64 {
     static LAYOUT: AtomicU64 = AtomicU64::new(1);
     LAYOUT.fetch_add(1, Ordering::Relaxed)
+}
+
+#[derive(Clone)]
+struct DirtyState {
+    saved_stamp: (usize, usize),
+    saved_table: GlobalConsts,
+    last_check: Option<(u64, bool)>,
+}
+
+struct DirtyCache(Mutex<DirtyState>);
+
+impl DirtyCache {
+    fn new(saved: &str, saved_table: GlobalConsts, revision: u64) -> Self {
+        DirtyCache(Mutex::new(DirtyState {
+            saved_stamp: (saved.as_ptr() as usize, saved.len()),
+            saved_table,
+            last_check: Some((revision, false)),
+        }))
+    }
+
+    fn get(&self) -> std::sync::MutexGuard<'_, DirtyState> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+impl Clone for DirtyCache {
+    fn clone(&self) -> Self {
+        DirtyCache(Mutex::new(self.get().clone()))
+    }
+}
+
+impl std::fmt::Debug for DirtyCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DirtyCache")
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -38,11 +74,15 @@ pub struct ConstsDoc {
     /// reset ([`ConstsDoc::relayout`]). Value edits keep it (a rebuild would despawn the number field being
     /// dragged or typed into).
     pub layout: u64,
+    dirty_cache: DirtyCache,
 }
 
 impl ConstsDoc {
     pub fn new(id: AssetId, table: GlobalConsts) -> Self {
-        let saved = table.to_ron();
+        let mut saved_table = table.clone();
+        saved_table.normalize();
+        let saved = saved_table.to_ron();
+        let dirty_cache = DirtyCache::new(&saved, saved_table, 1);
         ConstsDoc {
             aref: id.to_ref(),
             id,
@@ -54,15 +94,48 @@ impl ConstsDoc {
             form_error: None,
             revision: 1,
             layout: next_layout(),
+            dirty_cache,
         }
     }
 
     pub fn is_dirty(&self) -> bool {
-        self.table.to_ron() != self.saved
+        let stamp = (self.saved.as_ptr() as usize, self.saved.len());
+        let mut state = self.dirty_cache.get();
+        if stamp == state.saved_stamp {
+            if let Some((rev, dirty)) = state.last_check
+                && rev == self.revision
+            {
+                return dirty;
+            }
+            let mut norm = self.table.clone();
+            norm.normalize();
+            let dirty = norm != state.saved_table;
+            state.last_check = Some((self.revision, dirty));
+            return dirty;
+        }
+        let dirty = self.table.to_ron() != self.saved;
+        if !dirty {
+            let mut saved_table = self.table.clone();
+            saved_table.normalize();
+            state.saved_stamp = stamp;
+            state.saved_table = saved_table;
+            state.last_check = Some((self.revision, false));
+        } else if let Ok(parsed) = GlobalConsts::from_ron(&self.saved) {
+            state.saved_stamp = stamp;
+            state.saved_table = parsed;
+            state.last_check = Some((self.revision, true));
+        }
+        dirty
     }
 
     pub fn mark_saved(&mut self) {
-        self.saved = self.table.to_ron();
+        let mut saved_table = self.table.clone();
+        saved_table.normalize();
+        self.saved = saved_table.to_ron();
+        let mut state = self.dirty_cache.get();
+        state.saved_stamp = (self.saved.as_ptr() as usize, self.saved.len());
+        state.saved_table = saved_table;
+        state.last_check = Some((self.revision, false));
     }
 
     /// Applies `f` as one undoable step; consecutive edits with the same `key` share one step (a number drag).

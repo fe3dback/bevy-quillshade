@@ -134,8 +134,19 @@ impl GraphQuery<'_, '_> {
 
     /// Nodes of a canvas (not of canvases nested inside them), depth first.
     pub fn nodes_in(&self, canvas: Entity) -> impl Iterator<Item = Entity> + '_ {
-        // The content's subtree, minus nested canvases.
-        self.walk(self.content_of(canvas), |e| self.canvases.contains(e)).filter(|e| self.nodes.contains(*e))
+        // The content's subtree, minus nested canvases and the internal UI of nodes.
+        let mut stack: Vec<Entity> = self.content_of(canvas).into_iter().collect();
+        std::iter::from_fn(move || {
+            while let Some(entity) = stack.pop() {
+                if self.nodes.contains(entity) {
+                    return Some(entity);
+                }
+                if let Ok(children) = self.children.get(entity) {
+                    stack.extend(children.iter().rev().filter(|c| !self.canvases.contains(*c)));
+                }
+            }
+            None
+        })
     }
 
     /// Ports of a node (not of nodes nested inside it), in hierarchy order.

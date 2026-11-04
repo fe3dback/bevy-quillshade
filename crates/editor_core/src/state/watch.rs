@@ -17,6 +17,9 @@ impl Editor {
     pub fn poll_watcher(&mut self) {
         let Some(w) = &self.watcher else { return };
         let changed = w.lock().map(|w| w.poll()).unwrap_or_default();
+        if changed.is_empty() {
+            return;
+        }
         self.files_changed(changed);
     }
 

@@ -364,7 +364,10 @@ fn place_handles<D: CurveDomain>(
         have[h.index] = true;
         let at = plot.to_local(*p);
         let r = if h.hovered { HANDLE + 1.5 } else { HANDLE };
-        (node.left, node.top, node.width, node.height) = (px(at.x - r), px(at.y - r), px(2.0 * r), px(2.0 * r));
+        let (left, top, size) = (px(at.x - r), px(at.y - r), px(2.0 * r));
+        if node.left != left || node.top != top || node.width != size || node.height != size {
+            (node.left, node.top, node.width, node.height) = (left, top, size, size);
+        }
         let selected = c.selection.contains(&h.index);
         bg.set_if_neq(BackgroundColor(if selected { CURVE_COLOR } else { POINT_COLOR }));
         let edge = if h.hovered || selected { Color::WHITE } else { Color::srgb_u8(20, 21, 24) };
@@ -398,7 +401,10 @@ fn place_handles<D: CurveDomain>(
         } else {
             plot.to_local((0.0, label.1)) + Vec2::new(-size.x - 10.0, -size.y / 2.0)
         };
-        (node.left, node.top) = (px(at.x), px(at.y));
+        let (left, top) = (px(at.x), px(at.y));
+        if node.left != left || node.top != top {
+            (node.left, node.top) = (left, top);
+        }
     }
 }
 

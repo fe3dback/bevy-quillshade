@@ -16,7 +16,7 @@ use shader_graph_core::registry::{NodeDef, ParamKind};
 use shader_project::{AssetId, AssetType};
 
 use super::node_preview::{NodePreview, PreviewTarget};
-use crate::doc::{Doc, node_signature};
+use crate::doc::Doc;
 use crate::ops::Editor;
 use crate::ops::prelude::*;
 use crate::util::raster::{opaque_image, skia_color};
@@ -102,19 +102,14 @@ impl NodePreview for CurvePreview {
             None => editor.domains.material().disk.curves.get(&id)?.as_ref().ok()?,
         };
         let interp = params.get("type").and_then(|v| Interp::from_label(v.as_str())).unwrap_or_default();
-        let t = match view.edge_into(node, T_PIN) {
-            Some(_) => None,
-            None => {
-                let sig = node_signature(
-                    &view,
-                    node,
-                    &editor.domains.material().registry,
-                    &editor.domains.material().functions,
-                    &doc.id.path,
-                )?;
-                let default = sig.input(T_PIN).map_or(0.0, |p| p.default.as_f32());
-                Some(n.inputs.get(T_PIN).map_or(default, Value::as_f32))
-            }
+        let m = editor.domains.material();
+        let analysis = doc.analysis(&editor.asset_index, &m.registry, &m.functions, &m.features);
+        let t = if analysis.has_edge_into(node, T_PIN) {
+            None
+        } else {
+            let sig = analysis.signatures.get(node)?;
+            let default = sig.input(T_PIN).map_or(0.0, |p| p.default.as_f32());
+            Some(n.inputs.get(T_PIN).map_or(default, Value::as_f32))
         };
         Some(CurveKey { curve: curve.clone(), interp, t })
     }

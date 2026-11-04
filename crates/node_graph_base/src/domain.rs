@@ -66,6 +66,10 @@ pub trait GraphDomain: Send + Sync + 'static {
     fn topbar_extras() -> Vec<Box<dyn Scene>>;
     /// The in-node preview rows of `node`.
     fn previews(ctx: &GraphCtxRef, doc: &Self::Doc, node: &str) -> Vec<PreviewRow>;
+    /// Whether an inline component scrub (`SetComponent` with `is_final: false`) is currently in progress on `doc`.
+    fn is_scrubbing(_doc: &Self::Doc) -> bool {
+        false
+    }
     /// Bindings the domain adds to the graph's input context (after the base ones).
     fn bindings() -> Vec<Box<dyn Scene>> {
         Vec::new()

@@ -102,7 +102,9 @@ impl MaterialApply for Editor {
     fn material_after_apply(&mut self) {
         if std::mem::take(&mut self.domains.material_mut().tabs_closed) {
             self.refresh_functions();
-            self.domains.material_mut().validated = None;
+            let m = self.domains.material_mut();
+            m.validated = None;
+            m.validation_cache = None;
         } else if let Some(f) = self.features_doc() {
             let (path, table) = (f.id.path.clone(), f.table.clone());
             self.domains.material_mut().features.insert(path, table);
@@ -166,6 +168,7 @@ impl MaterialApply for Editor {
             let generation = self.project_generation;
             let m = self.domains.material_mut();
             m.registry = registry;
+            m.user_node_diags = project_diags.clone();
             m.project_diags = project_diags;
             m.disk = AssetSet::default();
             m.functions.clear();
@@ -174,11 +177,14 @@ impl MaterialApply for Editor {
             m.regen_only.clear();
             m.wesl_lines.clear();
             m.validated = None;
+            m.validation_cache = None;
             m.loaded = generation;
         }
         let Some(project) = &self.project else { return };
         self.domains.material_mut().disk = AssetSet::load_all(project);
         self.refresh_functions();
-        self.domains.material_mut().validated = None;
+        let m = self.domains.material_mut();
+        m.validated = None;
+        m.validation_cache = None;
     }
 }

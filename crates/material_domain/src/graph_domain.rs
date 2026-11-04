@@ -4,6 +4,8 @@
 //! rules, Named Routes, the preview (`V`) and Convert hotkey data, inline widgets, the four node preview kinds,
 //! palette entries, tree drops, the node / asset subpanes and the editor topbar's dynamic part.
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::Hasher;
 use std::sync::Arc;
 
 use bevy::prelude::*;
@@ -21,7 +23,7 @@ use shader_graph_core::registry::NodeRole;
 use shader_graph_core::{Code, Hotkey, HotkeyKey, PinType, Value};
 
 use crate::canvas::{header_color, pin_color};
-use crate::doc::{Doc, connection_error_with, node_signature_with, node_title_in, route_declarations};
+use crate::doc::{Doc, node_title_in};
 use crate::editors::graph::{GRAPH, GraphTopbarDynamic, PreviewNode, asset_subpanes, node_subpanes};
 use crate::inline::{Inline, inline_for_param, inline_for_pin, inline_scene};
 use crate::material_state::MaterialStates;
@@ -89,13 +91,14 @@ impl GraphDomain for MaterialGraph {
         let view = ctx.editor.view_of(d);
         let asset = view.as_ref();
         let Some(n) = asset.nodes.get(id) else { return NodeLook::default() };
-        let routes = route_declarations(asset, &m.registry);
+        let analysis = d.analysis(&ctx.editor.asset_index, &m.registry, &m.functions, &m.features);
+        let routes = &analysis.routes;
         let def = m.registry.get(&n.kind);
-        let sig = node_signature_with(asset, id, &m.registry, &m.functions, &m.features, &d.id.path);
+        let sig = analysis.signatures.get(id);
         let emphasis = Emphasis { pulse: previewed_node(asset) == Some(id) };
         let comment = (!n.comment.is_empty()).then(|| n.comment.clone());
         if def.is_some_and(|d| d.role() == NodeRole::Reroute) {
-            let ty = sig.as_ref().and_then(|s| s.outputs.first()).map_or(PinType::Any, |p| p.ty);
+            let ty = sig.and_then(|s| s.outputs.first()).map_or(PinType::Any, |p| p.ty);
             let color = pin_color(ty);
             let pin = |id: &str, output| PinLook { id: id.into(), color, output, ..default() };
             return NodeLook {
@@ -107,22 +110,25 @@ impl GraphDomain for MaterialGraph {
             };
         }
         let mut look = NodeLook {
-            title: node_title_in(&m.registry, &m.functions, asset, id, &routes, &|t| ctx.editor.const_table(t), &|t| {
+            title: node_title_in(&m.registry, &m.functions, asset, id, routes, &|t| ctx.editor.const_table(t), &|t| {
                 ctx.editor.feature_table(t)
             }),
-            header: header_color(&m.registry, asset, id, &routes),
+            header: header_color(&m.registry, asset, id, routes),
             emphasis,
             comment,
             ..default()
         };
+        let mut body_hasher = DefaultHasher::new();
         let params = m.registry.resolved_params(&n.kind, &n.params);
         if let Some((key, inline)) = inline_for_param(&n.kind, &params) {
             // Vector editors (a number field per component) need a wider node.
             look.wide |= matches!(inline, Inline::Vector(_));
+            inline.hash_into(&key, &mut body_hasher);
             let v = params.get(&key).cloned().unwrap_or(Value::Float(0.0));
             look.body = Some(inline_scene(GraphProp::Param { node: id.into(), key }, inline, &v));
         }
-        let Some(sig) = &sig else {
+        let Some(sig) = sig else {
+            look.body_tag = body_hasher.finish();
             look.note = Some("unknown node kind".into());
             return look;
         };
@@ -143,13 +149,14 @@ impl GraphDomain for MaterialGraph {
                 inactive: p.inactive,
                 hidden: usage,
             };
-            if !usage && asset.edge_into(id, &p.id).is_none() {
+            if !usage && !analysis.has_edge_into(id, &p.id) {
                 if let Some(what) = &p.implicit {
                     pin.label.push_str(&format!(" ({what})"));
                 } else if !p.required
                     && let Some(inline) = inline_for_pin(p.ty, p.range)
                 {
                     look.wide |= matches!(inline, Inline::Vector(_));
+                    inline.hash_into(&p.id, &mut body_hasher);
                     let v = n.inputs.get(&p.id).cloned().unwrap_or_else(|| p.default.clone()).coerce(p.ty);
                     let target = GraphProp::Input { node: id.into(), pin: p.id.clone() };
                     look.inline.push((p.id.clone(), inline_scene(target, inline, &v)));
@@ -157,6 +164,7 @@ impl GraphDomain for MaterialGraph {
             }
             look.pins.push(pin);
         }
+        look.body_tag = body_hasher.finish();
         look
     }
 
@@ -176,15 +184,8 @@ impl GraphDomain for MaterialGraph {
     /// The model rules (types spec §7.2, cycles): [`connection_error`].
     fn can_connect(ctx: &GraphCtxRef, d: &Doc, from: &PinRef, to: &PinRef) -> Result<(), String> {
         let m = ctx.editor.domains.material();
-        let error = connection_error_with(
-            &ctx.editor.view_of(d),
-            (&from.node, &from.pin),
-            (&to.node, &to.pin),
-            &m.registry,
-            &m.functions,
-            &m.features,
-            &d.id.path,
-        );
+        let analysis = d.analysis(&ctx.editor.asset_index, &m.registry, &m.functions, &m.features);
+        let error = analysis.connection_error((&from.node, &from.pin), (&to.node, &to.pin));
         error.map_or(Ok(()), Err)
     }
 
@@ -294,6 +295,10 @@ impl GraphDomain for MaterialGraph {
         def.map(|def| crate::ui::node_preview::previews(def.as_ref(), &node.to_string())).unwrap_or_default()
     }
 
+    fn is_scrubbing(d: &Doc) -> bool {
+        d.scrubbing
+    }
+
     /// `V`: the node preview on release (decision 0022).
     fn bindings() -> Vec<Box<dyn Scene>> {
         vec![Box::new(hotkey::<PreviewNode>(plain([KeyCode::KeyV])))]
@@ -358,7 +363,7 @@ pub(crate) fn graph_edit(e: &mut Editor, edit: GraphEdit) {
             let shown = |e: &Editor| e.doc().and_then(|d| Some((e.active_key()?, d.revision)));
             let before = shown(e);
             if let Some(d) = e.doc_mut() {
-                d.edit(|a| {
+                d.edit_with(None, false, false, |a| {
                     for (id, p) in &nodes {
                         if let Some(n) = a.nodes.get_mut(id) {
                             n.pos = *p;
@@ -385,7 +390,7 @@ pub(crate) fn graph_edit(e: &mut Editor, edit: GraphEdit) {
                     rect.2.max(node_graph_base::MIN_FRAME_SIZE.0),
                     rect.3.max(node_graph_base::MIN_FRAME_SIZE.1),
                 );
-                d.edit(|a| {
+                d.edit_with(None, false, false, |a| {
                     if let Some(f) = a.comments.iter_mut().find(|f| f.id == id) {
                         f.rect = clamped;
                     }

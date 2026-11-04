@@ -5,11 +5,13 @@
 //! from [`Editor::gradient_collection`]: an open gradients tab's unsaved state first, so an edit there shows on the
 //! node live.
 
+use std::cell::RefCell;
+
 use crate::material_state::MaterialStates;
 use bevy::ecs::system::SystemParamItem;
 use bevy::prelude::*;
 use shader_graph_core::Value;
-use shader_graph_core::gradient::SAMPLES;
+use shader_graph_core::gradient::{SAMPLES, Stop};
 use shader_graph_core::model::NodeId;
 use shader_graph_core::registry::{NodeDef, ParamKind};
 
@@ -87,7 +89,21 @@ impl NodePreview for GradientPreview {
         let collection = Some(collection.as_str()).filter(|c| !c.is_empty())?;
         let slot = value(ParamKind::GradientSlot).as_ref().map(Value::as_i32).filter(|s| *s > 0)?;
         let slot = editor.gradient_collection(collection)?.slots.iter().find(|s| i64::from(s.id) == i64::from(slot))?;
-        Some(slot.bake_row())
+        thread_local! {
+            static ROW_CACHE: RefCell<Vec<(Vec<Stop>, [[u8; 4]; SAMPLES])>> = const { RefCell::new(Vec::new()) };
+        }
+        Some(ROW_CACHE.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            if let Some((_, row)) = cache.iter().find(|(stops, _)| *stops == slot.stops) {
+                return *row;
+            }
+            let row = slot.bake_row();
+            if cache.len() >= 32 {
+                cache.remove(0);
+            }
+            cache.push((slot.stops.clone(), row));
+            row
+        }))
     }
 
     fn draw(

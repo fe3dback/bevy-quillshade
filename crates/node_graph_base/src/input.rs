@@ -525,19 +525,26 @@ fn draw_minimap<G: GraphDomain>(
     let want = if mapping.is_some() { Visibility::Inherited } else { Visibility::Hidden };
     vis.set_if_neq(want);
     let (Some(map), Ok((view, canvas))) = (mapping, views.get(ec.canvas)) else { return };
-    let place = |node: &mut Node, rect: Rect| {
+    let place = |node: &mut Mut<'_, Node>, rect: Rect| {
         let r = Rect::from_corners(map.to_map(rect.min), map.to_map(rect.max));
-        (node.left, node.top) = (px(r.min.x), px(r.min.y));
-        (node.width, node.height) = (px(r.width().max(1.0)), px(r.height().max(1.0)));
+        let (left, top) = (px(r.min.x), px(r.min.y));
+        let (width, height) = (px(r.width().max(1.0)), px(r.height().max(1.0)));
+        if node.left != left || node.top != top || node.width != width || node.height != height {
+            (node.left, node.top) = (left, top);
+            (node.width, node.height) = (width, height);
+        }
     };
+    let mut shown = bevy::ecs::entity::EntityHashSet::default();
     for (e, mini, mut node, _) in minis.iter_mut().filter(|m| m.3.parent() == map_e) {
         match nodes.get(mini.0).ok().filter(|n| own(n.3)) {
-            Some((_, p, c, _)) => place(&mut node, node_rect(p, c)),
+            Some((_, p, c, _)) => {
+                shown.insert(mini.0);
+                place(&mut node, node_rect(p, c));
+            }
             None => commands.entity(e).try_despawn(),
         }
     }
-    let shown = |n: Entity| minis.iter().any(|m| m.3.parent() == map_e && m.1.0 == n);
-    for (n, ..) in nodes.iter().filter(|(n, .., g)| own(g) && !shown(*n)) {
+    for (n, ..) in nodes.iter().filter(|(n, .., g)| own(g) && !shown.contains(n)) {
         commands.spawn((
             MiniNode(n),
             Node { position_type: PositionType::Absolute, ..default() },

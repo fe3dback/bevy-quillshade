@@ -362,6 +362,9 @@ fn redraw_sidebar<G: GraphDomain>(
     mut commands: Commands,
 ) {
     let Some(d) = active::<G>(&editor) else { return key.forget() };
+    if G::is_scrubbing(d) {
+        return;
+    }
     fill_sidebar_with(&mut commands, &body, &mut key, SidebarKey::now(&editor), || sidebar_rows::<G>(&editor, d));
 }
 

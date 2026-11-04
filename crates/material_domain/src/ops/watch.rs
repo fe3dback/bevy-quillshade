@@ -16,10 +16,14 @@ impl MaterialWatch for Editor {
         let user_nodes = changed.iter().any(|p| p.starts_with(&user_nodes_dir));
         if user_nodes {
             let (r, d) = project_registry(project);
-            self.domains.material_mut().registry = r;
-            self.domains.material_mut().project_diags = d;
+            let m = self.domains.material_mut();
+            m.registry = r;
+            m.user_node_diags = d.clone();
+            m.project_diags = d;
             for doc in self.tabs.iter_mut().filter_map(Tab::get_mut::<Doc>) {
                 doc.revision += 1;
+                doc.analysis_revision += 1;
+                doc.validation_revision += 1;
             }
         }
     }

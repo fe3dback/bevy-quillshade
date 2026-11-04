@@ -51,10 +51,17 @@ pub(crate) fn endpoint(
 pub(crate) fn update_edge_geometry(
     changed: Query<
         (),
-        Or<(Changed<NodePosition>, Changed<PortAnchor>, Added<Edge>, Changed<EdgeSource>, Changed<EdgeTarget>)>,
+        Or<(
+            Changed<NodePosition>,
+            Changed<PortAnchor>,
+            Changed<PortTangent>,
+            Added<Edge>,
+            Changed<EdgeSource>,
+            Changed<EdgeTarget>,
+        )>,
     >,
-    edges: Query<(Entity, &EdgeSource, &EdgeTarget, Option<&EdgeGeometry>)>,
-    wires: Query<(Entity, &PendingWire, Option<&EdgeGeometry>)>,
+    mut edges: Query<(Entity, &EdgeSource, &EdgeTarget, Option<&mut EdgeGeometry>), Without<PendingWire>>,
+    mut wires: Query<(Entity, &PendingWire, Option<&mut EdgeGeometry>)>,
     moves: Query<(Entity, &MovingEdges)>,
     mut moves_ended: RemovedComponents<MovingEdges>,
     targets: Query<&WireTarget>,
@@ -68,10 +75,11 @@ pub(crate) fn update_edge_geometry(
     for (wire, _) in gone.filter(|(_, from)| !ports.contains(*from)) {
         commands.entity(wire).try_despawn();
     }
-    // Inserted while both ends are laid out, removed otherwise.
-    let mut set = |entity, current: Option<&EdgeGeometry>, wanted: Option<EdgeGeometry>| match (current, wanted) {
-        (Some(current), Some(wanted)) if *current == wanted => {}
-        (_, Some(wanted)) => _ = commands.entity(entity).try_insert(wanted),
+    // Inserted while both ends are laid out, updated in place when changed, removed otherwise.
+    let mut set = |entity, current: Option<Mut<'_, EdgeGeometry>>, wanted: Option<EdgeGeometry>| match (current, wanted)
+    {
+        (Some(mut current), Some(wanted)) => _ = current.set_if_neq(wanted),
+        (None, Some(wanted)) => _ = commands.entity(entity).try_insert(wanted),
         (Some(_), None) => _ = commands.entity(entity).try_remove::<EdgeGeometry>(),
         (None, None) => {}
     };
@@ -84,22 +92,35 @@ pub(crate) fn update_edge_geometry(
         let loose = target.and_then(end).or(tangent.map(|t| (moving.pointer, t)));
         lifted.extend(moving.edges.iter().map(|edge| (*edge, (moving.from, target, loose))));
     }
-    // Every edge after a layout change or a finished move; else only lifted ones.
+    // Every edge after a finished move; otherwise only lifted edges or edges whose ports/nodes changed.
     let ended = moves_ended.read().count() > 0;
-    let all = !changed.is_empty() || ended;
-    for (edge, source, target, current) in edges.iter().filter(|(e, ..)| all || lifted.contains_key(e)) {
-        let mut ends = (end(source.0), end(target.0));
-        let mut at = (Some(source.0), Some(target.0));
-        match lifted.get(&edge) {
-            Some(&(from, to, loose)) if from == source.0 => (ends.0, at.0) = (loose, to),
-            Some(&(_, to, loose)) => (ends.1, at.1) = (loose, to),
-            None => {}
+    let port_changed = |port: Entity| {
+        changed.contains(port)
+            || ports.get(port).ok().and_then(|(_, anchor, _)| anchor.node).is_some_and(|n| changed.contains(n))
+    };
+    if !changed.is_empty() || ended || !lifted.is_empty() {
+        for (edge, source, target, current) in &mut edges {
+            if !ended
+                && !lifted.contains_key(&edge)
+                && !changed.contains(edge)
+                && !port_changed(source.0)
+                && !port_changed(target.0)
+            {
+                continue;
+            }
+            let mut ends = (end(source.0), end(target.0));
+            let mut at = (Some(source.0), Some(target.0));
+            match lifted.get(&edge) {
+                Some(&(from, to, loose)) if from == source.0 => (ends.0, at.0) = (loose, to),
+                Some(&(_, to, loose)) => (ends.1, at.1) = (loose, to),
+                None => {}
+            }
+            let geometry = ends.0.zip(ends.1).map(|(a, b)| EdgeGeometry::between(a, b).with_ports(at.0, at.1));
+            set(edge, current, geometry);
         }
-        let geometry = ends.0.zip(ends.1).map(|(a, b)| EdgeGeometry::between(a, b).with_ports(at.0, at.1));
-        set(edge, current, geometry);
     }
     // The dragged wire runs output → input; the pointer stands in for the free end.
-    for (entity, wire, current) in &wires {
+    for (entity, wire, current) in &mut wires {
         let target = targets.get(entity).ok().and_then(|t| t.0);
         let geometry = end(wire.from).map(|fixed| {
             let free = target.and_then(end).unwrap_or((wire.pointer, -fixed.1));
@@ -125,6 +146,9 @@ pub(crate) fn measure_ports(
     graph_nodes: Query<Option<&NodePosition>, With<GraphNode>>,
     contents: Query<&UiGlobalTransform, With<CanvasContent>>,
 ) {
+    /// Absorbs IEEE-754 roundoff (~1e-4 px) when unprojecting through a panned/zoomed `CanvasContent` inverse transform.
+    const EPSILON_SQ: f32 = 1e-4;
+    let close = |a: Vec2, b: Vec2| (a - b).length_squared() <= EPSILON_SQ;
     for (entity, mut anchor, transform, computed) in &mut ports {
         let node = parents.iter_ancestors(entity).find(|e| graph_nodes.contains(*e));
         let content = parents.iter_ancestors(entity).find_map(|e| contents.get(e).ok());
@@ -135,7 +159,14 @@ pub(crate) fn measure_ports(
             .map(|inverse| inverse.transform_point2(transform.translation) * computed.inverse_scale_factor());
         let origin = node.and_then(|n| graph_nodes.get(n).ok().flatten()).map_or(Vec2::ZERO, |p| p.0);
         let offset = position.unwrap_or_default() - origin;
-        anchor.set_if_neq(PortAnchor { node, offset, position });
+        let same_position = match (anchor.position, position) {
+            (Some(a), Some(b)) => close(a, b),
+            (None, None) => true,
+            _ => false,
+        };
+        if anchor.node != node || !same_position || !close(anchor.offset, offset) {
+            *anchor = PortAnchor { node, offset, position };
+        }
     }
 }
 

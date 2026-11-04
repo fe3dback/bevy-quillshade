@@ -76,7 +76,7 @@ impl MaterialRegen for Editor {
         let gradients = self.tabs.iter().filter_map(Tab::get::<GradientsDoc>).map(|g| (g.id.clone(), g.revision));
         let features = self.tabs.iter().filter_map(Tab::get::<FeaturesDoc>).map(|f| (f.id.clone(), f.revision));
         self.docs()
-            .map(|d| (d.id.clone(), d.revision))
+            .map(|d| (d.id.clone(), d.validation_revision))
             .chain(tables)
             .chain(textures)
             .chain(gradients)
@@ -86,29 +86,82 @@ impl MaterialRegen for Editor {
 
     fn validate(&mut self) {
         let Some(project) = self.project.clone().filter(|p| p.domain_enabled(MATERIAL)) else { return };
+        let current_revs = self.revisions();
+        let index_gen = self.asset_index.generation();
+        let incremental_mats: Option<Vec<AssetId>> = {
+            let m = self.domains.material();
+            if let (Some(prev_revs), Some((cached_gen, cached_non_mat, _))) = (&m.validated, &m.validation_cache)
+                && *cached_gen == index_gen
+                && prev_revs.len() == current_revs.len()
+                && prev_revs.iter().zip(&current_revs).all(|((a, _), (b, _))| a == b)
+            {
+                let non_mat: Vec<(AssetId, u64)> =
+                    current_revs.iter().filter(|(id, _)| id.ty != AssetType::Material).cloned().collect();
+                if &non_mat == cached_non_mat {
+                    let changed: Vec<AssetId> = prev_revs
+                        .iter()
+                        .zip(&current_revs)
+                        .filter(|((_, r1), (_, r2))| r1 != r2)
+                        .map(|((_, _), (id, _))| id.clone())
+                        .collect();
+                    (!changed.is_empty()).then_some(changed)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        };
+        if let Some(changed_ids) = incremental_mats {
+            let updates: Vec<(AssetId, Vec<Diagnostic>)> = {
+                let m = self.domains.material();
+                let (_, _, env) = m.validation_cache.as_ref().expect("checked above");
+                changed_ids
+                    .into_iter()
+                    .filter_map(|id| {
+                        let d = self.docs().find(|d| d.id == id)?;
+                        let view = d.resolved(&self.asset_index, &m.registry);
+                        let res = env.validate_material(&id, &view, &m.registry);
+                        Some((id, res.diagnostics))
+                    })
+                    .collect()
+            };
+            let m = self.domains.material_mut();
+            for (id, diags) in updates {
+                m.diags.insert(id, diags);
+            }
+            m.validated = Some(current_revs);
+            self.ui.log += 1;
+            return;
+        }
+
         self.refresh_functions();
         let set = self.overridden_set();
-        let list = self.domain_list.clone();
-        // UUID references resolve against the editor's index (ADR 0047 §4).
-        let opts = RegenOptions {
-            dry_run: true,
-            crates: list.crate_contributions(),
-            index: Some(&self.asset_index),
-            ..Default::default()
-        };
         // A Texture tab's Properties list its problems and hold no text field: redraw them when those changed.
         let texture = self.texture_doc().filter(|t| !t.is_internal()).map(|t| t.id());
         let before = texture.as_ref().and_then(|id| self.domains.material().diags.get(id).cloned());
-        if let Ok(report) = shader_project::regen::regenerate_set(&project, &set, &opts) {
-            self.domains.material_mut().project_diags = report.project;
-            self.domains.material_mut().diags = report.assets.into_iter().map(|(id, r)| (id, r.diagnostics)).collect();
-        }
+        // UUID references resolve against the editor's index (ADR 0047 §4).
+        let (report, env) = {
+            let m = self.domains.material();
+            shader_project::regen::validate_set(
+                &project,
+                &set,
+                Some(&self.asset_index),
+                Some((&m.registry, &m.user_node_diags)),
+            )
+        };
+        let non_mat: Vec<(AssetId, u64)> =
+            current_revs.iter().filter(|(id, _)| id.ty != AssetType::Material).cloned().collect();
+        let m = self.domains.material_mut();
+        m.project_diags = report.project;
+        m.diags = report.assets.into_iter().map(|(id, r)| (id, r.diagnostics)).collect();
+        m.validation_cache = Some((index_gen, non_mat, env));
         if let Some(id) = &texture
             && self.domains.material().diags.get(id) != before.as_ref()
         {
             self.ui.props += 1;
         }
-        self.domains.material_mut().validated = Some(self.revisions());
+        self.domains.material_mut().validated = Some(current_revs);
         self.ui.log += 1;
     }
 

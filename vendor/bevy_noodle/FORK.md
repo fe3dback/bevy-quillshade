@@ -204,3 +204,27 @@ identical to upstream.
   editor's workspace Bevy is built with `dynamic_linking`, so a doctest binary links `libstd` dynamically; rustdoc runs
   merged doctests from a temp dir without the toolchain's library path, and on CI they failed to start
   (`libstd-….so: cannot open shared object file`). `no_run` still compiles them against the API.
+
+### Performance optimizations for large graphs (shader editor Stage 3)
+
+Why: on graphs with 170+ nodes, 180+ edges, and 500+ ports (~5,500 UI entities), per-frame `Mut<Node>` dereferences on
+unchanged wire and selection-box visuals forced Bevy's Taffy UI layout system to recompute layout every idle frame;
+panning/zooming caused 1-ULP IEEE-754 floating-point roundoff in `measure_ports` that cascaded into `Changed<PortAnchor>`,
+`update_edge_geometry`, and `WireMaterial` asset re-uploads across all 180 edges every frame; dragging a single node
+recomputed `EdgeGeometry` for every edge in the graph; `EdgeHitbox::distance` allocated a `Vec<Vec2>` per edge during
+picking; and `GraphQuery::nodes_in` walked all 5,500 internal UI descendants of nodes.
+
+- `style::place_if_neq` (`style/mod.rs`): `draw_edges` and `draw_selection_boxes` now compare `position_type`,
+  `display`, `left`, `top`, `width`, and `height` before dereferencing `Mut<Node>`, avoiding `Changed<Node>` and Taffy
+  relayout when wire and selection-box rects are unchanged.
+- `EdgeHitbox::within_aabb` and zero-allocation `EdgeHitbox::distance` (`components.rs`, `interaction.rs`):
+  `EdgeHitbox::distance` now iterates the 32 cubic Bézier segments on the stack without allocating a `Vec<Vec2>`, and
+  `pick_edges` filters edges by control-point AABB (`within_aabb`) before checking canvas ownership or curve distance.
+- `geometry::measure_ports` and `geometry::update_edge_geometry` (`geometry.rs`): `measure_ports` uses a `1e-4` squared
+  distance threshold (`0.01` px) when comparing `PortAnchor` positions and offsets so 1-ULP float roundoff during
+  canvas pan/zoom does not mark `Changed<PortAnchor>` on every port; `update_edge_geometry` now updates `EdgeGeometry`
+  in place (`set_if_neq`) and only recomputes edges that are lifted, newly added/re-pointed, or connected to a changed
+  port or moved node.
+- `GraphQuery::nodes_in` (`query.rs`): stops descending once a `GraphNode` entity is reached instead of walking all
+  internal UI descendants of every node.
+

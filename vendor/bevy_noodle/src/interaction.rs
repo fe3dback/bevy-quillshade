@@ -818,9 +818,10 @@ fn pick_edges(
             let (computed, transform) = contents.get(graph.content_of(canvas)?).ok()?;
             let local = transform.inverse().transform_point2(point) * computed.inverse_scale_factor();
             let min_radius = MIN_RADIUS / transform.matrix2.x_axis.length().max(1e-6);
-            let edges = hitboxes
-                .iter()
-                .filter(|(edge, h)| (below_too || !h.below_nodes) && graph.canvas_of(*edge) == Some(canvas));
+            let edges = hitboxes.iter().filter(|(edge, h)| {
+                let radius = h.radius.max(min_radius);
+                (below_too || !h.below_nodes) && h.within_aabb(local, radius) && graph.canvas_of(*edge) == Some(canvas)
+            });
             let distances = edges.map(|(edge, h)| (edge, h.distance(local) / h.radius.max(min_radius)));
             let (edge, _) = distances.filter(|(_, d)| *d <= 1.0).min_by(|a, b| a.1.total_cmp(&b.1))?;
             Some((edge, local))

@@ -6,7 +6,7 @@
 //! active, a "Tools" pane of its tools replaces both ([`left_panes`]). Rows come from a [`TreeSource`] and carry a
 //! [`TreeRow`]; what clicks, menus and drops do is decided in [`tree`].
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use bevy::feathers::controls::{ButtonVariant, FeathersButton};
 use bevy::prelude::*;
@@ -162,18 +162,20 @@ fn redraw(
         let list = asset_rows(&editor).into_iter().filter(|(_, (_, error))| *error).map(|(r, _)| r).collect();
         *errors = Some((editor.ui.log, tree, list));
     }
-    let key = (
-        editor.ui.browser,
-        tree,
-        editor.tab().and_then(Tab::owner).cloned(),
-        errors.as_ref().map(|(_, _, e)| e.clone()).unwrap_or_default(),
-        editor.tabs.iter().map(|t| t.doc().is_dirty()).collect(),
-    );
-    if last.as_ref() == Some(&key) {
+    let active_owner = editor.tab().and_then(Tab::owner);
+    let err_slice = errors.as_ref().map_or(&[][..], |(_, _, e)| e.as_slice());
+    let dirty_iter = || editor.tabs.iter().map(|t| t.doc().is_dirty());
+    if let Some((last_browser, last_tree, last_owner, last_errors, last_dirty)) = last.as_ref()
+        && *last_browser == editor.ui.browser
+        && *last_tree == tree
+        && last_owner.as_ref() == active_owner
+        && last_errors.as_slice() == err_slice
+        && last_dirty.iter().copied().eq(dirty_iter())
+    {
         return;
     }
     let (Ok(body), Ok(game_body)) = (body.single(), game_body.single()) else { return };
-    *last = Some(key);
+    *last = Some((editor.ui.browser, tree, active_owner.cloned(), err_slice.to_vec(), dirty_iter().collect()));
     commands.entity(body).despawn_children();
     commands.entity(game_body).despawn_children();
     if editor.project.is_none() {
@@ -239,6 +241,8 @@ fn draw_tree(
 ) {
     let tree = source.id();
     let active = editor.tab().and_then(Tab::owner);
+    let dirty_owners: BTreeSet<&AssetRef> =
+        editor.tabs.iter().filter(|t| t.doc().is_dirty()).filter_map(Tab::owner).collect();
     let file = IconRef::from(IconId::File);
     for (depth, item) in source.rows(editor) {
         let label = tree::row_label(tree, &item);
@@ -254,11 +258,7 @@ fn draw_tree(
             }
             TreeItem::Asset(r) => {
                 let (icon, error) = assets.get(r).copied().unwrap_or((file, false));
-                let state = RowState {
-                    active: active == Some(r),
-                    error,
-                    dirty: editor.tabs.iter().any(|t| t.owner() == Some(r) && t.doc().is_dirty()),
-                };
+                let state = RowState { active: active == Some(r), error, dirty: dirty_owners.contains(r) };
                 (row_icons(None, icon), state)
             }
             TreeItem::GameFile(_) => (row_icons(None, IconId::Image), RowState::default()),

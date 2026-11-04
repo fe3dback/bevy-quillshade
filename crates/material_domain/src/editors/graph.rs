@@ -22,7 +22,7 @@ use shader_project::resolve::ref_type;
 use shader_project::{AssetId, AssetType, Project, assets, ops};
 
 use super::{StatusCtx, StatusInfo};
-use crate::doc::{Doc, node_signature_with, route_declarations};
+use crate::doc::Doc;
 use crate::doc_kind::{DocCtx, TabDoc, asset_title, io_error, project_of};
 use crate::graph_domain::MaterialGraph;
 use crate::inline::{Inline, inline_for_param, inline_for_pin};
@@ -379,9 +379,11 @@ pub(crate) fn node_subpanes(editor: &Editor, id: &str) -> Vec<Box<dyn Scene>> {
         node.push(Box::new(button(label, open, false)));
     }
     out.push(subpane_box("Node", node));
-    let params = editor.domains.material().registry.resolved_params(&n.kind, &n.params);
+    let m = editor.domains.material();
+    let analysis = d.analysis(&editor.asset_index, &m.registry, &m.functions, &m.features);
+    let params = m.registry.resolved_params(&n.kind, &n.params);
     let choices = Choices {
-        routes: route_declarations(&view, &editor.domains.material().registry),
+        routes: analysis.routes.clone(),
         slots: gradient_slots(editor, &def.params(), &params),
         ..Choices::default()
     };
@@ -457,19 +459,12 @@ pub(crate) fn node_subpanes(editor: &Editor, id: &str) -> Vec<Box<dyn Scene>> {
     if !rows.is_empty() {
         out.push(subpane_box("Parameters", rows));
     }
-    if let Some(sig) = node_signature_with(
-        &view,
-        id,
-        &editor.domains.material().registry,
-        &editor.domains.material().functions,
-        &editor.domains.material().features,
-        &d.id.path,
-    ) {
+    if let Some(sig) = analysis.signatures.get(id) {
         let mut rows: Vec<Box<dyn Scene>> = Vec::new();
         // A usage's input is the declaration's, never a value of its own.
         let inputs = if def.role() == NodeRole::RouteUsage { &[][..] } else { &sig.inputs[..] };
         for pin in inputs {
-            if view.edge_into(id, &pin.id).is_some() || pin.implicit.is_some() {
+            if analysis.has_edge_into(id, &pin.id) || pin.implicit.is_some() {
                 continue;
             }
             let Some(kind) = pin_kind(pin.ty) else { continue };

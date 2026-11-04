@@ -4,6 +4,8 @@
 //! Pure data, no Bevy: the gradients view redraws from [`GradientsDoc::collection`] when [`GradientsDoc::revision`]
 //! changes.
 
+use std::sync::{Mutex, PoisonError};
+
 use shader_graph_core::gradient::{GradientCollection, MAX_STOPS, Slot, Stop};
 use shader_project::AssetId;
 
@@ -49,6 +51,41 @@ impl GradientSel {
     }
 }
 
+#[derive(Clone)]
+struct DirtyState {
+    saved_stamp: (usize, usize),
+    saved_collection: GradientCollection,
+    last_check: Option<(u64, bool)>,
+}
+
+struct DirtyCache(Mutex<DirtyState>);
+
+impl DirtyCache {
+    fn new(saved: &str, saved_collection: GradientCollection, revision: u64) -> Self {
+        DirtyCache(Mutex::new(DirtyState {
+            saved_stamp: (saved.as_ptr() as usize, saved.len()),
+            saved_collection,
+            last_check: Some((revision, false)),
+        }))
+    }
+
+    fn get(&self) -> std::sync::MutexGuard<'_, DirtyState> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+impl Clone for DirtyCache {
+    fn clone(&self) -> Self {
+        DirtyCache(Mutex::new(self.get().clone()))
+    }
+}
+
+impl std::fmt::Debug for DirtyCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DirtyCache")
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct GradientsDoc {
     pub id: AssetId,
@@ -64,11 +101,15 @@ pub struct GradientsDoc {
     pub selection: Option<GradientSel>,
     /// Bumped on every change the view shows (collection, slot, selection).
     pub revision: u64,
+    dirty_cache: DirtyCache,
 }
 
 impl GradientsDoc {
     pub fn new(id: AssetId, collection: GradientCollection) -> Self {
-        let saved = collection.to_ron();
+        let mut saved_collection = collection.clone();
+        saved_collection.normalize();
+        let saved = saved_collection.to_ron();
+        let dirty_cache = DirtyCache::new(&saved, saved_collection, 1);
         GradientsDoc {
             aref: id.to_ref(),
             id,
@@ -78,15 +119,46 @@ impl GradientsDoc {
             slot: 0,
             selection: None,
             revision: 1,
+            dirty_cache,
         }
     }
 
     pub fn is_dirty(&self) -> bool {
-        self.collection.to_ron() != self.saved
+        let stamp = (self.saved.as_ptr() as usize, self.saved.len());
+        let mut state = self.dirty_cache.get();
+        if stamp == state.saved_stamp {
+            if let Some((rev, dirty)) = state.last_check
+                && rev == self.revision
+            {
+                return dirty;
+            }
+            let dirty = self.collection != state.saved_collection;
+            state.last_check = Some((self.revision, dirty));
+            return dirty;
+        }
+        let dirty = self.collection.to_ron() != self.saved;
+        if !dirty {
+            let mut saved_collection = self.collection.clone();
+            saved_collection.normalize();
+            state.saved_stamp = stamp;
+            state.saved_collection = saved_collection;
+            state.last_check = Some((self.revision, false));
+        } else if let Ok(parsed) = GradientCollection::from_ron(&self.saved) {
+            state.saved_stamp = stamp;
+            state.saved_collection = parsed;
+            state.last_check = Some((self.revision, true));
+        }
+        dirty
     }
 
     pub fn mark_saved(&mut self) {
-        self.saved = self.collection.to_ron();
+        let mut saved_collection = self.collection.clone();
+        saved_collection.normalize();
+        self.saved = saved_collection.to_ron();
+        let mut state = self.dirty_cache.get();
+        state.saved_stamp = (self.saved.as_ptr() as usize, self.saved.len());
+        state.saved_collection = saved_collection;
+        state.last_check = Some((self.revision, false));
     }
 
     /// The selected slot (`None` only for a collection without slots, which never loads).

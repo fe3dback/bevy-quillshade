@@ -6,14 +6,14 @@
 //! hand); everything that *shows* them — titles, signatures, previews, properties, "open referenced asset" — reads
 //! [`Doc::resolved`], the same graph with every known UUID replaced by the target's current path.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use project_core::asset_index::AssetIndex;
 
 use shader_graph_core::consts::{GlobalConsts, NoConsts};
 use shader_graph_core::features::{FeatureLookup, FeatureTable, NoFeatures};
-use shader_graph_core::ir::{with_routes, would_create_cycle};
 use shader_graph_core::model::{Asset, Edge, Frame, Node, NodeId, Preview, new_node_id};
 use shader_graph_core::registry::{
     FUNCTION_PREFIX, FunctionLookup, NoCurves, NoGradients, NoTextures, NodeRole, ParamKind, ROUTE_PARAM, Registry,
@@ -52,6 +52,10 @@ pub struct Doc {
     pub enclosed_frames: BTreeSet<String>,
     /// Bumped on every model change; the canvas rebuilds when it differs.
     pub revision: u64,
+    /// Bumped when an edit may affect [`Doc::analysis`] (topology, node kinds/params, or pin types).
+    pub analysis_revision: u64,
+    /// Bumped when an edit may affect shader validation or code generation.
+    pub validation_revision: u64,
     /// The generated files were written from this unsaved document (a preview toggle, decision 0022): closing it
     /// unsaved regenerates the asset from disk.
     pub regen_from_memory: bool,
@@ -61,8 +65,14 @@ pub struct Doc {
     /// [`Doc::reload`] dropped unsaved edits the generated files were written from (decision 0022): the material
     /// regenerates from disk (`Editor::material_after_apply`).
     pub restore_from_disk: bool,
+    /// True while a continuous component scrub (`SetComponent` with `is_final: false`) is in progress.
+    pub scrubbing: bool,
     /// [`Doc::resolved`]'s last result.
     resolved: ResolvedCache,
+    /// [`Doc::analysis`]'s last result.
+    analysis: AnalysisCache,
+    /// Cached dirty state keyed by [`Doc::revision`] and [`Doc::saved`]'s buffer stamp.
+    dirty_cache: DirtyCache,
 }
 
 /// The last resolved view of a [`Doc`], keyed by `(revision, index generation)`: every model change bumps the
@@ -88,9 +98,90 @@ impl std::fmt::Debug for ResolvedCache {
     }
 }
 
+#[derive(Clone)]
+struct AnalysisEntry {
+    revision: u64,
+    index_gen: u64,
+    path: String,
+    user_defs: Vec<(String, Option<usize>)>,
+    functions_read: Vec<(String, Option<FunctionSig>)>,
+    features_read: Vec<(String, Option<FeatureTable>)>,
+    analysis: Arc<GraphAnalysis>,
+}
+
+#[derive(Default)]
+struct AnalysisCache(Mutex<Option<AnalysisEntry>>);
+
+impl AnalysisCache {
+    fn get(&self) -> std::sync::MutexGuard<'_, Option<AnalysisEntry>> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+impl Clone for AnalysisCache {
+    fn clone(&self) -> Self {
+        AnalysisCache(Mutex::new(self.get().clone()))
+    }
+}
+
+impl std::fmt::Debug for AnalysisCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AnalysisCache")
+    }
+}
+
+#[derive(Clone)]
+struct DirtyState {
+    saved_stamp: (usize, usize),
+    saved_asset: Asset,
+    last_check: Option<(u64, bool)>,
+}
+
+struct DirtyCache(Mutex<DirtyState>);
+
+impl DirtyCache {
+    fn new(saved: &str, saved_asset: Asset, revision: u64, dirty: bool) -> Self {
+        DirtyCache(Mutex::new(DirtyState {
+            saved_stamp: (saved.as_ptr() as usize, saved.len()),
+            saved_asset,
+            last_check: Some((revision, dirty)),
+        }))
+    }
+
+    fn get(&self) -> std::sync::MutexGuard<'_, DirtyState> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+impl Clone for DirtyCache {
+    fn clone(&self) -> Self {
+        DirtyCache(Mutex::new(self.get().clone()))
+    }
+}
+
+impl std::fmt::Debug for DirtyCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DirtyCache")
+    }
+}
+
+fn is_asset_normalized(asset: &Asset) -> bool {
+    asset.nodes.values().all(|n| !n.kind.starts_with("param::") || !n.params.contains_key("order"))
+        && asset.edges.iter().all(|e| asset.nodes.contains_key(&e.from.0) && asset.nodes.contains_key(&e.to.0))
+        && asset.edges.windows(2).all(|w| (&w[0].to, &w[0].from) < (&w[1].to, &w[1].from))
+        && asset.comments.windows(2).all(|w| w[0].id <= w[1].id)
+        && asset
+            .comments
+            .iter()
+            .all(|c| c.nodes.iter().all(|n| asset.nodes.contains_key(n)) && c.nodes.windows(2).all(|w| w[0] < w[1]))
+}
+
 impl Doc {
     pub fn new(id: AssetId, asset: Asset) -> Self {
-        let saved = asset.to_ron();
+        let mut saved_asset = asset.clone();
+        saved_asset.normalize();
+        let saved = saved_asset.to_ron();
+        let dirty_cache = DirtyCache::new(&saved, saved_asset, 1, false);
         let asset_preview = asset.preview.clone();
         Doc {
             aref: id.to_ref(),
@@ -102,11 +193,65 @@ impl Doc {
             selected_frame: None,
             enclosed_frames: BTreeSet::new(),
             revision: 1,
+            analysis_revision: 1,
+            validation_revision: 1,
             regen_from_memory: false,
             preview_seen: asset_preview,
             restore_from_disk: false,
+            scrubbing: false,
             resolved: ResolvedCache::default(),
+            analysis: AnalysisCache::default(),
+            dirty_cache,
         }
+    }
+
+    /// Cached structural and signature analysis of the resolved graph.
+    pub fn analysis(
+        &self,
+        index: &AssetIndex,
+        registry: &Registry,
+        functions: &dyn FunctionLookup,
+        features: &dyn FeatureLookup,
+    ) -> Arc<GraphAnalysis> {
+        let index_gen = index.generation();
+        {
+            let cache = self.analysis.get();
+            if let Some(entry) = &*cache
+                && entry.revision == self.analysis_revision
+                && entry.index_gen == index_gen
+                && entry.path == self.id.path
+                && entry
+                    .user_defs
+                    .iter()
+                    .all(|(k, ptr)| registry.get(k).map(|d| Arc::as_ptr(d) as *const () as usize) == *ptr)
+                && entry.functions_read.iter().all(|(k, v)| functions.function(k) == v.as_ref())
+                && entry.features_read.iter().all(|(k, v)| features.feature_table(k) == v.as_ref())
+            {
+                return entry.analysis.clone();
+            }
+        }
+        let view = self.resolved(index, registry);
+        let tracked_fns = TrackingFunctions::new(functions);
+        let tracked_feats = TrackingFeatures::new(features);
+        let analysis = Arc::new(GraphAnalysis::compute(&view, registry, &tracked_fns, &tracked_feats, &self.id.path));
+        let mut user_defs = Vec::new();
+        let mut seen_kinds = HashSet::new();
+        for n in view.nodes.values() {
+            if n.kind.starts_with("user::") && seen_kinds.insert(n.kind.as_str()) {
+                user_defs.push((n.kind.clone(), registry.get(&n.kind).map(|d| Arc::as_ptr(d) as *const () as usize)));
+            }
+        }
+        let entry = AnalysisEntry {
+            revision: self.analysis_revision,
+            index_gen,
+            path: self.id.path.clone(),
+            user_defs,
+            functions_read: tracked_fns.into_read(),
+            features_read: tracked_feats.into_read(),
+            analysis: analysis.clone(),
+        };
+        *self.analysis.get() = Some(entry);
+        analysis
     }
 
     /// The resolved view of [`Doc::asset`] (ADR 0047 §4): function and user node kinds and reference params with
@@ -128,7 +273,37 @@ impl Doc {
     }
 
     pub fn is_dirty(&self) -> bool {
-        self.asset.to_ron() != self.saved
+        let stamp = (self.saved.as_ptr() as usize, self.saved.len());
+        let mut state = self.dirty_cache.get();
+        if stamp == state.saved_stamp {
+            if let Some((rev, dirty)) = state.last_check
+                && rev == self.revision
+            {
+                return dirty;
+            }
+            let dirty = if is_asset_normalized(&self.asset) {
+                self.asset != state.saved_asset
+            } else {
+                let mut norm = self.asset.clone();
+                norm.normalize();
+                norm != state.saved_asset
+            };
+            state.last_check = Some((self.revision, dirty));
+            return dirty;
+        }
+        let dirty = self.asset.to_ron() != self.saved;
+        if !dirty {
+            let mut saved_asset = self.asset.clone();
+            saved_asset.normalize();
+            state.saved_stamp = stamp;
+            state.saved_asset = saved_asset;
+            state.last_check = Some((self.revision, false));
+        } else if let Ok(parsed) = Asset::from_ron(&self.saved) {
+            state.saved_stamp = stamp;
+            state.saved_asset = parsed;
+            state.last_check = Some((self.revision, true));
+        }
+        dirty
     }
 
     /// Replaces the node selection; the frames a box enclosed with the old one are forgotten. Every direct write of
@@ -139,8 +314,14 @@ impl Doc {
     }
 
     pub fn mark_saved(&mut self) {
-        self.saved = self.asset.to_ron();
+        let mut saved_asset = self.asset.clone();
+        saved_asset.normalize();
+        self.saved = saved_asset.to_ron();
         self.regen_from_memory = false;
+        let mut state = self.dirty_cache.get();
+        state.saved_stamp = (self.saved.as_ptr() as usize, self.saved.len());
+        state.saved_asset = saved_asset;
+        state.last_check = Some((self.revision, false));
     }
 
     /// Applies `f` as one undoable step; returns its result. No-op edits are not recorded.
@@ -150,6 +331,19 @@ impl Doc {
 
     /// Like [`Doc::edit`]; consecutive edits with the same `key` share one undo step.
     pub fn edit_merge<R>(&mut self, key: Option<MergeKey>, f: impl FnOnce(&mut Asset) -> R) -> R {
+        let mut f = Some(f);
+        self.edit_with(key, true, true, |a| (f.take().expect("called once"))(a))
+    }
+
+    /// Applies `f` as one undoable step, optionally skipping [`Doc::analysis_revision`] and/or
+    /// [`Doc::validation_revision`] bumps when the edit cannot affect graph analysis or shader validation.
+    pub fn edit_with<R>(
+        &mut self,
+        key: Option<MergeKey>,
+        affects_analysis: bool,
+        affects_validation: bool,
+        mut f: impl FnMut(&mut Asset) -> R,
+    ) -> R {
         let before = self.asset.clone();
         let r = f(&mut self.asset);
         self.asset.normalize();
@@ -158,7 +352,22 @@ impl Doc {
         let changed = self.asset != before;
         self.history.record(changed.then_some(before), key);
         if changed {
+            let old_rev = self.revision;
             self.revision += 1;
+            if affects_analysis {
+                self.analysis_revision += 1;
+            } else if let Some((k, view)) = &mut *self.resolved.get()
+                && k.0 == old_rev
+            {
+                let v = Arc::make_mut(view);
+                f(v);
+                v.normalize();
+                v.clear_dangling_preview();
+                k.0 = self.revision;
+            }
+            if affects_validation {
+                self.validation_revision += 1;
+            }
             self.selection.retain(|n| self.asset.nodes.contains_key(n));
         }
         r
@@ -166,6 +375,7 @@ impl Doc {
 
     /// Ends the current merge group (e.g. a number drag finished).
     pub fn end_merge(&mut self) {
+        self.scrubbing = false;
         self.history.end_merge();
     }
 
@@ -194,7 +404,10 @@ impl Doc {
     }
 
     fn after_history(&mut self) {
+        self.scrubbing = false;
         self.revision += 1;
+        self.analysis_revision += 1;
+        self.validation_revision += 1;
         self.selection.retain(|n| self.asset.nodes.contains_key(n));
     }
 
@@ -343,9 +556,9 @@ impl Doc {
         // Node positions are top-left corners: 60 px left of them and 100 px above (room for the title).
         let rect = around.map(|(x0, y0, x1, y1)| (x0 - 60.0, y0 - 100.0, x1 - x0 + 320.0, y1 - y0 + 320.0));
         let fid = id.clone();
-        self.edit(|a| {
+        self.edit_with(None, false, false, |a| {
             a.comments.push(Frame {
-                id: fid,
+                id: fid.clone(),
                 title: title.into(),
                 rect: rect.unwrap_or((at.0, at.1, EMPTY_FRAME_SIZE.0, EMPTY_FRAME_SIZE.1)),
                 nodes: nodes.iter().cloned().collect(),
@@ -518,6 +731,398 @@ pub fn route_declarations(asset: &Asset, registry: &Registry) -> Vec<(NodeId, St
     out
 }
 
+struct TrackingFunctions<'a> {
+    inner: &'a dyn FunctionLookup,
+    seen: RefCell<BTreeMap<String, Option<FunctionSig>>>,
+}
+
+impl<'a> TrackingFunctions<'a> {
+    fn new(inner: &'a dyn FunctionLookup) -> Self {
+        Self { inner, seen: RefCell::new(BTreeMap::new()) }
+    }
+
+    fn into_read(self) -> Vec<(String, Option<FunctionSig>)> {
+        self.seen.into_inner().into_iter().collect()
+    }
+}
+
+impl FunctionLookup for TrackingFunctions<'_> {
+    fn function(&self, path: &str) -> Option<&FunctionSig> {
+        let res = self.inner.function(path);
+        let mut seen = self.seen.borrow_mut();
+        if !seen.contains_key(path) {
+            seen.insert(path.to_string(), res.cloned());
+        }
+        res
+    }
+}
+
+struct TrackingFeatures<'a> {
+    inner: &'a dyn FeatureLookup,
+    seen: RefCell<BTreeMap<String, Option<FeatureTable>>>,
+}
+
+impl<'a> TrackingFeatures<'a> {
+    fn new(inner: &'a dyn FeatureLookup) -> Self {
+        Self { inner, seen: RefCell::new(BTreeMap::new()) }
+    }
+
+    fn into_read(self) -> Vec<(String, Option<FeatureTable>)> {
+        self.seen.into_inner().into_iter().collect()
+    }
+}
+
+impl FeatureLookup for TrackingFeatures<'_> {
+    fn feature_table(&self, path: &str) -> Option<&FeatureTable> {
+        let res = self.inner.feature_table(path);
+        let mut seen = self.seen.borrow_mut();
+        if !seen.contains_key(path) {
+            seen.insert(path.to_string(), res.cloned());
+        }
+        res
+    }
+}
+
+/// Cached structural and signature analysis of a resolved [`Asset`]:
+/// route declarations, incoming edge index (`(node, pin) -> (from_node, from_pin)`),
+/// forward adjacency list for cycle detection, and every node's resolved [`Signature`].
+#[derive(Debug, Clone, Default)]
+pub struct GraphAnalysis {
+    pub routes: Vec<(NodeId, String)>,
+    pub edge_into: HashMap<(String, String), (String, String)>,
+    pub adj: HashMap<String, Vec<String>>,
+    pub signatures: HashMap<String, Signature>,
+}
+
+impl GraphAnalysis {
+    pub fn compute(
+        asset: &Asset,
+        registry: &Registry,
+        functions: &dyn FunctionLookup,
+        features: &dyn FeatureLookup,
+        path: &str,
+    ) -> Self {
+        let routes = route_declarations(asset, registry);
+        let cap = asset.edges.len() + routes.len();
+        let mut edge_into: HashMap<(String, String), (String, String)> = HashMap::with_capacity(cap);
+        let mut incoming: HashMap<&str, Vec<(&str, &str, &str)>> = HashMap::with_capacity(asset.nodes.len());
+        let mut adj: HashMap<String, Vec<String>> = HashMap::with_capacity(asset.nodes.len());
+
+        for e in &asset.edges {
+            edge_into.insert((e.to.0.clone(), e.to.1.clone()), (e.from.0.clone(), e.from.1.clone()));
+            incoming.entry(e.to.0.as_str()).or_default().push((e.to.1.as_str(), e.from.0.as_str(), e.from.1.as_str()));
+            adj.entry(e.from.0.clone()).or_default().push(e.to.0.clone());
+        }
+
+        let is_role = |n: &Node, r| registry.get(&n.kind).is_some_and(|d| d.role() == r);
+        for (id, node) in &asset.nodes {
+            if is_role(node, NodeRole::RouteUsage)
+                && !edge_into.contains_key(&(id.clone(), "in".to_string()))
+                && let Some(decl) = node.params.get(ROUTE_PARAM).map(Value::as_str).filter(|d| {
+                    !d.is_empty() && asset.nodes.get(*d).is_some_and(|n| is_role(n, NodeRole::RouteDeclaration))
+                })
+            {
+                edge_into.insert((id.clone(), "in".to_string()), (decl.to_string(), "out".to_string()));
+                incoming.entry(id.as_str()).or_default().push(("in", decl, "out"));
+                adj.entry(decl.to_string()).or_default().push(id.clone());
+            }
+        }
+
+        let env = SigEvalEnv { asset, registry, functions, features, path };
+        let mut memo: HashMap<&str, Option<Signature>> = HashMap::with_capacity(asset.nodes.len());
+        for id in asset.nodes.keys() {
+            let _ = eval_signature_indexed(&env, id, &incoming, &mut memo, 0);
+        }
+        let signatures = memo.into_iter().filter_map(|(k, v)| Some((k.to_string(), v?))).collect();
+        GraphAnalysis { routes, edge_into, adj, signatures }
+    }
+
+    pub fn has_edge_into(&self, node: &str, pin: &str) -> bool {
+        self.edge_into.contains_key(&(node.to_string(), pin.to_string()))
+    }
+
+    pub fn edge_into(&self, node: &str, pin: &str) -> Option<(&str, &str)> {
+        self.edge_into.get(&(node.to_string(), pin.to_string())).map(|(n, p)| (n.as_str(), p.as_str()))
+    }
+
+    pub fn output_type(&self, from: (&str, &str)) -> Option<PinType> {
+        self.signatures.get(from.0)?.output(from.1).map(|p| p.ty)
+    }
+
+    pub fn would_create_cycle(&self, from_node: &str, to_node: &str) -> bool {
+        if from_node == to_node {
+            return true;
+        }
+        let mut stack = vec![to_node];
+        let mut seen = HashSet::new();
+        while let Some(n) = stack.pop() {
+            if n == from_node {
+                return true;
+            }
+            if !seen.insert(n) {
+                continue;
+            }
+            if let Some(nexts) = self.adj.get(n) {
+                for next in nexts {
+                    stack.push(next.as_str());
+                }
+            }
+        }
+        false
+    }
+
+    pub fn connection_error(&self, from: (&str, &str), to: (&str, &str)) -> Option<String> {
+        if self.would_create_cycle(from.0, to.0) {
+            return Some("would create a cycle (E002)".into());
+        }
+        let from_ty = self.output_type(from)?;
+        let sig = self.signatures.get(to.0)?;
+        let pin = sig.input(to.1)?;
+        let target = if pin.poly && pin.attributes {
+            let attrs = PinType::MaterialAttributesPbr;
+            let others: Vec<PinType> = sig
+                .inputs
+                .iter()
+                .filter(|p| p.attributes && p.id != to.1)
+                .filter_map(|p| self.edge_into(to.0, &p.id))
+                .filter_map(|(fn_id, fp_id)| self.output_type((fn_id, fp_id)))
+                .collect();
+            let clash = if from_ty == attrs {
+                others.into_iter().find(|t| *t != attrs)
+            } else if from_ty.is_numeric() {
+                others.into_iter().find(|t| *t == attrs)
+            } else {
+                Some(pin.ty)
+            };
+            clash?
+        } else if pin.poly {
+            if from_ty.is_numeric() { return None } else { pin.ty }
+        } else {
+            pin.ty
+        };
+        match conversion(from_ty, target) {
+            Some(_) => None,
+            None => Some(format!("cannot connect {} to {} (E003)", from_ty.label(), target.label())),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct SigEvalEnv<'a> {
+    asset: &'a Asset,
+    registry: &'a Registry,
+    functions: &'a dyn FunctionLookup,
+    features: &'a dyn FeatureLookup,
+    path: &'a str,
+}
+
+fn eval_signature_indexed<'a>(
+    ctx: &SigEvalEnv<'a>,
+    id: &'a str,
+    incoming: &HashMap<&'a str, Vec<(&'a str, &'a str, &'a str)>>,
+    memo: &mut HashMap<&'a str, Option<Signature>>,
+    depth: u32,
+) -> Option<Signature> {
+    if let Some(cached) = memo.get(id) {
+        return cached.clone();
+    }
+    let Some((node_key, node)) = ctx.asset.nodes.get_key_value(id) else {
+        memo.insert(id, None);
+        return None;
+    };
+    let id_ref = node_key.as_str();
+    let Some(def) = ctx.registry.get(&node.kind) else {
+        memo.insert(id_ref, None);
+        return None;
+    };
+    let params = ctx.registry.resolved_params(&node.kind, &node.params);
+    let mut connected = BTreeMap::new();
+    if depth <= 64
+        && let Some(inc) = incoming.get(id_ref)
+    {
+        for &(to_pin, from_node, from_pin) in inc {
+            if let Some(src_sig) = eval_signature_indexed(ctx, from_node, incoming, memo, depth + 1)
+                && let Some(p) = src_sig.output(from_pin)
+            {
+                connected.insert(to_pin.to_string(), p.ty);
+            }
+        }
+    }
+    let env = Env {
+        asset_kind: ctx.asset.kind,
+        asset_path: ctx.path,
+        functions: ctx.functions,
+        curves: &NoCurves,
+        consts: &NoConsts,
+        textures: &NoTextures,
+        gradients: &NoGradients,
+        features: ctx.features,
+        compile_overrides: &BTreeMap::new(),
+        feature_overrides: &BTreeMap::new(),
+    };
+    let sig = def.signature(&SigCtx {
+        node_id: id_ref,
+        kind: &node.kind,
+        params: &params,
+        connected: &connected,
+        input_values: &node.inputs,
+        env: &env,
+    });
+    if depth <= 64 {
+        memo.insert(id_ref, Some(sig.clone()));
+    }
+    Some(sig)
+}
+
+fn eval_signature_memo<'a>(
+    ctx: &SigEvalEnv<'a>,
+    id: &'a str,
+    edges_sorted: bool,
+    memo: &mut HashMap<&'a str, Option<Signature>>,
+    depth: u32,
+) -> Option<Signature> {
+    if let Some(cached) = memo.get(id) {
+        return cached.clone();
+    }
+    let Some((node_key, node)) = ctx.asset.nodes.get_key_value(id) else {
+        memo.insert(id, None);
+        return None;
+    };
+    let id_ref = node_key.as_str();
+    let Some(def) = ctx.registry.get(&node.kind) else {
+        memo.insert(id_ref, None);
+        return None;
+    };
+    let params = ctx.registry.resolved_params(&node.kind, &node.params);
+    let mut connected = BTreeMap::new();
+    if depth <= 64 {
+        let mut has_in_edge = false;
+        let eval_edge = |e: &'a Edge,
+                         connected: &mut BTreeMap<String, PinType>,
+                         has_in_edge: &mut bool,
+                         memo: &mut HashMap<&'a str, Option<Signature>>| {
+            if e.to.1 == "in" {
+                *has_in_edge = true;
+            }
+            if let Some(src_sig) = eval_signature_memo(ctx, &e.from.0, edges_sorted, memo, depth + 1)
+                && let Some(p) = src_sig.output(&e.from.1)
+            {
+                connected.insert(e.to.1.clone(), p.ty);
+            }
+        };
+        if edges_sorted {
+            let start = ctx.asset.edges.partition_point(|e| e.to.0.as_str() < id_ref);
+            for e in &ctx.asset.edges[start..] {
+                if e.to.0.as_str() != id_ref {
+                    break;
+                }
+                eval_edge(e, &mut connected, &mut has_in_edge, &mut *memo);
+            }
+        } else {
+            for e in ctx.asset.edges.iter().filter(|e| e.to.0 == id_ref) {
+                eval_edge(e, &mut connected, &mut has_in_edge, &mut *memo);
+            }
+        }
+        if !has_in_edge
+            && def.role() == NodeRole::RouteUsage
+            && let Some(decl) = node.params.get(ROUTE_PARAM).map(Value::as_str).filter(|d| !d.is_empty())
+            && ctx
+                .asset
+                .nodes
+                .get(decl)
+                .is_some_and(|n| ctx.registry.get(&n.kind).is_some_and(|d| d.role() == NodeRole::RouteDeclaration))
+            && let Some(src_sig) = eval_signature_memo(ctx, decl, edges_sorted, memo, depth + 1)
+            && let Some(p) = src_sig.output("out")
+        {
+            connected.insert("in".to_string(), p.ty);
+        }
+    }
+    let env = Env {
+        asset_kind: ctx.asset.kind,
+        asset_path: ctx.path,
+        functions: ctx.functions,
+        curves: &NoCurves,
+        consts: &NoConsts,
+        textures: &NoTextures,
+        gradients: &NoGradients,
+        features: ctx.features,
+        compile_overrides: &BTreeMap::new(),
+        feature_overrides: &BTreeMap::new(),
+    };
+    let sig = def.signature(&SigCtx {
+        node_id: id_ref,
+        kind: &node.kind,
+        params: &params,
+        connected: &connected,
+        input_values: &node.inputs,
+        env: &env,
+    });
+    if depth <= 64 {
+        memo.insert(id_ref, Some(sig.clone()));
+    }
+    Some(sig)
+}
+
+fn routed_edge_into<'a>(
+    asset: &'a Asset,
+    node_id: &str,
+    pin: &str,
+    edges_sorted: bool,
+    registry: &Registry,
+) -> Option<(&'a str, &'a str)> {
+    if edges_sorted {
+        let start = asset.edges.partition_point(|e| e.to.0.as_str() < node_id);
+        for e in &asset.edges[start..] {
+            if e.to.0.as_str() != node_id {
+                break;
+            }
+            if e.to.1 == pin {
+                return Some((e.from.0.as_str(), e.from.1.as_str()));
+            }
+        }
+    } else if let Some(e) = asset.edge_into(node_id, pin) {
+        return Some((e.from.0.as_str(), e.from.1.as_str()));
+    }
+    if pin == "in"
+        && let Some(node) = asset.nodes.get(node_id)
+        && registry.get(&node.kind).is_some_and(|d| d.role() == NodeRole::RouteUsage)
+        && let Some(decl) = node.params.get(ROUTE_PARAM).map(Value::as_str).filter(|d| !d.is_empty())
+        && asset
+            .nodes
+            .get(decl)
+            .is_some_and(|n| registry.get(&n.kind).is_some_and(|d| d.role() == NodeRole::RouteDeclaration))
+    {
+        return Some((decl, "out"));
+    }
+    None
+}
+
+fn would_create_cycle_routed(asset: &Asset, registry: &Registry, from_node: &str, to_node: &str) -> bool {
+    if from_node == to_node {
+        return true;
+    }
+    let has_route_usage = asset.nodes.values().any(|n| {
+        n.kind == "stdlib::NamedRouteUsage" || registry.get(&n.kind).is_some_and(|d| d.role() == NodeRole::RouteUsage)
+    });
+    let route_edges = if has_route_usage { shader_graph_core::ir::route_edges(asset, registry) } else { Vec::new() };
+    let mut stack = vec![to_node];
+    let mut seen = HashSet::new();
+    while let Some(n) = stack.pop() {
+        if n == from_node {
+            return true;
+        }
+        if !seen.insert(n) {
+            continue;
+        }
+        for e in asset.edges.iter().chain(&route_edges) {
+            if e.from.0 == n {
+                stack.push(e.to.0.as_str());
+            }
+        }
+    }
+    false
+}
+
 /// Typed view of a node for the UI: signature resolved against the current model.
 pub fn node_signature(
     asset: &Asset,
@@ -539,91 +1144,10 @@ pub fn node_signature_with(
     features: &dyn FeatureLookup,
     path: &str,
 ) -> Option<Signature> {
-    let routed = with_routes(asset, registry);
-    let asset = routed.as_ref();
-    let node = asset.nodes.get(id)?;
-    let def = registry.get(&node.kind)?;
-    let params = registry.resolved_params(&node.kind, &node.params);
-    let connected = connected_types(asset, id, registry, functions, features, path, 0);
-    let env = Env {
-        asset_kind: asset.kind,
-        asset_path: path,
-        functions,
-        curves: &NoCurves,
-        consts: &NoConsts,
-        textures: &NoTextures,
-        gradients: &NoGradients,
-        features,
-        compile_overrides: &BTreeMap::new(),
-        feature_overrides: &BTreeMap::new(),
-    };
-    Some(def.signature(&SigCtx {
-        node_id: id,
-        kind: &node.kind,
-        params: &params,
-        connected: &connected,
-        input_values: &node.inputs,
-        env: &env,
-    }))
-}
-
-/// Source types of the connected inputs of `id` (recursive through upstream polymorphic nodes).
-fn connected_types(
-    asset: &Asset,
-    id: &str,
-    registry: &Registry,
-    functions: &dyn FunctionLookup,
-    features: &dyn FeatureLookup,
-    path: &str,
-    depth: u32,
-) -> BTreeMap<String, PinType> {
-    let mut out = BTreeMap::new();
-    if depth > 64 {
-        return out;
-    }
-    for e in asset.edges.iter().filter(|e| e.to.0 == id) {
-        if let Some(t) = output_type(asset, (&e.from.0, &e.from.1), registry, functions, features, path, depth + 1) {
-            out.insert(e.to.1.clone(), t);
-        }
-    }
-    out
-}
-
-fn output_type(
-    asset: &Asset,
-    from: (&str, &str),
-    registry: &Registry,
-    functions: &dyn FunctionLookup,
-    features: &dyn FeatureLookup,
-    path: &str,
-    depth: u32,
-) -> Option<PinType> {
-    let (node, pin) = from;
-    let n = asset.nodes.get(node)?;
-    let def = registry.get(&n.kind)?;
-    let params = registry.resolved_params(&n.kind, &n.params);
-    let connected = connected_types(asset, node, registry, functions, features, path, depth);
-    let env = Env {
-        asset_kind: asset.kind,
-        asset_path: path,
-        functions,
-        curves: &NoCurves,
-        consts: &NoConsts,
-        textures: &NoTextures,
-        gradients: &NoGradients,
-        features,
-        compile_overrides: &BTreeMap::new(),
-        feature_overrides: &BTreeMap::new(),
-    };
-    let sig = def.signature(&SigCtx {
-        node_id: node,
-        kind: &n.kind,
-        params: &params,
-        connected: &connected,
-        input_values: &n.inputs,
-        env: &env,
-    });
-    sig.output(pin).map(|p| p.ty)
+    let edges_sorted = asset.edges.windows(2).all(|w| w[0].to.0 <= w[1].to.0);
+    let env = SigEvalEnv { asset, registry, functions, features, path };
+    let mut memo = HashMap::new();
+    eval_signature_memo(&env, id, edges_sorted, &mut memo, 0)
 }
 
 /// Why a connection is refused (`None` = allowed).
@@ -648,13 +1172,14 @@ pub fn connection_error_with(
     features: &dyn FeatureLookup,
     path: &str,
 ) -> Option<String> {
-    let routed = with_routes(asset, registry);
-    let asset = routed.as_ref();
-    if would_create_cycle(asset, from.0, to.0) {
+    if would_create_cycle_routed(asset, registry, from.0, to.0) {
         return Some("would create a cycle (E002)".into());
     }
-    let from_ty = output_type(asset, from, registry, functions, features, path, 0)?;
-    let sig = node_signature_with(asset, to.0, registry, functions, features, path)?;
+    let edges_sorted = asset.edges.windows(2).all(|w| w[0].to.0 <= w[1].to.0);
+    let env = SigEvalEnv { asset, registry, functions, features, path };
+    let mut memo = HashMap::new();
+    let from_ty = eval_signature_memo(&env, from.0, edges_sorted, &mut memo, 0)?.output(from.1).map(|p| p.ty)?;
+    let sig = eval_signature_memo(&env, to.0, edges_sorted, &mut memo, 0)?;
     let pin = sig.input(to.1)?;
     let target = if pin.poly && pin.attributes {
         // Inputs that also take attributes (Lerp `a`/`b`, decision 0023): attributes and numbers never mix. Only
@@ -664,8 +1189,10 @@ pub fn connection_error_with(
             .inputs
             .iter()
             .filter(|p| p.attributes && p.id != to.1)
-            .filter_map(|p| asset.edge_into(to.0, &p.id))
-            .filter_map(|e| output_type(asset, (&e.from.0, &e.from.1), registry, functions, features, path, 0))
+            .filter_map(|p| routed_edge_into(asset, to.0, &p.id, edges_sorted, registry))
+            .filter_map(|(fn_id, fp_id)| {
+                eval_signature_memo(&env, fn_id, edges_sorted, &mut memo, 0)?.output(fp_id).map(|p| p.ty)
+            })
             .collect();
         let clash = if from_ty == attrs {
             others.into_iter().find(|t| *t != attrs)

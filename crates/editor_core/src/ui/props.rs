@@ -337,13 +337,18 @@ pub fn text_hint(target: impl Into<PropKey>, v: String, hint: &str) -> Box<dyn S
 
 /// Shows each [`Placeholder`] exactly while the text field next to it is empty.
 fn show_placeholders(
+    changed: Query<(), (With<EditableText>, Changed<EditableText>)>,
+    added: Query<(), Added<Placeholder>>,
     mut hints: Query<(&ChildOf, &mut Visibility), With<Placeholder>>,
     children: Query<&Children>,
     texts: Query<&EditableText>,
 ) {
+    if changed.is_empty() && added.is_empty() {
+        return;
+    }
     for (parent, mut vis) in &mut hints {
         let siblings = children.get(parent.parent()).into_iter().flatten();
-        let empty = siblings.filter_map(|c| texts.get(*c).ok()).all(|t| t.value().to_string().is_empty());
+        let empty = siblings.filter_map(|c| texts.get(*c).ok()).all(|t| t.value().chars().next().is_none());
         vis.set_if_neq(if empty { Visibility::Inherited } else { Visibility::Hidden });
     }
 }

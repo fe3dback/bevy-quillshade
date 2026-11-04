@@ -34,6 +34,8 @@ pub struct MaterialState {
     /// Live diagnostics per asset (validation of the in-memory state).
     pub diags: BTreeMap<AssetId, Vec<Diagnostic>>,
     pub project_diags: Vec<Diagnostic>,
+    /// Diagnostics from loading user nodes (`quillshade/material/.nodes/*.ron`), cached across live validations.
+    pub user_node_diags: Vec<Diagnostic>,
     /// E008/E010 from the last real regeneration (not reproduced by dry runs).
     pub(crate) regen_only: BTreeMap<AssetId, Vec<Diagnostic>>,
     /// Line count of each asset's generated `.wesl` (the editor statusbar, design §2.3): taken from what
@@ -41,6 +43,7 @@ pub struct MaterialState {
     pub wesl_lines: HashMap<AssetId, usize>,
     pub bevy: Option<BevySources>,
     pub(crate) validated: Option<Vec<(AssetId, u64)>>,
+    pub(crate) validation_cache: Option<(u64, Vec<(AssetId, u64)>, shader_project::regen::ValidationEnv)>,
     /// A tab of the domain closed (or dropped its edits) since the last `after_apply`: function signatures and
     /// validation follow.
     pub(crate) tabs_closed: bool,
@@ -66,10 +69,12 @@ impl Default for MaterialState {
             features: BTreeMap::new(),
             diags: BTreeMap::new(),
             project_diags: Vec::new(),
+            user_node_diags: Vec::new(),
             regen_only: BTreeMap::new(),
             wesl_lines: HashMap::new(),
             bevy: None,
             validated: None,
+            validation_cache: None,
             tabs_closed: false,
             moves: Vec::new(),
             loaded: 0,

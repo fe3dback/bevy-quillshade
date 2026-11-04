@@ -32,6 +32,33 @@ pub enum Inline {
     Check,
 }
 
+impl Inline {
+    /// Hashes `key` and this editor specification (including `f32::to_bits` for ranges) into `h` for structural change
+    /// detection.
+    pub fn hash_into(self, key: &str, h: &mut impl std::hash::Hasher) {
+        use std::hash::Hash;
+        key.hash(h);
+        match self {
+            Inline::Ranged { min, max } => {
+                0u8.hash(h);
+                min.to_bits().hash(h);
+                max.to_bits().hash(h);
+            }
+            Inline::Number => 1u8.hash(h),
+            Inline::Integer => 2u8.hash(h),
+            Inline::Vector(n) => {
+                3u8.hash(h);
+                n.hash(h);
+            }
+            Inline::Color(n) => {
+                4u8.hash(h);
+                n.hash(h);
+            }
+            Inline::Check => 5u8.hash(h),
+        }
+    }
+}
+
 /// A number editor, [`Inline::Ranged`] when `min < max`.
 fn scalar(min: Option<f32>, max: Option<f32>) -> Inline {
     soft_range(min, max).map_or(Inline::Number, |(min, max)| Inline::Ranged { min, max })

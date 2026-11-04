@@ -1,11 +1,35 @@
 //! Editing state and undo/redo history for a `.features.ron` Game Features table.
 
 use std::collections::BTreeMap;
+use std::sync::{Mutex, PoisonError};
 
 use editor_core::history::{History, MergeKey};
 use project_core::{AssetRef, AssetUuid};
 use shader_graph_core::features::{FeatureEnum, FeatureTable, FeatureVariant};
 use shader_project::AssetId;
+
+#[derive(Clone)]
+struct DirtyState {
+    saved_stamp: (usize, usize),
+    saved_table: FeatureTable,
+    last_check: Option<(u64, bool)>,
+}
+
+struct DirtyCache(Mutex<DirtyState>);
+
+impl DirtyCache {
+    fn new(saved: &str, saved_table: FeatureTable, revision: u64) -> Self {
+        DirtyCache(Mutex::new(DirtyState {
+            saved_stamp: (saved.as_ptr() as usize, saved.len()),
+            saved_table,
+            last_check: Some((revision, false)),
+        }))
+    }
+
+    fn get(&self) -> std::sync::MutexGuard<'_, DirtyState> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
 
 pub struct FeaturesDoc {
     pub aref: AssetRef,
@@ -20,12 +44,14 @@ pub struct FeaturesDoc {
     pub draft_variant_names: BTreeMap<AssetUuid, String>,
     pub form_error: Option<String>,
     history: History<FeatureTable>,
+    dirty_cache: DirtyCache,
 }
 
 impl FeaturesDoc {
     pub fn new(id: AssetId, mut table: FeatureTable) -> Self {
         table.ensure_id();
         let saved = table.to_ron();
+        let dirty_cache = DirtyCache::new(&saved, table.clone(), 0);
         Self {
             aref: id.to_ref(),
             id,
@@ -37,26 +63,53 @@ impl FeaturesDoc {
             draft_variant_names: BTreeMap::new(),
             form_error: None,
             history: History::default(),
+            dirty_cache,
         }
     }
 
     pub fn reload(&mut self, mut table: FeatureTable) {
         table.ensure_id();
-        self.saved = table.to_ron();
         self.table = table;
         self.history.clear();
         self.form_error = None;
         self.revision += 1;
         self.layout += 1;
+        self.mark_saved();
     }
 
     pub fn mark_saved(&mut self) {
         self.table.ensure_id();
         self.saved = self.table.to_ron();
+        let mut state = self.dirty_cache.get();
+        state.saved_stamp = (self.saved.as_ptr() as usize, self.saved.len());
+        state.saved_table = self.table.clone();
+        state.last_check = Some((self.revision, false));
     }
 
     pub fn is_dirty(&self) -> bool {
-        self.table.to_ron() != self.saved
+        let stamp = (self.saved.as_ptr() as usize, self.saved.len());
+        let mut state = self.dirty_cache.get();
+        if stamp == state.saved_stamp {
+            if let Some((rev, dirty)) = state.last_check
+                && rev == self.revision
+            {
+                return dirty;
+            }
+            let dirty = self.table != state.saved_table;
+            state.last_check = Some((self.revision, dirty));
+            return dirty;
+        }
+        let dirty = self.table.to_ron() != self.saved;
+        if !dirty {
+            state.saved_stamp = stamp;
+            state.saved_table = self.table.clone();
+            state.last_check = Some((self.revision, false));
+        } else if let Ok(parsed) = FeatureTable::from_ron(&self.saved) {
+            state.saved_stamp = stamp;
+            state.saved_table = parsed;
+            state.last_check = Some((self.revision, true));
+        }
+        dirty
     }
 
     pub fn relayout(&mut self) {

@@ -138,17 +138,10 @@ impl MaterialGraphOps for Editor {
         let asset_kind = d.asset.kind;
         let id = d.add_node_with(&stored, snap(pos), params);
         if let Some(link) = link {
-            let (d, view) = self.doc_view().expect("active graph");
-            let path = d.id.path.clone();
-            let ty = view.nodes.get(&link.node).and_then(|_| {
-                let sig = node_signature_with(
-                    &view,
-                    &link.node,
-                    &self.domains.material().registry,
-                    &self.domains.material().functions,
-                    &self.domains.material().features,
-                    &path,
-                )?;
+            let d = self.doc().expect("active graph");
+            let m = self.domains.material();
+            let analysis = d.analysis(&self.asset_index, &m.registry, &m.functions, &m.features);
+            let ty = analysis.signatures.get(&link.node).and_then(|sig| {
                 if link.from_output { sig.output(&link.pin).map(|p| p.ty) } else { sig.input(&link.pin).map(|p| p.ty) }
             });
             let end = ty.map(|t| if link.from_output { WireEnd::FromOutput(t) } else { WireEnd::FromInput(t) });
@@ -240,16 +233,10 @@ impl MaterialGraphOps for Editor {
     }
 
     fn connect_checked(&mut self, from: (NodeId, String), to: (NodeId, String), into_last_step: bool) {
-        let Some((d, view)) = self.doc_view() else { return };
-        if let Some(e) = connection_error_with(
-            &view,
-            (&from.0, &from.1),
-            (&to.0, &to.1),
-            &self.domains.material().registry,
-            &self.domains.material().functions,
-            &self.domains.material().features,
-            &d.id.path,
-        ) {
+        let Some(d) = self.doc() else { return };
+        let m = self.domains.material();
+        let analysis = d.analysis(&self.asset_index, &m.registry, &m.functions, &m.features);
+        if let Some(e) = analysis.connection_error((&from.0, &from.1), (&to.0, &to.1)) {
             self.push_msg(Level::Warning, format!("Connection refused: {e}"));
             return;
         }
@@ -350,15 +337,10 @@ impl MaterialGraphOps for Editor {
     }
 
     fn pin_menu(&self, node: &str, pin: &str) -> Vec<(String, Action)> {
-        let Some((d, view)) = self.doc_view() else { return Vec::new() };
-        let Some(sig) = node_signature_with(
-            &view,
-            node,
-            &self.domains.material().registry,
-            &self.domains.material().functions,
-            &self.domains.material().features,
-            &d.id.path,
-        ) else {
+        let Some(d) = self.doc() else { return Vec::new() };
+        let m = self.domains.material();
+        let analysis = d.analysis(&self.asset_index, &m.registry, &m.functions, &m.features);
+        let Some(sig) = analysis.signatures.get(node) else {
             return Vec::new();
         };
         let Some(p) = sig.input(pin) else { return Vec::new() };
@@ -451,20 +433,14 @@ impl MaterialGraphOps for Editor {
             return Some("only material nodes can be previewed".into());
         }
         let Some(n) = view.nodes.get(node) else { return Some(format!("node `{node}` does not exist")) };
-        let sig = node_signature_with(
-            &view,
-            node,
-            &self.domains.material().registry,
-            &self.domains.material().functions,
-            &self.domains.material().features,
-            &d.id.path,
-        );
+        let m = self.domains.material();
+        let analysis = d.analysis(&self.asset_index, &m.registry, &m.functions, &m.features);
+        let sig = analysis.signatures.get(node);
         let previewable =
-            self.domains.material().registry.get(&n.kind).zip(sig).is_some_and(|(def, sig)| {
-                def.role() != NodeRole::MaterialOutput && !def.preview_output(&sig).is_empty()
+            m.registry.get(&n.kind).zip(sig).is_some_and(|(def, sig)| {
+                def.role() != NodeRole::MaterialOutput && !def.preview_output(sig).is_empty()
             });
-        let title =
-            crate::doc::node_title(&self.domains.material().registry, &self.domains.material().functions, &view, node);
+        let title = crate::doc::node_title(&m.registry, &m.functions, &view, node);
         (!previewable).then(|| format!("`{title}` has no output that converts to a color"))
     }
 
@@ -690,20 +666,15 @@ impl MaterialGraphOps for Editor {
     fn set_pin_type(&mut self, node: &str, ty: PinType) {
         let Some((d, view)) = self.doc_view() else { return };
         let Some(n) = view.nodes.get(node) else { return };
-        let Some(sig) = node_signature_with(
-            &view,
-            node,
-            &self.domains.material().registry,
-            &self.domains.material().functions,
-            &self.domains.material().features,
-            &d.id.path,
-        ) else {
+        let m = self.domains.material();
+        let analysis = d.analysis(&self.asset_index, &m.registry, &m.functions, &m.features);
+        let Some(sig) = analysis.signatures.get(node) else {
             return;
         };
         let values: Vec<(String, Value)> = sig
             .inputs
             .iter()
-            .filter(|p| p.poly && view.edge_into(node, &p.id).is_none())
+            .filter(|p| p.poly && !analysis.has_edge_into(node, &p.id))
             .map(|p| (p.id.clone(), n.inputs.get(&p.id).unwrap_or(&p.default).coerce(ty)))
             .collect();
         if values.is_empty() {
@@ -720,16 +691,10 @@ impl MaterialGraphOps for Editor {
     }
 
     fn node_height(&self, id: &str) -> f32 {
-        let Some((d, view)) = self.doc_view() else { return 60.0 };
-        let rows = node_signature_with(
-            &view,
-            id,
-            &self.domains.material().registry,
-            &self.domains.material().functions,
-            &self.domains.material().features,
-            &d.id.path,
-        )
-        .map_or(1, |s| s.inputs.len() + s.outputs.len());
+        let Some(d) = self.doc() else { return 60.0 };
+        let m = self.domains.material();
+        let analysis = d.analysis(&self.asset_index, &m.registry, &m.functions, &m.features);
+        let rows = analysis.signatures.get(id).map_or(1, |s| s.inputs.len() + s.outputs.len());
         40.0 + rows as f32 * 24.0
     }
 
@@ -737,10 +702,10 @@ impl MaterialGraphOps for Editor {
         let Some(d) = self.doc() else { return };
         let pos = autolayout::layout(&d.asset, &d.selection, |n| self.node_height(n));
         if let Some(d) = self.doc_mut() {
-            d.edit(|a| {
-                for (id, p) in pos {
-                    if let Some(n) = a.nodes.get_mut(&id) {
-                        n.pos = p;
+            d.edit_with(None, false, false, |a| {
+                for (id, p) in &pos {
+                    if let Some(n) = a.nodes.get_mut(id) {
+                        n.pos = *p;
                     }
                 }
             });
@@ -749,15 +714,10 @@ impl MaterialGraphOps for Editor {
     }
 
     fn pin_type(&self, node: &str, pin: &str, output: bool) -> Option<PinType> {
-        let (d, view) = self.doc_view()?;
-        let sig = node_signature_with(
-            &view,
-            node,
-            &self.domains.material().registry,
-            &self.domains.material().functions,
-            &self.domains.material().features,
-            &d.id.path,
-        )?;
+        let d = self.doc()?;
+        let m = self.domains.material();
+        let analysis = d.analysis(&self.asset_index, &m.registry, &m.functions, &m.features);
+        let sig = analysis.signatures.get(node)?;
         if output { sig.output(pin).map(|p| p.ty) } else { sig.input(pin).map(|p| p.ty) }
     }
 
@@ -774,6 +734,9 @@ impl Doc {
     pub(crate) fn apply_edit(&mut self, ctx: &mut DocCtx, action: &TabAction) -> Handled {
         let index = ctx.index;
         let Some(m) = ctx.domain::<MaterialState>() else { return Handled::No };
+        if !matches!(action, TabAction::SetComponent { is_final: false, .. }) {
+            self.scrubbing = false;
+        }
         let redraw = match action {
             TabAction::Undo => self.undo(),
             TabAction::Redo => self.redo(),
@@ -828,10 +791,17 @@ impl Doc {
                     }
                 };
                 // `None`: a field sent its shown (rounded) text back on focus loss, which is not an edit.
-                let Some(new) = new else { return Handled::Yes };
+                let Some(new) = new else {
+                    if *is_final {
+                        self.end_merge();
+                    }
+                    return Handled::Yes;
+                };
                 let redraw = self.set_prop(m, index, key, target, new, true);
                 if *is_final {
                     self.end_merge();
+                } else {
+                    self.scrubbing = true;
                 }
                 redraw
             }
@@ -879,7 +849,7 @@ impl Doc {
     /// Deletes the selected comment frame, or the selected nodes with the frames they enclose (one undo step).
     fn delete_selected(&mut self, registry: &Registry) {
         if let Some(f) = self.selected_frame.take() {
-            self.edit(|a| a.comments.retain(|c| c.id != f));
+            self.edit_with(None, false, false, |a| a.comments.retain(|c| c.id != f));
         } else {
             // Frames enclosed by the selection go in the same step (design §4.5, one undo).
             let sel = self.selection.clone();
@@ -924,8 +894,8 @@ impl Doc {
             GraphProp::Input { node, pin } => {
                 let view = self.resolved(index, &m.registry);
                 let n = view.nodes.get(node)?;
-                let pin_def = node_signature_with(&view, node, &m.registry, &m.functions, &m.features, &self.id.path)
-                    .and_then(|sig| sig.input(pin).cloned());
+                let analysis = self.analysis(index, &m.registry, &m.functions, &m.features);
+                let pin_def = analysis.signatures.get(node).and_then(|sig| sig.input(pin));
                 // In the pin's resolved type: a wire on another poly pin may widen a stored scalar.
                 match (n.inputs.get(pin), pin_def) {
                     (Some(v), Some(p)) => Some(v.coerce(p.ty)),
@@ -1019,7 +989,9 @@ impl Doc {
                 });
             }
             GraphProp::Input { node, pin } => {
-                self.edit_merge(mkey, |a| {
+                let old_ty = self.asset.nodes.get(node).and_then(|n| n.inputs.get(pin)).and_then(Value::pin_type);
+                let affects_analysis = old_ty.unwrap_or(PinType::Float) != value.pin_type().unwrap_or(PinType::Float);
+                self.edit_with(mkey, affects_analysis, true, |a| {
                     if let Some(n) = a.nodes.get_mut(node) {
                         n.inputs.insert(pin.clone(), value.clone());
                     }
@@ -1055,12 +1027,12 @@ impl Doc {
                 });
             }
             GraphProp::Description => {
-                self.edit_merge(mkey, |a| a.meta.description = value.as_str().to_string());
+                self.edit_with(mkey, false, false, |a| a.meta.description = value.as_str().to_string());
                 refresh = false;
             }
             GraphProp::PreviewMode => {
                 if let Some(mode) = PreviewMode::ALL.into_iter().find(|m| preview_mode_label(*m) == value.as_str()) {
-                    self.edit(|a| a.preview.mode = mode);
+                    self.edit_with(None, false, false, |a| a.preview.mode = mode);
                 }
             }
             GraphProp::NodeLabel(id) => {
@@ -1074,15 +1046,15 @@ impl Doc {
             GraphProp::NodeComment(id) => {
                 let comment: String =
                     value.as_str().chars().take(shader_graph_core::model::Node::COMMENT_MAX).collect();
-                self.edit_merge(mkey, |a| {
+                self.edit_with(mkey, false, false, |a| {
                     if let Some(n) = a.nodes.get_mut(id) {
-                        n.comment = comment;
+                        n.comment = comment.clone();
                     }
                 });
                 refresh = false;
             }
             GraphProp::FrameTitle(id) => {
-                self.edit_merge(mkey, |a| {
+                self.edit_with(mkey, false, false, |a| {
                     if let Some(f) = a.comments.iter_mut().find(|f| f.id == *id) {
                         f.title = value.as_str().to_string();
                     }
@@ -1094,7 +1066,7 @@ impl Doc {
                     Value::Float(h) => Some(h.clamp(0.0, 360.0)),
                     _ => None,
                 };
-                self.edit_merge(mkey, |a| {
+                self.edit_with(mkey, false, false, |a| {
                     if let Some(f) = a.comments.iter_mut().find(|f| f.id == *id) {
                         f.hue = hue;
                     }

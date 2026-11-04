@@ -69,6 +69,10 @@ pub struct NodeLook {
     pub inline: Vec<(String, Box<dyn Scene>)>,
     /// A row of the node's own value editor (a constant's value), between the previews and the pins.
     pub body: Option<Box<dyn Scene>>,
+    /// Structural tag of the inline value editors (`body` and `inline`): changing an editor's widget kind or soft limit
+    /// range changes this tag so the node is respawned, while changing only the current value updates the widget in
+    /// place.
+    pub body_tag: u64,
     /// The node holds wide editors (one number field per vector component): a wider minimum width.
     pub wide: bool,
     /// Shown in the error colour instead of the pins (an unknown node kind).

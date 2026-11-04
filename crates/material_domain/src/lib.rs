@@ -93,7 +93,8 @@ fn follow_moves(mut editor: ResMut<Editor>, ec: Option<ResMut<EditorCanvas>>) {
 }
 
 fn validate_when_idle(mut editor: ResMut<Editor>, time: Res<Time>, mut quiet: Local<f32>) {
-    if !editor.bypass_change_detection().needs_validation() {
+    let changed = editor.is_changed();
+    if !editor.bypass_change_detection().needs_validation() || changed {
         *quiet = 0.0;
         return;
     }

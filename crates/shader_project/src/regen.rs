@@ -430,25 +430,110 @@ pub fn regenerate_set(project: &Project, set: &AssetSet, opts: &RegenOptions) ->
     Ok(report)
 }
 
-/// The Material pipeline up to the desired files (no W105, no write): the report (its `changes` empty) and the
-/// domain's output for [`commit`]. Every file of an asset names it (`source_rel`) as its owner. UUID references are
-/// resolved to paths (user nodes: `user::<ident>`) first ([`resolve_set`] against [`RegenOptions::index`]), so
-/// everything below sees paths.
-pub fn plan_set(project: &Project, set: &AssetSet, opts: &RegenOptions) -> (RegenReport, DomainOutput) {
-    let (registry, user_nodes, user_diags) = project_nodes(project);
-    let own_index;
-    let index = match opts.index {
-        Some(index) => index,
-        None => {
-            own_index = AssetIndex::build(vec![index_part(set, &user_nodes, &registry)]);
-            &own_index
+/// Shared project environment produced by validating all non-material assets (functions, curves, constants,
+/// textures, gradients, and feature tables). Can be reused to incrementally re-validate individual material graphs
+/// when only material tabs were edited.
+#[derive(Debug, Clone, Default)]
+pub struct ValidationEnv {
+    pub sigs: BTreeMap<String, FunctionSig>,
+    pub failed_fns: BTreeSet<String>,
+    pub curve_paths: BTreeSet<String>,
+    pub consts: BTreeMap<String, GlobalConsts>,
+    pub textures: BTreeSet<String>,
+    pub gradients: BTreeMap<String, GradientCollection>,
+    pub features: BTreeMap<String, FeatureTable>,
+}
+
+impl ValidationEnv {
+    /// Validates a single resolved material `asset` (`id.ty == AssetType::Material`) against this environment.
+    pub fn validate_material(&self, id: &AssetId, asset: &Asset, registry: &Registry) -> AssetResult {
+        let mut entry = AssetResult::default();
+        entry.diagnostics.extend(assets::validate_path(id));
+        let empty_compile = BTreeMap::new();
+        let empty_feat = BTreeMap::new();
+        let build = |a: &Asset| {
+            build_ir_with_features(
+                a,
+                &id.path,
+                registry,
+                &self.sigs,
+                &self.curve_paths,
+                &self.consts,
+                &self.textures,
+                &self.gradients,
+                &self.features,
+                &empty_compile,
+                &empty_feat,
+            )
+        };
+        let mut r = build(asset);
+        if let Some(w) = preview_changes_rust(asset, &r, &id.source_rel(), build) {
+            r.diagnostics.push(w);
         }
-    };
-    let resolved = resolve_set(set, index, &registry);
-    let set = &resolved;
+        entry.diagnostics.extend(r.diagnostics.into_iter().map(|d| d.in_asset(id.source_rel())));
+        let mut used_fns = BTreeSet::new();
+        for n in asset.nodes.values() {
+            if let Some(p) = n.kind.strip_prefix(FUNCTION_PREFIX) {
+                used_fns.insert(p);
+            }
+        }
+        for fn_path in used_fns {
+            if self.failed_fns.contains(fn_path) && self.sigs.contains_key(fn_path) {
+                entry.diagnostics.push(
+                    Diagnostic::new(Code::E006, format!("depends on function `{fn_path}` which has errors"))
+                        .in_asset(id.source_rel()),
+                );
+            }
+        }
+        if !entry.diagnostics.iter().any(Diagnostic::is_error)
+            && let Some(ir) = &r.ir
+        {
+            for (name, code) in &ir.custom_fns {
+                if let Some(e) = check::parse_error(code) {
+                    let node =
+                        name.strip_prefix("sg_custom_").or_else(|| name.strip_prefix("sg_user_")).unwrap_or(name);
+                    entry.diagnostics.push(
+                        Diagnostic::new(Code::E007, format!("Custom WESL does not parse: {e}"))
+                            .at_node(node)
+                            .in_asset(id.source_rel()),
+                    );
+                }
+            }
+            if !entry.diagnostics.iter().any(Diagnostic::is_error) {
+                entry.ok = true;
+            }
+        }
+        entry.ir = r.ir;
+        entry
+    }
+}
+
+struct ValidatedSet<'a> {
+    report: RegenReport,
+    deps: DepGraph,
+    curves: BTreeMap<&'a AssetId, &'a shader_graph_core::Curve>,
+    env: ValidationEnv,
+    results: BTreeMap<AssetId, AssetResult>,
+}
+
+fn not_owned_diag(project: &Project, dir: &std::path::Path, what: &str) -> Diagnostic {
+    Diagnostic::new(
+        Code::E008,
+        format!(
+            "`{}` is not a directory with a {INTERNAL_MARKER} marker file (or cannot be read); not writing {what}",
+            project.rel(dir)
+        ),
+    )
+}
+
+fn validate_resolved_set<'a>(
+    project: &Project,
+    set: &'a AssetSet,
+    registry: &Registry,
+    user_diags: Vec<Diagnostic>,
+) -> ValidatedSet<'a> {
     let mut report = RegenReport { project: user_diags, ..Default::default() };
-    let date = project.settings.header_date.then(civil_today);
-    let deps = DepGraph::build(set, &registry);
+    let deps = DepGraph::build(set, registry);
     let mut results: BTreeMap<AssetId, AssetResult> = BTreeMap::new();
 
     // Load errors and path checks.
@@ -514,7 +599,7 @@ pub fn plan_set(project: &Project, set: &AssetSet, opts: &RegenOptions) -> (Rege
     let fn_ids: Vec<&AssetId> = loaded.keys().copied().filter(|i| i.ty == AssetType::Function).collect();
     let mut sigs: BTreeMap<String, FunctionSig> = BTreeMap::new();
     for id in &fn_ids {
-        sigs.insert(id.path.clone(), declared_function_sig(loaded[id], &id.path, &registry));
+        sigs.insert(id.path.clone(), declared_function_sig(loaded[id], &id.path, registry));
     }
     let fn_paths: Vec<&str> = fn_ids.iter().map(|i| i.path.as_str()).collect();
     let mut succ: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
@@ -560,7 +645,6 @@ pub fn plan_set(project: &Project, set: &AssetSet, opts: &RegenOptions) -> (Rege
         visit(p, &succ, &remaining, &mut visited, &mut order);
     }
 
-    let gen_ctx_file = |id: &AssetId| id.source_rel();
     let empty_compile = BTreeMap::new();
     let empty_feat = BTreeMap::new();
     for p in order {
@@ -569,7 +653,7 @@ pub fn plan_set(project: &Project, set: &AssetSet, opts: &RegenOptions) -> (Rege
         let r = build_ir_with_features(
             asset,
             p,
-            &registry,
+            registry,
             &sigs,
             &curve_paths,
             &consts,
@@ -599,49 +683,9 @@ pub fn plan_set(project: &Project, set: &AssetSet, opts: &RegenOptions) -> (Rege
             failed_fns.insert(p.to_string());
         }
     }
-    for id in &fn_ids {
-        if results.get(*id).is_some_and(|r| r.diagnostics.iter().any(Diagnostic::is_error)) {
-            failed_fns.insert(id.path.clone());
-        }
-    }
-
-    // Materials.
-    for id in loaded.keys().copied().filter(|i| i.ty == AssetType::Material) {
-        let build = |a: &Asset| {
-            build_ir_with_features(
-                a,
-                &id.path,
-                &registry,
-                &sigs,
-                &curve_paths,
-                &consts,
-                &textures,
-                &gradients,
-                &features,
-                &empty_compile,
-                &empty_feat,
-            )
-        };
-        let mut r = build(loaded[id]);
-        if let Some(w) = preview_changes_rust(loaded[id], &r, &id.source_rel(), build) {
-            r.diagnostics.push(w);
-        }
-        let entry = results.entry(id.clone()).or_default();
-        entry.diagnostics.extend(r.diagnostics.into_iter().map(|d| d.in_asset(id.source_rel())));
-        for u in deps.uses.get(id).into_iter().flatten().filter(|u| u.ty == AssetType::Function) {
-            if failed_fns.contains(&u.path) && sigs.contains_key(&u.path) {
-                entry.diagnostics.push(
-                    Diagnostic::new(Code::E006, format!("depends on function `{}` which has errors", u.path))
-                        .in_asset(id.source_rel()),
-                );
-            }
-        }
-        entry.ir = r.ir;
-    }
-
-    // Generate WESL; Custom node parse check (E007).
+    // Custom node parse check (E007) for functions.
     for (id, r) in results.iter_mut() {
-        if r.diagnostics.iter().any(Diagnostic::is_error) {
+        if id.ty != AssetType::Function || r.diagnostics.iter().any(Diagnostic::is_error) {
             continue;
         }
         let Some(ir) = &r.ir else { continue };
@@ -655,9 +699,102 @@ pub fn plan_set(project: &Project, set: &AssetSet, opts: &RegenOptions) -> (Rege
                 );
             }
         }
-        if r.diagnostics.iter().any(Diagnostic::is_error) {
+        if !r.diagnostics.iter().any(Diagnostic::is_error) {
+            r.ok = true;
+        }
+    }
+    for id in &fn_ids {
+        if results.get(*id).is_some_and(|r| r.diagnostics.iter().any(Diagnostic::is_error)) {
+            failed_fns.insert(id.path.clone());
+        }
+    }
+
+    let env = ValidationEnv { sigs, failed_fns, curve_paths, consts, textures, gradients, features };
+
+    // Materials.
+    for id in loaded.keys().copied().filter(|i| i.ty == AssetType::Material) {
+        results.insert(id.clone(), env.validate_material(id, loaded[id], registry));
+    }
+    for id in curves.keys() {
+        if let Some(r) = results.get_mut(*id) {
+            r.ok = true;
+        }
+    }
+
+    let internal = project.internal_dir();
+    if !owned_binary_dir(&internal) {
+        report.project.push(not_owned_diag(project, &internal, "internal textures"));
+    }
+    let gradients_dir = project.gradients_dir();
+    if !set.gradients.is_empty() && !owned_binary_dir(&gradients_dir) {
+        report.project.push(not_owned_diag(project, &gradients_dir, "gradient collections"));
+    }
+
+    ValidatedSet { report, deps, curves, env, results }
+}
+
+/// Validates `set` in memory without generating WESL/Rust code, encoding gradient PNGs, or walking output
+/// directories on disk. Used by the editor's live validation pass.
+pub fn validate_set(
+    project: &Project,
+    set: &AssetSet,
+    index: Option<&AssetIndex>,
+    registry: Option<(&Registry, &[Diagnostic])>,
+) -> (RegenReport, ValidationEnv) {
+    let owned_reg;
+    let (reg, user_diags) = match registry {
+        Some((r, d)) => (r, d.to_vec()),
+        None => {
+            let (r, _, d) = project_nodes(project);
+            owned_reg = r;
+            (&owned_reg, d)
+        }
+    };
+    let own_index;
+    let index = match index {
+        Some(idx) => idx,
+        None => {
+            let (_, user_nodes, _) = project_nodes(project);
+            own_index = AssetIndex::build(vec![index_part(set, &user_nodes, reg)]);
+            &own_index
+        }
+    };
+    let resolved = resolve_set(set, index, reg);
+    let mut v = validate_resolved_set(project, &resolved, reg, user_diags);
+    if let Some(w) = workspace_warning(project) {
+        v.report.project.push(w);
+    }
+    v.report.assets = v.results;
+    (v.report, v.env)
+}
+
+/// The Material pipeline up to the desired files (no W105, no write): the report (its `changes` empty) and the
+/// domain's output for [`commit`]. Every file of an asset names it (`source_rel`) as its owner. UUID references are
+/// resolved to paths (user nodes: `user::<ident>`) first ([`resolve_set`] against [`RegenOptions::index`]), so
+/// everything below sees paths.
+pub fn plan_set(project: &Project, set: &AssetSet, opts: &RegenOptions) -> (RegenReport, DomainOutput) {
+    let (registry, user_nodes, user_diags) = project_nodes(project);
+    let own_index;
+    let index = match opts.index {
+        Some(index) => index,
+        None => {
+            own_index = AssetIndex::build(vec![index_part(set, &user_nodes, &registry)]);
+            &own_index
+        }
+    };
+    let resolved = resolve_set(set, index, &registry);
+    let set = &resolved;
+    let date = project.settings.header_date.then(civil_today);
+    let ValidatedSet { mut report, deps, curves, env, mut results } =
+        validate_resolved_set(project, set, &registry, user_diags);
+    let ValidationEnv { sigs, features, .. } = env;
+
+    let gen_ctx_file = |id: &AssetId| id.source_rel();
+    for (id, r) in results.iter_mut() {
+        if !r.ok {
             continue;
         }
+        let Some(ir) = &r.ir else { continue };
         let source = gen_ctx_file(id);
         let ctx = GenCtx { functions: &sigs, source_file: &source };
         let mut g = match id.ty {
@@ -674,7 +811,6 @@ pub fn plan_set(project: &Project, set: &AssetSet, opts: &RegenOptions) -> (Rege
             }
         }
         r.wesl = Some(g);
-        r.ok = true;
     }
 
     for (id, c) in &curves {
@@ -684,7 +820,6 @@ pub fn plan_set(project: &Project, set: &AssetSet, opts: &RegenOptions) -> (Rege
         }
         let r = results.get_mut(*id).expect("curve result");
         r.wesl = Some(Generated { text, line_nodes: Vec::new() });
-        r.ok = true;
     }
 
     // Optional compile check against Bevy sources.
@@ -835,15 +970,6 @@ pub fn plan_set(project: &Project, set: &AssetSet, opts: &RegenOptions) -> (Rege
         insert_date(&mut manifest, d);
     }
     desired.push((manifest_path, manifest.into_bytes()));
-    let not_owned = |dir: &std::path::Path, what: &str| {
-        Diagnostic::new(
-            Code::E008,
-            format!(
-                "`{}` is not a directory with a {INTERNAL_MARKER} marker file (or cannot be read); not writing {what}",
-                project.rel(dir)
-            ),
-        )
-    };
     // Internal textures (design §2), always written.
     if internal_owned {
         let marker = format!("{}\n", shader_codegen_wesl::header("internal textures"));
@@ -851,8 +977,6 @@ pub fn plan_set(project: &Project, set: &AssetSet, opts: &RegenOptions) -> (Rege
         for t in INTERNAL_TEXTURES {
             desired.push((internal.join(t.file), t.bytes.to_vec()));
         }
-    } else {
-        report.project.push(not_owned(&internal, "internal textures"));
     }
     // Baked gradient collections (gradient design §5), written by every regeneration, a scoped one too: a color edit
     // changes only the PNG. A failed collection keeps its old PNG (not in the manifest, so the game does not use it).
@@ -871,8 +995,6 @@ pub fn plan_set(project: &Project, set: &AssetSet, opts: &RegenOptions) -> (Rege
                 }
             }
         }
-    } else if has_gradients {
-        report.project.push(not_owned(&gradients_dir, "gradient collections"));
     }
 
     // Files of an asset are attributed to it (E008); the first asset in id order wins.

@@ -241,13 +241,15 @@ fn restyle_domain_tabs(
     mut last: Local<Option<(Option<DomainId>, Vec<(DomainId, bool)>)>>,
     mut commands: Commands,
 ) {
-    let enabled_vec: Vec<(DomainId, bool)> =
-        editor.domain_list.real_ids().map(|id| (id, editor.domain_enabled(id))).collect();
-    let state = (editor.active_domain, enabled_vec);
-    if last.as_ref() == Some(&state) && added.is_empty() {
+    let enabled_iter = || editor.domain_list.real_ids().map(|id| (id, editor.domain_enabled(id)));
+    if added.is_empty()
+        && let Some((last_active, last_enabled)) = last.as_ref()
+        && *last_active == editor.active_domain
+        && last_enabled.iter().copied().eq(enabled_iter())
+    {
         return;
     }
-    *last = Some(state);
+    *last = Some((editor.active_domain, enabled_iter().collect()));
     for (entity, DomainTab(id), mut bg, mut hover, hovered) in &mut tabs {
         let enabled = editor.domain_enabled(*id);
         let active = enabled && editor.active_domain == Some(*id);
@@ -366,13 +368,31 @@ fn tab(i: usize, label: String, full: String, kind: IconRef, look: TabLook) -> i
 }
 
 type TabKey = (String, String, IconRef, bool, TabLook);
+type FastTabKey = (u64, bool, TabLook);
 
 fn redraw(
     editor: Res<Editor>,
     row: Query<Entity, With<TabRow>>,
+    mut fast_last: Local<Option<(u64, Option<usize>, Option<DomainId>)>>,
+    mut fast_tabs: Local<Vec<FastTabKey>>,
     mut last: Local<Option<Vec<TabKey>>>,
     mut commands: Commands,
 ) {
+    let fast_hdr = (editor.ui.tabs, editor.active, editor.active_domain);
+    let fast_iter = || {
+        editor.tabs.iter().enumerate().map(|(i, t)| {
+            let look = TabLook::of(t.doc().tool().is_some(), editor.active == Some(i), editor.is_greyed(i));
+            (t.doc().revision(), t.doc().is_dirty(), look)
+        })
+    };
+    if *fast_last == Some(fast_hdr) && last.is_some() && fast_tabs.iter().copied().eq(fast_iter()) {
+        return;
+    }
+    let Ok(row) = row.single() else { return };
+    *fast_last = Some(fast_hdr);
+    fast_tabs.clear();
+    fast_tabs.extend(fast_iter());
+
     let labels = labels(&editor.tabs);
     let key: Vec<TabKey> = editor
         .tabs
@@ -387,7 +407,6 @@ fn redraw(
     if last.as_ref() == Some(&key) {
         return;
     }
-    let Ok(row) = row.single() else { return };
     *last = Some(key.clone());
     commands.entity(row).despawn_children();
     for (i, (label, full, kind, dirty, look)) in key.into_iter().enumerate() {

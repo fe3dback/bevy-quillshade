@@ -952,6 +952,10 @@ fn build_single_ir(
     // 5. Live sets per stage (inactive output pins and inactive CompileIf branches are not traversed for codegen,
     // while `all_reachable` traverses both branches of connected CompileIf nodes for W101 and diagnostic checks).
     let pin_stage = |pin: &str| if is_vertex_pin(pin) { Stage::Vertex } else { Stage::Fragment };
+    let mut edges_to: HashMap<&str, Vec<&Edge>> = HashMap::with_capacity(nodes.len());
+    for e in &edges {
+        edges_to.entry(e.to.0.as_str()).or_default().push(e);
+    }
     let mut live: BTreeMap<Stage, BTreeSet<&str>> = BTreeMap::new();
     let mut all_reachable: BTreeSet<&str> = BTreeSet::new();
     let mut compile_reachable: BTreeSet<&str> = BTreeSet::new();
@@ -988,10 +992,8 @@ fn build_single_ir(
             if !all_reachable.insert(n) {
                 continue;
             }
-            for e in &edges {
-                if e.to.0 == n {
-                    reach_stack.push(e.from.0.as_str());
-                }
+            for e in edges_to.get(n).into_iter().flatten() {
+                reach_stack.push(e.from.0.as_str());
             }
         }
         compile_reachable.insert(*root);
@@ -1003,16 +1005,14 @@ fn build_single_ir(
             if nodes[n].def.role() == NodeRole::CompileIf {
                 let cond = compile_if_cond.get(n).copied().unwrap_or(false);
                 let active_branch = if cond { "true_value" } else { "false_value" };
-                for e in &edges {
-                    if e.to.0 == n && (e.to.1 == "cond" || e.to.1 == active_branch) {
+                for e in edges_to.get(n).into_iter().flatten() {
+                    if e.to.1 == "cond" || e.to.1 == active_branch {
                         compile_stack.push(e.from.0.as_str());
                     }
                 }
             } else {
-                for e in &edges {
-                    if e.to.0 == n {
-                        compile_stack.push(e.from.0.as_str());
-                    }
+                for e in edges_to.get(n).into_iter().flatten() {
+                    compile_stack.push(e.from.0.as_str());
                 }
             }
         }
@@ -1025,24 +1025,22 @@ fn build_single_ir(
             if nodes[n].def.role() == NodeRole::CompileIf {
                 let cond = compile_if_cond.get(n).copied().unwrap_or(false);
                 let active_branch = if cond { "true_value" } else { "false_value" };
-                for e in &edges {
-                    if e.to.0 == n && (e.to.1 == "cond" || e.to.1 == active_branch) {
+                for e in edges_to.get(n).into_iter().flatten() {
+                    if e.to.1 == "cond" || e.to.1 == active_branch {
                         stack.push(e.from.0.as_str());
                     }
                 }
             } else if nodes[n].def.role() == NodeRole::FeatureSwitch {
                 if let Some(Some(active_pin)) = feature_switch_branch.get(n) {
-                    for e in &edges {
-                        if e.to.0 == n && e.to.1 == *active_pin {
+                    for e in edges_to.get(n).into_iter().flatten() {
+                        if e.to.1 == *active_pin {
                             stack.push(e.from.0.as_str());
                         }
                     }
                 }
             } else {
-                for e in &edges {
-                    if e.to.0 == n {
-                        stack.push(e.from.0.as_str());
-                    }
+                for e in edges_to.get(n).into_iter().flatten() {
+                    stack.push(e.from.0.as_str());
                 }
             }
         }
@@ -1056,7 +1054,7 @@ fn build_single_ir(
             if !all_reachable.insert(n) {
                 continue;
             }
-            reach_stack.extend(edges.iter().filter(|e| e.to.0 == n).map(|e| e.from.0.as_str()));
+            reach_stack.extend(edges_to.get(n).into_iter().flatten().map(|e| e.from.0.as_str()));
         }
         let mut compile_stack = vec![*p];
         while let Some(n) = compile_stack.pop() {
@@ -1067,13 +1065,15 @@ fn build_single_ir(
                 let cond = compile_if_cond.get(n).copied().unwrap_or(false);
                 let active_branch = if cond { "true_value" } else { "false_value" };
                 compile_stack.extend(
-                    edges
-                        .iter()
-                        .filter(|e| e.to.0 == n && (e.to.1 == "cond" || e.to.1 == active_branch))
+                    edges_to
+                        .get(n)
+                        .into_iter()
+                        .flatten()
+                        .filter(|e| e.to.1 == "cond" || e.to.1 == active_branch)
                         .map(|e| e.from.0.as_str()),
                 );
             } else {
-                compile_stack.extend(edges.iter().filter(|e| e.to.0 == n).map(|e| e.from.0.as_str()));
+                compile_stack.extend(edges_to.get(n).into_iter().flatten().map(|e| e.from.0.as_str()));
             }
         }
         let set = live.entry(Stage::Fragment).or_default();
@@ -1086,19 +1086,26 @@ fn build_single_ir(
                 let cond = compile_if_cond.get(n).copied().unwrap_or(false);
                 let active_branch = if cond { "true_value" } else { "false_value" };
                 stack.extend(
-                    edges
-                        .iter()
-                        .filter(|e| e.to.0 == n && (e.to.1 == "cond" || e.to.1 == active_branch))
+                    edges_to
+                        .get(n)
+                        .into_iter()
+                        .flatten()
+                        .filter(|e| e.to.1 == "cond" || e.to.1 == active_branch)
                         .map(|e| e.from.0.as_str()),
                 );
             } else if nodes[n].def.role() == NodeRole::FeatureSwitch {
                 if let Some(Some(active_pin)) = feature_switch_branch.get(n) {
                     stack.extend(
-                        edges.iter().filter(|e| e.to.0 == n && e.to.1 == *active_pin).map(|e| e.from.0.as_str()),
+                        edges_to
+                            .get(n)
+                            .into_iter()
+                            .flatten()
+                            .filter(|e| e.to.1 == *active_pin)
+                            .map(|e| e.from.0.as_str()),
                     );
                 }
             } else {
-                stack.extend(edges.iter().filter(|e| e.to.0 == n).map(|e| e.from.0.as_str()));
+                stack.extend(edges_to.get(n).into_iter().flatten().map(|e| e.from.0.as_str()));
             }
         }
     }
@@ -1740,6 +1747,10 @@ pub fn would_create_cycle(asset: &Asset, from_node: &str, to_node: &str) -> bool
     if from_node == to_node {
         return true;
     }
+    let mut adj: HashMap<&str, Vec<&str>> = HashMap::new();
+    for e in &asset.edges {
+        adj.entry(e.from.0.as_str()).or_default().push(e.to.0.as_str());
+    }
     let mut stack = vec![to_node];
     let mut seen = BTreeSet::new();
     while let Some(n) = stack.pop() {
@@ -1749,10 +1760,8 @@ pub fn would_create_cycle(asset: &Asset, from_node: &str, to_node: &str) -> bool
         if !seen.insert(n) {
             continue;
         }
-        for e in &asset.edges {
-            if e.from.0 == n {
-                stack.push(e.to.0.as_str());
-            }
+        if let Some(next) = adj.get(n) {
+            stack.extend(next);
         }
     }
     false
