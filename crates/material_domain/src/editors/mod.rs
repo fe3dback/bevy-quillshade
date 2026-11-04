@@ -45,6 +45,8 @@ mod tests {
             (crate::texture::IMAGE, "Image"),
             (crate::texture::TEXTURE, "Texture"),
             (gradients::GRADIENTS, "Gradients"),
+            (crate::texture_converter::TEXTURE_CONVERTER_VIEW, "Texture Converter"),
+            (crate::channel_assembler::CHANNEL_ASSEMBLER_VIEW, "Texture Channel Assembler"),
             // The built-in project domain's.
             (editor_core::settings::SETTINGS_VIEW, "Project Settings"),
         ];

@@ -19,6 +19,9 @@ use shader_project::layout::MATERIAL;
 use shader_project::migrate::MaterialMigrator;
 use shader_project::{AssetId, AssetType, ops};
 
+use crate::channel_assembler::{
+    CHANNEL_ASSEMBLER_TOOL, ChannelAssemblerEditor, channel_assembler_view, open_channel_assembler_tool,
+};
 use crate::curve::MaterialCurve;
 use crate::editors::{ConstsEditor, FeaturesEditor, GradientsEditor};
 use crate::graph_domain::MaterialGraph;
@@ -28,10 +31,14 @@ use crate::ops::MaterialAction;
 use crate::ops::MaterialEditor;
 use crate::tab::{RUST, WESL};
 use crate::texture::MaterialTexture;
+use crate::texture_converter::{
+    TEXTURE_CONVERTER_TOOL, TextureConverterEditor, open_texture_converter_tool, texture_converter_view,
+};
 use crate::ui;
 use editor_core::domain::{
-    AssetKindDef, AssetTemplate, DomainInfo, DomainList, DomainRegistrar, EditorDomain, TreeAsset,
+    AssetKindDef, AssetTemplate, DomainInfo, DomainList, DomainRegistrar, EditorDomain, ToolDef, TreeAsset,
 };
+use editor_core::menu::MainMenu;
 use editor_core::state::editor::Editor;
 
 /// The Material domain.
@@ -95,7 +102,23 @@ impl EditorDomain for MaterialDomain {
             .bevy(crate::material_window)
             .doc_view(|| Box::new(ui::consts_view::consts_view()))
             .doc_view(|| Box::new(ui::features_view::features_view()))
-            .doc_view(|| Box::new(ui::gradient_view::gradient_view()));
+            .doc_view(|| Box::new(ui::gradient_view::gradient_view()))
+            .tool(ToolDef {
+                id: TEXTURE_CONVERTER_TOOL,
+                title: "Texture Converter",
+                open: open_texture_converter_tool,
+                menu: Some(MainMenu::Tools),
+            })
+            .editor_kind::<TextureConverterEditor>()
+            .doc_view(|| Box::new(texture_converter_view()))
+            .tool(ToolDef {
+                id: CHANNEL_ASSEMBLER_TOOL,
+                title: "Texture Channel Assembler",
+                open: open_channel_assembler_tool,
+                menu: Some(MainMenu::Tools),
+            })
+            .editor_kind::<ChannelAssemblerEditor>()
+            .doc_view(|| Box::new(channel_assembler_view()));
     }
 }
 

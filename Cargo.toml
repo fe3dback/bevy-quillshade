@@ -12,7 +12,7 @@ license = "MIT"
 [workspace.dependencies]
 # system_clipboard: paste from / copy to other applications (without it the clipboard is in-app only).
 # dynamic_linking is the root package's default feature `dynamic_linking`, not set here.
-bevy = { version = "0.20.0", features = ["bevy_feathers", "system_clipboard"] }
+bevy = { version = "0.20.0", features = ["bevy_feathers", "system_clipboard", "jpeg"] }
 # Local fork of bevy_noodle 0.5.0 (vendor/bevy_noodle/FORK.md).
 bevy_noodle = { path = "vendor/bevy_noodle", features = ["default_style", "scene"] }
 # Input contexts of the editor (decision 0032).
@@ -37,7 +37,7 @@ rfd = "0.17"
 # Bevy 0.20's tree.
 png = "0.18"
 ktx2 = "0.5"
-image = { version = "0.25", default-features = false, features = ["hdr"] }
+image = { version = "0.25", default-features = false, features = ["hdr", "jpeg"] }
 ruzstd = "0.8"
 
 project_core = { path = "crates/project_core" }

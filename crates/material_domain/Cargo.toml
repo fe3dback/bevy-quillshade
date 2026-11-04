@@ -28,8 +28,13 @@ serde = { workspace = true }
 ron = { workspace = true }
 icon-rs = { workspace = true }
 resvg = { workspace = true }
+png = { workspace = true }
+ktx2 = { workspace = true }
+ruzstd = { workspace = true }
+rfd = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
 shader_project = { workspace = true }
 project_core = { workspace = true }
+image = { workspace = true }

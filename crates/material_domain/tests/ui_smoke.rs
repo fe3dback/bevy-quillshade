@@ -4685,3 +4685,613 @@ mod bars {
         assert!(mat_mod.is_file(), "generated module restored");
     }
 }
+
+/// Helper that builds a headless Bevy [`App`] with [`AreasPlugin`], [`DomainWindowPlugin`], the editor topbar, right
+/// sidebar, and all Material domain views spawned (`texture_converter_view`, `channel_assembler_view`, etc.).
+fn tools_app() -> (tempfile::TempDir, App) {
+    use editor_core::domain::DomainList;
+    use editor_core::ui::areas::{AreasPlugin, editor_topbar, right_sidebar};
+    use editor_core::ui::shell::{DomainWindowPlugin, domain_doc_views, show_active_view};
+
+    let (dir, mut app) = app_with(|app| {
+        app.add_plugins((AreasPlugin, DomainWindowPlugin))
+            .add_systems(Update, show_active_view.after(editor_core::apply_actions));
+    });
+    for view in domain_doc_views(app.world().resource::<DomainList>()) {
+        app.world_mut().spawn_scene(view).unwrap();
+    }
+    app.world_mut().spawn_scene(editor_topbar()).unwrap();
+    app.world_mut().spawn_scene(right_sidebar()).unwrap();
+    app.update();
+    (dir, app)
+}
+
+/// The `Texture Converter` tool (`Tools -> Texture Converter...`) registers under `MainMenu::Tools`, opens its 2-column
+/// UI (`TextureConverterLeftPane`, `TextureConverterRightPane`, `TextureConverterBar`, `TextureConverterSidebarBody`),
+/// imports a 2D image and populates `TextureConverterPreviewCache` (`source_thumb`, `output_preview`, `checker_handle`)
+/// along with `TextureConverterThumbImage` and `TextureConverterOutputImage`, updates all `TextureConverterProp`s and
+/// `PreviewChannel` live, and exports standalone `.ktx2` and `.png` files without creating any `.texture.ron` asset.
+#[test]
+fn texture_converter_tool_imports_previews_and_exports_ktx2_and_png_without_creating_texture_asset() {
+    use bevy::asset::RenderAssetUsages;
+    use bevy::image::{CompressedImageFormats, Image, ImageSampler, ImageType};
+    use bevy::render::render_resource::TextureFormat;
+    use editor_core::menu::MainMenu;
+    use editor_core::ui::menu::menu_entries;
+    use material_domain::channel_assembler::CHANNEL_ASSEMBLER_TOOL;
+    use material_domain::texture_converter::{
+        TEXTURE_CONVERTER_TOOL, TextureConverterAction, TextureConverterBar, TextureConverterDoc,
+        TextureConverterLeftPane, TextureConverterOutputImage, TextureConverterPreviewCache, TextureConverterProp,
+        TextureConverterRightPane, TextureConverterSidebarBody, TextureConverterThumbImage,
+    };
+    use material_domain::texture_tools_common::{
+        Ktx2ColorSpace, OutputFormat, PreviewChannel, ResizePreset, RgbaImage2d, encode_png,
+    };
+    use shader_project::layout::MATERIAL;
+    use texture_kit::{TextureShape, shape_problem};
+
+    let (dir, mut app) = tools_app();
+
+    // 1. Verify TEXTURE_CONVERTER_TOOL is registered under MainMenu::Tools ("Texture Converter").
+    {
+        let editor = app.world().resource::<Editor>();
+        let mat_domain = editor.domain_list.get(MATERIAL).expect("Material domain registered");
+        assert!(
+            mat_domain.tools.iter().any(|t| t.id == TEXTURE_CONVERTER_TOOL
+                && t.title == "Texture Converter"
+                && t.menu == Some(MainMenu::Tools)),
+            "Texture Converter tool registered on Material domain under MainMenu::Tools"
+        );
+        let entries = menu_entries(MainMenu::Tools, editor);
+        let labels: Vec<&str> = entries.iter().map(|e| e.label.as_str()).collect();
+        assert_eq!(labels, ["Texture Converter...", "Texture Channel Assembler..."]);
+        assert_eq!(entries[0].action, Action::OpenTool { domain: MATERIAL, id: TEXTURE_CONVERTER_TOOL, arg: None });
+        assert_eq!(entries[1].action, Action::OpenTool { domain: MATERIAL, id: CHANNEL_ASSEMBLER_TOOL, arg: None });
+    }
+
+    // 2. Dispatch Action::OpenTool for TEXTURE_CONVERTER_TOOL, tick, and verify UI containers have children.
+    act(&mut app, Action::OpenTool { domain: MATERIAL, id: TEXTURE_CONVERTER_TOOL, arg: None });
+    {
+        let w = app.world_mut();
+        let doc = w.resource::<Editor>().active_doc::<TextureConverterDoc>().expect("TextureConverterDoc is active");
+        assert!(doc.source_image.is_none());
+        assert_eq!(doc.source_summary(), "No image loaded");
+
+        let bar = w.query_filtered::<Entity, With<TextureConverterBar>>().single(w).expect("TextureConverterBar");
+        let left =
+            w.query_filtered::<Entity, With<TextureConverterLeftPane>>().single(w).expect("TextureConverterLeftPane");
+        let right =
+            w.query_filtered::<Entity, With<TextureConverterRightPane>>().single(w).expect("TextureConverterRightPane");
+        let sidebar = w
+            .query_filtered::<Entity, With<TextureConverterSidebarBody>>()
+            .single(w)
+            .expect("TextureConverterSidebarBody");
+        for (name, e) in [("bar", bar), ("left", left), ("right", right), ("sidebar", sidebar)] {
+            assert!(w.get::<Children>(e).is_some_and(|c| !c.is_empty()), "{name} container should have children");
+        }
+    }
+
+    // 3. Import a 2D image via import_from_bytes (and also verify load_demo()), tick, and check preview handles & ECS nodes.
+    {
+        let mut editor = app.world_mut().resource_mut::<Editor>();
+        let doc = editor.active_doc_mut::<TextureConverterDoc>().unwrap();
+        doc.load_demo();
+        assert_eq!(doc.source_image.as_ref().map(|i| (i.width, i.height)), Some((128, 128)));
+
+        // Now import a custom 8x4 RGBA8 PNG so we can verify exact pixel values after FlipY / Resize.
+        let mut pixels = Vec::with_capacity(8 * 4);
+        for y in 0..4u8 {
+            for x in 0..8u8 {
+                // Top row has y=0 (R=10), bottom row has y=3 (R=160); alpha = 128 + y * 20.
+                pixels.push([10 + y * 50, 20 + x * 10, 80, 128 + y * 20]);
+            }
+        }
+        let src = RgbaImage2d::new(8, 4, pixels);
+        let png_bytes = encode_png(&src).expect("encode test PNG");
+        doc.import_from_bytes(std::path::PathBuf::from("textures/test_albedo.png"), &png_bytes)
+            .expect("import_from_bytes");
+        editor.ui.props += 1;
+        editor.ui.tabs += 1;
+    }
+    app.update();
+    app.update();
+
+    let (thumb_id_initial, out_id_initial) = {
+        let w = app.world_mut();
+        let cache = w.resource::<TextureConverterPreviewCache>();
+        let thumb_handle = cache.source_thumb.clone().expect("source_thumb populated");
+        let out_handle = cache.output_preview.clone().expect("output_preview populated");
+        let checker_handle = cache.checker_handle.clone().expect("checker_handle populated");
+
+        let images = w.resource::<Assets<Image>>();
+        let thumb_img = images.get(&thumb_handle).expect("source_thumb in Assets<Image>");
+        let out_img = images.get(&out_handle).expect("output_preview in Assets<Image>");
+        assert!(images.get(&checker_handle).is_some(), "checker_handle in Assets<Image>");
+        assert_eq!(thumb_img.size(), UVec2::new(8, 4));
+        assert_eq!(out_img.size(), UVec2::new(8, 4));
+
+        let thumb_node_img = w
+            .query_filtered::<&ImageNode, With<TextureConverterThumbImage>>()
+            .single(w)
+            .expect("TextureConverterThumbImage in world")
+            .image
+            .clone();
+        let out_node_img = w
+            .query_filtered::<&ImageNode, With<TextureConverterOutputImage>>()
+            .single(w)
+            .expect("TextureConverterOutputImage in world")
+            .image
+            .clone();
+        assert_eq!(thumb_node_img, thumb_handle);
+        assert_eq!(out_node_img, out_handle);
+        (thumb_handle.id(), out_handle.id())
+    };
+
+    // 4. Test changing TextureConverterProp (Resize, FlipY, Ktx2ColorSpace, Mipmaps, Zstd) and SetPreviewChannel(A).
+    act(&mut app, TextureConverterAction::SetPreviewChannel(PreviewChannel::A));
+    act(
+        &mut app,
+        Action::Tab(TabAction::SetValue {
+            key: PropKey::new(TextureConverterProp::Resize),
+            value: PropValue::Str(ResizePreset::Size256.label().into()),
+            merge: false,
+        }),
+    );
+    act(
+        &mut app,
+        Action::Tab(TabAction::SetValue {
+            key: PropKey::new(TextureConverterProp::FlipY),
+            value: PropValue::Bool(true),
+            merge: false,
+        }),
+    );
+    act(
+        &mut app,
+        Action::Tab(TabAction::SetValue {
+            key: PropKey::new(TextureConverterProp::Ktx2ColorSpace),
+            value: PropValue::Str(Ktx2ColorSpace::Linear.label().into()),
+            merge: false,
+        }),
+    );
+    act(
+        &mut app,
+        Action::Tab(TabAction::SetValue {
+            key: PropKey::new(TextureConverterProp::Mipmaps),
+            value: PropValue::Bool(true),
+            merge: false,
+        }),
+    );
+    act(
+        &mut app,
+        Action::Tab(TabAction::SetValue {
+            key: PropKey::new(TextureConverterProp::Zstd),
+            value: PropValue::Bool(true),
+            merge: false,
+        }),
+    );
+
+    {
+        let w = app.world_mut();
+        let doc = w.resource::<Editor>().active_doc::<TextureConverterDoc>().unwrap();
+        assert_eq!(doc.preview_channel, PreviewChannel::A);
+        assert_eq!(doc.settings.resize, ResizePreset::Size256);
+        assert!(doc.settings.flip_y);
+        assert_eq!(doc.settings.ktx2_color_space, Ktx2ColorSpace::Linear);
+        assert!(doc.settings.mipmaps);
+        assert!(doc.settings.zstd);
+        assert_eq!(doc.output_summary(), "256x256 | KTX2 | RGBA8 (Linear) | 9 mips | Zstd");
+
+        let cache = w.resource::<TextureConverterPreviewCache>();
+        let out_handle = cache.output_preview.as_ref().unwrap();
+        assert_ne!(out_handle.id(), out_id_initial, "output_preview rebuilt after prop changes");
+        let images = w.resource::<Assets<Image>>();
+        assert!(!images.contains(thumb_id_initial), "stale thumb removed from Assets<Image>");
+        assert!(!images.contains(out_id_initial), "stale output removed from Assets<Image>");
+        let out_img = images.get(out_handle).expect("resized output_preview in Assets<Image>");
+        assert_eq!(out_img.size(), UVec2::new(256, 256));
+    }
+
+    // 5. Export both .ktx2 and .png to a tempdir (and check that no .texture.ron is created in the project).
+    let out_dir = tempfile::tempdir().unwrap();
+    let textures_before: Vec<AssetId> =
+        app.world().resource::<Editor>().domains.material().disk.textures.keys().cloned().collect();
+
+    let ktx2_path = out_dir.path().join("converted_linear.ktx2");
+    let ktx2_bytes_written = app
+        .world_mut()
+        .resource_mut::<Editor>()
+        .active_doc_mut::<TextureConverterDoc>()
+        .unwrap()
+        .export_to_path(&ktx2_path)
+        .expect("export .ktx2");
+    assert!(ktx2_bytes_written > 80);
+    assert!(ktx2_path.is_file());
+
+    // Switch OutputFormat to PNG and export .png.
+    act(
+        &mut app,
+        Action::Tab(TabAction::SetValue {
+            key: PropKey::new(TextureConverterProp::OutputFormat),
+            value: PropValue::Str(OutputFormat::Png.label().into()),
+            merge: false,
+        }),
+    );
+    {
+        let doc = app.world().resource::<Editor>().active_doc::<TextureConverterDoc>().unwrap();
+        assert_eq!(doc.settings.output_format, OutputFormat::Png);
+        assert_eq!(doc.output_summary(), "256x256 | PNG | RGBA8");
+    }
+
+    let png_path = out_dir.path().join("converted_flipped.png");
+    let png_bytes_written = app
+        .world_mut()
+        .resource_mut::<Editor>()
+        .active_doc_mut::<TextureConverterDoc>()
+        .unwrap()
+        .export_to_path(&png_path)
+        .expect("export .png");
+    assert!(png_bytes_written > 0);
+    assert!(png_path.is_file());
+
+    // 6. Verify Bevy's Image::from_buffer decodes both exported files with expected dimensions, format, and mip count.
+    let ktx2_bytes = std::fs::read(&ktx2_path).unwrap();
+    assert_eq!(shape_problem(&ktx2_bytes, TextureShape::Plain2d), None);
+    let decoded_ktx2 = Image::from_buffer(
+        &ktx2_bytes,
+        ImageType::Extension("ktx2"),
+        CompressedImageFormats::NONE,
+        false,
+        ImageSampler::Default,
+        RenderAssetUsages::default(),
+    )
+    .expect("Bevy decodes exported 2D KTX2");
+    assert_eq!(
+        (
+            decoded_ktx2.texture_descriptor.size.width,
+            decoded_ktx2.texture_descriptor.size.height,
+            decoded_ktx2.texture_descriptor.size.depth_or_array_layers,
+        ),
+        (256, 256, 1)
+    );
+    assert_eq!(decoded_ktx2.texture_descriptor.mip_level_count, 9);
+    assert_eq!(decoded_ktx2.texture_descriptor.format, TextureFormat::Rgba8Unorm);
+
+    let png_bytes = std::fs::read(&png_path).unwrap();
+    let decoded_png = Image::from_buffer(
+        &png_bytes,
+        ImageType::Extension("png"),
+        CompressedImageFormats::NONE,
+        true,
+        ImageSampler::Default,
+        RenderAssetUsages::default(),
+    )
+    .expect("Bevy decodes exported 2D PNG");
+    assert_eq!(
+        (
+            decoded_png.texture_descriptor.size.width,
+            decoded_png.texture_descriptor.size.height,
+            decoded_png.texture_descriptor.size.depth_or_array_layers,
+        ),
+        (256, 256, 1)
+    );
+    assert_eq!(decoded_png.texture_descriptor.mip_level_count, 1);
+    assert_eq!(decoded_png.texture_descriptor.format, TextureFormat::Rgba8UnormSrgb);
+    // Because FlipY was enabled, the top-left pixel of the exported PNG comes from the bottom row (y=3 -> R=160).
+    let png_data = decoded_png.data.as_ref().expect("PNG pixel data");
+    assert_eq!(png_data[0], 160, "FlipY placed bottom row (R=160) at top of exported image");
+
+    // 7. Verify JPEG (.jpg) import updates the preview cache and no .texture.ron file was created in the project's
+    // quillshade/material/ directory.
+    {
+        let mut jpg_bytes = Vec::new();
+        let rgb = [160u8, 80, 40].repeat(4 * 4);
+        let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpg_bytes, 100);
+        enc.encode(&rgb, 4, 4, image::ExtendedColorType::Rgb8).expect("encode JPEG");
+
+        let mut editor = app.world_mut().resource_mut::<Editor>();
+        let doc = editor.active_doc_mut::<TextureConverterDoc>().unwrap();
+        doc.import_from_bytes(std::path::PathBuf::from("textures/photo.jpg"), &jpg_bytes).expect("import JPEG");
+        editor.ui.props += 1;
+        editor.ui.tabs += 1;
+    }
+    app.update();
+    assert_eq!(
+        app.world().resource::<Editor>().active_doc::<TextureConverterDoc>().unwrap().suggested_export_filename(),
+        "photo.png"
+    );
+
+    app.world_mut().resource_mut::<Editor>().rescan();
+    let textures_after: Vec<AssetId> =
+        app.world().resource::<Editor>().domains.material().disk.textures.keys().cloned().collect();
+    assert_eq!(textures_before, textures_after, "no .texture.ron asset created by Texture Converter");
+    assert!(!dir.path().join("quillshade/material/converted_linear.texture.ron").exists());
+    assert!(!dir.path().join("quillshade/material/converted_flipped.texture.ron").exists());
+
+    // 8. Closing the tab cleans up the preview cache handles from Assets<Image>.
+    let (thumb_last, out_last) = {
+        let cache = app.world().resource::<TextureConverterPreviewCache>();
+        (cache.source_thumb.as_ref().unwrap().id(), cache.output_preview.as_ref().unwrap().id())
+    };
+    act(&mut app, Action::DiscardTab(0));
+    {
+        let cache = app.world().resource::<TextureConverterPreviewCache>();
+        let images = app.world().resource::<Assets<Image>>();
+        assert!(cache.source_thumb.is_none());
+        assert!(cache.output_preview.is_none());
+        assert!(!images.contains(thumb_last));
+        assert!(!images.contains(out_last));
+    }
+}
+
+/// The `Texture Channel Assembler` tool (`Tools -> Texture Channel Assembler...`) registers under `MainMenu::Tools`,
+/// opens its 2-column UI (`ChannelAssemblerLeftPane`, `ChannelAssemblerRightPane`, `ChannelAssemblerBar`,
+/// `ChannelAssemblerSidebarBody`), packs up to 4 channel slots with independent source channel selection, inversion,
+/// and empty-slot fallback fills, populates `ChannelAssemblerPreviewCache` (`slot_thumbs`, `output_preview`,
+/// `checker_handle`) and `ChannelAssemblerOutputImage`, and exports standalone `.ktx2` and `.png` files without
+/// creating any `.texture.ron` asset.
+#[test]
+fn channel_assembler_tool_packs_channels_previews_and_exports_ktx2_and_png_without_creating_texture_asset() {
+    use bevy::asset::RenderAssetUsages;
+    use bevy::image::{CompressedImageFormats, Image, ImageSampler, ImageType};
+    use bevy::render::render_resource::TextureFormat;
+    use editor_core::menu::MainMenu;
+    use editor_core::ui::menu::menu_entries;
+    use material_domain::channel_assembler::{
+        CHANNEL_ASSEMBLER_TOOL, ChannelAssemblerAction, ChannelAssemblerBar, ChannelAssemblerDoc,
+        ChannelAssemblerLeftPane, ChannelAssemblerOutputImage, ChannelAssemblerPreviewCache, ChannelAssemblerProp,
+        ChannelAssemblerRightPane, ChannelAssemblerSidebarBody, ChannelAssemblerSlotThumbImage,
+    };
+    use material_domain::texture_tools_common::{
+        Ktx2ColorSpace, OutputFormat, PreviewChannel, RgbaImage2d, SourceChannel, encode_png,
+    };
+    use shader_project::layout::MATERIAL;
+    use texture_kit::{TextureShape, shape_problem};
+
+    let (dir, mut app) = tools_app();
+
+    // 1. Verify CHANNEL_ASSEMBLER_TOOL is registered under MainMenu::Tools ("Texture Channel Assembler").
+    {
+        let editor = app.world().resource::<Editor>();
+        let mat_domain = editor.domain_list.get(MATERIAL).expect("Material domain registered");
+        assert!(
+            mat_domain.tools.iter().any(|t| {
+                t.id == CHANNEL_ASSEMBLER_TOOL
+                    && t.title == "Texture Channel Assembler"
+                    && t.menu == Some(MainMenu::Tools)
+            }),
+            "Texture Channel Assembler tool registered on Material domain under MainMenu::Tools"
+        );
+        let entries = menu_entries(MainMenu::Tools, editor);
+        assert_eq!(entries[1].label, "Texture Channel Assembler...");
+        assert_eq!(entries[1].action, Action::OpenTool { domain: MATERIAL, id: CHANNEL_ASSEMBLER_TOOL, arg: None });
+    }
+
+    // 2. Dispatch Action::OpenTool for CHANNEL_ASSEMBLER_TOOL, tick, and verify UI containers have children.
+    act(&mut app, Action::OpenTool { domain: MATERIAL, id: CHANNEL_ASSEMBLER_TOOL, arg: None });
+    {
+        let w = app.world_mut();
+        let doc = w.resource::<Editor>().active_doc::<ChannelAssemblerDoc>().expect("ChannelAssemblerDoc is active");
+        assert!(!doc.has_any_slot());
+        assert_eq!(doc.settings.ktx2_color_space, Ktx2ColorSpace::Linear);
+
+        let bar = w.query_filtered::<Entity, With<ChannelAssemblerBar>>().single(w).expect("ChannelAssemblerBar");
+        let left =
+            w.query_filtered::<Entity, With<ChannelAssemblerLeftPane>>().single(w).expect("ChannelAssemblerLeftPane");
+        let right =
+            w.query_filtered::<Entity, With<ChannelAssemblerRightPane>>().single(w).expect("ChannelAssemblerRightPane");
+        let sidebar = w
+            .query_filtered::<Entity, With<ChannelAssemblerSidebarBody>>()
+            .single(w)
+            .expect("ChannelAssemblerSidebarBody");
+        for (name, e) in [("bar", bar), ("left", left), ("right", right), ("sidebar", sidebar)] {
+            assert!(w.get::<Children>(e).is_some_and(|c| !c.is_empty()), "{name} container should have children");
+        }
+    }
+
+    // 3. Import images into slots 0, 1, 2 with different source channels / invert, leaving slot 3 empty (default 255).
+    {
+        let mut editor = app.world_mut().resource_mut::<Editor>();
+        let doc = editor.active_doc_mut::<ChannelAssemblerDoc>().unwrap();
+        // Slot 0 (Output R): 4x4 image with R=50, G=110, B=20, A=255 -> take from G (110).
+        let png0 = encode_png(&RgbaImage2d::new(4, 4, vec![[50, 110, 20, 255]; 16])).unwrap();
+        doc.import_slot_from_bytes(0, std::path::PathBuf::from("masks/ao.png"), &png0).unwrap();
+        // Slot 1 (Output G): 4x4 image with R=200, G=40, B=80, A=255 -> take from R (200) and invert -> 55.
+        let png1 = encode_png(&RgbaImage2d::new(4, 4, vec![[200, 40, 80, 255]; 16])).unwrap();
+        doc.import_slot_from_bytes(1, std::path::PathBuf::from("masks/roughness.png"), &png1).unwrap();
+        // Slot 2 (Output B): 8x8 image (mixed size!) with R=10, G=20, B=175, A=255 -> take from B (175).
+        let png2 = encode_png(&RgbaImage2d::new(8, 8, vec![[10, 20, 175, 255]; 64])).unwrap();
+        doc.import_slot_from_bytes(2, std::path::PathBuf::from("masks/metallic.png"), &png2).unwrap();
+        editor.ui.props += 1;
+        editor.ui.tabs += 1;
+    }
+
+    // Configure source channels and inversion via TabAction::SetValue:
+    act(
+        &mut app,
+        Action::Tab(TabAction::SetValue {
+            key: PropKey::new(ChannelAssemblerProp::SlotSourceChannel(0)),
+            value: PropValue::Str(SourceChannel::G.label().into()),
+            merge: false,
+        }),
+    );
+    act(
+        &mut app,
+        Action::Tab(TabAction::SetValue {
+            key: PropKey::new(ChannelAssemblerProp::SlotSourceChannel(1)),
+            value: PropValue::Str(SourceChannel::R.label().into()),
+            merge: false,
+        }),
+    );
+    act(
+        &mut app,
+        Action::Tab(TabAction::SetValue {
+            key: PropKey::new(ChannelAssemblerProp::SlotInvert(1)),
+            value: PropValue::Bool(true),
+            merge: false,
+        }),
+    );
+    act(
+        &mut app,
+        Action::Tab(TabAction::SetValue {
+            key: PropKey::new(ChannelAssemblerProp::SlotSourceChannel(2)),
+            value: PropValue::Str(SourceChannel::B.label().into()),
+            merge: false,
+        }),
+    );
+    act(&mut app, ChannelAssemblerAction::SetPreviewChannel(PreviewChannel::G));
+
+    // Verify ChannelAssemblerPreviewCache and ECS world image nodes.
+    {
+        let w = app.world_mut();
+        let doc = w.resource::<Editor>().active_doc::<ChannelAssemblerDoc>().unwrap();
+        assert_eq!(doc.loaded_slot_count(), 3);
+        assert!(doc.has_mixed_sizes());
+        assert_eq!(doc.slots[3].default_value, 255);
+        assert_eq!(doc.preview_channel, PreviewChannel::G);
+
+        let cache = w.resource::<ChannelAssemblerPreviewCache>();
+        assert!(cache.mixed_sizes);
+        assert_eq!(cache.out_dims, (4, 4));
+        let thumb0 = cache.slot_thumbs[0].clone().expect("slot 0 thumb");
+        let thumb1 = cache.slot_thumbs[1].clone().expect("slot 1 thumb");
+        let thumb2 = cache.slot_thumbs[2].clone().expect("slot 2 thumb");
+        assert!(cache.slot_thumbs[3].is_none(), "slot 3 is empty so it has no thumbnail");
+        let out_handle = cache.output_preview.clone().expect("output_preview populated");
+        let checker_handle = cache.checker_handle.clone().expect("checker_handle populated");
+
+        let images = w.resource::<Assets<Image>>();
+        assert_eq!(images.get(&thumb0).unwrap().size(), UVec2::new(4, 4));
+        assert_eq!(images.get(&thumb1).unwrap().size(), UVec2::new(4, 4));
+        assert_eq!(images.get(&thumb2).unwrap().size(), UVec2::new(8, 8));
+        assert_eq!(images.get(&out_handle).unwrap().size(), UVec2::new(4, 4));
+        assert!(images.get(&checker_handle).is_some());
+
+        let out_node = w
+            .query_filtered::<&ImageNode, With<ChannelAssemblerOutputImage>>()
+            .single(w)
+            .expect("ChannelAssemblerOutputImage in world");
+        assert_eq!(out_node.image, out_handle);
+
+        let slot_thumb_count = w.query::<&ChannelAssemblerSlotThumbImage>().iter(w).count();
+        assert_eq!(slot_thumb_count, 3, "3 loaded slots have ChannelAssemblerSlotThumbImage entities");
+    }
+
+    // 4. Export both .ktx2 and .png to a tempdir and verify Bevy's Image::from_buffer decodes both with expected pixels.
+    let out_dir = tempfile::tempdir().unwrap();
+    let textures_before: Vec<AssetId> =
+        app.world().resource::<Editor>().domains.material().disk.textures.keys().cloned().collect();
+
+    let ktx2_path = out_dir.path().join("orm_packed.ktx2");
+    let ktx2_bytes_written = app
+        .world_mut()
+        .resource_mut::<Editor>()
+        .active_doc_mut::<ChannelAssemblerDoc>()
+        .unwrap()
+        .export_to_path(&ktx2_path)
+        .expect("export assembled .ktx2");
+    assert!(ktx2_bytes_written > 80);
+    assert!(ktx2_path.is_file());
+
+    // Switch OutputFormat to PNG and export .png.
+    act(
+        &mut app,
+        Action::Tab(TabAction::SetValue {
+            key: PropKey::new(ChannelAssemblerProp::OutputFormat),
+            value: PropValue::Str(OutputFormat::Png.label().into()),
+            merge: false,
+        }),
+    );
+    let png_path = out_dir.path().join("orm_packed.png");
+    let png_bytes_written = app
+        .world_mut()
+        .resource_mut::<Editor>()
+        .active_doc_mut::<ChannelAssemblerDoc>()
+        .unwrap()
+        .export_to_path(&png_path)
+        .expect("export assembled .png");
+    assert!(png_bytes_written > 0);
+    assert!(png_path.is_file());
+
+    // Verify KTX2 via Bevy's Image::from_buffer: 4x4, 3 mips (4->2->1), Rgba8Unorm (Linear default), pixel [110, 55, 175, 255].
+    let ktx2_bytes = std::fs::read(&ktx2_path).unwrap();
+    assert_eq!(shape_problem(&ktx2_bytes, TextureShape::Plain2d), None);
+    let decoded_ktx2 = Image::from_buffer(
+        &ktx2_bytes,
+        ImageType::Extension("ktx2"),
+        CompressedImageFormats::NONE,
+        false,
+        ImageSampler::Default,
+        RenderAssetUsages::default(),
+    )
+    .expect("Bevy decodes exported assembled KTX2");
+    assert_eq!(
+        (
+            decoded_ktx2.texture_descriptor.size.width,
+            decoded_ktx2.texture_descriptor.size.height,
+            decoded_ktx2.texture_descriptor.size.depth_or_array_layers,
+        ),
+        (4, 4, 1)
+    );
+    assert_eq!(decoded_ktx2.texture_descriptor.mip_level_count, 3);
+    assert_eq!(decoded_ktx2.texture_descriptor.format, TextureFormat::Rgba8Unorm);
+    let ktx2_data = decoded_ktx2.data.as_ref().expect("KTX2 pixel data");
+    assert_eq!(&ktx2_data[..4], &[110, 55, 175, 255]);
+
+    // Verify PNG via Bevy's Image::from_buffer: 4x4, 1 mip, pixel [110, 55, 175, 255].
+    let png_bytes = std::fs::read(&png_path).unwrap();
+    let decoded_png = Image::from_buffer(
+        &png_bytes,
+        ImageType::Extension("png"),
+        CompressedImageFormats::NONE,
+        false,
+        ImageSampler::Default,
+        RenderAssetUsages::default(),
+    )
+    .expect("Bevy decodes exported assembled PNG");
+    assert_eq!(
+        (
+            decoded_png.texture_descriptor.size.width,
+            decoded_png.texture_descriptor.size.height,
+            decoded_png.texture_descriptor.size.depth_or_array_layers,
+        ),
+        (4, 4, 1)
+    );
+    assert_eq!(decoded_png.texture_descriptor.mip_level_count, 1);
+    let png_data = decoded_png.data.as_ref().expect("PNG pixel data");
+    assert_eq!(&png_data[..4], &[110, 55, 175, 255]);
+
+    // 5. Verify JPEG (.jpeg) slot import works and no .texture.ron file was created in the project's
+    // quillshade/material/ directory.
+    {
+        let mut jpg_bytes = Vec::new();
+        let rgb = [90u8, 180, 45].repeat(4 * 4);
+        let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpg_bytes, 100);
+        enc.encode(&rgb, 4, 4, image::ExtendedColorType::Rgb8).expect("encode JPEG");
+
+        let mut editor = app.world_mut().resource_mut::<Editor>();
+        let doc = editor.active_doc_mut::<ChannelAssemblerDoc>().unwrap();
+        doc.import_slot_from_bytes(3, std::path::PathBuf::from("masks/alpha.jpeg"), &jpg_bytes)
+            .expect("import JPEG slot");
+        editor.ui.props += 1;
+        editor.ui.tabs += 1;
+    }
+    app.update();
+    assert_eq!(app.world().resource::<Editor>().active_doc::<ChannelAssemblerDoc>().unwrap().loaded_slot_count(), 4);
+
+    app.world_mut().resource_mut::<Editor>().rescan();
+    let textures_after: Vec<AssetId> =
+        app.world().resource::<Editor>().domains.material().disk.textures.keys().cloned().collect();
+    assert_eq!(textures_before, textures_after, "no .texture.ron asset created by Texture Channel Assembler");
+    assert!(!dir.path().join("quillshade/material/orm_packed.texture.ron").exists());
+
+    // 6. Closing the tab cleans up the preview cache handles from Assets<Image>.
+    let out_last = app.world().resource::<ChannelAssemblerPreviewCache>().output_preview.as_ref().unwrap().id();
+    act(&mut app, Action::DiscardTab(0));
+    {
+        let cache = app.world().resource::<ChannelAssemblerPreviewCache>();
+        let images = app.world().resource::<Assets<Image>>();
+        assert!(cache.output_preview.is_none());
+        assert!(cache.slot_thumbs.iter().all(Option::is_none));
+        assert!(!images.contains(out_last));
+    }
+}

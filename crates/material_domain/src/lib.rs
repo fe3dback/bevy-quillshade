@@ -14,6 +14,7 @@ use bevy::prelude::*;
 
 pub mod autolayout;
 pub mod canvas;
+pub mod channel_assembler;
 pub use editor_core::config;
 pub mod consts_doc;
 pub mod curve;
@@ -38,6 +39,8 @@ pub mod tab;
 #[cfg(test)]
 mod tests;
 pub mod texture;
+pub mod texture_converter;
+pub mod texture_tools_common;
 pub mod ui;
 pub use editor_core::util;
 
@@ -128,6 +131,30 @@ fn debug_screenshot(
     }
     *frames += 1;
     if *frames == 2
+        && let Ok(open) = std::env::var("SHADER_EDITOR_OPEN")
+        && let Some(tool) = open.strip_prefix(editor_core::domain::TOOL_KEY_PREFIX)
+    {
+        let (tool_name, demo_arg) = tool.split_once(':').map_or((tool, None), |(t, a)| (t, Some(a)));
+        if tool_name == texture_converter::TEXTURE_CONVERTER_TOOL {
+            editor.open_tool(shader_project::layout::MATERIAL, texture_converter::TEXTURE_CONVERTER_TOOL, None);
+            if demo_arg == Some("demo")
+                && let Some(doc) = editor.active_doc_mut::<texture_converter::TextureConverterDoc>()
+            {
+                doc.load_demo();
+                editor.ui.props += 1;
+                editor.ui.tabs += 1;
+            }
+        } else if tool_name == channel_assembler::CHANNEL_ASSEMBLER_TOOL {
+            editor.open_tool(shader_project::layout::MATERIAL, channel_assembler::CHANNEL_ASSEMBLER_TOOL, None);
+            if demo_arg == Some("demo")
+                && let Some(doc) = editor.active_doc_mut::<channel_assembler::ChannelAssemblerDoc>()
+            {
+                doc.load_demo();
+                editor.ui.props += 1;
+                editor.ui.tabs += 1;
+            }
+        }
+    } else if *frames == 2
         && let Ok(open) = std::env::var("SHADER_EDITOR_OPEN")
         && let Some(path) = open.strip_prefix(texture::GAME_KEY_PREFIX)
     {
