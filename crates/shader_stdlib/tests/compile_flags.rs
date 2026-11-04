@@ -107,6 +107,7 @@ fn compile_if_prunes_dead_branch_params_textures_functions_builtins_and_w101() {
             textures: vec![],
             gradients: vec![],
             scene: vec![],
+            features: vec![],
         },
     );
     let textures = BTreeSet::from(["textures/rock".to_string()]);
@@ -330,4 +331,100 @@ fn runtime_bool_and_toggle_nodes_emit_expected_wesl() {
     assert_eq!(ir.params.len(), 1);
     assert_eq!(ir.params[0].name, "active");
     assert!(ir.main.lines.iter().any(|l| l.name == "n_rif_out" && l.expr.starts_with("select(")));
+}
+
+#[test]
+fn game_feature_switch_prunes_inactive_variants_and_switches_branches() {
+    use shader_graph_core::{FeatureEnum, FeatureTable, FeatureVariant, build_ir_with_features, variant_pin_id};
+
+    let mut a = pbr();
+    let out = node(&mut a, "out", "output::Pbr3d", &[]);
+    let low = FeatureVariant::new("low");
+    let high = FeatureVariant::new("high");
+    let rq = FeatureEnum::new("render_quality", vec![low.clone(), high.clone()]);
+    let mut table = FeatureTable::new("graphics", vec![rq.clone()]);
+    table.ensure_id();
+
+    let green = node(&mut a, "green", "stdlib::Constant3Vector", &[("value", Value::Float3([0.0, 1.0, 0.0]))]);
+    let tex_sample = node(
+        &mut a,
+        "sample",
+        "param::TextureSample2D",
+        &[("name", Value::Str("grass".into())), ("default", Value::Str("textures/grass".into()))],
+    );
+    let sw = node(
+        &mut a,
+        "sw",
+        "stdlib::GameFeatureSwitch",
+        &[("table", Value::Str("graphics".into())), ("feature", Value::Str(rq.id.to_string()))],
+    );
+    a.connect((&green, "out"), (&sw, &variant_pin_id(low.id)));
+    a.connect((&tex_sample, "rgb"), (&sw, &variant_pin_id(high.id)));
+    a.connect((&sw, "out"), (&out, "base_color"));
+
+    let features = BTreeMap::from([("graphics".to_string(), table)]);
+    let textures = BTreeSet::from(["textures/grass".to_string()]);
+    let reg = shader_stdlib::registry();
+
+    // Explicit override `render_quality = low`: `tex_sample` is pruned from IR and textures!
+    let low_overrides = BTreeMap::from([(rq.id, low.id)]);
+    let res_low = build_ir_with_features(
+        &a,
+        "test/mat",
+        &reg,
+        &NoFunctions,
+        &NoCurves,
+        &NoConsts,
+        &textures,
+        &NoGradients,
+        &features,
+        &BTreeMap::new(),
+        &low_overrides,
+    );
+    assert!(!res_low.has_errors(), "{:?}", res_low.diagnostics);
+    let ir_low = res_low.ir.expect("ir_low");
+    assert!(ir_low.textures.is_empty(), "high texture must be pruned in low branch: {:?}", ir_low.textures);
+
+    // Multi-permutation build (empty overrides): perm 0 (`main`) has no textureSample statement, perm 1 (`high`) has it.
+    let res_all = build_ir_with_features(
+        &a,
+        "test/mat",
+        &reg,
+        &NoFunctions,
+        &NoCurves,
+        &NoConsts,
+        &textures,
+        &NoGradients,
+        &features,
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+    );
+    assert!(!res_all.has_errors(), "{:?}", res_all.diagnostics);
+    let ir_all = res_all.ir.expect("ir_all");
+    assert_eq!(ir_all.features.len(), 1);
+    assert_eq!(ir_all.features[0].1.name, "render_quality");
+    assert_eq!(ir_all.permutation_stages.len(), 1);
+    assert!(ir_all.main.lines.is_empty());
+    assert!(ir_all.permutation_stages[0].0.lines.iter().any(|s| s.node == "sample"));
+    assert_eq!(ir_all.textures.len(), 1);
+    assert_eq!(ir_all.textures[0].ident, "inp_grass");
+
+    // Override `render_quality = high`: `tex_sample` becomes live!
+    let overrides = BTreeMap::from([(rq.id, high.id)]);
+    let res_high = build_ir_with_features(
+        &a,
+        "test/mat",
+        &reg,
+        &NoFunctions,
+        &NoCurves,
+        &NoConsts,
+        &textures,
+        &NoGradients,
+        &features,
+        &BTreeMap::new(),
+        &overrides,
+    );
+    assert!(!res_high.has_errors(), "{:?}", res_high.diagnostics);
+    let ir_high = res_high.ir.expect("ir_high");
+    assert_eq!(ir_high.textures.len(), 1);
 }

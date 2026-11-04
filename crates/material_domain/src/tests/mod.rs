@@ -75,6 +75,7 @@ mod consts;
 mod curves;
 mod domain;
 mod drop;
+mod features;
 mod gradients;
 mod graph;
 mod nav;

@@ -142,7 +142,19 @@ pub fn index_part(set: &AssetSet, user_nodes: &[UserNodeFile], registry: &Regist
     }
     for (id, t) in &set.consts {
         if let Ok(t) = t {
-            let subs = t.consts.iter().map(|c| SubItem { id: c.id.into(), label: c.name.clone() }).collect();
+            let subs = t.consts.iter().map(|c| SubItem::new(u64::from(c.id), c.name.clone())).collect();
+            add(id, t.id, subs, Vec::new());
+        }
+    }
+    for (id, t) in &set.features {
+        if let Ok(t) = t {
+            let mut subs = Vec::new();
+            for e in &t.enums {
+                subs.push(SubItem::with_uuid(e.id, e.name.clone()));
+                for v in &e.variants {
+                    subs.push(SubItem::with_uuid(v.id, format!("{}::{}", e.name, v.name)));
+                }
+            }
             add(id, t.id, subs, Vec::new());
         }
     }
@@ -153,7 +165,7 @@ pub fn index_part(set: &AssetSet, user_nodes: &[UserNodeFile], registry: &Regist
     }
     for (id, g) in &set.gradients {
         if let Ok(g) = g {
-            let subs = g.slots.iter().map(|s| SubItem { id: s.id.into(), label: s.name.clone() }).collect();
+            let subs = g.slots.iter().map(|s| SubItem::new(u64::from(s.id), s.name.clone())).collect();
             add(id, g.id, subs, Vec::new());
         }
     }

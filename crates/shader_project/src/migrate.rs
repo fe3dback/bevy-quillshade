@@ -38,6 +38,7 @@ use serde::Deserialize;
 use serde::de::{self, DeserializeOwned};
 use shader_graph_core::consts::GlobalConsts;
 use shader_graph_core::curve::Curve;
+use shader_graph_core::features::FeatureTable;
 use shader_graph_core::gradient::GradientCollection;
 use shader_graph_core::model::Asset;
 use shader_graph_core::registry::FUNCTION_PREFIX;
@@ -281,6 +282,11 @@ fn migrate_v3(source: &Source, text: &str, facts: &MigrationFacts) -> Result<Str
         }
         Kind::Asset(AssetType::Consts) => {
             let mut t: GlobalConsts = parse(text)?;
+            (t.format_version, t.id) = (format_version, uuid);
+            t.to_ron()
+        }
+        Kind::Asset(AssetType::Features) => {
+            let mut t: FeatureTable = parse(text)?;
             (t.format_version, t.id) = (format_version, uuid);
             t.to_ron()
         }

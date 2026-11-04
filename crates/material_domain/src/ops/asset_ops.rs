@@ -67,6 +67,15 @@ impl MaterialAssets for Editor {
                 u if u.is_empty() => format!("Delete {}?", id.source_rel()),
                 u => usage_message(&format!("Deleting {}", id.source_rel()), &names, &u),
             }
+        } else if id.ty == AssetType::Features
+            && let Some(t) = self.feature_table(&id.path)
+        {
+            let ids: Vec<AssetUuid> = t.enums.iter().map(|e| e.id).collect();
+            let names: Vec<String> = t.enums.iter().map(|e| e.name.clone()).collect();
+            match self.feature_enum_usages(&id.path, &ids) {
+                u if u.is_empty() => format!("Delete {}?", id.source_rel()),
+                u => usage_message(&format!("Deleting {}", id.source_rel()), &names, &u),
+            }
         } else {
             format!("Delete {}?", id.source_rel())
         };
@@ -125,6 +134,9 @@ impl MaterialAssets for Editor {
             }),
             AssetType::Consts => self.follow_ref_clear(const_table_refs, names, |a, r| {
                 ops::clear_const_table_refs(a, r, names);
+            }),
+            AssetType::Features => self.follow_ref_clear(feature_table_refs, names, |a, r| {
+                ops::clear_feature_table_refs(a, r, names);
             }),
             _ => {}
         }

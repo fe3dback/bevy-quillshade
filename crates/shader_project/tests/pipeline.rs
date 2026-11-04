@@ -2401,3 +2401,94 @@ fn deleting_a_duplicate_copy_keeps_refs_to_the_original() {
     ops::delete(&p, &tex).unwrap();
     assert!(!changed(&p).is_empty(), "deleting the original clears its references");
 }
+
+#[test]
+fn game_features_permutations_and_limits() {
+    use shader_graph_core::Value;
+    use shader_graph_core::features::{FeatureEnum, FeatureTable, FeatureVariant};
+    use shader_graph_core::model::{AssetKind, MaterialKind, Node, PbrSettings};
+
+    let (_d, p) = temp_project();
+    let feat_id = AssetId::new(AssetType::Features, "common/graphics");
+    let q_enum = FeatureEnum::new("render_quality", vec![FeatureVariant::new("low"), FeatureVariant::new("high")]);
+    let s_enum = FeatureEnum::new(
+        "shadow_mode",
+        vec![FeatureVariant::new("off"), FeatureVariant::new("soft"), FeatureVariant::new("pcss")],
+    );
+    let mut table = FeatureTable::new("graphics", vec![q_enum.clone(), s_enum.clone()]);
+    ops::save_features(&p, &feat_id, &mut table).unwrap();
+
+    // Build a material using both `render_quality` (2 variants) and `shadow_mode` (3 variants) -> 2 * 3 = 6 perms.
+    let mat_id = AssetId::new(AssetType::Material, "fx/featured");
+    let mut mat = ops::template("featured", AssetKind::Material(MaterialKind::Pbr3d(PbrSettings::default())));
+    let out_node = mat.nodes.keys().next().unwrap().clone();
+    let sw_q = mat.add_node(
+        Node::new("stdlib::GameFeatureSwitch", (0.0, 0.0))
+            .with_param("table", Value::Str(table.id.to_string()))
+            .with_param("feature", Value::Str(q_enum.id.to_string())),
+    );
+    let sw_s = mat.add_node(
+        Node::new("stdlib::GameFeatureSwitch", (0.0, 120.0))
+            .with_param("table", Value::Str(table.id.to_string()))
+            .with_param("feature", Value::Str(s_enum.id.to_string())),
+    );
+    let c_low = mat.add_node(
+        Node::new("stdlib::Constant3Vector", (-200.0, 0.0)).with_param("value", Value::Float3([0.1, 0.2, 0.3])),
+    );
+    let c_high = mat.add_node(
+        Node::new("stdlib::Constant3Vector", (-200.0, 60.0)).with_param("value", Value::Float3([0.8, 0.9, 1.0])),
+    );
+    mat.connect((&c_low, "out"), (&sw_q, &q_enum.variants[0].id.to_string()));
+    mat.connect((&c_high, "out"), (&sw_q, &q_enum.variants[1].id.to_string()));
+    mat.connect((&sw_q, "out"), (&out_node, "base_color"));
+    mat.connect((&sw_s, "out"), (&out_node, "roughness"));
+    ops::save(&p, &mat_id, &mut mat).unwrap();
+
+    let bevy = BevySources::discover();
+    let opts = RegenOptions { compile_check: bevy.as_ref(), ..Default::default() };
+    let r = regenerate(&p, &opts).unwrap();
+    assert!(!r.has_errors(), "{:?}", r.diagnostics().collect::<Vec<_>>());
+
+    let wesl = read(&p.root.join("assets/quillshade/material/autogen/dir_fx/mat_featured.wesl"));
+    assert!(wesl.contains(&format!("@if({} && {})", q_enum.wesl_cond(0), s_enum.wesl_cond(1))), "{wesl}");
+    assert!(wesl.contains(&format!("@elif({} && {})", q_enum.wesl_cond(1), s_enum.wesl_cond(2))), "{wesl}");
+
+    let rs = read(&p.root.join("crates/quillshade/src/material/materials/dir_fx/mat_featured.rs"));
+    assert!(
+        rs.contains("pub(crate) fn permutation_of(features: &crate::material::QuillshadeMaterialFeatures) -> u32"),
+        "{rs}"
+    );
+
+    let feat_rs = read(&p.root.join("crates/quillshade/src/material/features.rs"));
+    assert!(feat_rs.contains("#[reflect(Resource, Default, Debug, PartialEq, Clone)]"), "{feat_rs}");
+    assert!(feat_rs.contains("#[reflect(Default, Debug, PartialEq, Hash, Clone)]"), "{feat_rs}");
+    assert!(feat_rs.contains("pub mod dir_common"), "{feat_rs}");
+    assert!(feat_rs.contains("pub mod feat_graphics"), "{feat_rs}");
+    assert!(feat_rs.contains("pub enum RenderQuality"), "{feat_rs}");
+    assert!(feat_rs.contains("pub enum ShadowMode"), "{feat_rs}");
+
+    // Exceeding MAX_MATERIAL_PERMUTATIONS (64) reports E015.
+    let mut big_enums = Vec::new();
+    for i in 0..7 {
+        big_enums.push(FeatureEnum::new(format!("flag_{i}"), vec![FeatureVariant::new("a"), FeatureVariant::new("b")]));
+    }
+    let mut big_table = FeatureTable::new("graphics", big_enums.clone());
+    big_table.id = table.id;
+    ops::save_features(&p, &feat_id, &mut big_table).unwrap();
+
+    let mut prev = c_low.clone();
+    for (i, en) in big_enums.iter().enumerate() {
+        let sw = mat.add_node(
+            Node::new("stdlib::GameFeatureSwitch", (0.0, i as f32 * 50.0))
+                .with_param("table", Value::Str(big_table.id.to_string()))
+                .with_param("feature", Value::Str(en.id.to_string())),
+        );
+        mat.connect((&prev, "out"), (&sw, &en.variants[0].id.to_string()));
+        prev = sw;
+    }
+    mat.connect((&prev, "out"), (&out_node, "base_color"));
+    ops::save(&p, &mat_id, &mut mat).unwrap();
+
+    let r2 = regenerate(&p, &RegenOptions::default()).unwrap();
+    assert!(r2.diagnostics().any(|d| d.code == Code::E015), "{:?}", r2.diagnostics().collect::<Vec<_>>());
+}

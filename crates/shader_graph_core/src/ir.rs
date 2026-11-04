@@ -3,9 +3,12 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
+use project_core::AssetUuid;
+
 use crate::consts::ConstLookup;
 use crate::curve::Interp;
 use crate::diag::{Code, Diagnostic, Diagnostics};
+use crate::features::{FeatureEnum, FeatureLookup, MAX_MATERIAL_PERMUTATIONS, NoFeatures, variant_pin_id};
 use crate::ident::{check_ident, input_ident};
 use crate::model::{Asset, AssetKind, Edge, MaterialKind, NodeId, PbrOutputMode, PreviewMode};
 use crate::preview::{PreviewSlot, PreviewSource, albedo_expr};
@@ -202,6 +205,12 @@ pub struct Ir {
     pub params: Vec<MaterialParam>,
     /// Named compile-time boolean parameters (`param::CompileBool`) active in the graph (name → resolved bool value).
     pub compile_flags: BTreeMap<String, bool>,
+    /// Feature enums switched in this graph or in called functions: `(table_path, FeatureEnum)`, sorted by
+    /// `(table_path, enum.name, enum.id)`.
+    pub features: Vec<(String, FeatureEnum)>,
+    /// Additional permutation stages (`1..P`) when `features` produces `P > 1` permutations.
+    /// Permutation `0` (all default variants) is stored in `self.main` and `self.vertex`.
+    pub permutation_stages: Vec<(IrStage, Option<IrStage>)>,
     pub uniform: UniformLayout,
     /// Texture bindings of a material: parameters first (by name), then fixed textures sorted by
     /// `(origin, node)`, then gradient collections sorted by id; numbered `101/102`, `103/104`, … Empty for
@@ -230,13 +239,67 @@ impl Ir {
         self.textures.iter().find(|t| matches!(&t.source, TextureSource::Param(p) if p == name))
     }
 
-    /// All builtins used by any stage.
+    /// All builtins used by any stage (including all permutations).
     pub fn all_builtins(&self) -> BTreeSet<Builtin> {
         let mut b = self.main.builtins.clone();
         if let Some(v) = &self.vertex {
             b.extend(v.builtins.iter().copied());
         }
+        for (m, v) in &self.permutation_stages {
+            b.extend(m.builtins.iter().copied());
+            if let Some(vs) = v {
+                b.extend(vs.builtins.iter().copied());
+            }
+        }
         b
+    }
+
+    /// Total number of shader permutations (`1` when `features` is empty).
+    pub fn total_permutations(&self) -> usize {
+        self.features.iter().fold(1usize, |acc, (_, fe)| acc.saturating_mul(fe.variants.len().max(1)))
+    }
+
+    /// Number of compiled stage permutations stored in this `Ir` (`1 + self.permutation_stages.len()`).
+    pub fn permutation_count(&self) -> usize {
+        1 + self.permutation_stages.len()
+    }
+
+    /// Variant index (`0..variants.len()`) of each feature in `self.features` for permutation `perm_idx`.
+    pub fn permutation_variant_indices(&self, perm_idx: usize) -> Vec<usize> {
+        let mut rem = perm_idx;
+        let mut indices = vec![0usize; self.features.len()];
+        for i in (0..self.features.len()).rev() {
+            let n = self.features[i].1.variants.len().max(1);
+            indices[i] = rem % n;
+            rem /= n;
+        }
+        indices
+    }
+
+    /// `enum.id -> variant.id` map for permutation `perm_idx`.
+    pub fn permutation_overrides(&self, perm_idx: usize) -> BTreeMap<AssetUuid, AssetUuid> {
+        let indices = self.permutation_variant_indices(perm_idx);
+        let mut out = BTreeMap::new();
+        for ((_, fe), idx) in self.features.iter().zip(indices) {
+            if let Some(v) = fe.variants.get(idx) {
+                out.insert(fe.id, v.id);
+            }
+        }
+        out
+    }
+
+    /// WESL `shader_defs` enabled when compiling permutation `perm_idx` (`QS_F_<enum_uuid_simple>_<variant_idx>` for
+    /// each active feature with `variant_idx > 0`).
+    pub fn permutation_shader_defs(&self, perm_idx: usize) -> Vec<String> {
+        let indices = self.permutation_variant_indices(perm_idx);
+        self.features.iter().zip(indices).filter(|&(_, idx)| idx > 0).map(|((_, fe), idx)| fe.shader_def(idx)).collect()
+    }
+
+    /// WESL `@if(...)` condition expression matching permutation `perm_idx` (`>= 1`).
+    pub fn permutation_wesl_cond(&self, perm_idx: usize) -> String {
+        let indices = self.permutation_variant_indices(perm_idx);
+        let parts: Vec<String> = self.features.iter().zip(indices).map(|((_, fe), idx)| fe.wesl_cond(idx)).collect();
+        if parts.is_empty() { "true".to_string() } else { parts.join(" && ") }
     }
 
     /// WESL feature naming the binding layout of a material (decision 0029): `SG_LAYOUT_` + an FNV-1a hash of its
@@ -266,6 +329,13 @@ impl Ir {
         }
         for (k, v) in &self.compile_flags {
             key.push_str(&format!("cf:{k}={v};"));
+        }
+        for (tpath, fe) in &self.features {
+            key.push_str(&format!("feat:{tpath}:{}:{}:", fe.id, fe.name));
+            for v in &fe.variants {
+                key.push_str(&format!("{}={},", v.id, v.name));
+            }
+            key.push(';');
         }
         // FNV-1a (32 bit): stable across Rust versions, unlike `DefaultHasher`.
         let hash = key.bytes().fold(0x811c_9dc5_u32, |h, b| (h ^ u32::from(b)).wrapping_mul(0x0100_0193));
@@ -329,6 +399,7 @@ pub fn declared_function_sig(asset: &Asset, path: &str, registry: &Registry) -> 
         textures: Vec::new(),
         gradients: Vec::new(),
         scene: Vec::new(),
+        features: Vec::new(),
     }
 }
 
@@ -390,6 +461,216 @@ pub fn build_ir_with_overrides(
     gradients: &dyn GradientLookup,
     compile_overrides: &BTreeMap<String, bool>,
 ) -> IrResult {
+    build_ir_with_features(
+        asset,
+        path,
+        registry,
+        functions,
+        curves,
+        consts,
+        textures,
+        gradients,
+        &NoFeatures,
+        compile_overrides,
+        &BTreeMap::new(),
+    )
+}
+
+/// Builds the IR of `asset` with feature tables (`features`), compile-time boolean flag overrides
+/// (`compile_overrides`), and active feature enum variant overrides (`feature_overrides`: `enum_id -> variant_id`).
+/// When `feature_overrides` is empty, builds all `N_1 * ... * N_M` permutations (up to [`MAX_MATERIAL_PERMUTATIONS`])
+/// and unifies their bindings and imports into the returned [`Ir`].
+#[allow(clippy::too_many_arguments)]
+pub fn build_ir_with_features(
+    asset: &Asset,
+    path: &str,
+    registry: &Registry,
+    functions: &dyn FunctionLookup,
+    curves: &dyn CurveLookup,
+    consts: &dyn ConstLookup,
+    textures: &dyn TextureLookup,
+    gradients: &dyn GradientLookup,
+    features: &dyn FeatureLookup,
+    compile_overrides: &BTreeMap<String, bool>,
+    feature_overrides: &BTreeMap<AssetUuid, AssetUuid>,
+) -> IrResult {
+    let mut base = build_single_ir(
+        asset,
+        path,
+        registry,
+        functions,
+        curves,
+        consts,
+        textures,
+        gradients,
+        features,
+        compile_overrides,
+        feature_overrides,
+    );
+    if !feature_overrides.is_empty() || base.has_errors() {
+        return base;
+    }
+    let Some(mut ir) = base.ir.take() else { return base };
+    let perm_count = ir.total_permutations();
+    if perm_count <= 1 || perm_count > MAX_MATERIAL_PERMUTATIONS {
+        base.ir = Some(ir);
+        return base;
+    }
+
+    let mut diags = Diagnostics(base.diagnostics);
+    let mut params_by_node: BTreeMap<NodeId, MaterialParam> =
+        ir.params.drain(..).map(|p| (p.node.clone(), p)).collect();
+    let mut all_fixed: BTreeMap<(Option<String>, NodeId), String> = BTreeMap::new();
+    let mut all_gradients: BTreeSet<String> = BTreeSet::new();
+    for tb in &ir.textures {
+        match &tb.source {
+            TextureSource::Fixed { node, origin } => {
+                all_fixed.insert((origin.clone(), node.clone()), tb.texture.clone());
+            }
+            TextureSource::Gradient(c) => {
+                all_gradients.insert(c.clone());
+            }
+            TextureSource::Param(_) => {}
+        }
+    }
+    if let Some(sig) = &ir.function_sig {
+        for h in &sig.textures {
+            all_fixed.insert((Some(h.origin.clone()), h.node.clone()), h.texture.clone());
+        }
+        all_gradients.extend(sig.gradients.iter().cloned());
+    }
+
+    let mut any_vertex = ir.vertex.is_some();
+    for p in 1..perm_count {
+        let overrides_p = ir.permutation_overrides(p);
+        let res_p = build_single_ir(
+            asset,
+            path,
+            registry,
+            functions,
+            curves,
+            consts,
+            textures,
+            gradients,
+            features,
+            compile_overrides,
+            &overrides_p,
+        );
+        diags.extend(res_p.diagnostics);
+        if let Some(ir_p) = res_p.ir {
+            ir.stdlib.extend(ir_p.stdlib);
+            ir.functions.extend(ir_p.functions);
+            ir.curves.extend(ir_p.curves);
+            ir.custom_fns.extend(ir_p.custom_fns);
+            ir.scene.extend(ir_p.scene);
+            ir.compile_flags.extend(ir_p.compile_flags);
+            ir.uses_normal |= ir_p.uses_normal;
+            any_vertex |= ir_p.vertex.is_some();
+            for param in ir_p.params {
+                params_by_node.entry(param.node.clone()).or_insert(param);
+            }
+            for tb in &ir_p.textures {
+                match &tb.source {
+                    TextureSource::Fixed { node, origin } => {
+                        all_fixed.insert((origin.clone(), node.clone()), tb.texture.clone());
+                    }
+                    TextureSource::Gradient(c) => {
+                        all_gradients.insert(c.clone());
+                    }
+                    TextureSource::Param(_) => {}
+                }
+            }
+            if let Some(sig_p) = &ir_p.function_sig {
+                for h in &sig_p.textures {
+                    all_fixed.insert((Some(h.origin.clone()), h.node.clone()), h.texture.clone());
+                }
+                all_gradients.extend(sig_p.gradients.iter().cloned());
+            }
+            ir.permutation_stages.push((ir_p.main, ir_p.vertex));
+        }
+    }
+
+    if any_vertex && ir.vertex.is_none() {
+        ir.vertex = Some(IrStage::default());
+    }
+    let mut raw_params: Vec<MaterialParam> = params_by_node.into_values().collect();
+    raw_params.sort_by(|a, b| (&a.name, &a.node).cmp(&(&b.name, &b.node)));
+    let all_param_names: BTreeSet<String> = raw_params.iter().map(|p| p.name.clone()).collect();
+    let mut names: BTreeSet<String> = ir.compile_flags.keys().cloned().collect();
+    let mut params = Vec::with_capacity(raw_params.len());
+    for p in raw_params {
+        if !names.insert(p.name.clone()) {
+            diags.push(Diagnostic::new(Code::E005, format!("duplicate parameter name `{}`", p.name)).at_node(&p.node));
+        } else {
+            if p.ty == ParamType::Texture && all_param_names.contains(&format!("{}_sampler", p.name)) {
+                diags.push(
+                    Diagnostic::new(Code::E005, format!("`{}_sampler` clashes with a texture sampler name", p.name))
+                        .at_node(&p.node),
+                );
+            }
+            params.push(p);
+        }
+    }
+    for c in &all_gradients {
+        let other = format!("{c}_sampler");
+        if all_gradients.contains(&other) {
+            diags.push(Diagnostic::new(
+                Code::E006,
+                format!(
+                    "collections `{c}` and `{other}` get the same identifier `{}`; rename one of them",
+                    gradient_ident(&other)
+                ),
+            ));
+        }
+    }
+    {
+        let mut fn_names: BTreeMap<&str, &str> = BTreeMap::new();
+        for f in &ir.functions {
+            let name = f.rsplit('/').next().unwrap_or(f);
+            if let Some(other) = fn_names.insert(name, f) {
+                diags.push(Diagnostic::new(
+                    Code::E006,
+                    format!("functions `{other}` and `{f}` have the same name; rename one of them"),
+                ));
+            }
+        }
+    }
+    ir.uniform = UniformLayout::compute(&params);
+    ir.textures = if asset.kind.is_function() {
+        Vec::new()
+    } else {
+        texture_bindings(&params, all_fixed.clone(), &all_gradients)
+    };
+    ir.params = params;
+    let all_builtins: Vec<_> = ir.all_builtins().into_iter().collect();
+    let all_scene: Vec<_> = ir.scene.iter().copied().collect();
+    if let Some(sig) = &mut ir.function_sig {
+        sig.builtins = all_builtins;
+        sig.textures = all_fixed
+            .into_iter()
+            .filter_map(|((origin, node), texture)| Some(HiddenTexture { origin: origin?, node, texture }))
+            .collect();
+        sig.gradients = all_gradients.into_iter().collect();
+        sig.scene = all_scene;
+    }
+
+    IrResult { ir: if diags.has_errors() { None } else { Some(ir) }, diagnostics: diags.into_vec() }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_single_ir(
+    asset: &Asset,
+    path: &str,
+    registry: &Registry,
+    functions: &dyn FunctionLookup,
+    curves: &dyn CurveLookup,
+    consts: &dyn ConstLookup,
+    textures: &dyn TextureLookup,
+    gradients: &dyn GradientLookup,
+    features: &dyn FeatureLookup,
+    compile_overrides: &BTreeMap<String, bool>,
+    feature_overrides: &BTreeMap<AssetUuid, AssetUuid>,
+) -> IrResult {
     let original = asset;
     let routed = with_routes(asset, registry);
     let asset = routed.as_ref();
@@ -402,7 +683,9 @@ pub fn build_ir_with_overrides(
         consts,
         textures,
         gradients,
+        features,
         compile_overrides,
+        feature_overrides,
     };
 
     if let Err(e) = check_ident(&asset.name) {
@@ -574,6 +857,7 @@ pub fn build_ir_with_overrides(
     let mut full_sigs: HashMap<&str, Signature> = HashMap::new();
     let mut compile_sink = EmitSink::default();
     let mut compile_if_cond: HashMap<&str, bool> = HashMap::new();
+    let mut feature_switch_branch: HashMap<&str, Option<String>> = HashMap::new();
     for id in &full_order {
         let id = *id;
         let n = &nodes[id];
@@ -646,6 +930,22 @@ pub fn build_ir_with_overrides(
             };
             compile_if_cond.insert(id, cond);
         }
+        if n.def.role() == NodeRole::FeatureSwitch {
+            let table = n.params.get("table").map(Value::as_str).unwrap_or_default();
+            let feature = n.params.get("feature").map(Value::as_str).unwrap_or_default();
+            let active_pin = env
+                .features
+                .feature_table(table)
+                .and_then(|t| t.resolve_enum(feature))
+                .and_then(|fe| {
+                    env.feature_overrides
+                        .get(&fe.id)
+                        .and_then(|vid| fe.get_variant_by_id(*vid))
+                        .or_else(|| fe.variants.first())
+                })
+                .map(|v| variant_pin_id(v.id));
+            feature_switch_branch.insert(id, active_pin);
+        }
         full_sigs.insert(id, sig);
     }
 
@@ -654,6 +954,7 @@ pub fn build_ir_with_overrides(
     let pin_stage = |pin: &str| if is_vertex_pin(pin) { Stage::Vertex } else { Stage::Fragment };
     let mut live: BTreeMap<Stage, BTreeSet<&str>> = BTreeMap::new();
     let mut all_reachable: BTreeSet<&str> = BTreeSet::new();
+    let mut compile_reachable: BTreeSet<&str> = BTreeSet::new();
     for (stage, root) in &roots {
         let mut set = BTreeSet::new();
         let root_node = &nodes[root];
@@ -693,6 +994,28 @@ pub fn build_ir_with_overrides(
                 }
             }
         }
+        compile_reachable.insert(*root);
+        let mut compile_stack = seeds.clone();
+        while let Some(n) = compile_stack.pop() {
+            if !compile_reachable.insert(n) {
+                continue;
+            }
+            if nodes[n].def.role() == NodeRole::CompileIf {
+                let cond = compile_if_cond.get(n).copied().unwrap_or(false);
+                let active_branch = if cond { "true_value" } else { "false_value" };
+                for e in &edges {
+                    if e.to.0 == n && (e.to.1 == "cond" || e.to.1 == active_branch) {
+                        compile_stack.push(e.from.0.as_str());
+                    }
+                }
+            } else {
+                for e in &edges {
+                    if e.to.0 == n {
+                        compile_stack.push(e.from.0.as_str());
+                    }
+                }
+            }
+        }
         set.insert(*root);
         let mut stack = seeds;
         while let Some(n) = stack.pop() {
@@ -705,6 +1028,14 @@ pub fn build_ir_with_overrides(
                 for e in &edges {
                     if e.to.0 == n && (e.to.1 == "cond" || e.to.1 == active_branch) {
                         stack.push(e.from.0.as_str());
+                    }
+                }
+            } else if nodes[n].def.role() == NodeRole::FeatureSwitch {
+                if let Some(Some(active_pin)) = feature_switch_branch.get(n) {
+                    for e in &edges {
+                        if e.to.0 == n && e.to.1 == *active_pin {
+                            stack.push(e.from.0.as_str());
+                        }
                     }
                 }
             } else {
@@ -727,6 +1058,24 @@ pub fn build_ir_with_overrides(
             }
             reach_stack.extend(edges.iter().filter(|e| e.to.0 == n).map(|e| e.from.0.as_str()));
         }
+        let mut compile_stack = vec![*p];
+        while let Some(n) = compile_stack.pop() {
+            if !compile_reachable.insert(n) {
+                continue;
+            }
+            if nodes[n].def.role() == NodeRole::CompileIf {
+                let cond = compile_if_cond.get(n).copied().unwrap_or(false);
+                let active_branch = if cond { "true_value" } else { "false_value" };
+                compile_stack.extend(
+                    edges
+                        .iter()
+                        .filter(|e| e.to.0 == n && (e.to.1 == "cond" || e.to.1 == active_branch))
+                        .map(|e| e.from.0.as_str()),
+                );
+            } else {
+                compile_stack.extend(edges.iter().filter(|e| e.to.0 == n).map(|e| e.from.0.as_str()));
+            }
+        }
         let set = live.entry(Stage::Fragment).or_default();
         let mut stack = vec![*p];
         while let Some(n) = stack.pop() {
@@ -742,6 +1091,12 @@ pub fn build_ir_with_overrides(
                         .filter(|e| e.to.0 == n && (e.to.1 == "cond" || e.to.1 == active_branch))
                         .map(|e| e.from.0.as_str()),
                 );
+            } else if nodes[n].def.role() == NodeRole::FeatureSwitch {
+                if let Some(Some(active_pin)) = feature_switch_branch.get(n) {
+                    stack.extend(
+                        edges.iter().filter(|e| e.to.0 == n && e.to.1 == *active_pin).map(|e| e.from.0.as_str()),
+                    );
+                }
             } else {
                 stack.extend(edges.iter().filter(|e| e.to.0 == n).map(|e| e.from.0.as_str()));
             }
@@ -812,13 +1167,17 @@ pub fn build_ir_with_overrides(
             let is_compile_if = n.def.role() == NodeRole::CompileIf;
             let inactive_if_pin = is_compile_if
                 .then(|| if compile_if_cond.get(id).copied().unwrap_or(false) { "false_value" } else { "true_value" });
+            let active_switch_pin = (n.def.role() == NodeRole::FeatureSwitch)
+                .then(|| feature_switch_branch.get(id).and_then(Option::as_deref));
             let mut inputs = BTreeMap::new();
             let mut connected_pins = BTreeSet::new();
             for pin in &sig.inputs {
                 if is_root && *stage != Stage::Function && pin_stage(&pin.id) != *stage {
                     continue;
                 }
-                if inactive_if_pin == Some(pin.id.as_str()) {
+                let is_inactive_branch = inactive_if_pin == Some(pin.id.as_str())
+                    || active_switch_pin.is_some_and(|act| act != Some(pin.id.as_str()));
+                if is_inactive_branch {
                     match edge_into.get(&(id, pin.id.as_str())) {
                         Some(e) => {
                             if let Some(from_ty) = full_types.get(&(e.from.0.as_str(), e.from.1.clone())) {
@@ -1067,7 +1426,7 @@ pub fn build_ir_with_overrides(
             // Not previewable after all: build the normal IR, so the extra upstream leaves no trace.
             let mut normal = original.clone();
             normal.preview.node = None;
-            let mut r = build_ir_with_overrides(
+            let mut r = build_single_ir(
                 &normal,
                 path,
                 registry,
@@ -1076,7 +1435,9 @@ pub fn build_ir_with_overrides(
                 consts,
                 textures,
                 gradients,
+                features,
                 compile_overrides,
+                feature_overrides,
             );
             let msg = format!("preview ignored: `{}` has no output that converts to a color", n.def.info().name);
             r.diagnostics.push(Diagnostic::new(Code::W107, msg).at_node(p));
@@ -1133,6 +1494,54 @@ pub fn build_ir_with_overrides(
         ir_preview = Some(IrPreview { node: p.to_string(), mode: asset.preview.mode });
     }
 
+    let mut features_map: BTreeMap<(String, String, AssetUuid), (String, FeatureEnum)> = BTreeMap::new();
+    for id in &compile_reachable {
+        let n = &nodes[id];
+        if n.def.role() == NodeRole::FeatureSwitch {
+            let table = n.params.get("table").map(Value::as_str).unwrap_or_default();
+            let feature = n.params.get("feature").map(Value::as_str).unwrap_or_default();
+            if let Some(t) = env.features.feature_table(table)
+                && let Some(fe) = t.resolve_enum(feature)
+                && fe.variants.len() >= 2
+            {
+                features_map.insert((table.to_string(), fe.name.clone(), fe.id), (table.to_string(), fe.clone()));
+            }
+        }
+        if let Some(fpath) = asset.nodes[*id].kind.strip_prefix(crate::registry::FUNCTION_PREFIX)
+            && let Some(sig) = env.functions.function(fpath)
+        {
+            for (tpath, fe) in &sig.features {
+                if fe.variants.len() >= 2 {
+                    features_map.insert((tpath.clone(), fe.name.clone(), fe.id), (tpath.clone(), fe.clone()));
+                }
+            }
+        }
+    }
+    let features_vec: Vec<(String, FeatureEnum)> = features_map.into_values().collect();
+    if !asset.kind.is_function() {
+        let mut perm_count = 1usize;
+        let mut overflow = false;
+        for (_, fe) in &features_vec {
+            let n = fe.variants.len().max(1);
+            match perm_count.checked_mul(n) {
+                Some(p) if p <= MAX_MATERIAL_PERMUTATIONS => perm_count = p,
+                _ => {
+                    overflow = true;
+                    perm_count = perm_count.saturating_mul(n);
+                }
+            }
+        }
+        if overflow {
+            diags.push(Diagnostic::new(
+                Code::E015,
+                format!(
+                    "material requires {perm_count} shader permutations, which exceeds the maximum of \
+                     {MAX_MATERIAL_PERMUTATIONS}"
+                ),
+            ));
+        }
+    }
+
     let function_sig = if asset.kind.is_function() {
         let mut sig = declared_function_sig(asset, path, registry);
         sig.builtins = main.builtins.iter().copied().collect();
@@ -1146,6 +1555,7 @@ pub fn build_ir_with_overrides(
         // Own gradient collections and the callees' (gradient design §7), sorted.
         sig.gradients = gradients_used.iter().cloned().collect();
         sig.scene = scene.iter().copied().collect();
+        sig.features = features_vec.clone();
         let input_names: BTreeSet<&str> = sig.inputs.iter().map(|i| i.name.as_str()).collect();
         let mut seen = BTreeSet::new();
         for (id, n) in &nodes {
@@ -1212,6 +1622,8 @@ pub fn build_ir_with_overrides(
             vertex,
             params,
             compile_flags,
+            features: features_vec,
+            permutation_stages: Vec::new(),
             uniform,
             textures,
             stdlib,

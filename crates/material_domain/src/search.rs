@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 
 pub use editor_core::search::{Searchable, score, search, search_indices, search_indices_leading};
 use shader_graph_core::consts::NoConsts;
+use shader_graph_core::features::NoFeatures;
 use shader_graph_core::model::{Asset, AssetKind};
 use shader_graph_core::registry::{
     FUNCTION_PREFIX, FunctionLookup, NoCurves, NoGradients, NoTextures, NodeRole, ROUTE_PARAM, Registry, SigCtx,
@@ -144,7 +145,9 @@ pub fn fresh_pins(
         consts: &NoConsts,
         textures: &NoTextures,
         gradients: &NoGradients,
+        features: &NoFeatures,
         compile_overrides: &BTreeMap::new(),
+        feature_overrides: &BTreeMap::new(),
     };
     let sig = def.signature(&SigCtx {
         node_id: "new",

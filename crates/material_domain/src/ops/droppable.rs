@@ -81,6 +81,8 @@ pub enum Dropped {
     Curve(String),
     /// A gradient collection of the Project tree, path without suffix: the value of a `GradientCollection` param.
     Gradients(String),
+    /// A Game Features table of the Project tree, path without suffix: the value of a `FeatureTable` param.
+    Features(String),
 }
 
 impl Dropped {
@@ -97,6 +99,7 @@ impl Dropped {
                     AssetType::Function => Some(Dropped::Function(id.path)),
                     AssetType::Curve => Some(Dropped::Curve(id.path)),
                     AssetType::Gradients => Some(Dropped::Gradients(id.path)),
+                    AssetType::Features => Some(Dropped::Features(id.path)),
                     _ => None,
                 }
             }

@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use shader_graph_core::consts::GlobalConsts;
 use shader_graph_core::curve::Curve;
+use shader_graph_core::features::FeatureTable;
 use shader_graph_core::gradient::GradientCollection;
 use shader_graph_core::ident::check_ident;
 use shader_graph_core::model::{Asset, AssetKind};
@@ -21,6 +22,8 @@ pub enum AssetType {
     Consts,
     /// Curve asset (decision 0015), not a node graph.
     Curve,
+    /// Game Feature static enum table (`.features.ron`), not a node graph; generates `features.rs`.
+    Features,
     Function,
     /// Gradient collection (gradient design §3): 128 gradient slots baked into one texture, not a node graph; no WESL
     /// module of its own.
@@ -38,6 +41,7 @@ impl AssetType {
             AssetType::Function => "function",
             AssetType::Curve => "curve",
             AssetType::Consts => "consts",
+            AssetType::Features => "features",
             AssetType::Texture => "texture",
             AssetType::Gradients => "gradients",
         }
@@ -48,10 +52,10 @@ impl AssetType {
         matches!(self, AssetType::Material | AssetType::Function)
     }
 
-    /// Assets with a generated WESL module (constant tables have none: their values are inlined; Texture assets and
-    /// gradient collections have none either).
+    /// Assets with a generated WESL module (constant tables, feature tables, Texture assets and gradient collections
+    /// have none).
     pub fn has_wesl(self) -> bool {
-        !matches!(self, AssetType::Consts | AssetType::Texture | AssetType::Gradients)
+        !matches!(self, AssetType::Consts | AssetType::Features | AssetType::Texture | AssetType::Gradients)
     }
 
     pub fn of(kind: &AssetKind) -> Self {
@@ -59,11 +63,12 @@ impl AssetType {
     }
 }
 
-const ALL_TYPES: [AssetType; 6] = [
+const ALL_TYPES: [AssetType; 7] = [
     AssetType::Material,
     AssetType::Function,
     AssetType::Curve,
     AssetType::Consts,
+    AssetType::Features,
     AssetType::Texture,
     AssetType::Gradients,
 ];
@@ -117,16 +122,7 @@ impl std::fmt::Display for AssetId {
 /// Parses a `quillshade/material/`-relative file path into an asset id.
 pub fn id_from_rel(rel: &str) -> Option<AssetId> {
     let rel = rel.replace('\\', "/");
-    [
-        AssetType::Material,
-        AssetType::Function,
-        AssetType::Curve,
-        AssetType::Consts,
-        AssetType::Texture,
-        AssetType::Gradients,
-    ]
-    .into_iter()
-    .find_map(|ty| rel.strip_suffix(&format!(".{}.ron", ty.suffix())).map(|p| AssetId::new(ty, p)))
+    ALL_TYPES.into_iter().find_map(|ty| rel.strip_suffix(&format!(".{}.ron", ty.suffix())).map(|p| AssetId::new(ty, p)))
 }
 
 /// Inverse of [`AssetId::source_rel`]: `quillshade/material/env/rock_wet.material.ron` (relative to the project
@@ -223,6 +219,17 @@ pub fn load_gradients(project: &Project, id: &AssetId) -> Result<GradientCollect
     GradientCollection::from_ron(&text).map_err(|e| e.to_string())
 }
 
+/// Loads a Game Feature enum table; the file name wins over the `name` stored inside.
+pub fn load_features(project: &Project, id: &AssetId) -> Result<FeatureTable, String> {
+    if id.ty != AssetType::Features {
+        return Err(format!("{} is not a feature table", id.source_rel()));
+    }
+    let text = std::fs::read_to_string(id.file(project)).map_err(|e| e.to_string())?;
+    let mut table = FeatureTable::from_ron(&text).map_err(|e| e.to_string())?;
+    table.name = id.name().to_string();
+    Ok(table)
+}
+
 /// Checks the asset path (spec §5): snake_case components. Generated modules are prefixed (`dir_`, `mat_`;
 /// decision 0020), so keywords, a material next to a directory of the same name and top-level `stdlib/`,
 /// `functions/`, `curves/` directories are fine.
@@ -309,6 +316,8 @@ pub struct AssetSet {
     pub curves: BTreeMap<AssetId, Result<Curve, String>>,
     /// Global constant tables.
     pub consts: BTreeMap<AssetId, Result<GlobalConsts, String>>,
+    /// Game Feature enum tables.
+    pub features: BTreeMap<AssetId, Result<FeatureTable, String>>,
     /// Texture assets (design §1.1).
     pub textures: BTreeMap<AssetId, Result<TextureAsset, String>>,
     /// Gradient collections (gradient design §3).
@@ -332,6 +341,10 @@ impl AssetSet {
                     let c = load_consts(project, &id);
                     set.consts.insert(id, c);
                 }
+                AssetType::Features => {
+                    let f = load_features(project, &id);
+                    set.features.insert(id, f);
+                }
                 AssetType::Texture => {
                     let t = load_texture(project, &id);
                     set.textures.insert(id, t);
@@ -345,12 +358,13 @@ impl AssetSet {
         set
     }
 
-    /// Every asset: graphs, curves, constant tables, textures, gradient collections (sorted within each kind).
+    /// Every asset: graphs, curves, constant tables, feature tables, textures, gradient collections (sorted within each kind).
     pub fn ids(&self) -> impl Iterator<Item = &AssetId> {
         self.assets
             .keys()
             .chain(self.curves.keys())
             .chain(self.consts.keys())
+            .chain(self.features.keys())
             .chain(self.textures.keys())
             .chain(self.gradients.keys())
     }
@@ -359,12 +373,18 @@ impl AssetSet {
         self.assets.contains_key(id)
             || self.curves.contains_key(id)
             || self.consts.contains_key(id)
+            || self.features.contains_key(id)
             || self.textures.contains_key(id)
             || self.gradients.contains_key(id)
     }
 
     pub fn len(&self) -> usize {
-        self.assets.len() + self.curves.len() + self.consts.len() + self.textures.len() + self.gradients.len()
+        self.assets.len()
+            + self.curves.len()
+            + self.consts.len()
+            + self.features.len()
+            + self.textures.len()
+            + self.gradients.len()
     }
 
     pub fn is_empty(&self) -> bool {

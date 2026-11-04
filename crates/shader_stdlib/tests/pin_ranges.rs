@@ -23,7 +23,9 @@ fn signature(kind: &str) -> Signature {
         consts: &NoConsts,
         textures: &NoTextures,
         gradients: &NoGradients,
+        features: &shader_graph_core::NoFeatures,
         compile_overrides: &BTreeMap::new(),
+        feature_overrides: &BTreeMap::new(),
     };
     def.signature(&SigCtx {
         node_id: "n",
@@ -79,7 +81,9 @@ fn call_signature(f: FunctionSig) -> Signature {
         consts: &NoConsts,
         textures: &NoTextures,
         gradients: &NoGradients,
+        features: &shader_graph_core::NoFeatures,
         compile_overrides: &BTreeMap::new(),
+        feature_overrides: &BTreeMap::new(),
     };
     def.signature(&SigCtx {
         node_id: "n",

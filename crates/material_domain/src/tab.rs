@@ -12,6 +12,7 @@ use crate::consts_doc::ConstsDoc;
 use crate::curve::CurveDoc;
 use crate::doc::Doc;
 use crate::doc_kind::TabDoc;
+use crate::features_doc::FeaturesDoc;
 use crate::gradients_doc::GradientsDoc;
 use crate::texture::{TextureDoc, TextureDocId};
 
@@ -63,6 +64,8 @@ pub fn override_into(tab: &Tab, set: &mut AssetSet) {
         set.curves.insert(id, Ok(c.curve.clone()));
     } else if let Some(c) = tab.get::<ConstsDoc>() {
         set.consts.insert(c.id.clone(), Ok(c.table.clone()));
+    } else if let Some(f) = tab.get::<FeaturesDoc>() {
+        set.features.insert(f.id.clone(), Ok(f.table.clone()));
     } else if let Some(t) = tab.get::<TextureDoc>().filter(|t| !t.is_internal()) {
         set.textures.insert(t.id(), Ok(t.asset.clone()));
     } else if let Some(g) = tab.get::<GradientsDoc>() {

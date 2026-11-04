@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use project_core::asset_index::AssetIndex;
 
 use shader_graph_core::consts::{GlobalConsts, NoConsts};
+use shader_graph_core::features::{FeatureLookup, FeatureTable, NoFeatures};
 use shader_graph_core::ir::{with_routes, would_create_cycle};
 use shader_graph_core::model::{Asset, Edge, Frame, Node, NodeId, Preview, new_node_id};
 use shader_graph_core::registry::{
@@ -404,11 +405,12 @@ pub fn has_label(kind: &str) -> bool {
 }
 
 pub fn node_title(registry: &Registry, functions: &BTreeMap<String, FunctionSig>, asset: &Asset, id: &str) -> String {
-    node_title_in(registry, functions, asset, id, &route_declarations(asset, registry), &|_| None)
+    node_title_in(registry, functions, asset, id, &route_declarations(asset, registry), &|_| None, &|_| None)
 }
 
 /// [`node_title`] with the asset's [`route_declarations`] already at hand (a canvas rebuild computes them once) and
-/// `consts` looking up a constant table by path: a `Global*` node is titled by its constant's name.
+/// `consts` / `features` looking up a constant or feature table by path: a `Global*` node is titled by its constant's
+/// name, and a `GameFeatureSwitch` node by its enum's name.
 pub(crate) fn node_title_in<'a>(
     registry: &Registry,
     functions: &BTreeMap<String, FunctionSig>,
@@ -416,6 +418,7 @@ pub(crate) fn node_title_in<'a>(
     id: &str,
     routes: &[(NodeId, String)],
     consts: &dyn Fn(&str) -> Option<&'a GlobalConsts>,
+    features: &dyn Fn(&str) -> Option<&'a FeatureTable>,
 ) -> String {
     let Some(n) = asset.nodes.get(id) else { return String::new() };
     let Some(def) = registry.get(&n.kind) else { return format!("? {}", n.kind) };
@@ -434,6 +437,25 @@ pub(crate) fn node_title_in<'a>(
         _ if has_label(&n.kind) && !n.label.is_empty() => n.label.clone(),
         _ if n.kind.starts_with("stdlib::Constant") => params.get("value").map(short).unwrap_or(name),
         _ => {
+            let ftable = def
+                .params()
+                .into_iter()
+                .find(|p| p.kind == ParamKind::FeatureTable)
+                .and_then(|t| params.get(&t.id))
+                .map(Value::as_str)
+                .filter(|t| !t.is_empty());
+            let fenum = def
+                .params()
+                .into_iter()
+                .find(|p| p.kind == ParamKind::FeatureEnum)
+                .and_then(|e| params.get(&e.id))
+                .map(Value::as_str)
+                .and_then(project_core::AssetUuid::parse);
+            if let (Some(ftable), Some(fenum)) = (ftable, fenum)
+                && let Some(en) = features(ftable).and_then(|t| t.get_by_id(fenum))
+            {
+                return format!("{} ({})", en.name, ftable.rsplit('/').next().unwrap_or(ftable));
+            }
             // Global*: the constant's name and its table's (`roughness (tuning)`), from the table as `consts` has it
             // (the canvas rebuilds on graph revisions and tab switches, so a constant renamed in its table's tab shows
             // on the way back); unset or unknown, the table's name as below.
@@ -465,7 +487,11 @@ pub(crate) fn node_title_in<'a>(
                 .find(|p| {
                     matches!(
                         p.kind,
-                        ParamKind::Curve | ParamKind::GlobalConsts | ParamKind::Texture | ParamKind::GradientCollection
+                        ParamKind::Curve
+                            | ParamKind::GlobalConsts
+                            | ParamKind::FeatureTable
+                            | ParamKind::Texture
+                            | ParamKind::GradientCollection
                     )
                 })
                 .map(|c| p(&c.id));
@@ -500,12 +526,25 @@ pub fn node_signature(
     functions: &dyn FunctionLookup,
     path: &str,
 ) -> Option<Signature> {
+    node_signature_with(asset, id, registry, functions, &NoFeatures, path)
+}
+
+/// [`node_signature`] with `features` looking up `.features.ron` tables so `stdlib::GameFeatureSwitch` exposes its
+/// variant pins.
+pub fn node_signature_with(
+    asset: &Asset,
+    id: &str,
+    registry: &Registry,
+    functions: &dyn FunctionLookup,
+    features: &dyn FeatureLookup,
+    path: &str,
+) -> Option<Signature> {
     let routed = with_routes(asset, registry);
     let asset = routed.as_ref();
     let node = asset.nodes.get(id)?;
     let def = registry.get(&node.kind)?;
     let params = registry.resolved_params(&node.kind, &node.params);
-    let connected = connected_types(asset, id, registry, functions, path, 0);
+    let connected = connected_types(asset, id, registry, functions, features, path, 0);
     let env = Env {
         asset_kind: asset.kind,
         asset_path: path,
@@ -514,7 +553,9 @@ pub fn node_signature(
         consts: &NoConsts,
         textures: &NoTextures,
         gradients: &NoGradients,
+        features,
         compile_overrides: &BTreeMap::new(),
+        feature_overrides: &BTreeMap::new(),
     };
     Some(def.signature(&SigCtx {
         node_id: id,
@@ -532,6 +573,7 @@ fn connected_types(
     id: &str,
     registry: &Registry,
     functions: &dyn FunctionLookup,
+    features: &dyn FeatureLookup,
     path: &str,
     depth: u32,
 ) -> BTreeMap<String, PinType> {
@@ -540,7 +582,7 @@ fn connected_types(
         return out;
     }
     for e in asset.edges.iter().filter(|e| e.to.0 == id) {
-        if let Some(t) = output_type(asset, &e.from.0, &e.from.1, registry, functions, path, depth + 1) {
+        if let Some(t) = output_type(asset, (&e.from.0, &e.from.1), registry, functions, features, path, depth + 1) {
             out.insert(e.to.1.clone(), t);
         }
     }
@@ -549,17 +591,18 @@ fn connected_types(
 
 fn output_type(
     asset: &Asset,
-    node: &str,
-    pin: &str,
+    from: (&str, &str),
     registry: &Registry,
     functions: &dyn FunctionLookup,
+    features: &dyn FeatureLookup,
     path: &str,
     depth: u32,
 ) -> Option<PinType> {
+    let (node, pin) = from;
     let n = asset.nodes.get(node)?;
     let def = registry.get(&n.kind)?;
     let params = registry.resolved_params(&n.kind, &n.params);
-    let connected = connected_types(asset, node, registry, functions, path, depth);
+    let connected = connected_types(asset, node, registry, functions, features, path, depth);
     let env = Env {
         asset_kind: asset.kind,
         asset_path: path,
@@ -568,7 +611,9 @@ fn output_type(
         consts: &NoConsts,
         textures: &NoTextures,
         gradients: &NoGradients,
+        features,
         compile_overrides: &BTreeMap::new(),
+        feature_overrides: &BTreeMap::new(),
     };
     let sig = def.signature(&SigCtx {
         node_id: node,
@@ -590,13 +635,26 @@ pub fn connection_error(
     functions: &dyn FunctionLookup,
     path: &str,
 ) -> Option<String> {
+    connection_error_with(asset, from, to, registry, functions, &NoFeatures, path)
+}
+
+/// [`connection_error`] with `features` looking up `.features.ron` tables.
+pub fn connection_error_with(
+    asset: &Asset,
+    from: (&str, &str),
+    to: (&str, &str),
+    registry: &Registry,
+    functions: &dyn FunctionLookup,
+    features: &dyn FeatureLookup,
+    path: &str,
+) -> Option<String> {
     let routed = with_routes(asset, registry);
     let asset = routed.as_ref();
     if would_create_cycle(asset, from.0, to.0) {
         return Some("would create a cycle (E002)".into());
     }
-    let from_ty = output_type(asset, from.0, from.1, registry, functions, path, 0)?;
-    let sig = node_signature(asset, to.0, registry, functions, path)?;
+    let from_ty = output_type(asset, from, registry, functions, features, path, 0)?;
+    let sig = node_signature_with(asset, to.0, registry, functions, features, path)?;
     let pin = sig.input(to.1)?;
     let target = if pin.poly && pin.attributes {
         // Inputs that also take attributes (Lerp `a`/`b`, decision 0023): attributes and numbers never mix. Only
@@ -607,7 +665,7 @@ pub fn connection_error(
             .iter()
             .filter(|p| p.attributes && p.id != to.1)
             .filter_map(|p| asset.edge_into(to.0, &p.id))
-            .filter_map(|e| output_type(asset, &e.from.0, &e.from.1, registry, functions, path, 0))
+            .filter_map(|e| output_type(asset, (&e.from.0, &e.from.1), registry, functions, features, path, 0))
             .collect();
         let clash = if from_ty == attrs {
             others.into_iter().find(|t| *t != attrs)

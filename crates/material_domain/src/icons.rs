@@ -8,6 +8,8 @@ use shader_project::{AssetId, AssetType};
 const MATERIAL_UNLIT_ICON: Icon = custom("material-unlit", Kind::Solid, include_str!("../icons/material-unlit.svg"));
 /// The letters "rs" as strokes: the generated Rust crate.
 const RUST_RS_ICON: Icon = custom("rust-rs", Kind::Line, include_str!("../icons/rust_rs.svg"));
+const MATERIAL_FEATURES_ICON: Icon =
+    custom("material-features", Kind::Line, include_str!("../icons/material-features.svg"));
 
 pub const FUNCTION: IconRef = IconRef::new(&icon_rs::VARIABLES);
 pub const PBR: IconRef = IconRef::new(&icon_rs::MATERIAL_LIBRARY);
@@ -15,6 +17,8 @@ pub const UNLIT: IconRef = IconRef::new(&MATERIAL_UNLIT_ICON);
 /// A curve asset: `curve_kit`'s icon.
 pub const CURVE: IconRef = curve_kit::editor::CURVE_ICON;
 pub const CONSTS: IconRef = IconRef::new(&icon_rs::CONFIGURATIONS);
+/// A Game Features table (`.features.ron`).
+pub const FEATURES: IconRef = IconRef::new(&MATERIAL_FEATURES_ICON);
 /// A Texture asset (design §6.1): `texture_kit`'s icon; game images keep `IconId::Image`.
 pub const TEXTURE: IconRef = texture_kit::editor::TEXTURE_ICON;
 /// The node preview's Full mode (every output slot, decision 0022); Unlit / Lit use [`UNLIT`] / [`PBR`].
@@ -29,7 +33,8 @@ pub fn sprite() -> IconRef {
 }
 
 /// Every icon declared here, for the rasterize test.
-pub const MATERIAL_ICONS: &[IconRef] = &[FUNCTION, PBR, UNLIT, CURVE, CONSTS, TEXTURE, LAYERS, RUST, GRADIENTS];
+pub const MATERIAL_ICONS: &[IconRef] =
+    &[FUNCTION, PBR, UNLIT, CURVE, CONSTS, FEATURES, TEXTURE, LAYERS, RUST, GRADIENTS];
 
 /// The icon of an asset of `kind` (`None`: unreadable file).
 pub fn for_asset(kind: Option<AssetKind>) -> IconRef {
@@ -48,6 +53,7 @@ pub fn for_id(id: &AssetId, kind: Option<AssetKind>) -> IconRef {
         AssetType::Curve => CURVE,
         AssetType::Gradients => GRADIENTS,
         AssetType::Consts => CONSTS,
+        AssetType::Features => FEATURES,
         AssetType::Texture => TEXTURE,
         AssetType::Material | AssetType::Function => for_asset(kind),
     }
@@ -64,7 +70,11 @@ mod tests {
 
     #[test]
     fn custom_icons_use_only_palette_colours() {
-        editor_core::ui::icons::assert_only_palette_colours(&[MATERIAL_UNLIT_ICON, RUST_RS_ICON]);
+        editor_core::ui::icons::assert_only_palette_colours(&[
+            MATERIAL_UNLIT_ICON,
+            RUST_RS_ICON,
+            MATERIAL_FEATURES_ICON,
+        ]);
     }
 
     #[test]

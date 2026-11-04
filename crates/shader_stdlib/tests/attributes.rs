@@ -88,7 +88,9 @@ fn make_has_field_pins() {
         consts: &NoConsts,
         textures: &NoTextures,
         gradients: &NoGradients,
+        features: &shader_graph_core::NoFeatures,
         compile_overrides: &Default::default(),
+        feature_overrides: &Default::default(),
     };
     let empty = Default::default();
     let params = Default::default();
@@ -196,7 +198,9 @@ fn output_sig(settings: PbrSettings) -> shader_graph_core::Signature {
         consts: &NoConsts,
         textures: &NoTextures,
         gradients: &NoGradients,
+        features: &shader_graph_core::NoFeatures,
         compile_overrides: &Default::default(),
+        feature_overrides: &Default::default(),
     };
     let empty = Default::default();
     let params = Default::default();

@@ -16,6 +16,7 @@ pub use editor_core::editors::{SidebarKey, fill_sidebar_with};
 pub use editor_core::main_input;
 
 pub mod consts;
+pub mod features;
 pub mod gradients;
 pub mod graph;
 
@@ -23,6 +24,7 @@ pub use crate::curve::{CurveCtx, CurveEditor};
 pub use crate::texture::{ImageEditor, TextureEditor};
 pub use consts::ConstsEditor;
 pub use editor_core::editors::text::{self, TextCtx, TextEditor};
+pub use features::FeaturesEditor;
 pub use gradients::GradientsEditor;
 pub use graph::{GraphCtx, GraphEditor};
 
@@ -39,6 +41,7 @@ mod tests {
             (text::TEXT, "Generated File"),
             (crate::curve::CURVE, "Curve"),
             (consts::CONSTS, "Constants"),
+            (features::FEATURES, "Game Features"),
             (crate::texture::IMAGE, "Image"),
             (crate::texture::TEXTURE, "Texture"),
             (gradients::GRADIENTS, "Gradients"),

@@ -318,6 +318,8 @@ mod tests {
             scene: Default::default(),
             uses_normal: false,
             preview: None,
+            features: Default::default(),
+            permutation_stages: Default::default(),
         };
         let m = ManifestMaterial::from_ir(&ir);
         assert_eq!(m.path, "env/rock_wet");

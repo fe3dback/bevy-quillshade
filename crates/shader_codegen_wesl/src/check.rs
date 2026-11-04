@@ -217,6 +217,18 @@ pub fn compile_with(
     variant: Variant,
     strip: bool,
 ) -> Result<String, CheckError> {
+    compile_with_defs(bevy, files, main, variant, strip, &[])
+}
+
+/// Like [`compile_with`], with extra shader_def flags enabled (e.g. `QS_F_*` feature permutation flags).
+pub fn compile_with_defs(
+    bevy: &BevySources,
+    files: &Files,
+    main: &[String],
+    variant: Variant,
+    strip: bool,
+    extra_defs: &[String],
+) -> Result<String, CheckError> {
     let (flags, group) = variant.flags();
     let constants = format!(
         "const MATERIAL_BIND_GROUP = {group};\nconst MAX_DIRECTIONAL_LIGHTS = 10;\nconst MAX_CASCADES_PER_LIGHT = 4;\nconst MAX_RECT_LIGHTS = 8;\nconst AVAILABLE_STORAGE_BUFFER_BINDINGS = 8;\n"
@@ -236,6 +248,9 @@ pub fn compile_with(
         features.flags.insert(f.to_string(), Feature::Enable);
     }
     for f in &files.features {
+        features.flags.insert(f.clone(), Feature::Enable);
+    }
+    for f in extra_defs {
         features.flags.insert(f.clone(), Feature::Enable);
     }
     let options =

@@ -26,6 +26,7 @@ pub fn ref_type(kind: &ParamKind) -> Option<AssetType> {
     match kind {
         ParamKind::Curve => Some(AssetType::Curve),
         ParamKind::GlobalConsts => Some(AssetType::Consts),
+        ParamKind::FeatureTable => Some(AssetType::Features),
         ParamKind::Texture => Some(AssetType::Texture),
         ParamKind::GradientCollection => Some(AssetType::Gradients),
         _ => None,

@@ -22,6 +22,7 @@ pub mod doc;
 pub mod doc_kind;
 pub mod domain;
 pub mod editors;
+pub mod features_doc;
 pub mod gradients_doc;
 pub mod graph_domain;
 pub mod highlight_wesl;
@@ -62,6 +63,7 @@ pub(crate) fn material_logic(app: &mut App) {
 pub(crate) fn material_window(app: &mut App) {
     app.add_plugins((
         ui::consts_view::ConstsViewPlugin,
+        ui::features_view::FeaturesViewPlugin,
         ui::node_preview::NodePreviewsPlugin,
         ui::props::PropsPlugin,
         ui::gradient_strip::GradientStripPlugin,

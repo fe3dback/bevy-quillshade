@@ -14,11 +14,23 @@ use crate::diag::Diagnostic;
 use crate::domain::DomainId;
 use crate::layout::Project;
 
-/// A sub-item of an asset, referenced as `(asset uuid, local id)`: a constant of a `.consts.ron`, a gradient slot.
+/// A sub-item of an asset, referenced as `(asset uuid, local id)` (a constant of a `.consts.ron`, a gradient slot) or
+/// by its own `uuid` (an enum or variant of a `.features.ron`).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct SubItem {
     pub id: u64,
+    pub uuid: Option<AssetUuid>,
     pub label: String,
+}
+
+impl SubItem {
+    pub fn new(id: u64, label: impl Into<String>) -> Self {
+        SubItem { id, uuid: None, label: label.into() }
+    }
+
+    pub fn with_uuid(uuid: AssetUuid, label: impl Into<String>) -> Self {
+        SubItem { id: 0, uuid: Some(uuid), label: label.into() }
+    }
 }
 
 /// One reference stored in a source file.
@@ -91,6 +103,8 @@ pub struct AssetIndex {
     parts: BTreeMap<DomainId, Vec<IndexedAsset>>,
     /// UUID → the winner of a duplicate.
     by_id: BTreeMap<AssetUuid, AssetEntry>,
+    /// Sub-item UUID → `(domain, "<asset_path>::<sub_label>")` for D27 path comments.
+    sub_by_id: BTreeMap<AssetUuid, (DomainId, String)>,
     /// Every file with a valid id, duplicate losers included.
     by_ref: BTreeMap<AssetRef, AssetUuid>,
     /// Forward edges, keyed by file: duplicate files share a UUID but are different referrers.
@@ -154,6 +168,12 @@ impl AssetIndex {
                 self.duplicates.insert(id, same.iter().map(|a| a.asset.clone()).collect());
             }
             let winner = same[0];
+            for sub in &winner.sub_items {
+                if let Some(sub_uuid) = sub.uuid {
+                    self.sub_by_id
+                        .insert(sub_uuid, (winner.asset.domain, format!("{}::{}", winner.asset.path, sub.label)));
+                }
+            }
             self.by_id.insert(id, AssetEntry { id, asset: winner.asset.clone(), sub_items: winner.sub_items.clone() });
         }
         self.parts = parts;
@@ -285,7 +305,9 @@ impl AssetIndex {
 
 impl RefNames for AssetIndex {
     fn name_of(&self, id: AssetUuid) -> Option<(DomainId, &str)> {
-        self.get(id).map(|e| (e.asset.domain, e.asset.path.as_str()))
+        self.get(id)
+            .map(|e| (e.asset.domain, e.asset.path.as_str()))
+            .or_else(|| self.sub_by_id.get(&id).map(|(d, p)| (*d, p.as_str())))
     }
 }
 
@@ -424,7 +446,7 @@ mod tests {
     /// light: `sky` texture (3), `day` environment (4) using 3.
     fn sample() -> AssetIndex {
         let mut pulse = asset(r(MAT, "common/pulse", "curve"), 1, &[]);
-        pulse.sub_items = vec![SubItem { id: 0, label: "a".into() }, SubItem { id: 7, label: "b".into() }];
+        pulse.sub_items = vec![SubItem::new(0, "a"), SubItem::new(7, "b")];
         AssetIndex::build(vec![
             DomainIndex {
                 domain: MAT,

@@ -44,6 +44,8 @@ impl MaterialApply for Editor {
             crate::graph_domain::graph_edit(self, e.clone());
         } else if let Some(a) = payload.downcast::<ConstsAction>() {
             self.consts_action(a.clone());
+        } else if let Some(a) = payload.downcast::<FeaturesAction>() {
+            self.features_action(a.clone());
         } else {
             bevy::log::debug!("{payload:?} ignored by the Material domain");
         }
@@ -101,6 +103,9 @@ impl MaterialApply for Editor {
         if std::mem::take(&mut self.domains.material_mut().tabs_closed) {
             self.refresh_functions();
             self.domains.material_mut().validated = None;
+        } else if let Some(f) = self.features_doc() {
+            let (path, table) = (f.id.path.clone(), f.table.clone());
+            self.domains.material_mut().features.insert(path, table);
         }
         self.restore_reloaded();
         self.follow_previews();
@@ -164,6 +169,7 @@ impl MaterialApply for Editor {
             m.project_diags = project_diags;
             m.disk = AssetSet::default();
             m.functions.clear();
+            m.features.clear();
             m.diags.clear();
             m.regen_only.clear();
             m.wesl_lines.clear();

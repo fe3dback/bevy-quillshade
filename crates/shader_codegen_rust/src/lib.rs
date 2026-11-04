@@ -7,6 +7,7 @@ pub mod manifest;
 
 use project_core::AssetUuid;
 use shader_codegen_wesl::{header, params_struct, paths};
+use shader_graph_core::features::FeatureTable;
 use shader_graph_core::ident::{input_ident, to_pascal_case};
 use shader_graph_core::registry::{Builtin, ParamType};
 use shader_graph_core::value::rust_f32;
@@ -243,13 +244,17 @@ pub fn material_module(ir: &Ir, source_file: &str) -> String {
             ),
         );
     }
-    let no_fields = !has_uniform && ir.textures.is_empty();
+    let has_features = !ir.features.is_empty();
+    let no_fields = !has_uniform && ir.textures.is_empty() && !has_features;
     // Without parameters every field has a default (fixed textures: `Handle::default()`), and `new()` takes no
     // arguments: clippy's `new_without_default` wants `Default`.
     if ir.params.is_empty() {
         line(&mut o, "#[derive(Asset, AsBindGroup, Reflect, Debug, Clone, Default)]");
     } else {
         line(&mut o, "#[derive(Asset, AsBindGroup, Reflect, Debug, Clone)]");
+    }
+    if has_features {
+        line(&mut o, "#[bind_group_data(u32)]");
     }
     if ir.textures.iter().any(|t| t.ident.contains("__")) {
         line(&mut o, "#[allow(non_snake_case)]");
@@ -278,14 +283,28 @@ pub fn material_module(ir: &Ir, source_file: &str) -> String {
         line(&mut o, &format!("    #[sampler({})]", t.binding + 1));
         line(&mut o, &format!("    pub {}: Handle<Image>,", t.ident));
     }
+    if has_features {
+        line(&mut o, "    /// Active Game Feature permutation index (`0..N`); updated by `BakedPlugin` when");
+        line(&mut o, "    /// [`crate::material::QuillshadeMaterialFeatures`] changes.");
+        line(&mut o, "    pub permutation: u32,");
+    }
     line(&mut o, "}");
     line(&mut o, "");
+    if has_features {
+        line(&mut o, &format!("impl From<&{}> for u32 {{", names.main));
+        line(&mut o, &format!("    fn from(m: &{}) -> Self {{", names.main));
+        line(&mut o, "        m.permutation");
+        line(&mut o, "    }");
+        line(&mut o, "}");
+        line(&mut o, "");
+    }
 
     // Trait impl.
     let mut defs = vec!["LAYOUT_FEATURE"];
     if needs_instance_index {
         defs.push("\"VERTEX_OUTPUT_INSTANCE_INDEX\"");
     }
+    let key_param = if has_features { "key" } else { "_key" };
     let push_defs = |o: &mut String| {
         for d in &defs {
             o.push_str(&format!("        descriptor.vertex.shader_defs.push({d}.into());\n"));
@@ -295,6 +314,26 @@ pub fn material_module(ir: &Ir, source_file: &str) -> String {
             o.push_str(&format!("            fragment.shader_defs.push({d}.into());\n"));
         }
         o.push_str("        }\n");
+        if has_features {
+            o.push_str("        let perm_defs: &[&str] = match key.bind_group_data {\n");
+            for p in 1..ir.permutation_count() {
+                let p_defs = ir.permutation_shader_defs(p);
+                if !p_defs.is_empty() {
+                    let quoted: Vec<String> = p_defs.into_iter().map(|s| format!("\"{s}\"")).collect();
+                    o.push_str(&format!("            {p} => &[{}],\n", quoted.join(", ")));
+                }
+            }
+            o.push_str("            _ => &[],\n");
+            o.push_str("        };\n");
+            o.push_str("        for &d in perm_defs {\n");
+            o.push_str("            descriptor.vertex.shader_defs.push(d.into());\n");
+            o.push_str("        }\n");
+            o.push_str("        if let Some(fragment) = descriptor.fragment.as_mut() {\n");
+            o.push_str("            for &d in perm_defs {\n");
+            o.push_str("                fragment.shader_defs.push(d.into());\n");
+            o.push_str("            }\n");
+            o.push_str("        }\n");
+        }
     };
     match kind {
         MaterialKind::Pbr3d(_) => {
@@ -325,7 +364,7 @@ pub fn material_module(ir: &Ir, source_file: &str) -> String {
             line(&mut o, "        _pipeline: &MaterialExtensionPipeline,");
             line(&mut o, "        descriptor: &mut RenderPipelineDescriptor,");
             line(&mut o, "        _layout: &MeshVertexBufferLayoutRef,");
-            line(&mut o, "        _key: MaterialExtensionKey<Self>,");
+            line(&mut o, &format!("        {key_param}: MaterialExtensionKey<Self>,"));
             line(&mut o, "    ) -> Result<(), SpecializedMeshPipelineError> {");
             push_defs(&mut o);
             line(&mut o, "        Ok(())");
@@ -356,7 +395,7 @@ pub fn material_module(ir: &Ir, source_file: &str) -> String {
             line(&mut o, "        _pipeline: &MaterialPipeline,");
             line(&mut o, "        descriptor: &mut RenderPipelineDescriptor,");
             line(&mut o, "        _layout: &MeshVertexBufferLayoutRef,");
-            line(&mut o, "        _key: MaterialPipelineKey<Self>,");
+            line(&mut o, &format!("        {key_param}: MaterialPipelineKey<Self>,"));
             line(&mut o, "    ) -> Result<(), SpecializedMeshPipelineError> {");
             if two_sided {
                 line(&mut o, "        descriptor.primitive.cull_mode = None;");
@@ -381,7 +420,7 @@ pub fn material_module(ir: &Ir, source_file: &str) -> String {
             line(&mut o, "        _pipeline: &Material2dPipeline,");
             line(&mut o, "        descriptor: &mut RenderPipelineDescriptor,");
             line(&mut o, "        _layout: &MeshVertexBufferLayoutRef,");
-            line(&mut o, "        _key: Material2dKey<Self>,");
+            line(&mut o, &format!("        {key_param}: Material2dKey<Self>,"));
             line(&mut o, "    ) -> Result<(), SpecializedMeshPipelineError> {");
             push_defs(&mut o);
             line(&mut o, "        Ok(())");
@@ -433,10 +472,35 @@ pub fn material_module(ir: &Ir, source_file: &str) -> String {
                 }
             }
         }
+        if has_features {
+            line(&mut o, "            permutation: 0,");
+        }
         line(&mut o, "        }");
     }
     line(&mut o, "    }");
     from_values(&mut o, ir, &names.params);
+    if has_features {
+        line(&mut o, "");
+        line(&mut o, "    /// Computes the active permutation index for `features`.");
+        line(
+            &mut o,
+            "    pub(crate) fn permutation_of(features: &crate::material::QuillshadeMaterialFeatures) -> u32 {",
+        );
+        line(&mut o, "        let mut p: u32 = 0;");
+        for (table, e) in &ir.features {
+            let n = e.variants.len().max(1);
+            line(
+                &mut o,
+                &format!(
+                    "        p = p * {n} + features.variant_index(\"{}\", \"{}\");",
+                    table.escape_default(),
+                    e.name.escape_default()
+                ),
+            );
+        }
+        line(&mut o, "        p");
+        line(&mut o, "    }");
+    }
     for p in &ir.params {
         let field = input_ident(&p.name);
         line(&mut o, "");
@@ -503,6 +567,7 @@ pub fn material_module(ir: &Ir, source_file: &str) -> String {
 /// default, `{Name}Params::default()`, with a warning), images through `tex`. Called by `BakedMaterials::insert`.
 fn from_values(o: &mut String, ir: &Ir, params: &str) {
     let has_uniform = !ir.uniform.is_empty();
+    let has_features = !ir.features.is_empty();
     let (v, tex) = (
         if has_uniform || !ir.textures.is_empty() { "v" } else { "_v" },
         if ir.textures.is_empty() { "_tex" } else { "tex" },
@@ -515,7 +580,7 @@ fn from_values(o: &mut String, ir: &Ir, params: &str) {
     o.push_str(&format!(
         "    pub(crate) fn from_values({v}: &MaterialValues, {tex}: &dyn Fn(&str) -> Handle<Image>) -> Self {{\n"
     ));
-    if !has_uniform && ir.textures.is_empty() {
+    if !has_uniform && ir.textures.is_empty() && !has_features {
         o.push_str("        Self {}\n");
         o.push_str("    }\n");
         return;
@@ -549,6 +614,9 @@ fn from_values(o: &mut String, ir: &Ir, params: &str) {
     for t in &ir.textures {
         o.push_str(&format!("            {}: tex(v.texture(BAKED_ID, \"{}\")),\n", t.ident, t.ident));
     }
+    if has_features {
+        o.push_str("            permutation: 0,\n");
+    }
     o.push_str("        }\n");
     o.push_str("    }\n");
 }
@@ -563,6 +631,8 @@ pub struct MaterialEntry {
     /// The `id` of its `.material.ron` when it is a valid UUIDv7 (ADR 0047 §12): its key in
     /// `BakedMaterials::by_id`. `None` (no id, or not a v7) leaves the material out of `by_id`.
     pub uuid: Option<AssetUuid>,
+    /// Whether this material uses one or more `GameFeatureSwitch` nodes.
+    pub has_features: bool,
 }
 
 impl MaterialEntry {
@@ -575,6 +645,7 @@ impl MaterialEntry {
             material: n.material.clone(),
             params: (!ir.uniform.is_empty()).then_some(n.params),
             uuid: None,
+            has_features: !ir.features.is_empty(),
         }
     }
 
@@ -586,15 +657,16 @@ impl MaterialEntry {
 }
 
 /// All files of the Material module: path relative to the module directory (`crates/quillshade/src/material`) →
-/// content. Includes `mod.rs`, every `materials/**/mod.rs`, the given material modules (keyed by asset path) and
-/// `baked/` (design §3.1: `BakedMaterials` over `entries`, `BakedTextures` over `texture_ids`: every Texture asset
-/// that parses, not only the manifest's valid ones, plus the internal textures). Modules are named by
+/// content. Includes `mod.rs`, `features.rs`, every `materials/**/mod.rs`, the given material modules (keyed by asset
+/// path) and `baked/` (design §3.1: `BakedMaterials` over `entries`, `BakedTextures` over `texture_ids`: every Texture
+/// asset that parses, not only the manifest's valid ones, plus the internal textures). Modules are named by
 /// `paths::material_components` (`dir_env::mat_rock_wet`, decision 0020). The umbrella crate's `Cargo.toml` and
 /// `src/lib.rs` come from `project_core::umbrella`.
 pub fn crate_files(
     entries: &[MaterialEntry],
     modules: &BTreeMap<String, String>,
     texture_ids: &[String],
+    feature_tables: &BTreeMap<String, FeatureTable>,
 ) -> BTreeMap<String, String> {
     let mut files = BTreeMap::new();
 
@@ -672,7 +744,9 @@ pub fn crate_files(
     for (path, text) in modules {
         files.insert(format!("materials/{}.rs", paths::material_components(path).join("/")), text.clone());
     }
-    files.insert("mod.rs".to_string(), mod_rs(root_reexports));
+    let (features_text, features_reexports) = baked::features_rs(feature_tables);
+    files.insert("features.rs".to_string(), features_text);
+    files.insert("mod.rs".to_string(), mod_rs(root_reexports, features_reexports));
     files.insert("baked/mod.rs".to_string(), baked::mod_rs());
     files.insert("baked/materials.rs".to_string(), baked::materials_rs(entries));
     files.insert("baked/textures.rs".to_string(), baked::textures_rs(texture_ids));
@@ -686,7 +760,9 @@ fn compiled_manifest_path() -> String {
     format!("{}assets/{}/baked.ron", "../".repeat(up), paths::AUTOGEN.join("/"))
 }
 
-fn mod_rs(materials_reexports: bool) -> String {
+fn mod_rs(materials_reexports: bool, features_reexports: bool) -> String {
+    let features_use =
+        if features_reexports { "pub use features::*;\n" } else { "pub use features::QuillshadeMaterialFeatures;\n" };
     let materials_glob = if materials_reexports { "pub use materials::*;\n" } else { "" };
     let manifest = compiled_manifest_path();
     format!(
@@ -698,12 +774,13 @@ fn mod_rs(materials_reexports: bool) -> String {
 use bevy::prelude::*;
 
 pub mod baked;
+pub mod features;
 pub mod materials;
 
 pub use baked::{{
     BakedMaterials, BakedMaterialsLoader, BakedMaterialsProgress, BakedMaterialsReady, BakedPlugin, BakedTextures,
 }};
-{materials_glob}
+{features_use}{materials_glob}
 /// The baked manifest at build time (design §3.2): the compiled snapshot of every Texture asset and material value.
 pub const COMPILED_MANIFEST: &str = include_str!("{manifest}");
 

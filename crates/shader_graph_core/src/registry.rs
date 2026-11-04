@@ -8,6 +8,7 @@ use project_core::AssetUuid;
 use crate::consts::{ConstLookup, ConstType, GlobalConsts};
 use crate::curve::{Interp, curve_fn_alias};
 use crate::diag::{Code, Diagnostic};
+use crate::features::{FeatureEnum, FeatureLookup, FeatureTable, FeatureVariant};
 use crate::gradient::GradientCollection;
 use crate::model::{AssetKind, BlendMode, MaterialKind, NodeId};
 use crate::preview::ShaderOutputDto;
@@ -57,6 +58,11 @@ pub enum ParamKind {
     /// Id of a slot ([`crate::gradient::Slot::id`]) of the collection chosen by the node's
     /// [`ParamKind::GradientCollection`] param; `0` = none (stored as `Value::Int`; gradient design §6).
     GradientSlot,
+    /// Id of a feature enum table asset of the project (`common/graphics`); `""` = none (stored as `Value::Str`).
+    FeatureTable,
+    /// UUID of a [`crate::features::FeatureEnum`] in the table chosen by the node's [`ParamKind::FeatureTable`] param;
+    /// `""` = none (stored as `Value::Str`).
+    FeatureEnum,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -208,6 +214,9 @@ pub enum NodeRole {
     RouteUsage,
     /// Compile-time conditional branch (`stdlib::If`): evaluates `cond` at compile time and prunes the inactive branch.
     CompileIf,
+    /// Compile-time static enum branch (`stdlib::GameFeatureSwitch`): selects the active variant pin and prunes all
+    /// inactive variant branches.
+    FeatureSwitch,
 }
 
 /// Parameter of a [`NodeRole::RouteUsage`] node: the node id of its declaration (decision 0011).
@@ -296,6 +305,47 @@ pub fn gradient_refs(asset: &crate::model::Asset, registry: &Registry) -> Vec<(N
             let collection = n.params.get(&p.id).unwrap_or(&p.default).as_str();
             if !collection.is_empty() {
                 out.push((id.clone(), p.id, collection.to_string()));
+            }
+        }
+    }
+    out
+}
+
+/// Feature table ids `asset` refers to through [`ParamKind::FeatureTable`] parameters:
+/// `(node id, param id, table id)`; empty references are skipped.
+pub fn feature_table_refs(asset: &crate::model::Asset, registry: &Registry) -> Vec<(NodeId, String, String)> {
+    let mut out = Vec::new();
+    for (id, n) in &asset.nodes {
+        let Some(def) = registry.get(&n.kind) else { continue };
+        for p in def.params().into_iter().filter(|p| p.kind == ParamKind::FeatureTable) {
+            let table = n.params.get(&p.id).unwrap_or(&p.default).as_str();
+            if !table.is_empty() {
+                out.push((id.clone(), p.id, table.to_string()));
+            }
+        }
+    }
+    out
+}
+
+/// Feature enums `asset` refers to through [`ParamKind::FeatureTable`] + [`ParamKind::FeatureEnum`] parameters:
+/// `(node id, enum param id, table id, enum id)`.
+pub fn feature_enum_refs(asset: &crate::model::Asset, registry: &Registry) -> Vec<(NodeId, String, String, String)> {
+    let mut out = Vec::new();
+    for (id, n) in &asset.nodes {
+        let Some(def) = registry.get(&n.kind) else { continue };
+        let params = def.params();
+        let Some(table) = params
+            .iter()
+            .find(|p| p.kind == ParamKind::FeatureTable)
+            .map(|p| n.params.get(&p.id).unwrap_or(&p.default).as_str())
+            .filter(|t| !t.is_empty())
+        else {
+            continue;
+        };
+        for p in params.iter().filter(|p| p.kind == ParamKind::FeatureEnum) {
+            let eid = n.params.get(&p.id).unwrap_or(&p.default).as_str();
+            if !eid.is_empty() {
+                out.push((id.clone(), p.id.clone(), table.to_string(), eid.to_string()));
             }
         }
     }
@@ -465,6 +515,9 @@ pub struct FunctionSig {
     /// View textures read by the function or, transitively, by the functions it calls; sorted. No arguments: callers
     /// only inherit the requirement ([`EmitCtx::scene_texture`]).
     pub scene: Vec<SceneTexture>,
+    /// Feature enums read by `stdlib::GameFeatureSwitch` in this function or, transitively, in functions it calls:
+    /// `(table_path, FeatureEnum)`, sorted by `(table_path, enum.name, enum.id)`.
+    pub features: Vec<(String, FeatureEnum)>,
 }
 
 /// Fixed texture of a node inside a function (design §1.3), passed to the function as a hidden trailing texture +
@@ -581,7 +634,9 @@ pub struct Env<'a> {
     pub consts: &'a dyn ConstLookup,
     pub textures: &'a dyn TextureLookup,
     pub gradients: &'a dyn GradientLookup,
+    pub features: &'a dyn FeatureLookup,
     pub compile_overrides: &'a BTreeMap<String, bool>,
+    pub feature_overrides: &'a BTreeMap<AssetUuid, AssetUuid>,
 }
 
 /// Inputs for computing a node signature.
@@ -912,6 +967,16 @@ impl EmitCtx<'_> {
     /// A global constant table of the project (`None` if no table exists at `path`).
     pub fn const_table(&self, path: &str) -> Option<&GlobalConsts> {
         self.env.consts.const_table(path)
+    }
+
+    /// A feature enum table of the project (`None` if no table exists at `path`).
+    pub fn feature_table(&self, path: &str) -> Option<&FeatureTable> {
+        self.env.features.feature_table(path)
+    }
+
+    /// Active variant of feature enum `e` for the current permutation (`feature_overrides`, or `e.variants[0]`).
+    pub fn active_feature_variant<'b>(&self, e: &'b FeatureEnum) -> Option<&'b FeatureVariant> {
+        self.env.feature_overrides.get(&e.id).and_then(|vid| e.get_variant_by_id(*vid)).or_else(|| e.variants.first())
     }
 
     /// Adds a standalone fn definition (Custom node).

@@ -8,10 +8,14 @@ use shader_codegen_rust::manifest::{ManifestMaterial, ManifestTexture, manifest_
 use shader_codegen_wesl::check::{self, BevySources, Files};
 use shader_codegen_wesl::{GenCtx, Generated, paths};
 use shader_graph_core::consts::GlobalConsts;
+use shader_graph_core::features::FeatureTable;
 use shader_graph_core::gradient::{GradientCollection, texture_id};
-use shader_graph_core::ir::{Ir, IrResult, build_ir, declared_function_sig, find_cycle};
+use shader_graph_core::ident::check_ident;
+use shader_graph_core::ir::{Ir, IrResult, build_ir_with_features, declared_function_sig, find_cycle};
 use shader_graph_core::model::{Asset, Preview};
-use shader_graph_core::registry::{FUNCTION_PREFIX, const_table_refs, curve_refs, gradient_refs, texture_refs};
+use shader_graph_core::registry::{
+    FUNCTION_PREFIX, const_table_refs, curve_refs, feature_table_refs, gradient_refs, texture_refs,
+};
 use shader_graph_core::texture::{self, INTERNAL_PREFIX, MATERIAL_TEXTURES, ProblemKind};
 use shader_graph_core::{Code, Diagnostic, FunctionSig, Registry};
 use shader_stdlib::internal::{DEFAULT_TEXTURE, INTERNAL_TEXTURES};
@@ -123,6 +127,9 @@ impl DepGraph {
             for (_, _, table) in const_table_refs(a, registry) {
                 add(id, AssetId::new(AssetType::Consts, table));
             }
+            for (_, _, table) in feature_table_refs(a, registry) {
+                add(id, AssetId::new(AssetType::Features, table));
+            }
             // Internal textures are not project assets.
             for (_, _, texture) in texture_refs(a, registry) {
                 if !texture.starts_with(INTERNAL_PREFIX) {
@@ -182,6 +189,62 @@ pub fn collect_consts(set: &AssetSet) -> ConstTables {
         consts.insert(id.path.clone(), table.clone());
     }
     (consts, diags)
+}
+
+/// Game Feature enum tables nodes can switch on, by path, and the problems of every table:
+/// load errors (E009), bad paths (E005), invalid or duplicate enum/variant names (E005), and enums with `< 2`
+/// variants (W113).
+pub type FeatureTables = (BTreeMap<String, FeatureTable>, BTreeMap<AssetId, Vec<Diagnostic>>);
+
+pub fn collect_features(set: &AssetSet) -> FeatureTables {
+    let mut features: BTreeMap<String, FeatureTable> = BTreeMap::new();
+    let mut diags: BTreeMap<AssetId, Vec<Diagnostic>> = BTreeMap::new();
+    for (id, table) in &set.features {
+        let d = diags.entry(id.clone()).or_default();
+        d.extend(assets::validate_path(id));
+        let table = match table {
+            Ok(t) if d.is_empty() => t,
+            Ok(_) => continue,
+            Err(e) => {
+                d.push(Diagnostic::new(Code::E009, format!("cannot load: {e}")).in_asset(id.source_rel()));
+                continue;
+            }
+        };
+        let mut seen_enums = BTreeSet::new();
+        for e in &table.enums {
+            let name = e.name.as_str();
+            if let Err(err) = check_ident(name) {
+                d.push(Diagnostic::new(Code::E005, format!("feature enum name: {err}")).in_asset(id.source_rel()));
+            } else if !seen_enums.insert(name) {
+                d.push(
+                    Diagnostic::new(Code::E005, format!("duplicate feature enum `{name}`")).in_asset(id.source_rel()),
+                );
+            }
+            if e.variants.len() < 2 {
+                d.push(
+                    Diagnostic::new(Code::W113, format!("feature enum `{name}` has fewer than 2 variants"))
+                        .in_asset(id.source_rel()),
+                );
+            }
+            let mut seen_vars = BTreeSet::new();
+            for v in &e.variants {
+                let vname = v.name.as_str();
+                if let Err(err) = check_ident(vname) {
+                    d.push(
+                        Diagnostic::new(Code::E005, format!("variant name in `{name}`: {err}"))
+                            .in_asset(id.source_rel()),
+                    );
+                } else if !seen_vars.insert(vname) {
+                    d.push(
+                        Diagnostic::new(Code::E005, format!("duplicate variant `{vname}` in `{name}`"))
+                            .in_asset(id.source_rel()),
+                    );
+                }
+            }
+        }
+        features.insert(id.path.clone(), table.clone());
+    }
+    (features, diags)
 }
 
 /// Image paths of the loadable Texture assets, each with the assets pointing at it (sorted); more than one is E011.
@@ -282,7 +345,7 @@ pub fn module_of(id: &AssetId) -> Option<Vec<String>> {
         AssetType::Material => paths::material_module(&id.path),
         AssetType::Function => paths::function_module(&id.path),
         AssetType::Curve => paths::curve_module(&id.path),
-        AssetType::Consts | AssetType::Texture | AssetType::Gradients => return None,
+        AssetType::Consts | AssetType::Features | AssetType::Texture | AssetType::Gradients => return None,
     })
 }
 
@@ -425,6 +488,13 @@ pub fn plan_set(project: &Project, set: &AssetSet, opts: &RegenOptions) -> (Rege
         r.ok = !d.iter().any(Diagnostic::is_error);
         r.diagnostics.extend(d);
     }
+    // Game Feature enum tables: generate `src/material/features.rs`.
+    let (features, feature_diags) = collect_features(set);
+    for (id, d) in feature_diags {
+        let r = results.entry(id).or_default();
+        r.ok = !d.iter().any(Diagnostic::is_error);
+        r.diagnostics.extend(d);
+    }
     // Texture assets: validated only, they generate nothing.
     for (id, d) in texture_diagnostics(project, set) {
         let r = results.entry(id).or_default();
@@ -491,10 +561,24 @@ pub fn plan_set(project: &Project, set: &AssetSet, opts: &RegenOptions) -> (Rege
     }
 
     let gen_ctx_file = |id: &AssetId| id.source_rel();
+    let empty_compile = BTreeMap::new();
+    let empty_feat = BTreeMap::new();
     for p in order {
         let id = AssetId::new(AssetType::Function, p);
         let asset = loaded[&id];
-        let r = build_ir(asset, p, &registry, &sigs, &curve_paths, &consts, &textures, &gradients);
+        let r = build_ir_with_features(
+            asset,
+            p,
+            &registry,
+            &sigs,
+            &curve_paths,
+            &consts,
+            &textures,
+            &gradients,
+            &features,
+            &empty_compile,
+            &empty_feat,
+        );
         let entry = results.entry(id.clone()).or_default();
         entry.diagnostics.extend(r.diagnostics.into_iter().map(|d| d.in_asset(id.source_rel())));
         for u in deps.uses.get(&id).into_iter().flatten().filter(|u| u.ty == AssetType::Function) {
@@ -523,7 +607,21 @@ pub fn plan_set(project: &Project, set: &AssetSet, opts: &RegenOptions) -> (Rege
 
     // Materials.
     for id in loaded.keys().copied().filter(|i| i.ty == AssetType::Material) {
-        let build = |a: &Asset| build_ir(a, &id.path, &registry, &sigs, &curve_paths, &consts, &textures, &gradients);
+        let build = |a: &Asset| {
+            build_ir_with_features(
+                a,
+                &id.path,
+                &registry,
+                &sigs,
+                &curve_paths,
+                &consts,
+                &textures,
+                &gradients,
+                &features,
+                &empty_compile,
+                &empty_feat,
+            )
+        };
         let mut r = build(loaded[id]);
         if let Some(w) = preview_changes_rust(loaded[id], &r, &id.source_rel(), build) {
             r.diagnostics.push(w);
@@ -565,7 +663,9 @@ pub fn plan_set(project: &Project, set: &AssetSet, opts: &RegenOptions) -> (Rege
         let mut g = match id.ty {
             AssetType::Material => shader_codegen_wesl::material(ir, &ctx),
             AssetType::Function => shader_codegen_wesl::function(ir, &ctx),
-            AssetType::Curve | AssetType::Consts | AssetType::Texture | AssetType::Gradients => continue,
+            AssetType::Curve | AssetType::Consts | AssetType::Features | AssetType::Texture | AssetType::Gradients => {
+                continue;
+            }
         };
         if let Some(d) = &date {
             insert_date(&mut g.text, d);
@@ -610,14 +710,18 @@ pub fn plan_set(project: &Project, set: &AssetSet, opts: &RegenOptions) -> (Rege
             }
             let ir = r.ir.as_ref().expect("material IR");
             let kind = *ir.kind.material().expect("material IR");
-            for v in check::variants_for(&kind, ir.vertex.is_some()) {
-                if let Err(e) = check::compile(bevy, &files, &paths::material_module(&id.path), *v) {
-                    r.diagnostics.push(
-                        Diagnostic::new(Code::E010, format!("generated WESL failed to compile: {e}"))
-                            .in_asset(id.source_rel()),
-                    );
-                    r.ok = false;
-                    break;
+            let mat_mod = paths::material_module(&id.path);
+            'check_perms: for p in 0..ir.permutation_count() {
+                let defs = ir.permutation_shader_defs(p);
+                for v in check::variants_for(&kind, ir.vertex.is_some()) {
+                    if let Err(e) = check::compile_with_defs(bevy, &files, &mat_mod, *v, true, &defs) {
+                        r.diagnostics.push(
+                            Diagnostic::new(Code::E010, format!("generated WESL failed to compile: {e}"))
+                                .in_asset(id.source_rel()),
+                        );
+                        r.ok = false;
+                        break 'check_perms;
+                    }
                 }
             }
         }
@@ -723,7 +827,7 @@ pub fn plan_set(project: &Project, set: &AssetSet, opts: &RegenOptions) -> (Rege
     }
     let module_dir = project.material_module_dir();
     let texture_ids = texture_field_ids(set);
-    for (rel, text) in shader_codegen_rust::crate_files(&entries, &modules, &texture_ids) {
+    for (rel, text) in shader_codegen_rust::crate_files(&entries, &modules, &texture_ids, &features) {
         desired.push((module_dir.join(rel), text.into_bytes()));
     }
     let mut manifest = manifest_ron(&manifest_textures, &manifest_materials);
@@ -881,5 +985,6 @@ fn entry_from_old(id: &AssetId, asset: Option<&Asset>, old: &str) -> MaterialEnt
         material: format!("{base}Material"),
         params: old.contains(&format!("pub struct {params}")).then_some(params),
         uuid: None,
+        has_features: old.contains("fn permutation_of("),
     }
 }

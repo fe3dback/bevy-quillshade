@@ -54,6 +54,8 @@ fn node_material(kind: &str) -> Option<(String, Asset)> {
         textures: &NoTextures,
         gradients: &NoGradients,
         compile_overrides: &BTreeMap::new(),
+        features: &shader_graph_core::NoFeatures,
+        feature_overrides: &BTreeMap::new(),
     };
     let sig = def.signature(&SigCtx {
         node_id: &n,

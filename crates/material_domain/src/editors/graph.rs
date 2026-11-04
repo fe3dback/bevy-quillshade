@@ -22,7 +22,7 @@ use shader_project::resolve::ref_type;
 use shader_project::{AssetId, AssetType, Project, assets, ops};
 
 use super::{StatusCtx, StatusInfo};
-use crate::doc::{Doc, node_signature, route_declarations};
+use crate::doc::{Doc, node_signature_with, route_declarations};
 use crate::doc_kind::{DocCtx, TabDoc, asset_title, io_error, project_of};
 use crate::graph_domain::MaterialGraph;
 use crate::inline::{Inline, inline_for_param, inline_for_pin};
@@ -310,6 +310,7 @@ pub(crate) fn reference_choices(editor: &Editor, ty: AssetType, shown: &str) -> 
     let targets = match ty {
         AssetType::Curve => editor.curve_paths().into_iter().map(|p| (p.clone(), p)).collect(),
         AssetType::Consts => editor.const_tables(),
+        AssetType::Features => editor.feature_tables(),
         AssetType::Texture => editor.texture_choices(),
         AssetType::Gradients => editor.gradient_collections(),
         AssetType::Material | AssetType::Function => Vec::new(),
@@ -329,7 +330,9 @@ pub(crate) fn reference_choices(editor: &Editor, ty: AssetType, shown: &str) -> 
 pub(crate) fn title(editor: &Editor, view: &Asset, id: &str) -> String {
     let m = editor.domains.material();
     let routes = crate::doc::route_declarations(view, &m.registry);
-    crate::doc::node_title_in(&m.registry, &m.functions, view, id, &routes, &|t| editor.const_table(t))
+    crate::doc::node_title_in(&m.registry, &m.functions, view, id, &routes, &|t| editor.const_table(t), &|t| {
+        editor.feature_table(t)
+    })
 }
 
 pub(crate) fn node_subpanes(editor: &Editor, id: &str) -> Vec<Box<dyn Scene>> {
@@ -367,6 +370,7 @@ pub(crate) fn node_subpanes(editor: &Editor, id: &str) -> Vec<Box<dyn Scene>> {
             AssetType::Function => "Open function",
             AssetType::Curve => "Open curve",
             AssetType::Consts => "Open constant table",
+            AssetType::Features => "Open game features",
             AssetType::Material => "Open material",
             AssetType::Texture => "Open texture",
             AssetType::Gradients => "Open gradients",
@@ -396,10 +400,29 @@ pub(crate) fn node_subpanes(editor: &Editor, id: &str) -> Vec<Box<dyn Scene>> {
             match ty {
                 AssetType::Curve => c.curves = list,
                 AssetType::Consts => c.const_tables = list,
+                AssetType::Features => c.feature_tables = list,
                 AssetType::Texture => c.textures = list,
                 _ => c.gradients = list,
             }
             v = Value::Str(current);
+            choices_here = Some(c);
+        }
+        if p.kind == ParamKind::FeatureEnum {
+            let mut c = choices.clone();
+            let table = def
+                .params()
+                .into_iter()
+                .find(|p| p.kind == ParamKind::FeatureTable)
+                .and_then(|p| params.get(&p.id))
+                .map(Value::as_str)
+                .and_then(|t| editor.feature_table(t));
+            if let Some(t) = table {
+                c.feature_enums = t.enums.iter().map(|e| (e.id.to_string(), e.name.clone())).collect();
+            }
+            let cur = v.as_str();
+            if !cur.is_empty() && !c.feature_enums.iter().any(|(id, _)| id == cur) {
+                c.feature_enums.push((cur.to_string(), format!("{cur} (missing)")));
+            }
             choices_here = Some(c);
         }
         // Constants of the node's type in the selected table; a missing one or one of another type stays visible
@@ -434,9 +457,14 @@ pub(crate) fn node_subpanes(editor: &Editor, id: &str) -> Vec<Box<dyn Scene>> {
     if !rows.is_empty() {
         out.push(subpane_box("Parameters", rows));
     }
-    if let Some(sig) =
-        node_signature(&view, id, &editor.domains.material().registry, &editor.domains.material().functions, &d.id.path)
-    {
+    if let Some(sig) = node_signature_with(
+        &view,
+        id,
+        &editor.domains.material().registry,
+        &editor.domains.material().functions,
+        &editor.domains.material().features,
+        &d.id.path,
+    ) {
         let mut rows: Vec<Box<dyn Scene>> = Vec::new();
         // A usage's input is the declaration's, never a value of its own.
         let inputs = if def.role() == NodeRole::RouteUsage { &[][..] } else { &sig.inputs[..] };

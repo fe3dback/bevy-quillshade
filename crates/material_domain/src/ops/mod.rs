@@ -14,6 +14,7 @@ use editor_core::history::MergeKey;
 use project_core::AssetRef;
 use project_core::asset_index::AssetIndex;
 use shader_graph_core::consts::{ConstType, GlobalConsts};
+use shader_graph_core::features::FeatureTable;
 use shader_graph_core::gradient::{GradientCollection, MAX_STOPS, Stop};
 use shader_graph_core::ir::declared_function_sig;
 use shader_graph_core::model::{
@@ -21,7 +22,7 @@ use shader_graph_core::model::{
 };
 use shader_graph_core::registry::{
     Conversion, FUNCTION_PREFIX, Hotkey, HotkeyKey, NodeAction, NodeOp, NodeRole, ParamKind, const_refs,
-    const_table_refs,
+    const_table_refs, feature_table_refs,
 };
 use shader_graph_core::{Code, Diagnostic, PinType, Registry, Value};
 use shader_project::layout::{MATERIAL, MaterialLayout, USER_NODES_DIR};
@@ -31,8 +32,9 @@ use shader_project::{AssetId, AssetSet, AssetType, RegenOptions, Scope, assets, 
 use crate::autolayout;
 use crate::consts_doc::ConstsDoc;
 use crate::curve::CurveDoc;
-use crate::doc::{Doc, bounds, connection_error, node_signature};
+use crate::doc::{Doc, bounds, connection_error_with, node_signature_with};
 use crate::doc_kind::DocCtx;
+use crate::features_doc::FeaturesDoc;
 use crate::gradients_doc::{GradientSel, GradientsDoc};
 use crate::material_state::{MaterialState, MaterialStates};
 use crate::search::{self, WireEnd};
@@ -45,6 +47,7 @@ mod apply;
 mod asset_ops;
 mod consts_ops;
 pub mod droppable;
+mod features_ops;
 mod gradient_ops;
 mod graph_ops;
 mod nav;
@@ -58,6 +61,7 @@ pub use apply::MaterialApply;
 pub use asset_ops::MaterialAssets;
 pub use consts_ops::MaterialConsts;
 use consts_ops::usage_message;
+pub use features_ops::MaterialFeatures;
 pub use graph_ops::MaterialGraphOps;
 pub use nav::*;
 pub use regen::MaterialRegen;
@@ -69,8 +73,8 @@ pub use watch::MaterialWatch;
 /// Every Material extension trait of `Editor`.
 pub mod prelude {
     pub use super::{
-        MaterialApply, MaterialAssets, MaterialConsts, MaterialEditor, MaterialGraphOps, MaterialRegen, MaterialTabs,
-        MaterialTextures, MaterialWatch,
+        MaterialApply, MaterialAssets, MaterialConsts, MaterialEditor, MaterialFeatures, MaterialGraphOps,
+        MaterialRegen, MaterialTabs, MaterialTextures, MaterialWatch,
     };
     pub use crate::texture::TextureDocId;
 }
@@ -110,6 +114,20 @@ pub trait MaterialEditor {
 
     /// Tab index of a constant table.
     fn consts_index(&self, id: &AssetId) -> Option<usize>;
+
+    /// The active tab's Game Features table.
+    fn features_doc(&self) -> Option<&FeaturesDoc>;
+
+    fn features_doc_mut(&mut self) -> Option<&mut FeaturesDoc>;
+
+    /// Tab index of a Game Features table.
+    fn features_index(&self, id: &AssetId) -> Option<usize>;
+
+    /// The project's loadable Game Features tables as `(id, label)` choices.
+    fn feature_tables(&self) -> Vec<(String, String)>;
+
+    /// Game Features table `id` (its path): an open tab's unsaved state first, then the file as last scanned.
+    fn feature_table(&self, id: &str) -> Option<&FeatureTable>;
 
     /// The active tab's Texture asset (or built-in texture).
     fn texture_doc(&self) -> Option<&TextureDoc>;
@@ -211,6 +229,31 @@ impl MaterialEditor for Editor {
 
     fn consts_index(&self, id: &AssetId) -> Option<usize> {
         self.tabs.iter().position(|t| t.get::<ConstsDoc>().is_some_and(|c| c.id == *id))
+    }
+
+    fn features_doc(&self) -> Option<&FeaturesDoc> {
+        self.active_doc()
+    }
+
+    fn features_doc_mut(&mut self) -> Option<&mut FeaturesDoc> {
+        self.active_doc_mut()
+    }
+
+    fn features_index(&self, id: &AssetId) -> Option<usize> {
+        self.tabs.iter().position(|t| t.get::<FeaturesDoc>().is_some_and(|f| f.id == *id))
+    }
+
+    fn feature_tables(&self) -> Vec<(String, String)> {
+        let ok = self.domains.material().disk.features.iter().filter(|(_, f)| f.is_ok()).map(|(id, _)| id.path.clone());
+        ok.map(|p| (p.clone(), p)).collect()
+    }
+
+    fn feature_table(&self, id: &str) -> Option<&FeatureTable> {
+        let open = self.tabs.iter().filter_map(Tab::get::<FeaturesDoc>).find(|f| f.id.path == id);
+        open.map(|f| &f.table).or_else(|| {
+            let id = AssetId::new(AssetType::Features, id);
+            self.domains.material().disk.features.get(&id).and_then(|f| f.as_ref().ok())
+        })
     }
 
     fn texture_doc(&self) -> Option<&TextureDoc> {

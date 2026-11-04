@@ -17,6 +17,13 @@ pub const SAMPLE_CURVE_KIND: &str = "stdlib::SampleCurve";
 /// Property of [`SAMPLE_CURVE_KIND`]: the Curve asset path, `""` = none.
 pub const CURVE_PARAM: &str = "curve";
 
+/// Node switching between static enum variants (`quillshade/material/**/*.features.ron`).
+pub const GAME_FEATURE_SWITCH_KIND: &str = "stdlib::GameFeatureSwitch";
+/// Property of [`GAME_FEATURE_SWITCH_KIND`]: the FeatureTable asset path/UUID, `""` = none.
+pub const FEATURE_TABLE_PARAM: &str = "table";
+/// Property of [`GAME_FEATURE_SWITCH_KIND`]: the FeatureEnum UUID/name in the table, `""` = none.
+pub const FEATURE_ENUM_PARAM: &str = "feature";
+
 /// Position input of the noise nodes: the connected value, or the world position.
 fn noise_position(c: &mut EmitCtx) -> String {
     if c.is_connected("position") { c.input("position") } else { c.builtin(Builtin::WorldPosition) }
@@ -83,6 +90,88 @@ pub fn register(r: &mut Registry) {
                 |c| {
                     let branch = if c.compile_bool("cond") { "true_value" } else { "false_value" };
                     let expr = c.input(branch);
+                    c.alias("out", Operand::Value(expr));
+                },
+            ),
+    );
+
+    r.register(
+        def(GAME_FEATURE_SWITCH_KIND, "GameFeatureSwitch", CAT)
+            .kw(&["game feature", "feature switch", "enum", "switch", "static switch", "permutation", "quality"])
+            .role(NodeRole::FeatureSwitch)
+            .param(ParamDef::new(
+                FEATURE_TABLE_PARAM,
+                "Feature Table",
+                ParamKind::FeatureTable,
+                Value::Str(String::new()),
+            ))
+            .param(ParamDef::new(FEATURE_ENUM_PARAM, "Feature Enum", ParamKind::FeatureEnum, Value::Str(String::new())))
+            .build(
+                |c| {
+                    let table = c.param(FEATURE_TABLE_PARAM).as_str();
+                    let feature = c.param(FEATURE_ENUM_PARAM).as_str();
+                    let variants = c
+                        .env
+                        .features
+                        .feature_table(table)
+                        .and_then(|t| t.resolve_enum(feature))
+                        .map(|fe| fe.variants.as_slice())
+                        .unwrap_or(&[]);
+                    let pin_pairs: Vec<(String, String)> = variants
+                        .iter()
+                        .map(|v| {
+                            (shader_graph_core::variant_pin_id(v.id), shader_graph_core::ident::to_pascal_case(&v.name))
+                        })
+                        .collect();
+                    let pin_ids: Vec<&str> = pin_pairs.iter().map(|(id, _)| id.as_str()).collect();
+                    let attrs = PinType::MaterialAttributesPbr;
+                    if pin_ids.iter().any(|p| c.connected.get(*p) == Some(&attrs)) {
+                        let ins = pin_pairs
+                            .iter()
+                            .map(|(id, label)| PinDef::new(id, label, attrs).poly().accepts_attributes())
+                            .collect();
+                        return sig(ins, vec![poly_out("out", attrs)]);
+                    }
+                    let ty = c.poly_type(&pin_ids);
+                    let ins = pin_pairs
+                        .iter()
+                        .map(|(id, label)| {
+                            PinDef::new(id, label, ty).poly().default(Value::Float(0.0)).accepts_attributes()
+                        })
+                        .collect();
+                    sig(ins, vec![poly_out("out", ty)])
+                },
+                |c| {
+                    let table = c.param(FEATURE_TABLE_PARAM).as_str().to_string();
+                    let feature = c.param(FEATURE_ENUM_PARAM).as_str().to_string();
+                    let emit_default = |c: &mut EmitCtx| {
+                        let ty = c.out_type("out");
+                        if ty == PinType::MaterialAttributesPbr {
+                            c.sink.stdlib.insert(shader_graph_core::attributes::import());
+                            c.define("out", shader_graph_core::attributes::pbr_default_literal());
+                        } else {
+                            c.define("out", Value::zero(ty).wesl_literal(ty));
+                        }
+                    };
+                    if table.is_empty() || feature.is_empty() {
+                        c.diag(Code::W113, "GameFeatureSwitch has no feature enum selected: outputs 0.0");
+                        emit_default(c);
+                        return;
+                    }
+                    let Some(fe) = c.feature_table(&table).and_then(|t| t.resolve_enum(&feature)).cloned() else {
+                        c.diag(Code::W113, format!("feature enum `{feature}` in `{table}` not found: outputs 0.0"));
+                        emit_default(c);
+                        return;
+                    };
+                    if fe.variants.len() < 2 {
+                        c.diag(Code::W113, format!("feature enum `{}` has fewer than 2 variants", fe.name));
+                    }
+                    let Some(active) = c.active_feature_variant(&fe) else {
+                        emit_default(c);
+                        return;
+                    };
+                    let pin_id = shader_graph_core::variant_pin_id(active.id);
+                    let expr = c.input(&pin_id);
                     c.alias("out", Operand::Value(expr));
                 },
             ),

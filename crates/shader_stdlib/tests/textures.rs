@@ -287,6 +287,7 @@ fn layer_sig(path: &str, node: &str) -> FunctionSig {
         textures: vec![HiddenTexture { origin: path.into(), node: node.into(), texture: "textures/rock".into() }],
         gradients: vec![],
         scene: vec![],
+        features: vec![],
     }
 }
 

@@ -30,7 +30,17 @@ impl MaterialTabs for Editor {
                 sigs.insert(id.path.clone(), declared_function_sig(asset, &id.path, &self.domains.material().registry));
             }
         }
+        let mut features = BTreeMap::new();
+        for (id, f) in &self.domains.material().disk.features {
+            if let Ok(table) = f {
+                features.insert(id.path.clone(), table.clone());
+            }
+        }
+        for f in self.tabs.iter().filter_map(Tab::get::<FeaturesDoc>) {
+            features.insert(f.id.path.clone(), f.table.clone());
+        }
         self.domains.material_mut().functions = sigs;
+        self.domains.material_mut().features = features;
     }
 
     fn open_asset(&mut self, id: &AssetId) {
@@ -68,6 +78,9 @@ pub(crate) fn asset_tab(e: &mut Editor, r: &AssetRef) -> Option<Tab> {
         // arms only hand such a reference over to it.
         AssetType::Texture => return texture_kit::editor::open::<MaterialTexture>(e, r),
         AssetType::Consts => assets::load_consts(project, &id).map(|c| material_tab(ConstsDoc::new(id.clone(), c))),
+        AssetType::Features => {
+            assets::load_features(project, &id).map(|f| material_tab(FeaturesDoc::new(id.clone(), f)))
+        }
         AssetType::Gradients => {
             assets::load_gradients(project, &id).map(|c| material_tab(GradientsDoc::new(id.clone(), c)))
         }

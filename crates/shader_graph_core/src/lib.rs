@@ -6,6 +6,7 @@ pub mod attributes;
 pub mod consts;
 pub mod curve;
 pub mod diag;
+pub mod features;
 pub mod gradient;
 pub mod ident;
 pub mod ir;
@@ -19,10 +20,14 @@ pub mod value;
 pub use consts::{ConstLookup, ConstType, GlobalConst, GlobalConsts};
 pub use curve::{Curve, Interp};
 pub use diag::{Code, Diagnostic, Diagnostics};
+pub use features::{
+    FEATURES_FORMAT_VERSION, FeatureEnum, FeatureLookup, FeatureTable, FeatureVariant, MAX_MATERIAL_PERMUTATIONS,
+    NoFeatures, parse_variant_pin_id, variant_pin_id,
+};
 pub use gradient::GradientCollection;
 pub use ir::{
     Ir, IrPreview, IrResult, IrStage, TextureBinding, TextureSource, UniformField, UniformLayout, UniformTy, build_ir,
-    build_ir_with_overrides,
+    build_ir_with_features, build_ir_with_overrides,
 };
 pub use model::{
     Asset, AssetKind, BlendMode, Edge, Frame, MaterialKind, Meta, Node, NodeId, PbrOutputMode, PbrSettings, Preview,

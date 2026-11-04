@@ -6,11 +6,13 @@
 use bevy::prelude::*;
 
 pub mod baked;
+pub mod features;
 pub mod materials;
 
 pub use baked::{
     BakedMaterials, BakedMaterialsLoader, BakedMaterialsProgress, BakedMaterialsReady, BakedPlugin, BakedTextures,
 };
+pub use features::QuillshadeMaterialFeatures;
 pub use materials::*;
 
 /// The baked manifest at build time (design §3.2): the compiled snapshot of every Texture asset and material value.

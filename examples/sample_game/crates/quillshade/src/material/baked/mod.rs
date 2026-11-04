@@ -575,22 +575,26 @@ impl Plugin for BakedPlugin {
     fn build(&self, app: &mut App) {
         BakedMaterials::init_assets(app);
         init_asset::<BakedManifest>(app);
+        crate::material::QuillshadeMaterialFeatures::register_types(app);
         app.register_asset_loader(ManifestLoader)
             .add_message::<BakedMaterialsProgress>()
             .add_message::<BakedMaterialsReady>()
             .init_resource::<BakedState>()
             .init_resource::<BakedTextures>()
+            .init_resource::<crate::material::QuillshadeMaterialFeatures>()
             .add_systems(
                 PreUpdate,
                 (
                     auto_load.run_if(|s: Res<BakedState>| !s.started),
                     insert_materials.run_if(|s: Res<BakedState>| s.pending_build),
                     apply_manifest.run_if(|s: Res<BakedState>| s.manifest.is_some()),
+                    sync_features.run_if(|s: Res<BakedState>| s.started && !s.pending_build),
                     track_progress.run_if(|s: Res<BakedState>| s.started && (!s.ready || s.loading())),
                     apply_samplers.run_if(|s: Res<BakedState>| s.sampler_pending()),
                 )
                     .chain(),
-            );
+            )
+            .add_systems(PostUpdate, sync_features.run_if(|s: Res<BakedState>| s.started && !s.pending_build));
     }
 
     fn finish(&self, app: &mut App) {
@@ -613,6 +617,27 @@ pub(crate) fn init_asset<A: Asset>(app: &mut App) {
 pub(crate) fn insert_material<M: Asset>(world: &mut World, handle: &Handle<M>, m: M) {
     if let Err(e) = world.resource_mut::<Assets<M>>().insert(handle.id(), m) {
         error!("baked materials: cannot insert a material: {e}");
+    }
+}
+
+/// Updates the active Game Feature permutation on every material in `Assets<M>` whose permutation differs from `perm`.
+#[allow(dead_code)] // unused in a project without feature switches
+pub(crate) fn set_material_permutation<M: Asset>(
+    world: &mut World,
+    perm: u32,
+    get: fn(&M) -> u32,
+    set: fn(&mut M, u32),
+) {
+    let Some(assets) = world.get_resource::<Assets<M>>() else { return };
+    if !assets.iter().any(|(_, m)| get(m) != perm) {
+        return;
+    }
+    let to_update: Vec<AssetId<M>> = assets.iter().filter(|(_, m)| get(m) != perm).map(|(id, _)| id).collect();
+    let mut assets = world.resource_mut::<Assets<M>>();
+    for id in to_update {
+        if let Some(mut m) = assets.get_mut(id) {
+            set(&mut m, perm);
+        }
     }
 }
 
@@ -652,6 +677,15 @@ fn build_materials(world: &mut World, ids: &[String]) {
     for (id, values) in todo {
         baked.insert(world, id, &values, &tex);
     }
+    let features = world.resource::<crate::material::QuillshadeMaterialFeatures>().clone();
+    baked.apply_features(world, &features);
+}
+
+/// Updates the active shader permutation of materials when [`crate::material::QuillshadeMaterialFeatures`] changes.
+fn sync_features(world: &mut World) {
+    let baked = world.resource::<BakedMaterials>().clone();
+    let features = world.resource::<crate::material::QuillshadeMaterialFeatures>().clone();
+    baked.apply_features(world, &features);
 }
 
 /// Follows the texture loads: counts loaded / failed, switches the materials of a failed texture to

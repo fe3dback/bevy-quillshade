@@ -61,6 +61,21 @@ pub enum ConstsProp {
 
 impl PropTarget for ConstsProp {}
 
+/// What a property widget of a Game Features table edits.
+#[derive(Debug, Clone, PartialEq)]
+pub enum FeaturesProp {
+    /// Name of a feature enum (by its `FeatureEnum::id`).
+    EnumName(project_core::AssetUuid),
+    /// Name of a feature variant (by `(FeatureEnum::id, FeatureVariant::id)`).
+    VariantName(project_core::AssetUuid, project_core::AssetUuid),
+    /// Name in the add-enum form.
+    DraftEnumName,
+    /// Name in the add-variant form of an enum.
+    DraftVariantName(project_core::AssetUuid),
+}
+
+impl PropTarget for FeaturesProp {}
+
 /// What a property widget of a Texture or image tab edits: `texture_kit`'s (decision 0024), tagged with Material's
 /// texture domain (design §14.4).
 pub use crate::texture::{TextureKey, TextureProp};
@@ -168,6 +183,23 @@ pub enum ConstsAction {
     History { undo: bool, confirmed: bool },
 }
 
+/// Edits of the active Game Features table.
+#[derive(Debug, Clone, PartialEq)]
+pub enum FeaturesAction {
+    /// Adds the enum of the add-enum form.
+    AddEnum,
+    /// Deletes an enum; `confirmed` once the user agreed to clear its references.
+    DeleteEnum { enum_id: project_core::AssetUuid, confirmed: bool },
+    /// Adds a variant to an enum.
+    AddVariant { enum_id: project_core::AssetUuid },
+    /// Deletes a variant from an enum; `confirmed` once the user agreed to disconnect wires into that variant pin.
+    DeleteVariant { enum_id: project_core::AssetUuid, variant_id: project_core::AssetUuid, confirmed: bool },
+    /// Moves a variant up (`-1`) or down (`+1`) inside its enum.
+    MoveVariant { enum_id: project_core::AssetUuid, variant_id: project_core::AssetUuid, dir: i32 },
+    /// Undo (`undo`) or redo in the table; asks first when the step removes an enum nodes read.
+    History { undo: bool, confirmed: bool },
+}
+
 /// Edits of the active Texture tab and the image preview's channel: `texture_kit`'s (decision 0024), tagged with
 /// Material's texture domain (design §14.4).
 pub use crate::texture::{PreviewChannel, TextureAction, TextureEdit};
@@ -187,7 +219,7 @@ macro_rules! doc_edit {
         }
     )*};
 }
-doc_edit!(GradientsAction, ConstsAction);
+doc_edit!(GradientsAction, ConstsAction, FeaturesAction);
 
 /// A wire end the palette should connect the new node to.
 #[derive(Debug, Clone, PartialEq)]

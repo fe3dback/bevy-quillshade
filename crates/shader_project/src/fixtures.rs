@@ -1106,6 +1106,11 @@ pub fn convert_to_uuid_form(project: &Project) -> Result<(), OpError> {
                 t.id = uuid;
                 ops::save_consts(project, id, &mut t)?;
             }
+            AssetType::Features => {
+                let mut t = assets::load_features(project, id).map_err(invalid)?;
+                t.id = uuid;
+                ops::save_features(project, id, &mut t)?;
+            }
             AssetType::Texture => {
                 let mut t = assets::load_texture(project, id).map_err(invalid)?;
                 t.id = uuid;

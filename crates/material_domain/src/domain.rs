@@ -20,7 +20,7 @@ use shader_project::migrate::MaterialMigrator;
 use shader_project::{AssetId, AssetType, ops};
 
 use crate::curve::MaterialCurve;
-use crate::editors::{ConstsEditor, GradientsEditor};
+use crate::editors::{ConstsEditor, FeaturesEditor, GradientsEditor};
 use crate::graph_domain::MaterialGraph;
 use crate::icons;
 use crate::material_state::MaterialState;
@@ -81,6 +81,7 @@ impl EditorDomain for MaterialDomain {
             r.asset_kind(kind);
         }
         r.editor_kind::<ConstsEditor>()
+            .editor_kind::<FeaturesEditor>()
             .editor_kind::<GradientsEditor>()
             .parse_tab(crate::ops::parse_tab)
             .tab_exists(crate::ops::tab_exists)
@@ -93,6 +94,7 @@ impl EditorDomain for MaterialDomain {
             })
             .bevy(crate::material_window)
             .doc_view(|| Box::new(ui::consts_view::consts_view()))
+            .doc_view(|| Box::new(ui::features_view::features_view()))
             .doc_view(|| Box::new(ui::gradient_view::gradient_view()));
     }
 }
@@ -173,12 +175,24 @@ fn asset_kinds() -> [Vec<AssetKindDef>; 3] {
             })],
         ),
     ];
-    let consts = vec![kind(
-        AssetType::Consts,
-        "Global Consts",
-        icons::CONSTS,
-        vec![template("Global Consts", "new_consts", icons::CONSTS, |p, r| created(ops::create_consts(p, &r.path)))],
-    )];
+    let consts = vec![
+        kind(
+            AssetType::Consts,
+            "Global Consts",
+            icons::CONSTS,
+            vec![template("Global Consts", "new_consts", icons::CONSTS, |p, r| {
+                created(ops::create_consts(p, &r.path))
+            })],
+        ),
+        kind(
+            AssetType::Features,
+            "Game Features",
+            icons::FEATURES,
+            vec![template("Game Features", "new_features", icons::FEATURES, |p, r| {
+                created(ops::create_features(p, &r.path))
+            })],
+        ),
+    ];
     let gradients = vec![kind(
         AssetType::Gradients,
         "Gradient Collection",

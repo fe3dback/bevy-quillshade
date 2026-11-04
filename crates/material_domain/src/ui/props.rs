@@ -108,6 +108,8 @@ pub(crate) struct Choices {
     pub curves: Vec<(String, String)>,
     pub const_tables: Vec<(String, String)>,
     pub consts: Vec<(String, String)>,
+    pub feature_tables: Vec<(String, String)>,
+    pub feature_enums: Vec<(String, String)>,
     pub textures: Vec<(String, String)>,
     pub gradients: Vec<(String, String)>,
     pub slots: GradientSlots,
@@ -194,6 +196,8 @@ pub(crate) fn value_widget(target: PropKey, kind: &ParamKind, v: &Value, choices
             let cur = u32::try_from(v.as_i32()).ok().filter(|id| *id != 0).map_or(String::new(), |id| id.to_string());
             keyed_select(target, &choices.consts, &cur)
         }
+        ParamKind::FeatureTable => keyed_select(target, &choices.feature_tables, v.as_str()),
+        ParamKind::FeatureEnum => keyed_select(target, &choices.feature_enums, v.as_str()),
         // `(none)`: the node uses the default texture (W110).
         ParamKind::Texture => keyed_select(target, &choices.textures, v.as_str()),
         // `(none)`: the node outputs white (W111); picking a collection resets the slot (gradient design §6).

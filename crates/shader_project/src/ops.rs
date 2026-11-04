@@ -7,9 +7,13 @@ use project_core::asset_index::{RefNames, annotate_refs};
 use shader_graph_core::Value;
 use shader_graph_core::consts::GlobalConsts;
 use shader_graph_core::curve::Curve;
+use shader_graph_core::features::FeatureTable;
 use shader_graph_core::gradient::GradientCollection;
 use shader_graph_core::model::{Asset, AssetKind, MaterialKind, Node};
-use shader_graph_core::registry::{ParamKind, Registry, const_refs, const_table_refs, gradient_refs, texture_refs};
+use shader_graph_core::registry::{
+    ParamKind, Registry, const_refs, const_table_refs, feature_enum_refs, feature_table_refs, gradient_refs,
+    texture_refs,
+};
 use shader_graph_core::texture::{MATERIAL_TEXTURES, TextureAsset};
 use shader_stdlib::user::UserNode;
 
@@ -68,6 +72,12 @@ pub fn save_curve(project: &Project, id: &AssetId, curve: &mut Curve) -> Result<
 
 /// Writes a global constant table (creating `quillshade/material/` and parent directories).
 pub fn save_consts(project: &Project, id: &AssetId, table: &mut GlobalConsts) -> Result<(), OpError> {
+    table.ensure_id();
+    write_source(project, id, &table.to_ron())
+}
+
+/// Writes a Game Feature enum table (creating `quillshade/material/` and parent directories).
+pub fn save_features(project: &Project, id: &AssetId, table: &mut FeatureTable) -> Result<(), OpError> {
     table.ensure_id();
     write_source(project, id, &table.to_ron())
 }
@@ -135,6 +145,12 @@ pub fn set_asset_uuid(
             t.id = id;
             save_consts(project, &asset_id, &mut t)
         }
+        AssetType::Features => {
+            let mut t = assets::load_features(project, &asset_id).map_err(invalid)?;
+            t.id = id;
+            t.regenerate_sub_ids();
+            save_features(project, &asset_id, &mut t)
+        }
         AssetType::Texture => {
             let mut t = assets::load_texture(project, &asset_id).map_err(invalid)?;
             t.id = id;
@@ -170,6 +186,17 @@ pub fn create_consts(project: &Project, path: &str) -> Result<AssetId, OpError> 
         return Err(OpError::Exists(id.source_rel()));
     }
     save_consts(project, &id, &mut GlobalConsts::new(id.name(), Vec::new()))?;
+    Ok(id)
+}
+
+/// New, empty Game Feature enum table.
+pub fn create_features(project: &Project, path: &str) -> Result<AssetId, OpError> {
+    check_path(path)?;
+    let id = AssetId::new(AssetType::Features, path);
+    if id.file(project).exists() {
+        return Err(OpError::Exists(id.source_rel()));
+    }
+    save_features(project, &id, &mut FeatureTable::new(id.name(), Vec::new()))?;
     Ok(id)
 }
 
@@ -238,6 +265,11 @@ pub fn rename(project: &Project, id: &AssetId, new_path: &str) -> Result<AssetId
             table.name = new_id.name().to_string();
             save_consts(project, &new_id, &mut table)?;
         }
+        AssetType::Features => {
+            let mut table = assets::load_features(project, id).map_err(OpError::Invalid)?;
+            table.name = new_id.name().to_string();
+            save_features(project, &new_id, &mut table)?;
+        }
         AssetType::Texture => {
             let mut texture = assets::load_texture(project, id).map_err(OpError::Invalid)?;
             save_texture(project, &new_id, &mut texture)?;
@@ -301,9 +333,32 @@ pub fn clear_const_table_refs(asset: &mut Asset, registry: &Registry, names: &[S
     clear_refs(asset, registry, refs, names, |k| matches!(k, ParamKind::GlobalConst(_)))
 }
 
+/// Clears every reference of `asset`'s nodes to the feature table named by `names` ([`ref_names`]): the table
+/// parameter and the enum parameter ([`ParamKind::FeatureEnum`]) of the same nodes become `""`, and edges into
+/// those nodes are removed; returns whether anything changed. Used when the feature table is deleted.
+pub fn clear_feature_table_refs(asset: &mut Asset, registry: &Registry, names: &[String]) -> bool {
+    let refs = feature_table_refs(asset, registry);
+    let touched: Vec<String> = refs.iter().filter(|r| names.contains(&r.2)).map(|r| r.0.clone()).collect();
+    let mut changed = clear_refs(asset, registry, refs, names, |k| *k == ParamKind::FeatureEnum);
+    for node in &touched {
+        if let Some(n) = asset.nodes.get_mut(node)
+            && !n.inputs.is_empty()
+        {
+            n.inputs.clear();
+            changed = true;
+        }
+    }
+    if !touched.is_empty() {
+        let before = asset.edges.len();
+        asset.edges.retain(|e| !touched.contains(&e.to.0));
+        changed |= asset.edges.len() != before;
+    }
+    changed
+}
+
 /// Sets the parameters of `refs` (`(node, param, value)`, from `texture_refs` & co.) whose value is one of `names` to
-/// `""`, and the parameters of the same nodes whose kind passes `sub_item` (a slot, a constant) to `0`; returns
-/// whether anything changed.
+/// `""`, and the parameters of the same nodes whose kind passes `sub_item` (a slot, a constant, a feature enum) to
+/// their default; returns whether anything changed.
 fn clear_refs(
     asset: &mut Asset,
     registry: &Registry,
@@ -316,7 +371,7 @@ fn clear_refs(
         let Some(n) = asset.nodes.get_mut(&node) else { continue };
         if let Some(def) = registry.get(&n.kind) {
             for p in def.params().into_iter().filter(|p| sub_item(&p.kind)) {
-                n.params.insert(p.id, Value::Int(0));
+                n.params.insert(p.id, p.default);
             }
         }
         n.params.insert(param, Value::Str(String::new()));
@@ -350,6 +405,62 @@ pub fn clear_const_refs(asset: &mut Asset, registry: &Registry, table: &str, id:
     changed
 }
 
+/// Clears every reference of `asset`'s nodes to feature enum `(table, enum_key)` (where `enum_key` is in `enum_keys`,
+/// e.g. the enum's UUID string or name); returns whether anything changed. Used when an enum is deleted from a
+/// `.features.ron` table.
+pub fn clear_feature_enum_refs(asset: &mut Asset, registry: &Registry, table: &str, enum_keys: &[String]) -> bool {
+    let mut changed = false;
+    let mut touched = Vec::new();
+    for (node, param, t, eid) in feature_enum_refs(asset, registry) {
+        if t == table
+            && enum_keys.contains(&eid)
+            && let Some(n) = asset.nodes.get_mut(&node)
+        {
+            n.params.insert(param, Value::Str(String::new()));
+            n.inputs.clear();
+            touched.push(node);
+            changed = true;
+        }
+    }
+    if !touched.is_empty() {
+        let before = asset.edges.len();
+        asset.edges.retain(|e| !touched.contains(&e.to.0));
+        changed |= asset.edges.len() != before;
+    }
+    changed
+}
+
+/// Clears edges and stored pin inputs on `asset`'s nodes that switch on `(table, enum_key)` and target any pin in
+/// `variant_pins`; returns whether anything changed. Used when a variant is deleted from a `FeatureEnum`.
+pub fn clear_feature_variant_refs(
+    asset: &mut Asset,
+    registry: &Registry,
+    table: &str,
+    enum_keys: &[String],
+    variant_pins: &[String],
+) -> bool {
+    let mut changed = false;
+    let mut touched = Vec::new();
+    for (node, _, t, eid) in feature_enum_refs(asset, registry) {
+        if t == table && enum_keys.contains(&eid) {
+            if let Some(n) = asset.nodes.get_mut(&node) {
+                for pin in variant_pins {
+                    if n.inputs.remove(pin).is_some() {
+                        changed = true;
+                    }
+                }
+            }
+            touched.push(node);
+        }
+    }
+    if !touched.is_empty() {
+        let before = asset.edges.len();
+        asset.edges.retain(|e| !(touched.contains(&e.to.0) && variant_pins.contains(&e.to.1)));
+        changed |= asset.edges.len() != before;
+    }
+    changed
+}
+
 /// Moves an asset into directory `dir` (`""` = the Material source root).
 pub fn move_to(project: &Project, id: &AssetId, dir: &str) -> Result<AssetId, OpError> {
     let new_path = if dir.is_empty() { id.name().to_string() } else { format!("{dir}/{}", id.name()) };
@@ -357,14 +468,16 @@ pub fn move_to(project: &Project, id: &AssetId, dir: &str) -> Result<AssetId, Op
 }
 
 /// Deletes the asset source; autogen is removed by the following full regeneration. Deleting a Texture asset keeps
-/// its game image and clears the references to it in every graph (design §1.2); deleting a gradient collection or
-/// constant table clears the references to it too (gradient design §6, decision 0017). References are matched by the
-/// asset's UUID (and its path, [`ref_names`]; ADR 0047 §13); curve and function references stay dangling.
+/// its game image and clears the references to it in every graph (design §1.2); deleting a gradient collection,
+/// constant table, or feature table clears the references to it too (gradient design §6, decision 0017). References
+/// are matched by the asset's UUID (and its path, [`ref_names`]; ADR 0047 §13); curve and function references stay
+/// dangling.
 pub fn delete(project: &Project, id: &AssetId) -> Result<(), OpError> {
     let names = ref_names(project, id);
     std::fs::remove_file(id.file(project))?;
     match id.ty {
         AssetType::Consts => rewrite_graphs(project, |a, r| clear_const_table_refs(a, r, &names))?,
+        AssetType::Features => rewrite_graphs(project, |a, r| clear_feature_table_refs(a, r, &names))?,
         AssetType::Texture => rewrite_graphs(project, |a, r| clear_texture_refs(a, r, &names))?,
         AssetType::Gradients => rewrite_graphs(project, |a, r| clear_gradient_refs(a, r, &names))?,
         _ => {}

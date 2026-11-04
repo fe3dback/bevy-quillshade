@@ -7,6 +7,7 @@ use editor_core::dynval::Payload;
 use editor_core::tab::TabKey;
 use project_core::{AssetRef, DomainId};
 use shader_codegen_wesl::check::BevySources;
+use shader_graph_core::features::FeatureTable;
 use shader_graph_core::gradient::Slot;
 use shader_graph_core::{Diagnostic, FunctionSig, Registry};
 use shader_project::layout::MATERIAL;
@@ -27,6 +28,9 @@ pub struct MaterialState {
     pub(crate) paste_count: u32,
     /// Declared function signatures (disk, overridden by open documents).
     pub functions: BTreeMap<String, FunctionSig>,
+    /// Loaded feature tables (disk, overridden by open documents) so `node_signature` and `connection_error` see
+    /// dynamic variant pins.
+    pub features: BTreeMap<String, FeatureTable>,
     /// Live diagnostics per asset (validation of the in-memory state).
     pub diags: BTreeMap<AssetId, Vec<Diagnostic>>,
     pub project_diags: Vec<Diagnostic>,
@@ -59,6 +63,7 @@ impl Default for MaterialState {
             gradient_clipboard: None,
             paste_count: 0,
             functions: BTreeMap::new(),
+            features: BTreeMap::new(),
             diags: BTreeMap::new(),
             project_diags: Vec::new(),
             regen_only: BTreeMap::new(),

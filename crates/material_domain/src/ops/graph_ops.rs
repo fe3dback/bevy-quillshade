@@ -5,7 +5,7 @@ use shader_graph_core::model::Edge;
 use shader_graph_core::registry::ROUTE_PARAM;
 use shader_project::resolve::ref_type;
 use shader_stdlib::nodes::color::{GRADIENT_COLLECTION_PARAM, SAMPLE_GRADIENT_KIND};
-use shader_stdlib::nodes::utility::{CURVE_PARAM, SAMPLE_CURVE_KIND};
+use shader_stdlib::nodes::utility::{CURVE_PARAM, FEATURE_TABLE_PARAM, GAME_FEATURE_SWITCH_KIND, SAMPLE_CURVE_KIND};
 
 /// Graph editing (spec §9): nodes, wires, previews, the palette and the node menus.
 pub trait MaterialGraphOps {
@@ -141,11 +141,12 @@ impl MaterialGraphOps for Editor {
             let (d, view) = self.doc_view().expect("active graph");
             let path = d.id.path.clone();
             let ty = view.nodes.get(&link.node).and_then(|_| {
-                let sig = node_signature(
+                let sig = node_signature_with(
                     &view,
                     &link.node,
                     &self.domains.material().registry,
                     &self.domains.material().functions,
+                    &self.domains.material().features,
                     &path,
                 )?;
                 if link.from_output { sig.output(&link.pin).map(|p| p.ty) } else { sig.input(&link.pin).map(|p| p.ty) }
@@ -193,6 +194,7 @@ impl MaterialGraphOps for Editor {
             Dropped::Gradients(value) => {
                 (SAMPLE_GRADIENT_KIND, GRADIENT_COLLECTION_PARAM, ParamKind::GradientCollection, value)
             }
+            Dropped::Features(value) => (GAME_FEATURE_SWITCH_KIND, FEATURE_TABLE_PARAM, ParamKind::FeatureTable, value),
             Dropped::Function(path) => {
                 if search::is_self_call(&path, &d.id.path) {
                     let msg = format!("Function `{path}` cannot call itself (recursion)");
@@ -239,12 +241,13 @@ impl MaterialGraphOps for Editor {
 
     fn connect_checked(&mut self, from: (NodeId, String), to: (NodeId, String), into_last_step: bool) {
         let Some((d, view)) = self.doc_view() else { return };
-        if let Some(e) = connection_error(
+        if let Some(e) = connection_error_with(
             &view,
             (&from.0, &from.1),
             (&to.0, &to.1),
             &self.domains.material().registry,
             &self.domains.material().functions,
+            &self.domains.material().features,
             &d.id.path,
         ) {
             self.push_msg(Level::Warning, format!("Connection refused: {e}"));
@@ -301,8 +304,14 @@ impl MaterialGraphOps for Editor {
                 )
             )
         };
-        let sig =
-            node_signature(&moved, &to.0, &self.domains.material().registry, &self.domains.material().functions, path);
+        let sig = node_signature_with(
+            &moved,
+            &to.0,
+            &self.domains.material().registry,
+            &self.domains.material().functions,
+            &self.domains.material().features,
+            path,
+        );
         let fits = sig.is_some_and(|s| if output { s.output(&to.1).is_some() } else { s.input(&to.1).is_some() });
         if !fits {
             let dir = if output { "an output" } else { "an input" };
@@ -323,12 +332,13 @@ impl MaterialGraphOps for Editor {
         moved.edges.retain(|e| !at_pin(e) && (output || e.to != *to));
         for e in &rewired {
             let (f, t) = ((e.from.0.as_str(), e.from.1.as_str()), (e.to.0.as_str(), e.to.1.as_str()));
-            if let Some(why) = connection_error(
+            if let Some(why) = connection_error_with(
                 &moved,
                 f,
                 t,
                 &self.domains.material().registry,
                 &self.domains.material().functions,
+                &self.domains.material().features,
                 path,
             ) {
                 return Err(format!("Wires not moved: {} → {}: {why}", label(&moved, &e.from), label(&moved, &e.to)));
@@ -341,11 +351,12 @@ impl MaterialGraphOps for Editor {
 
     fn pin_menu(&self, node: &str, pin: &str) -> Vec<(String, Action)> {
         let Some((d, view)) = self.doc_view() else { return Vec::new() };
-        let Some(sig) = node_signature(
+        let Some(sig) = node_signature_with(
             &view,
             node,
             &self.domains.material().registry,
             &self.domains.material().functions,
+            &self.domains.material().features,
             &d.id.path,
         ) else {
             return Vec::new();
@@ -440,11 +451,12 @@ impl MaterialGraphOps for Editor {
             return Some("only material nodes can be previewed".into());
         }
         let Some(n) = view.nodes.get(node) else { return Some(format!("node `{node}` does not exist")) };
-        let sig = node_signature(
+        let sig = node_signature_with(
             &view,
             node,
             &self.domains.material().registry,
             &self.domains.material().functions,
+            &self.domains.material().features,
             &d.id.path,
         );
         let previewable =
@@ -524,11 +536,12 @@ impl MaterialGraphOps for Editor {
         // Signatures of the converted graph as resolved (ADR 0047 §4); node ids and wires are the model's.
         let view = self.resolve(&asset);
         for id in nodes {
-            let Some(sig) = node_signature(
+            let Some(sig) = node_signature_with(
                 &view,
                 id,
                 &self.domains.material().registry,
                 &self.domains.material().functions,
+                &self.domains.material().features,
                 &d.id.path,
             ) else {
                 continue;
@@ -625,6 +638,12 @@ impl MaterialGraphOps for Editor {
                         return Some(id);
                     }
                 }
+                ParamKind::FeatureTable => {
+                    let id = AssetId::new(AssetType::Features, v);
+                    if self.domains.material().disk.features.contains_key(&id) {
+                        return Some(id);
+                    }
+                }
                 ParamKind::GradientCollection => {
                     let id = AssetId::new(AssetType::Gradients, v);
                     if self.domains.material().disk.gradients.contains_key(&id) {
@@ -671,11 +690,12 @@ impl MaterialGraphOps for Editor {
     fn set_pin_type(&mut self, node: &str, ty: PinType) {
         let Some((d, view)) = self.doc_view() else { return };
         let Some(n) = view.nodes.get(node) else { return };
-        let Some(sig) = node_signature(
+        let Some(sig) = node_signature_with(
             &view,
             node,
             &self.domains.material().registry,
             &self.domains.material().functions,
+            &self.domains.material().features,
             &d.id.path,
         ) else {
             return;
@@ -701,11 +721,12 @@ impl MaterialGraphOps for Editor {
 
     fn node_height(&self, id: &str) -> f32 {
         let Some((d, view)) = self.doc_view() else { return 60.0 };
-        let rows = node_signature(
+        let rows = node_signature_with(
             &view,
             id,
             &self.domains.material().registry,
             &self.domains.material().functions,
+            &self.domains.material().features,
             &d.id.path,
         )
         .map_or(1, |s| s.inputs.len() + s.outputs.len());
@@ -729,11 +750,12 @@ impl MaterialGraphOps for Editor {
 
     fn pin_type(&self, node: &str, pin: &str, output: bool) -> Option<PinType> {
         let (d, view) = self.doc_view()?;
-        let sig = node_signature(
+        let sig = node_signature_with(
             &view,
             node,
             &self.domains.material().registry,
             &self.domains.material().functions,
+            &self.domains.material().features,
             &d.id.path,
         )?;
         if output { sig.output(pin).map(|p| p.ty) } else { sig.input(pin).map(|p| p.ty) }
@@ -902,7 +924,7 @@ impl Doc {
             GraphProp::Input { node, pin } => {
                 let view = self.resolved(index, &m.registry);
                 let n = view.nodes.get(node)?;
-                let pin_def = node_signature(&view, node, &m.registry, &m.functions, &self.id.path)
+                let pin_def = node_signature_with(&view, node, &m.registry, &m.functions, &m.features, &self.id.path)
                     .and_then(|sig| sig.input(pin).cloned());
                 // In the pin's resolved type: a wire on another poly pin may widen a stored scalar.
                 match (n.inputs.get(pin), pin_def) {
@@ -961,14 +983,37 @@ impl Doc {
             GraphProp::Param { node, key: k } => self.slot_param_reset_by(node, k, &shown, &m.registry, index),
             _ => None,
         };
+        let reset_feature_enum = match target {
+            GraphProp::Param { node, key: k } => self.feature_enum_reset_by(node, k, &shown, &m.registry, index),
+            _ => None,
+        };
+        let prune_pins = match target {
+            GraphProp::Param { node, key: k } => self.changes_feature_pins(node, k, &m.registry, index),
+            _ => false,
+        };
         let mut refresh = !merge;
         match target {
             GraphProp::Param { node, key: k } => {
+                let path = self.id.path.clone();
                 self.edit_merge(mkey, |a| {
                     if let Some(n) = a.nodes.get_mut(node) {
                         n.params.insert(k.clone(), value.clone());
                         if let Some(slot) = &reset_slot {
                             n.params.insert(slot.clone(), Value::Int(0));
+                        }
+                        if let Some(enum_key) = &reset_feature_enum {
+                            n.params.insert(enum_key.clone(), Value::Str(String::new()));
+                        }
+                    }
+                    if prune_pins {
+                        let view = shader_project::resolve::resolve_asset(a, index, &m.registry);
+                        if let Some(sig) =
+                            node_signature_with(&view, node, &m.registry, &m.functions, &m.features, &path)
+                        {
+                            a.edges.retain(|e| e.to.0 != *node || sig.input(&e.to.1).is_some());
+                            if let Some(n) = a.nodes.get_mut(node) {
+                                n.inputs.retain(|pin, _| sig.input(pin).is_some());
+                            }
                         }
                     }
                 });
@@ -1078,7 +1123,10 @@ impl Doc {
         // Signatures as resolved (ADR 0047 §4); node ids and wires are the model's.
         let view = shader_project::resolve::resolve_asset(&asset, index, &m.registry);
         for id in &outputs {
-            let Some(sig) = node_signature(&view, id, &m.registry, &m.functions, &self.id.path) else { continue };
+            let Some(sig) = node_signature_with(&view, id, &m.registry, &m.functions, &m.features, &self.id.path)
+            else {
+                continue;
+            };
             asset.edges.retain(|e| e.to.0 != *id || sig.input(&e.to.1).is_some());
             if let Some(n) = asset.nodes.get_mut(id) {
                 n.inputs.retain(|pin, _| sig.input(pin).is_some());
@@ -1134,5 +1182,33 @@ impl Doc {
             if is_gradient { p.kind == ParamKind::GradientSlot } else { matches!(p.kind, ParamKind::GlobalConst(_)) }
         })?;
         n.params.get(&slot.id).is_some_and(|v| *v != Value::Int(0)).then_some(slot.id)
+    }
+
+    fn feature_enum_reset_by(
+        &self,
+        node: &str,
+        key: &str,
+        value: &Value,
+        registry: &Registry,
+        index: &AssetIndex,
+    ) -> Option<String> {
+        let view = self.resolved(index, registry);
+        let n = view.nodes.get(node)?;
+        let params = registry.get(&n.kind)?.params();
+        if !params.iter().any(|p| p.id == key && p.kind == ParamKind::FeatureTable) {
+            return None;
+        }
+        if registry.resolved_params(&n.kind, &n.params).get(key) == Some(value) {
+            return None;
+        }
+        let enum_param = params.into_iter().find(|p| p.kind == ParamKind::FeatureEnum)?;
+        n.params.get(&enum_param.id).is_some_and(|v| !v.as_str().is_empty()).then_some(enum_param.id)
+    }
+
+    fn changes_feature_pins(&self, node: &str, key: &str, registry: &Registry, index: &AssetIndex) -> bool {
+        let view = self.resolved(index, registry);
+        let Some(n) = view.nodes.get(node) else { return false };
+        let Some(def) = registry.get(&n.kind) else { return false };
+        def.params().iter().any(|p| p.id == key && matches!(p.kind, ParamKind::FeatureTable | ParamKind::FeatureEnum))
     }
 }

@@ -11,7 +11,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use project_core::AssetUuid;
 use shader_codegen_wesl::paths;
 use shader_graph_core::GENERATOR_VERSION;
+use shader_graph_core::features::FeatureTable;
 use shader_graph_core::gradient::GRADIENT_PREFIX;
+use shader_graph_core::ident::{to_pascal_case, to_snake_case};
 use shader_graph_core::texture::INTERNAL_PREFIX;
 
 use crate::MaterialEntry;
@@ -19,6 +21,7 @@ use crate::MaterialEntry;
 pub const DIR_PREFIX: &str = "dir_";
 pub const MATERIAL_PREFIX: &str = "mat_";
 pub const TEXTURE_PREFIX: &str = "tex_";
+pub const FEATURE_PREFIX: &str = "feat_";
 /// Field (and module) of `BakedTextures` holding the internal textures (`tex.internal.default`).
 pub const INTERNAL_GROUP: &str = "internal";
 /// Field (and module) of `BakedTextures` holding the baked gradient collections, nested by path
@@ -492,6 +495,28 @@ fn dispatch(entries: &[MaterialEntry]) -> String {
         o.push_str("        out\n");
     }
     o.push_str("    }\n");
+
+    let has_any_features = sorted.iter().any(|e| e.has_features);
+    let (world, features) = if has_any_features { ("world", "features") } else { ("_world", "_features") };
+    o.push('\n');
+    o.push_str("    /// Updates the active shader permutation of every material that uses Game Feature switches.\n");
+    o.push_str(&format!(
+        "    pub(crate) fn apply_features(&self, {world}: &mut World, {features}: &crate::material::QuillshadeMaterialFeatures) {{\n"
+    ));
+    for e in sorted.iter().filter(|e| e.has_features) {
+        let m = module(e);
+        let perm = format!("{m}::{}::permutation_of(features)", e.main);
+        let (get, set) = if e.main == e.material {
+            ("|m| m.permutation", "|m, p| m.permutation = p")
+        } else {
+            ("|m| m.extension.permutation", "|m, p| m.extension.permutation = p")
+        };
+        o.push_str(&format!(
+            "        super::set_material_permutation::<{m}::{}>(world, {perm}, {get}, {set});\n",
+            e.material
+        ));
+    }
+    o.push_str("    }\n");
     o
 }
 
@@ -617,6 +642,282 @@ pub fn mod_rs() -> String {
     MOD_TEMPLATE.replace("{{GENERATOR_VERSION}}", &GENERATOR_VERSION.to_string())
 }
 
+fn feature_enum_type(name: &str) -> String {
+    let mut ty = to_pascal_case(name);
+    if ty.is_empty() {
+        ty = "Feature".to_string();
+    } else if ty.as_bytes()[0].is_ascii_digit() {
+        ty = format!("F{ty}");
+    }
+    if ty == "Table" {
+        ty = "FeatTable".to_string();
+    }
+    ty
+}
+
+fn feature_field_name(name: &str) -> String {
+    let mut s = to_snake_case(name);
+    if s.is_empty() {
+        s = "feature".to_string();
+    } else if s.as_bytes()[0].is_ascii_digit() {
+        s = format!("feat_{s}");
+    }
+    if RUST_KEYWORDS.contains(&s.as_str()) { format!("{FEATURE_PREFIX}{s}") } else { s }
+}
+
+fn feature_variant_ident(name: &str) -> String {
+    let mut v = to_pascal_case(name);
+    if v.is_empty() {
+        v = "Default".to_string();
+    } else if v.as_bytes()[0].is_ascii_digit() {
+        v = format!("V{v}");
+    }
+    v
+}
+
+/// Generates a `.features.ron` leaf module `pub mod feat_<leaf> { ... }` and returns `(module_text, [(raw_enum_name, field_name, enum_type)])`.
+fn emit_feature_table_mod(id: &str, table: &FeatureTable) -> (String, Vec<(String, String, String)>) {
+    let leaf = paths::split(id).last().cloned().unwrap_or_else(|| "table".to_string());
+    let module = format!("{FEATURE_PREFIX}{leaf}");
+    let mut o = String::new();
+    o.push('\n');
+    o.push_str(&format!("pub mod {module} {{\n"));
+    let mut inner = String::new();
+    inner.push_str("use bevy::prelude::*;\n");
+    let mut seen_fields = BTreeSet::new();
+    let mut seen_types = BTreeSet::new();
+    let mut enum_entries = Vec::new();
+    for (ei, e) in table.enums.iter().enumerate() {
+        let mut field = feature_field_name(&e.name);
+        if !seen_fields.insert(field.clone()) {
+            field = format!("{field}_{ei}");
+            seen_fields.insert(field.clone());
+        }
+        let mut ty = feature_enum_type(&e.name);
+        if !seen_types.insert(ty.clone()) {
+            ty = format!("{ty}{ei}");
+            seen_types.insert(ty.clone());
+        }
+        let mut variants = Vec::new();
+        let mut seen_vars = BTreeSet::new();
+        for (vi, v) in e.variants.iter().enumerate() {
+            let mut ident = feature_variant_ident(&v.name);
+            if !seen_vars.insert(ident.clone()) {
+                ident = format!("{ident}_{vi}");
+                seen_vars.insert(ident.clone());
+            }
+            variants.push(ident);
+        }
+        if variants.is_empty() {
+            variants.push("Default".to_string());
+        }
+        inner.push('\n');
+        inner.push_str(&format!("/// Game Feature enum `{}` of `{id}.features.ron`.\n", e.name));
+        inner.push_str("#[derive(Reflect, Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]\n");
+        inner.push_str("#[reflect(Default, Debug, PartialEq, Hash, Clone)]\n");
+        inner.push_str(&format!("pub enum {ty} {{\n"));
+        for (vi, v) in variants.iter().enumerate() {
+            if vi == 0 {
+                inner.push_str("    #[default]\n");
+            }
+            inner.push_str(&format!("    {v},\n"));
+        }
+        inner.push_str("}\n\n");
+        inner.push_str(&format!("impl {ty} {{\n"));
+        inner.push_str("    /// Zero-based variant index matching the shader permutation order.\n");
+        inner.push_str("    pub const fn variant_index(self) -> u32 {\n");
+        inner.push_str("        match self {\n");
+        for (vi, v) in variants.iter().enumerate() {
+            inner.push_str(&format!("            Self::{v} => {vi},\n"));
+        }
+        inner.push_str("        }\n");
+        inner.push_str("    }\n");
+        inner.push_str("}\n");
+        enum_entries.push((e.name.clone(), field, ty));
+    }
+    inner.push('\n');
+    inner.push_str(&format!("/// Feature enums of `{id}.features.ron`.\n"));
+    inner.push_str("#[derive(Reflect, Clone, Debug, Default, PartialEq, Eq)]\n");
+    inner.push_str("#[reflect(Default, Debug, PartialEq, Clone)]\n");
+    inner.push_str("pub struct Table {\n");
+    for (_, field, ty) in &enum_entries {
+        inner.push_str(&format!("    pub {field}: {ty},\n"));
+    }
+    inner.push_str("}\n");
+    o.push_str(&indent(&inner, 4));
+    o.push_str("}\n");
+    (o, enum_entries)
+}
+
+/// `src/material/features.rs`: [`QuillshadeMaterialFeatures`] resource and static feature enums, nested by folder and
+/// `.features.ron` table. Returns `(file_text, has_root_reexports)`.
+pub fn features_rs(tables: &BTreeMap<String, FeatureTable>) -> (String, bool) {
+    let ids: Vec<&str> = tables.keys().map(String::as_str).collect();
+    let tree = build_group(&Tree::of(ids.iter().copied()), FEATURE_PREFIX, &[]);
+    let mut table_field_paths = BTreeMap::new();
+    field_paths_of(&tree, &mut Vec::new(), &mut table_field_paths);
+
+    // Pre-generate leaf table modules and record all enum paths for `variant_index` and unique top-level re-exports.
+    let mut leaf_mods = BTreeMap::new();
+    let mut enum_info = BTreeMap::new();
+    for (id, table) in tables {
+        let (mod_text, entries) = emit_feature_table_mod(id, table);
+        leaf_mods.insert(id.clone(), mod_text);
+        enum_info.insert(id.clone(), entries);
+    }
+
+    fn emit_group_fields(g: &Group) -> String {
+        let mut o = String::new();
+        for (name, f) in &g.fields {
+            match f {
+                Field::Leaf(id) => {
+                    let leaf = paths::split(id).last().cloned().unwrap_or_else(|| "table".to_string());
+                    o.push_str(&format!("    pub {name}: {FEATURE_PREFIX}{leaf}::Table,\n"));
+                }
+                Field::Dir(module, _) => o.push_str(&format!("    pub {name}: {module}::Group,\n")),
+            }
+        }
+        o
+    }
+
+    fn emit_group_modules(g: &Group, path: &[&str], leaf_mods: &BTreeMap<String, String>) -> String {
+        let mut o = String::new();
+        for f in g.fields.values() {
+            match f {
+                Field::Leaf(id) => {
+                    if let Some(m) = leaf_mods.get(id) {
+                        o.push_str(m);
+                    }
+                }
+                Field::Dir(module, sub) => {
+                    let sub_path: Vec<&str> = path.iter().copied().chain([module.as_str()]).collect();
+                    o.push('\n');
+                    o.push_str(&format!("pub mod {module} {{\n"));
+                    let mut inner = String::new();
+                    inner.push_str("use bevy::prelude::*;\n\n");
+                    inner.push_str(&format!("/// Feature tables of `{}/`.\n", folder_path(&sub_path)));
+                    inner.push_str("#[derive(Reflect, Clone, Debug, Default, PartialEq, Eq)]\n");
+                    inner.push_str("#[reflect(Default, Debug, PartialEq, Clone)]\n");
+                    inner.push_str("pub struct Group {\n");
+                    inner.push_str(&emit_group_fields(sub));
+                    inner.push_str("}\n");
+                    inner.push_str(&emit_group_modules(sub, &sub_path, leaf_mods));
+                    o.push_str(&indent(&inner, 4));
+                    o.push_str("}\n");
+                }
+            }
+        }
+        o
+    }
+
+    fn collect_group_types(g: &Group, prefix: &str, out: &mut Vec<String>) {
+        for f in g.fields.values() {
+            match f {
+                Field::Leaf(id) => {
+                    let leaf = paths::split(id).last().cloned().unwrap_or_else(|| "table".to_string());
+                    let m = if prefix.is_empty() {
+                        format!("{FEATURE_PREFIX}{leaf}")
+                    } else {
+                        format!("{prefix}::{FEATURE_PREFIX}{leaf}")
+                    };
+                    out.push(format!("{m}::Table"));
+                }
+                Field::Dir(module, sub) => {
+                    let m = if prefix.is_empty() { module.clone() } else { format!("{prefix}::{module}") };
+                    out.push(format!("{m}::Group"));
+                    collect_group_types(sub, &m, out);
+                }
+            }
+        }
+    }
+
+    let mut registered_types = Vec::new();
+    collect_group_types(&tree, "", &mut registered_types);
+
+    let mut match_arms = Vec::new();
+    let mut type_counts: BTreeMap<String, usize> = BTreeMap::new();
+    let mut type_mod_paths: Vec<(String, String)> = Vec::new();
+    for (id, entries) in &enum_info {
+        let Some(field_path) = table_field_paths.get(id) else { continue };
+        let parts = paths::split(id);
+        let (leaf, dirs) = parts.split_last().expect("non-empty path");
+        let mut mod_chain: Vec<String> = dirs.iter().map(|d| format!("{DIR_PREFIX}{d}")).collect();
+        mod_chain.push(format!("{FEATURE_PREFIX}{leaf}"));
+        let mod_path = mod_chain.join("::");
+        let mut seen_raw = BTreeSet::new();
+        for (raw_name, enum_field, enum_ty) in entries {
+            if seen_raw.insert(raw_name.clone()) {
+                match_arms.push(format!(
+                    "            (\"{}\", \"{}\") => self.{}.{enum_field}.variant_index(),\n",
+                    id.escape_default(),
+                    raw_name.escape_default(),
+                    field_path.join(".")
+                ));
+            }
+            *type_counts.entry(enum_ty.clone()).or_default() += 1;
+            type_mod_paths.push((mod_path.clone(), enum_ty.clone()));
+            registered_types.push(format!("{mod_path}::{enum_ty}"));
+        }
+    }
+
+    let mut o = marker();
+    o.push_str(
+        "//! [`QuillshadeMaterialFeatures`]: static Game Feature enums, nested by folder and `.features.ron` table.\n\n",
+    );
+    o.push_str("use bevy::prelude::*;\n\n");
+    o.push_str("/// Static Game Feature enums of the Material domain, nested by folder and `.features.ron` table.\n");
+    o.push_str(
+        "/// Mutating this resource at runtime switches the active shader permutation of every material that uses the\n",
+    );
+    o.push_str("/// changed feature enums.\n");
+    o.push_str("#[derive(Resource, Reflect, Clone, Debug, Default, PartialEq, Eq)]\n");
+    o.push_str("#[reflect(Resource, Default, Debug, PartialEq, Clone)]\n");
+    o.push_str("pub struct QuillshadeMaterialFeatures {\n");
+    o.push_str(&emit_group_fields(&tree));
+    o.push_str("}\n\n");
+    o.push_str("impl QuillshadeMaterialFeatures {\n");
+    o.push_str(
+        "    /// Registers [`QuillshadeMaterialFeatures`] and every nested feature group, table and enum in `app`.\n",
+    );
+    o.push_str("    pub(crate) fn register_types(app: &mut App) {\n");
+    o.push_str("        app.register_type::<Self>();\n");
+    for ty in &registered_types {
+        o.push_str(&format!("        app.register_type::<{ty}>();\n"));
+    }
+    o.push_str("    }\n\n");
+    o.push_str("    /// Zero-based active variant index of feature enum `(table, name)`.\n");
+    let (t_arg, n_arg) = if match_arms.is_empty() { ("_table", "_name") } else { ("table", "name") };
+    o.push_str(&format!("    pub fn variant_index(&self, {t_arg}: &str, {n_arg}: &str) -> u32 {{\n"));
+    if match_arms.is_empty() {
+        o.push_str("        0\n");
+    } else {
+        o.push_str("        match (table, name) {\n");
+        for arm in &match_arms {
+            o.push_str(arm);
+        }
+        o.push_str("            _ => 0,\n");
+        o.push_str("        }\n");
+    }
+    o.push_str("    }\n");
+    o.push_str("}\n");
+    o.push_str(&emit_group_modules(&tree, &[], &leaf_mods));
+
+    let mut reexports = Vec::new();
+    for (mod_path, enum_ty) in &type_mod_paths {
+        if type_counts.get(enum_ty).copied().unwrap_or(0) == 1 {
+            reexports.push(format!("pub use {mod_path}::{enum_ty};\n"));
+        }
+    }
+    let has_reexports = !reexports.is_empty();
+    if has_reexports {
+        o.push('\n');
+        for r in reexports {
+            o.push_str(&r);
+        }
+    }
+    (o, has_reexports)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -705,6 +1006,7 @@ mod tests {
                 material: "MMaterial".into(),
                 params: None,
                 uuid: None,
+                has_features: false,
             }
             .with_uuid(uuid)
         };

@@ -21,7 +21,7 @@ use shader_graph_core::registry::NodeRole;
 use shader_graph_core::{Code, Hotkey, HotkeyKey, PinType, Value};
 
 use crate::canvas::{header_color, pin_color};
-use crate::doc::{Doc, connection_error, node_signature, node_title_in, route_declarations};
+use crate::doc::{Doc, connection_error_with, node_signature_with, node_title_in, route_declarations};
 use crate::editors::graph::{GRAPH, GraphTopbarDynamic, PreviewNode, asset_subpanes, node_subpanes};
 use crate::inline::{Inline, inline_for_param, inline_for_pin, inline_scene};
 use crate::material_state::MaterialStates;
@@ -91,7 +91,7 @@ impl GraphDomain for MaterialGraph {
         let Some(n) = asset.nodes.get(id) else { return NodeLook::default() };
         let routes = route_declarations(asset, &m.registry);
         let def = m.registry.get(&n.kind);
-        let sig = node_signature(asset, id, &m.registry, &m.functions, &d.id.path);
+        let sig = node_signature_with(asset, id, &m.registry, &m.functions, &m.features, &d.id.path);
         let emphasis = Emphasis { pulse: previewed_node(asset) == Some(id) };
         let comment = (!n.comment.is_empty()).then(|| n.comment.clone());
         if def.is_some_and(|d| d.role() == NodeRole::Reroute) {
@@ -107,7 +107,9 @@ impl GraphDomain for MaterialGraph {
             };
         }
         let mut look = NodeLook {
-            title: node_title_in(&m.registry, &m.functions, asset, id, &routes, &|t| ctx.editor.const_table(t)),
+            title: node_title_in(&m.registry, &m.functions, asset, id, &routes, &|t| ctx.editor.const_table(t), &|t| {
+                ctx.editor.feature_table(t)
+            }),
             header: header_color(&m.registry, asset, id, &routes),
             emphasis,
             comment,
@@ -174,12 +176,13 @@ impl GraphDomain for MaterialGraph {
     /// The model rules (types spec §7.2, cycles): [`connection_error`].
     fn can_connect(ctx: &GraphCtxRef, d: &Doc, from: &PinRef, to: &PinRef) -> Result<(), String> {
         let m = ctx.editor.domains.material();
-        let error = connection_error(
+        let error = connection_error_with(
             &ctx.editor.view_of(d),
             (&from.node, &from.pin),
             (&to.node, &to.pin),
             &m.registry,
             &m.functions,
+            &m.features,
             &d.id.path,
         );
         error.map_or(Ok(()), Err)

@@ -206,7 +206,7 @@ enum Ctx {
 }
 
 /// Statements defining each used builtin in a material entry point.
-fn builtin_prelude(ctx: Ctx, builtins: &BTreeSet<Builtin>, imports: &mut Imports, w: &mut Writer) {
+fn builtin_prelude(ctx: Ctx, builtins: &BTreeSet<Builtin>, indent: &str, imports: &mut Imports, w: &mut Writer) {
     let is3d = ctx != Ctx::Sprite;
     let is_vertex = matches!(ctx, Ctx::Vertex3d { .. });
     let is_pbr = matches!(ctx, Ctx::Pbr | Ctx::Vertex3d { pbr: true });
@@ -224,44 +224,44 @@ fn builtin_prelude(ctx: Ctx, builtins: &BTreeSet<Builtin>, imports: &mut Imports
         let v = b.var();
         let ty = b.wesl_type();
         match b {
-            Builtin::Uv0 if ctx == Ctx::Sprite => w.line(format!("    let {v}: {ty} = in.uv;")),
+            Builtin::Uv0 if ctx == Ctx::Sprite => w.line(format!("{indent}let {v}: {ty} = in.uv;")),
             Builtin::Uv0 | Builtin::Uv1 => {
                 let (flag, field) = if *b == Builtin::Uv0 { ("VERTEX_UVS_A", "uv") } else { ("VERTEX_UVS_B", "uv_b") };
-                w.line(format!("    var {v}: {ty} = vec2<f32>(0.0);"));
+                w.line(format!("{indent}var {v}: {ty} = vec2<f32>(0.0);"));
                 if ctx == Ctx::Sprite {
                     // mesh2d has a single UV channel.
-                    w.line(format!("    {v} = in.uv;"));
+                    w.line(format!("{indent}{v} = in.uv;"));
                 } else {
-                    w.line(format!("    @if({flag}) {v} = {src}.{field};"));
+                    w.line(format!("{indent}@if({flag}) {v} = {src}.{field};"));
                 }
             }
             Builtin::WorldPosition => {
                 let e = if is_vertex { "out.world_position.xyz" } else { "in.world_position.xyz" };
-                w.line(format!("    let {v}: {ty} = {e};"));
+                w.line(format!("{indent}let {v}: {ty} = {e};"));
             }
             Builtin::WorldNormal => match ctx {
-                Ctx::Pbr => w.line(format!("    let {v}: {ty} = pbr_input.world_normal;")),
+                Ctx::Pbr => w.line(format!("{indent}let {v}: {ty} = pbr_input.world_normal;")),
                 Ctx::Vertex3d { pbr: true } => {
-                    w.line(format!("    var {v}: {ty} = vec3<f32>(0.0, 0.0, 1.0);"));
+                    w.line(format!("{indent}var {v}: {ty} = vec3<f32>(0.0, 0.0, 1.0);"));
                     w.line(format!(
-                        "    @if(!PREPASS_PIPELINE || NORMAL_PREPASS_OR_DEFERRED_PREPASS) {v} = out.world_normal;"
+                        "{indent}@if(!PREPASS_PIPELINE || NORMAL_PREPASS_OR_DEFERRED_PREPASS) {v} = out.world_normal;"
                     ));
                 }
-                Ctx::Vertex3d { pbr: false } => w.line(format!("    let {v}: {ty} = out.world_normal;")),
-                _ => w.line(format!("    let {v}: {ty} = normalize(in.world_normal);")),
+                Ctx::Vertex3d { pbr: false } => w.line(format!("{indent}let {v}: {ty} = out.world_normal;")),
+                _ => w.line(format!("{indent}let {v}: {ty} = normalize(in.world_normal);")),
             },
             Builtin::WorldTangent => {
-                w.line(format!("    var {v}: {ty} = vec4<f32>(1.0, 0.0, 0.0, 1.0);"));
+                w.line(format!("{indent}var {v}: {ty} = vec4<f32>(1.0, 0.0, 0.0, 1.0);"));
                 let e = if is_vertex { "out.world_tangent" } else { "in.world_tangent" };
-                w.line(format!("    @if({tangent_guard}) {v} = {e};"));
+                w.line(format!("{indent}@if({tangent_guard}) {v} = {e};"));
             }
             Builtin::VertexColor => {
-                w.line(format!("    var {v}: {ty} = vec4<f32>(1.0);"));
-                w.line(format!("    @if(VERTEX_COLORS) {v} = {src}.color;"));
+                w.line(format!("{indent}var {v}: {ty} = vec4<f32>(1.0);"));
+                w.line(format!("{indent}@if(VERTEX_COLORS) {v} = {src}.color;"));
             }
             Builtin::FragCoord => {
                 let e = if is_vertex { "vec4<f32>(0.0)" } else { "in.position" };
-                w.line(format!("    let {v}: {ty} = {e};"));
+                w.line(format!("{indent}let {v}: {ty} = {e};"));
             }
             Builtin::Time | Builtin::DeltaTime => {
                 let field = if *b == Builtin::Time { "time" } else { "delta_time" };
@@ -269,10 +269,10 @@ fn builtin_prelude(ctx: Ctx, builtins: &BTreeSet<Builtin>, imports: &mut Imports
                 if is_pbr {
                     // The prepass/deferred pipeline binds globals at binding 1 (main pass: 11).
                     imports.add("bevy_render::globals", "Globals");
-                    w.line(format!("    var {v}: {ty} = 0.0;"));
-                    w.line(format!("    @if(PREPASS_PIPELINE) {{ {v} = sg_prepass_globals.{field}; }} @else {{ {v} = globals.{field}; }}"));
+                    w.line(format!("{indent}var {v}: {ty} = 0.0;"));
+                    w.line(format!("{indent}@if(PREPASS_PIPELINE) {{ {v} = sg_prepass_globals.{field}; }} @else {{ {v} = globals.{field}; }}"));
                 } else {
-                    w.line(format!("    let {v}: {ty} = globals.{field};"));
+                    w.line(format!("{indent}let {v}: {ty} = globals.{field};"));
                 }
             }
             Builtin::ViewSize | Builtin::CameraPosition | Builtin::ViewFromWorld | Builtin::ClipFromWorld => {
@@ -283,24 +283,64 @@ fn builtin_prelude(ctx: Ctx, builtins: &BTreeSet<Builtin>, imports: &mut Imports
                     Builtin::ViewFromWorld => "view.view_from_world",
                     _ => "view.clip_from_world",
                 };
-                w.line(format!("    let {v}: {ty} = {e};"));
+                w.line(format!("{indent}let {v}: {ty} = {e};"));
             }
             Builtin::WorldFromLocal => match ctx {
-                Ctx::Vertex3d { .. } => w.line(format!("    let {v}: {ty} = world_from_local;")),
+                Ctx::Vertex3d { .. } => w.line(format!("{indent}let {v}: {ty} = world_from_local;")),
                 Ctx::Sprite => {
                     imports.add(mesh_fns, "get_world_from_local");
-                    w.line(format!("    let {v}: {ty} = get_world_from_local(in.instance_index);"));
+                    w.line(format!("{indent}let {v}: {ty} = get_world_from_local(in.instance_index);"));
                 }
                 _ => {
                     imports.add(mesh_fns, "get_world_from_local");
-                    w.line(format!("    var {v}: {ty} = {IDENTITY4};"));
+                    w.line(format!("{indent}var {v}: {ty} = {IDENTITY4};"));
                     w.line(format!(
-                        "    @if(VERTEX_OUTPUT_INSTANCE_INDEX) {v} = get_world_from_local(in.instance_index);"
+                        "{indent}@if(VERTEX_OUTPUT_INSTANCE_INDEX) {v} = get_world_from_local(in.instance_index);"
                     ));
                 }
             },
         }
     }
+}
+
+fn emit_stage_permutations(ir: &Ir, w: &mut Writer, mut emit_one: impl FnMut(&IrStage, &str, &mut Writer)) {
+    if ir.permutation_stages.is_empty() {
+        emit_one(&ir.main, "    ", w);
+        return;
+    }
+    for (i, (stage, _)) in ir.permutation_stages.iter().enumerate() {
+        let perm_idx = i + 1;
+        let cond = ir.permutation_wesl_cond(perm_idx);
+        if i == 0 {
+            w.line(format!("    @if({cond}) {{"));
+        } else {
+            w.line(format!("    }} @elif({cond}) {{"));
+        }
+        emit_one(stage, "        ", w);
+    }
+    w.line("    } @else {");
+    emit_one(&ir.main, "        ", w);
+    w.line("    }");
+}
+
+fn emit_vertex_permutations(ir: &Ir, w: &mut Writer, mut emit_one: impl FnMut(Option<&IrStage>, &str, &mut Writer)) {
+    if ir.permutation_stages.is_empty() {
+        emit_one(ir.vertex.as_ref(), "    ", w);
+        return;
+    }
+    for (i, (_, vs)) in ir.permutation_stages.iter().enumerate() {
+        let perm_idx = i + 1;
+        let cond = ir.permutation_wesl_cond(perm_idx);
+        if i == 0 {
+            w.line(format!("    @if({cond}) {{"));
+        } else {
+            w.line(format!("    }} @elif({cond}) {{"));
+        }
+        emit_one(vs.as_ref(), "        ", w);
+    }
+    w.line("    } @else {");
+    emit_one(ir.vertex.as_ref(), "        ", w);
+    w.line("    }");
 }
 
 /// Whether the material uses prepass globals (needs the extra binding declaration).
@@ -320,7 +360,7 @@ pub fn material(ir: &Ir, ctx: &GenCtx) -> Generated {
         w.line(format!("// preview of node {} ({}): the material output is bypassed", p.node, p.mode.label()));
     }
 
-    let normal = ir.main.outputs.contains_key("normal") && matches!(kind, MaterialKind::Pbr3d(_));
+    let normal = ir.uses_normal && matches!(kind, MaterialKind::Pbr3d(_));
     let extra: Vec<(&str, &str)> = if normal { vec![("transform", "sg_tbn")] } else { vec![] };
     graph_imports(ir, &extra, &this, ctx, &mut imports);
 
@@ -331,8 +371,8 @@ pub fn material(ir: &Ir, ctx: &GenCtx) -> Generated {
         MaterialKind::Unlit3d(_) => unlit_fragment(ir, &kind, &mut imports, &mut body),
         MaterialKind::Sprite2d(_) => sprite_fragment(ir, &mut imports, &mut body),
     }
-    if let Some(vs) = &ir.vertex {
-        vertex_3d(vs, matches!(kind, MaterialKind::Pbr3d(_)), &mut imports, &mut body);
+    if ir.vertex.is_some() {
+        vertex_3d(ir, matches!(kind, MaterialKind::Pbr3d(_)), &mut imports, &mut body);
     }
 
     match kind {
@@ -400,7 +440,6 @@ pub fn material(ir: &Ir, ctx: &GenCtx) -> Generated {
 /// `PREPASS_FRAGMENT` nor `prepass::io::FragmentOutput`: the entry point is left out there, otherwise the whole module
 /// fails and the mesh is missing from the depth prepass (DepthFade, SceneDepth) and from the shadow maps.
 fn pbr_fragment(ir: &Ir, kind: &MaterialKind, normal: bool, imports: &mut Imports, w: &mut Writer) {
-    let o = &ir.main.outputs;
     let blend = kind.blend();
     if ir.vertex.is_some() {
         w.line("@if(!PREPASS_PIPELINE || PREPASS_FRAGMENT)");
@@ -408,53 +447,60 @@ fn pbr_fragment(ir: &Ir, kind: &MaterialKind, normal: bool, imports: &mut Import
     w.line("@fragment");
     w.line("fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> FragmentOutput {");
     w.line("    var pbr_input = pbr_input_from_standard_material(in, is_front);");
-    if !ir.main.builtins.is_empty() {
-        w.line("    // --- builtins ---");
-        builtin_prelude(Ctx::Pbr, &ir.main.builtins, imports, w);
-    }
-    if !ir.main.lines.is_empty() {
-        w.line("    // --- graph ---");
-        write_lines(w, &ir.main, "    ");
-    }
-    w.line("    // --- outputs ---");
-    if let Some(v) = o.get("base_color") {
-        // Node preview forces alpha to 1 (decision 0022).
-        let alpha = if ir.preview.is_some() { "1.0" } else { "pbr_input.material.base_color.a" };
-        w.line(format!("    pbr_input.material.base_color = vec4<f32>({v}, {alpha});"));
-    }
-    if let Some(v) = o.get("metallic") {
-        w.line(format!("    pbr_input.material.metallic = {v};"));
-    }
-    if let Some(v) = o.get("specular") {
-        w.line(format!("    pbr_input.material.reflectance = vec3<f32>({v});"));
-    }
-    if let Some(v) = o.get("roughness") {
-        w.line(format!("    pbr_input.material.perceptual_roughness = {v};"));
-    }
-    if let Some(v) = o.get("emissive") {
-        w.line(format!("    pbr_input.material.emissive = vec4<f32>({v}, pbr_input.material.emissive.a);"));
-    }
-    match blend {
-        BlendMode::Mask => {
-            if let Some(v) = o.get("opacity_mask") {
-                w.line(format!("    pbr_input.material.base_color.a = {v};"));
+    emit_stage_permutations(ir, w, |stage, indent, w| {
+        let o = &stage.outputs;
+        if !stage.builtins.is_empty() {
+            w.line(format!("{indent}// --- builtins ---"));
+            builtin_prelude(Ctx::Pbr, &stage.builtins, indent, imports, w);
+        }
+        if !stage.lines.is_empty() {
+            w.line(format!("{indent}// --- graph ---"));
+            write_lines(w, stage, indent);
+        }
+        w.line(format!("{indent}// --- outputs ---"));
+        if let Some(v) = o.get("base_color") {
+            // Node preview forces alpha to 1 (decision 0022).
+            let alpha = if ir.preview.is_some() { "1.0" } else { "pbr_input.material.base_color.a" };
+            w.line(format!("{indent}pbr_input.material.base_color = vec4<f32>({v}, {alpha});"));
+        }
+        if let Some(v) = o.get("metallic") {
+            w.line(format!("{indent}pbr_input.material.metallic = {v};"));
+        }
+        if let Some(v) = o.get("specular") {
+            w.line(format!("{indent}pbr_input.material.reflectance = vec3<f32>({v});"));
+        }
+        if let Some(v) = o.get("roughness") {
+            w.line(format!("{indent}pbr_input.material.perceptual_roughness = {v};"));
+        }
+        if let Some(v) = o.get("emissive") {
+            w.line(format!("{indent}pbr_input.material.emissive = vec4<f32>({v}, pbr_input.material.emissive.a);"));
+        }
+        match blend {
+            BlendMode::Mask => {
+                if let Some(v) = o.get("opacity_mask") {
+                    w.line(format!("{indent}pbr_input.material.base_color.a = {v};"));
+                }
+            }
+            BlendMode::Opaque => {}
+            _ => {
+                if let Some(v) = o.get("opacity") {
+                    w.line(format!("{indent}pbr_input.material.base_color.a = {v};"));
+                }
             }
         }
-        BlendMode::Opaque => {}
-        _ => {
-            if let Some(v) = o.get("opacity") {
-                w.line(format!("    pbr_input.material.base_color.a = {v};"));
-            }
+        if let Some(v) = o.get("ambient_occlusion") {
+            w.line(format!("{indent}pbr_input.diffuse_occlusion = pbr_input.diffuse_occlusion * {v};"));
         }
-    }
-    if let Some(v) = o.get("ambient_occlusion") {
-        w.line(format!("    pbr_input.diffuse_occlusion = pbr_input.diffuse_occlusion * {v};"));
-    }
-    if normal && let Some(v) = o.get("normal") {
-        w.line("    @if(VERTEX_TANGENTS && (!PREPASS_PIPELINE || NORMAL_PREPASS_OR_DEFERRED_PREPASS)) {");
-        w.line(format!("        pbr_input.N = normalize(sg_tbn(pbr_input.world_normal, in.world_tangent) * {v});"));
-        w.line("    }");
-    }
+        if normal && let Some(v) = o.get("normal") {
+            w.line(format!(
+                "{indent}@if(VERTEX_TANGENTS && (!PREPASS_PIPELINE || NORMAL_PREPASS_OR_DEFERRED_PREPASS)) {{"
+            ));
+            w.line(format!(
+                "{indent}    pbr_input.N = normalize(sg_tbn(pbr_input.world_normal, in.world_tangent) * {v});"
+            ));
+            w.line(format!("{indent}}}"));
+        }
+    });
     // Unlit preview bypasses lighting in WESL only (spec §5), like Bevy's `pbr.wesl` does for unlit materials:
     // the flag also reaches the deferred G-buffer through `deferred_output`.
     let unlit_preview = ir.preview.as_ref().is_some_and(|p| p.mode == PreviewMode::Unlit);
@@ -482,70 +528,75 @@ fn pbr_fragment(ir: &Ir, kind: &MaterialKind, normal: bool, imports: &mut Import
 pub const MASK_CUTOFF: f32 = 0.3333;
 
 fn unlit_fragment(ir: &Ir, kind: &MaterialKind, imports: &mut Imports, w: &mut Writer) {
-    let o = &ir.main.outputs;
     let blend = kind.blend();
     w.line("@fragment");
     w.line("fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {");
-    if !ir.main.builtins.is_empty() {
-        w.line("    // --- builtins ---");
-        builtin_prelude(Ctx::Unlit, &ir.main.builtins, imports, w);
-    }
-    if !ir.main.lines.is_empty() {
-        w.line("    // --- graph ---");
-        write_lines(w, &ir.main, "    ");
-    }
-    w.line("    // --- outputs ---");
-    let color = o.get("color").cloned().unwrap_or_else(|| "vec3<f32>(0.0)".into());
-    if ir.preview.is_some() {
-        // Node preview (decision 0022): opaque color, no opacity, mask or blend-mode handling.
-        w.line(format!("    return vec4<f32>({color}, 1.0);"));
-        w.line("}");
-        return;
-    }
-    let alpha = match blend {
-        BlendMode::Opaque | BlendMode::Mask => "1.0".to_string(),
-        _ => o.get("opacity").cloned().unwrap_or_else(|| "1.0".into()),
-    };
-    w.line(format!("    let color: vec3<f32> = {color};"));
-    w.line(format!("    let alpha: f32 = {alpha};"));
-    if blend == BlendMode::Mask
-        && let Some(m) = o.get("opacity_mask")
-    {
-        w.line(format!("    if ({m}) < {} {{", shader_graph_core::value::wesl_f32(MASK_CUTOFF)));
-        w.line("        discard;");
-        w.line("    }");
-    }
-    match blend {
-        // Additive blending in Bevy expects premultiplied color.
-        BlendMode::Add => w.line("    return vec4<f32>(color * alpha, alpha);"),
-        BlendMode::Multiply => w.line("    return vec4<f32>(mix(vec3<f32>(1.0), color, alpha), alpha);"),
-        _ => w.line("    return vec4<f32>(color, alpha);"),
-    }
+    emit_stage_permutations(ir, w, |stage, indent, w| {
+        let o = &stage.outputs;
+        if !stage.builtins.is_empty() {
+            w.line(format!("{indent}// --- builtins ---"));
+            builtin_prelude(Ctx::Unlit, &stage.builtins, indent, imports, w);
+        }
+        if !stage.lines.is_empty() {
+            w.line(format!("{indent}// --- graph ---"));
+            write_lines(w, stage, indent);
+        }
+        w.line(format!("{indent}// --- outputs ---"));
+        let color = o.get("color").cloned().unwrap_or_else(|| "vec3<f32>(0.0)".into());
+        if ir.preview.is_some() {
+            // Node preview (decision 0022): opaque color, no opacity, mask or blend-mode handling.
+            w.line(format!("{indent}return vec4<f32>({color}, 1.0);"));
+            return;
+        }
+        let alpha = match blend {
+            BlendMode::Opaque | BlendMode::Mask => "1.0".to_string(),
+            _ => o.get("opacity").cloned().unwrap_or_else(|| "1.0".into()),
+        };
+        w.line(format!("{indent}let color: vec3<f32> = {color};"));
+        w.line(format!("{indent}let alpha: f32 = {alpha};"));
+        if blend == BlendMode::Mask
+            && let Some(m) = o.get("opacity_mask")
+        {
+            w.line(format!("{indent}if ({m}) < {} {{", shader_graph_core::value::wesl_f32(MASK_CUTOFF)));
+            w.line(format!("{indent}    discard;"));
+            w.line(format!("{indent}}}"));
+        }
+        match blend {
+            // Additive blending in Bevy expects premultiplied color.
+            BlendMode::Add => w.line(format!("{indent}return vec4<f32>(color * alpha, alpha);")),
+            BlendMode::Multiply => {
+                w.line(format!("{indent}return vec4<f32>(mix(vec3<f32>(1.0), color, alpha), alpha);"))
+            }
+            _ => w.line(format!("{indent}return vec4<f32>(color, alpha);")),
+        }
+    });
     w.line("}");
 }
 
 fn sprite_fragment(ir: &Ir, imports: &mut Imports, w: &mut Writer) {
-    let o = &ir.main.outputs;
     w.line("@fragment");
     w.line("fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {");
-    if !ir.main.builtins.is_empty() {
-        w.line("    // --- builtins ---");
-        builtin_prelude(Ctx::Sprite, &ir.main.builtins, imports, w);
-    }
-    if !ir.main.lines.is_empty() {
-        w.line("    // --- graph ---");
-        write_lines(w, &ir.main, "    ");
-    }
-    w.line("    // --- outputs ---");
-    match o.get("color") {
-        // Node preview (decision 0022): the IR built `vec4<f32>(albedo, 1.0)`, no sprite color/tint.
-        Some(c) if ir.preview.is_some() => w.line(format!("    return {c};")),
-        Some(c) => w.line(format!("    return get_final_color({c}, in.instance_index);")),
-        None => {
-            let uv = o.get("uv").cloned().unwrap_or_else(|| "in.uv".into());
-            w.line(format!("    return sample_final_color({uv}, in.instance_index);"));
+    emit_stage_permutations(ir, w, |stage, indent, w| {
+        let o = &stage.outputs;
+        if !stage.builtins.is_empty() {
+            w.line(format!("{indent}// --- builtins ---"));
+            builtin_prelude(Ctx::Sprite, &stage.builtins, indent, imports, w);
         }
-    }
+        if !stage.lines.is_empty() {
+            w.line(format!("{indent}// --- graph ---"));
+            write_lines(w, stage, indent);
+        }
+        w.line(format!("{indent}// --- outputs ---"));
+        match o.get("color") {
+            // Node preview (decision 0022): the IR built `vec4<f32>(albedo, 1.0)`, no sprite color/tint.
+            Some(c) if ir.preview.is_some() => w.line(format!("{indent}return {c};")),
+            Some(c) => w.line(format!("{indent}return get_final_color({c}, in.instance_index);")),
+            None => {
+                let uv = o.get("uv").cloned().unwrap_or_else(|| "in.uv".into());
+                w.line(format!("{indent}return sample_final_color({uv}, in.instance_index);"));
+            }
+        }
+    });
     w.line("}");
 }
 
@@ -553,9 +604,7 @@ fn sprite_fragment(ir: &Ir, imports: &mut Imports, w: &mut Writer) {
 /// World Position Offset and World Normal (spec §10.2). The world normal replaces `out.world_normal`, which
 /// `pbr_input_from_standard_material` turns into `pbr_input.world_normal` / `N`: the tangent-space Normal pin, the
 /// fragment `VertexNormalWS` and the prepass / deferred normals all build on it.
-fn vertex_3d(vs: &IrStage, pbr: bool, imports: &mut Imports, w: &mut Writer) {
-    let wpo = vs.outputs.get(shader_graph_core::ir::WPO_PIN);
-    let world_normal = vs.outputs.get(shader_graph_core::ir::WORLD_NORMAL_PIN);
+fn vertex_3d(ir: &Ir, pbr: bool, imports: &mut Imports, w: &mut Writer) {
     let normal_guard = if pbr {
         "VERTEX_NORMALS && (!PREPASS_PIPELINE || NORMAL_PREPASS_OR_DEFERRED_PREPASS)"
     } else {
@@ -615,25 +664,33 @@ fn vertex_3d(vs: &IrStage, pbr: bool, imports: &mut Imports, w: &mut Writer) {
     w.line("    @if(VERTEX_COLORS) out.color = vertex.color;");
     w.line("    @if(VERTEX_OUTPUT_INSTANCE_INDEX) out.instance_index = vertex_no_morph.instance_index;");
     w.line("    @if(VISIBILITY_RANGE_DITHER) out.visibility_range_dither = mesh_functions::get_visibility_range_dither_level(vertex_no_morph.instance_index, mesh_world_from_local[3]);");
-    if !vs.builtins.is_empty() {
-        w.line("    // --- builtins ---");
-        builtin_prelude(Ctx::Vertex3d { pbr }, &vs.builtins, imports, w);
-    }
-    if !vs.lines.is_empty() {
-        w.line("    // --- graph ---");
-        write_lines(w, vs, "    ");
-    }
-    if let Some(n) = world_normal {
-        w.line("    // --- world normal ---");
-        w.line(format!("    @if({normal_guard}) out.world_normal = normalize({n});"));
-    }
-    match wpo {
-        Some(wpo) => {
-            w.line("    // --- world position offset ---");
-            w.line(format!("    out.world_position = vec4<f32>(out.world_position.xyz + {wpo}, 1.0);"));
+    emit_vertex_permutations(ir, w, |vs, indent, w| {
+        let Some(vs) = vs else {
+            w.line(format!("{indent}// --- clip position ---"));
+            return;
+        };
+        let wpo = vs.outputs.get(shader_graph_core::ir::WPO_PIN);
+        let world_normal = vs.outputs.get(shader_graph_core::ir::WORLD_NORMAL_PIN);
+        if !vs.builtins.is_empty() {
+            w.line(format!("{indent}// --- builtins ---"));
+            builtin_prelude(Ctx::Vertex3d { pbr }, &vs.builtins, indent, imports, w);
         }
-        None => w.line("    // --- clip position ---"),
-    }
+        if !vs.lines.is_empty() {
+            w.line(format!("{indent}// --- graph ---"));
+            write_lines(w, vs, indent);
+        }
+        if let Some(n) = world_normal {
+            w.line(format!("{indent}// --- world normal ---"));
+            w.line(format!("{indent}@if({normal_guard}) out.world_normal = normalize({n});"));
+        }
+        match wpo {
+            Some(wpo) => {
+                w.line(format!("{indent}// --- world position offset ---"));
+                w.line(format!("{indent}out.world_position = vec4<f32>(out.world_position.xyz + {wpo}, 1.0);"));
+            }
+            None => w.line(format!("{indent}// --- clip position ---")),
+        }
+    });
     w.line("    out.position = position_world_to_clip(out.world_position.xyz);");
     if pbr {
         w.line("    @if(PREPASS_PIPELINE && UNCLIPPED_DEPTH_ORTHO_EMULATION) {");
@@ -691,16 +748,18 @@ pub fn function(ir: &Ir, ctx: &GenCtx) -> Generated {
         w.blank();
     }
     w.line(format!("fn {}({}) -> {ret} {{", function_ident(&sig.name), args.join(", ")));
-    write_lines(&mut w, &ir.main, "    ");
-    let value = |name: &str, ty: PinType| {
-        ir.main.outputs.get(name).cloned().unwrap_or_else(|| shader_graph_core::Value::zero(ty).wesl_literal(ty))
-    };
-    if sig.outputs.len() == 1 {
-        w.line(format!("    return {};", value(&sig.outputs[0].name, sig.outputs[0].ty)));
-    } else {
-        let vals: Vec<String> = sig.outputs.iter().map(|o| value(&o.name, o.ty)).collect();
-        w.line(format!("    return {}({});", sig.out_struct(), vals.join(", ")));
-    }
+    emit_stage_permutations(ir, &mut w, |stage, indent, w| {
+        write_lines(w, stage, indent);
+        let value = |name: &str, ty: PinType| {
+            stage.outputs.get(name).cloned().unwrap_or_else(|| shader_graph_core::Value::zero(ty).wesl_literal(ty))
+        };
+        if sig.outputs.len() == 1 {
+            w.line(format!("{indent}return {};", value(&sig.outputs[0].name, sig.outputs[0].ty)));
+        } else {
+            let vals: Vec<String> = sig.outputs.iter().map(|o| value(&o.name, o.ty)).collect();
+            w.line(format!("{indent}return {}({});", sig.out_struct(), vals.join(", ")));
+        }
+    });
     w.line("}");
     w.finish()
 }

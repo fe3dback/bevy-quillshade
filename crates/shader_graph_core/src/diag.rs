@@ -39,6 +39,8 @@ pub enum Code {
     /// Texture asset image that is no plain 2D texture (a KTX2 cube map, array or 3D texture): a `texture_2d` binding
     /// cannot take it (decision 0029).
     E014,
+    /// Material exceeds the maximum number of shader permutations (`MAX_MATERIAL_PERMUTATIONS = 64`).
+    E015,
     /// Dead branch, excluded from codegen.
     W101,
     /// Output pin inactive for the current blend mode.
@@ -66,6 +68,8 @@ pub enum Code {
     /// Scene texture (SceneDepth, DepthFade) read in an opaque or masked 3D material, which is drawn into the prepass
     /// itself: it reads its own surface.
     W112,
+    /// `Game Feature Switch` node without a feature enum or with an enum having fewer than 2 variants: outputs default.
+    W113,
 }
 
 impl Code {
@@ -101,6 +105,7 @@ impl Code {
                 | Code::E012
                 | Code::E013
                 | Code::E014
+                | Code::E015
         )
     }
 }

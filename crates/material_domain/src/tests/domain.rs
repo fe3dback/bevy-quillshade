@@ -19,6 +19,7 @@ fn material_new_menu_unchanged() {
             "New Function...",
             "New Curve...",
             "New Global Consts...",
+            "New Game Features...",
             "New Gradient Collection...",
             "New folder...",
             "",

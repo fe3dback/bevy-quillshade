@@ -63,6 +63,21 @@ fn header_name(registry: &Registry, asset: &Asset, id: &str, routes: &[(NodeId, 
         NodeRole::RouteUsage => usage_route(routes, &params).map(str::to_string),
         _ if has_label(&n.kind) => Some(n.label.clone()),
         _ => {
+            let ftable = def
+                .params()
+                .into_iter()
+                .find(|p| p.kind == ParamKind::FeatureTable)
+                .and_then(|p| params.get(&p.id).map(|v| v.as_str().to_string()))
+                .filter(|s| !s.is_empty());
+            let fenum = def
+                .params()
+                .into_iter()
+                .find(|p| p.kind == ParamKind::FeatureEnum)
+                .and_then(|p| params.get(&p.id).map(|v| v.as_str().to_string()))
+                .filter(|s| !s.is_empty());
+            if let Some((t, eid)) = ftable.zip(fenum) {
+                return Some(format!("{t}#{eid}"));
+            }
             let table = def
                 .params()
                 .into_iter()

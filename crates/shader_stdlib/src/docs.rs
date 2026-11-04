@@ -707,6 +707,16 @@ pub const DOCS: &[(&str, &str)] = &[
         ! Free on the GPU, but cannot change at runtime. For a runtime switch use `RuntimeIf`."#,
     ),
     (
+        "stdlib::GameFeatureSwitch",
+        r#"Switches between the variants of a static **Feature Enum** (`*.features.ron`): compiles one specialized shader permutation per active variant combination, pruning inactive branches (and their texture samples) from each permutation.
+        # Inputs
+        - One input per enum variant: any float type, also **Material Attributes**
+        # Properties
+        - **Feature Table**: the `.features.ron` asset
+        - **Feature Enum**: the enum in the table
+        > Switched at runtime in the game via the `QuillshadeMaterialFeatures` resource."#,
+    ),
+    (
         "stdlib::RuntimeIf",
         r#"Chooses True or False **on the GPU**, per pixel (WGSL `select`).
         # Inputs

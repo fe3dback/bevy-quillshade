@@ -74,7 +74,14 @@ impl MaterialRegen for Editor {
         let textures = textures.map(|t| (t.id(), t.revision));
         // Open gradient collections: a cleared or refilled slot changes W111 of the graphs sampling it.
         let gradients = self.tabs.iter().filter_map(Tab::get::<GradientsDoc>).map(|g| (g.id.clone(), g.revision));
-        self.docs().map(|d| (d.id.clone(), d.revision)).chain(tables).chain(textures).chain(gradients).collect()
+        let features = self.tabs.iter().filter_map(Tab::get::<FeaturesDoc>).map(|f| (f.id.clone(), f.revision));
+        self.docs()
+            .map(|d| (d.id.clone(), d.revision))
+            .chain(tables)
+            .chain(textures)
+            .chain(gradients)
+            .chain(features)
+            .collect()
     }
 
     fn validate(&mut self) {
