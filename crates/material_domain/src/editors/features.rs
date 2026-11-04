@@ -13,7 +13,6 @@ use crate::doc_kind::{DocCtx, TabDoc, asset_title, io_error, project_of};
 use crate::features_doc::FeaturesDoc;
 use crate::ops::Editor;
 use crate::ops::prelude::*;
-use crate::ui::features_view::FeaturesViewBar;
 use crate::ui::icons::IconRef;
 use crate::ui::props::hotkey_row;
 use crate::ui::widgets::subpane_box;
@@ -31,7 +30,7 @@ impl EditorAreas for FeaturesEditor {
     const SIDEBAR_TITLE: &'static str = "Game Features";
 
     fn topbar() -> Option<impl Scene> {
-        Some(bsn! { @super::bar_row() FeaturesViewBar })
+        None::<Box<dyn Scene>>
     }
 
     fn sidebar() -> Option<impl Scene> {

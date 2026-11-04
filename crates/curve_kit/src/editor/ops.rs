@@ -49,6 +49,8 @@ pub enum CurveAction {
     },
     /// Moves the selected points by `(dt, dvalue)` (arrow keys).
     Nudge((f32, f32)),
+    /// Replaces the curve's points and preview interpolation with the preset at `index` in [`super::CURVE_PRESETS`].
+    ApplyPreset(usize),
 }
 
 /// A [`CurveAction`] for `D`'s curve tab (design §14.4): only a [`CurveDoc`] of `D` applies it, so an edit queued
@@ -195,6 +197,9 @@ impl<D: 'static> CurveDoc<D> {
             CurveAction::Nudge(delta) => {
                 let (points, selection) = moved(&self.curve.points, &self.selection, *delta);
                 self.set_points(points, selection, Some("nudge".into()));
+            }
+            CurveAction::ApplyPreset(index) => {
+                self.apply_preset(*index);
             }
         }
         true

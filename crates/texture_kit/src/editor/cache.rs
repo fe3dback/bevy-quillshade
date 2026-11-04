@@ -6,9 +6,10 @@
 //! bytes embedded in the editor. Cube maps, arrays and 3D textures are shown as a 2D strip of their faces
 //! ([`stack_layers`]): the UI binds a 2D view.
 
+use std::collections::BTreeMap;
 use std::marker::PhantomData;
-use std::path::Path;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
 
 use bevy::asset::RenderAssetUsages;
@@ -19,6 +20,7 @@ use bevy::image::{
 use bevy::prelude::*;
 use bevy::render::renderer::RenderDevice;
 use bevy::render::settings::WgpuFeatures;
+use editor_core::util::text::{format_bytes, plural};
 use project_core::Project;
 
 use super::{TextureDomain, internal_path};
@@ -26,7 +28,7 @@ use crate::{AddressMode, FilterMode, INTERNAL_PREFIX, TextureAsset, TextureSetti
 
 /// Modification time and size of a file: a different stamp means the file changed (the size also catches two
 /// writes within one coarse mtime tick).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct FileStamp {
     modified: Option<SystemTime>,
     len: u64,
@@ -377,6 +379,103 @@ pub fn describe(image: &Image) -> String {
     };
     let s = if mips == 1 { "" } else { "s" };
     format!("{}x{} | {:?} | {mips} mip{s}{layers}", d.size.width, d.size.height, d.format)
+}
+
+#[derive(Clone)]
+struct StatusMeta {
+    byte_len: u64,
+    decoded: Result<(u32, u32, u32, String, u32), String>,
+}
+
+type StatusCacheKey = (PathBuf, Option<FileStamp>, bool);
+
+fn status_cache() -> &'static Mutex<BTreeMap<StatusCacheKey, StatusMeta>> {
+    static CACHE: OnceLock<Mutex<BTreeMap<StatusCacheKey, StatusMeta>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+fn decode_status_meta(bytes: &[u8], path: &str, is_srgb: bool) -> Result<(u32, u32, u32, String, u32), String> {
+    let ext = Path::new(path).extension().and_then(|e| e.to_str()).unwrap_or_default();
+    let image = Image::from_buffer(
+        bytes,
+        ImageType::Extension(ext),
+        CompressedImageFormats::NONE,
+        is_srgb,
+        ImageSampler::Default,
+        RenderAssetUsages::RENDER_WORLD,
+    )
+    .or_else(|_| {
+        Image::from_buffer(
+            bytes,
+            ImageType::Extension(ext),
+            CompressedImageFormats::all(),
+            is_srgb,
+            ImageSampler::Default,
+            RenderAssetUsages::RENDER_WORLD,
+        )
+    })
+    .map_err(|e| format!("cannot load image: {e}"))?;
+    let d = &image.texture_descriptor;
+    Ok((d.size.width, d.size.height, d.size.depth_or_array_layers, format!("{:?}", d.format), d.mip_level_count))
+}
+
+fn format_status_meta(meta: &StatusMeta) -> Vec<String> {
+    let size = format_bytes(meta.byte_len);
+    match &meta.decoded {
+        Ok((w, h, layers, fmt, mips)) => {
+            let dims = if *layers > 1 { format!("{layers}x {w}x{h}") } else { format!("{w}x{h}") };
+            vec![size, dims, fmt.clone(), plural(*mips as usize, "mip", "mips")]
+        }
+        Err(err) => vec![size, err.clone()],
+    }
+}
+
+/// Returns the statusbar counts (`[size, dims, format, mips]` or `[size, "cannot load image: ..."]`) for a texture or
+/// game image at `path` (or `@internal/…`), caching decoded metadata by `(file, FileStamp, is_srgb)`.
+pub fn status_counts<D: TextureDomain>(project: Option<&Project>, path: &str, is_srgb: bool) -> Vec<String> {
+    if path.is_empty() {
+        return Vec::new();
+    }
+    if path.starts_with(INTERNAL_PREFIX) {
+        let Some(t) = D::POLICY.internal_texture(path) else { return Vec::new() };
+        let key = (PathBuf::from(path), None, is_srgb);
+        if let Ok(cache) = status_cache().lock()
+            && let Some(meta) = cache.get(&key)
+        {
+            return format_status_meta(meta);
+        }
+        let meta = StatusMeta {
+            byte_len: t.bytes.len() as u64,
+            decoded: decode_status_meta(t.bytes, &internal_path::<D>(t), is_srgb),
+        };
+        let out = format_status_meta(&meta);
+        if let Ok(mut cache) = status_cache().lock() {
+            cache.insert(key, meta);
+        }
+        return out;
+    }
+    let Some(project) = project else { return Vec::new() };
+    if TextureAsset::check_path(path, &D::POLICY).is_err() {
+        return Vec::new();
+    }
+    let file = project.assets_dir().join(path);
+    let Some(stamp) = FileStamp::of(&file) else { return Vec::new() };
+    let key = (file.clone(), Some(stamp), is_srgb);
+    if let Ok(cache) = status_cache().lock()
+        && let Some(meta) = cache.get(&key)
+    {
+        return format_status_meta(meta);
+    }
+    let decoded = std::fs::read(&file)
+        .map_err(|e| format!("cannot load image: {e}"))
+        .and_then(|bytes| decode_status_meta(&bytes, path, is_srgb));
+    let meta = StatusMeta { byte_len: stamp.len, decoded };
+    let out = format_status_meta(&meta);
+    if let Ok(mut cache) = status_cache().lock() {
+        cache.retain(|(p, _, s), _| p != &file || *s != is_srgb);
+        cache.insert(key, meta);
+    }
+    out
 }
 
 /// `D`'s [`GameImageCache`]: following the render device, freeing unused images.
@@ -743,5 +842,45 @@ mod tests {
         let mut image = Image::default();
         image.texture_descriptor.format = TextureFormat::Bc1RgbaUnorm;
         assert!(!grey_channel(&mut image, 0));
+    }
+
+    #[test]
+    fn status_counts_reports_metadata_cubemap_layers_and_decode_errors() {
+        use editor_core::doc_kind::{StatusCtx, TabDoc};
+
+        let (_dir, p) = project();
+        let ctx = StatusCtx { project: Some(&p), ..StatusCtx::default() };
+        let img = crate::editor::ImageDoc::<TestTexture>::open(&p, "textures/rock_albedo.png");
+        let s = img.status(&ctx).expect("image doc has status");
+        assert_eq!(
+            s.counts,
+            vec![
+                format_bytes(std::fs::metadata(p.assets_dir().join("textures/rock_albedo.png")).unwrap().len()),
+                "128x128".to_string(),
+                "Rgba8UnormSrgb".to_string(),
+                "1 mip".to_string(),
+            ]
+        );
+
+        let aref = project_core::AssetRef { domain: TestTexture::DOMAIN, path: "rock".into(), suffix: "texture" };
+        let tex = crate::editor::TextureDoc::<TestTexture>::new(aref, TextureAsset::new("textures/rock_albedo.png"));
+        assert_eq!(tex.status(&ctx).unwrap().counts, s.counts);
+
+        std::fs::write(p.assets_dir().join("textures/sky.ktx2"), cube_ktx2(4)).unwrap();
+        let cube_counts = status_counts::<TestTexture>(Some(&p), "textures/sky.ktx2", true);
+        assert_eq!(cube_counts[1], "6x 4x4");
+        assert_eq!(cube_counts[2], "Rgba8UnormSrgb");
+        assert_eq!(cube_counts[3], "1 mip");
+
+        std::fs::write(p.assets_dir().join("textures/bad.png"), b"not png").unwrap();
+        let bad = status_counts::<TestTexture>(Some(&p), "textures/bad.png", true);
+        assert_eq!(bad.len(), 2);
+        assert_eq!(bad[0], "7 B");
+        assert!(bad[1].starts_with("cannot load image:"), "{bad:?}");
+
+        let internal_doc = crate::editor::TextureDoc::<WithInternal>::internal(&INTERNAL[0]);
+        let internal_counts = internal_doc.status(&StatusCtx::default()).unwrap().counts;
+        assert_eq!(internal_counts.len(), 4);
+        assert_eq!(internal_counts[1], "64x64");
     }
 }

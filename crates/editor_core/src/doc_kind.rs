@@ -156,6 +156,8 @@ pub struct StatusCtx<'a> {
     /// The project's [`AssetIndex`] (empty in [`StatusCtx::default`]): what a document resolves the UUID references
     /// it shows through (ADR 0047 §4).
     pub index: &'a AssetIndex,
+    /// The open project (`None` in [`StatusCtx::default`] or when no project is open).
+    pub project: Option<&'a Project>,
 }
 
 impl StatusCtx<'_> {
@@ -167,7 +169,7 @@ impl StatusCtx<'_> {
 
 impl Default for StatusCtx<'_> {
     fn default() -> Self {
-        StatusCtx { diagnostics: &[], domain: &(), index: &EMPTY_INDEX }
+        StatusCtx { diagnostics: &[], domain: &(), index: &EMPTY_INDEX, project: None }
     }
 }
 

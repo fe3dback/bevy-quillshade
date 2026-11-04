@@ -125,11 +125,9 @@ fn redraw(
     *last = Some(key);
 
     commands.entity(bar).despawn_children();
-    let (path, open) = (t.rel.clone(), Action::OpenFile(t.path.clone()));
+    let open = Action::OpenFile(t.path.clone());
     let source_icon = IconId::File;
     let source = Action::OpenAsset(t.source.clone());
-    commands.spawn_scene(bsn! { @clipped_text(path, TEXT, 13.0) ChildOf(bar) });
-    // The path keeps its width first: the label yields (clipped) before the path is clipped.
     commands.spawn_scene(
         bsn! { @clipped_text("read-only, generated", TEXT_DIM, 12.0) Node { flex_shrink: 100.0 } ChildOf(bar) },
     );

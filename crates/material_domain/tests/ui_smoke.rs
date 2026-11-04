@@ -3459,7 +3459,7 @@ fn open_gradients(app: &mut App) -> AssetId {
 
 /// Gradient design §8: a collection tab fills the editor topbar (Duplicate / Clear / Move up / Move down), the right
 /// sidebar (the Name field and a Feathers list of all 128 slots, the selected one `Selected`) and the editor content
-/// (the bar with one handle per stop and one diamond per segment).
+/// (the bar with one handle per stop, one diamond per segment, and a read-only color card per stop).
 #[test]
 fn gradients_tab_fills_its_areas() {
     use bevy::feathers::controls::{FeathersListRow, FeathersListView};
@@ -3469,7 +3469,7 @@ fn gradients_tab_fills_its_areas() {
     use material_domain::ui::areas::{AreasPlugin, editor_topbar, right_sidebar};
     use material_domain::ui::gradient_strip::{GradientStrip, GradientStripPlugin};
     use material_domain::ui::gradient_view::{
-        GradientCanvas, GradientViewPlugin, MidHandle, StopHandle, gradient_view,
+        GradientCanvas, GradientStopCard, GradientViewPlugin, MidHandle, StopHandle, gradient_view,
     };
     use material_domain::ui::props::PropsPlugin;
     use material_domain::ui::tooltip::Tooltip;
@@ -3504,17 +3504,32 @@ fn gradients_tab_fills_its_areas() {
     act(&mut app, Action::from(GradientsAction::SelectSlot(3)));
     assert_eq!(selected(&mut app), [3]);
 
-    // Stops and midpoints get their handles.
+    // Stops and midpoints get their handles, and each stop gets a read-only color card.
     for t in [0.1, 0.5, 0.9] {
         act(&mut app, Action::from(GradientsAction::AddStop(t)));
     }
     let w = app.world_mut();
     assert_eq!(w.query::<&StopHandle>().iter(w).count(), 3);
     assert_eq!(w.query::<&MidHandle>().iter(w).count(), 2);
+    let mut cards: Vec<(usize, Entity)> =
+        w.query::<(Entity, &GradientStopCard)>().iter(w).map(|(e, c)| (c.0, e)).collect();
+    cards.sort_by_key(|(i, _)| *i);
+    assert_eq!(cards.iter().map(|(i, _)| *i).collect::<Vec<_>>(), [0, 1, 2]);
+    let all_texts: Vec<(Entity, String)> =
+        w.query::<(Entity, &Text)>().iter(w).map(|(e, t)| (e, t.0.clone())).collect();
+    for (i, card) in cards {
+        let under = |e: Entity| std::iter::successors(Some(e), |x| w.get::<ChildOf>(*x).map(ChildOf::parent));
+        let card_texts: Vec<&str> =
+            all_texts.iter().filter(|(e, _)| under(*e).any(|x| x == card)).map(|(_, t)| t.as_str()).collect();
+        assert!(card_texts.iter().any(|t| t.contains(&format!("Stop #{i}")) && t.contains("T:")), "{card_texts:?}");
+        assert!(card_texts.iter().any(|t| t.starts_with("RGB:")), "{card_texts:?}");
+        assert!(card_texts.iter().any(|t| t.starts_with("HSL:")), "{card_texts:?}");
+    }
 }
 
 /// Gradient design §8: dragging a stop handle moves its `t` as one undo step and keeps hold of the stop when it passes
-/// another one (the re-sort gives it a new index); a click on the bar adds a stop there, a drag across it does not.
+/// another one (the re-sort gives it a new index); dragging a stop upwards deletes it as one undo step; a click on the
+/// bar adds a stop there, a drag across it does not.
 #[test]
 fn gradient_stop_drag_and_bar_click() {
     use bevy::picking::backend::HitData;
@@ -3578,6 +3593,33 @@ fn gradient_stop_drag_and_bar_click() {
     drag(&mut app, first, &[350.0, 400.0]);
     let passed = ts(&app);
     assert!((passed[0] - 0.8).abs() < 1e-5 && (passed[1] - 1.0).abs() < 1e-5, "{passed:?}");
+
+    // Dragging a stop handle upwards past the threshold deletes the stop in a single undo step.
+    let before_delete = ts(&app);
+    let first = handle(&mut app, 0);
+    {
+        let w = app.world_mut();
+        w.trigger(PointerDragStart { entity: first, pointer: pointer.clone(), button, hit: hit.clone() });
+        w.flush();
+        app.update();
+        let distance = Vec2::new(20.0, 3.0);
+        let w = app.world_mut();
+        w.trigger(PointerDrag { entity: first, pointer: pointer.clone(), button, distance, delta: Vec2::ZERO });
+        w.flush();
+        app.update();
+        let distance = Vec2::new(20.0, -40.0);
+        let w = app.world_mut();
+        w.trigger(PointerDrag { entity: first, pointer: pointer.clone(), button, distance, delta: Vec2::ZERO });
+        w.flush();
+        app.update();
+        let w = app.world_mut();
+        w.trigger(PointerDragEnd { entity: first, pointer: pointer.clone(), button, distance });
+        w.flush();
+        app.update();
+    }
+    assert_eq!(ts(&app).len(), before_delete.len() - 1, "dragging upwards deletes the stop");
+    act(&mut app, Action::Tab(TabAction::Undo));
+    assert_eq!(ts(&app), before_delete, "one undo step restores the deleted stop at its pre-drag position");
 
     // A press on the bar, 100 px from its left end, then a release there: bevy_picking's click, after `moved` px of
     // drag on the bar.

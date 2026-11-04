@@ -30,7 +30,6 @@ pub const INSPECT_GAME_TOOL: ToolId = "inspect_game";
 pub const INSPECT_GAME_VIEW: ViewKindId = ViewKindId("light.inspect_game");
 
 const SECTION_W: f32 = 680.0;
-const WARN: Color = Color::srgb(0.95, 0.78, 0.35);
 
 /// The `Inspect Game` tool tab's document.
 pub struct InspectGameDoc {
@@ -220,14 +219,7 @@ fn redraw_bar(
         Action::Rescan,
         "Rescan game Rust source files for Bevy lighting conflicts",
     );
-    let summary: Box<dyn Scene> = if doc.conflicts.is_empty() {
-        Box::new(text("No conflicts in game Rust sources", TEXT_DIM, 12.0))
-    } else {
-        let count = plural(doc.conflicts.len(), "conflict", "conflicts");
-        Box::new(text(format!("{count} in game Rust sources"), WARN, 12.0))
-    };
     commands.spawn_scene(bsn! { @{rescan} ChildOf(bar) });
-    commands.spawn_scene(bsn! { @{summary} ChildOf(bar) });
 }
 
 fn redraw_body(

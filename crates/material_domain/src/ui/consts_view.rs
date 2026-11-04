@@ -16,7 +16,7 @@ use shader_graph_core::consts::{ConstType, GlobalConst};
 
 use super::icons::IconId;
 use super::props::{PropField, checkbox_w, linear_color, number_input, select_w, text_w, vector_fields};
-use super::{TEXT, TEXT_DIM, VIEW_BG, ViewOf, icon_button, icon_tool_button, scroll_column, text};
+use super::{TEXT_DIM, VIEW_BG, ViewOf, icon_button, icon_tool_button, scroll_column, text};
 use crate::consts_doc::ConstsDoc;
 use crate::editors::consts::CONSTS;
 use editor_core::action::TabAction;
@@ -31,10 +31,6 @@ const NAME_W: f32 = 220.0;
 const TYPE_W: f32 = 140.0;
 const ERROR: Color = Color::srgb(0.95, 0.42, 0.42);
 const ROW_LINE: Color = Color::srgb_u8(40, 42, 48);
-
-/// The editor topbar row of a consts tab (path, count), rebuilt with the tab.
-#[derive(Component, Default, Clone)]
-pub(crate) struct ConstsViewBar;
 
 /// Form and table, rebuilt on [`ConstsDoc::layout`].
 #[derive(Component, Default, Clone)]
@@ -205,7 +201,6 @@ fn table(c: &ConstsDoc) -> Vec<Box<dyn Scene>> {
 
 fn redraw(
     editor: Res<Editor>,
-    bar: Query<Entity, With<ConstsViewBar>>,
     body: Query<Entity, With<ConstsViewBody>>,
     mut last: Local<Option<u64>>,
     mut commands: Commands,
@@ -214,12 +209,8 @@ fn redraw(
     if *last == Some(c.layout) {
         return;
     }
-    let (Ok(bar), Ok(body)) = (bar.single(), body.single()) else { return };
+    let Ok(body) = body.single() else { return };
     *last = Some(c.layout);
-    commands.entity(bar).despawn_children();
-    // Only the path: the constant count is in the editor statusbar, how values are used in the sidebar's Usage
-    // subpane (design §6.4).
-    commands.spawn_scene(bsn! { @text(c.id.source_rel(), TEXT, 13.0) ChildOf(bar) });
     commands.entity(body).despawn_children();
     for r in form(c).into_iter().chain(table(c)) {
         commands.spawn_scene(bsn! { @{r} ChildOf(body) });

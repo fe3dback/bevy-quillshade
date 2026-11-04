@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use bevy::prelude::*;
 use editor_core::action::{Action, Handled, TabAction};
-use editor_core::doc_kind::{DocCtx, StatusCtx, TabDoc};
+use editor_core::doc_kind::{DocCtx, StatusCtx, StatusInfo, TabDoc};
 use editor_core::dynval::{PropKey, PropValue};
 use editor_core::editors::{EditorAreas, SidebarKey, ViewOf, bar_row, fill_sidebar_with, sidebar_body};
 use editor_core::preview::{PreviewHandle, start_preview};
@@ -28,7 +28,7 @@ use project_core::{AssetRef, Project};
 use super::ops::{preview_edit, prop_of_key};
 use super::{
     CUBEMAP_PREVIEW_KIND, Channel, CreateTextureForFile, CubeMapViewMode, FileStamp, PREVIEW_HOTKEYS, PreviewDoc,
-    PreviewInfoText, TextureDomain, TextureProp, preview_area, preview_controls, texture_for_file,
+    TextureDomain, TextureProp, preview_area, preview_controls, texture_for_file,
 };
 use crate::{AddressMode, SamplerSettings, TextureSettings};
 
@@ -193,6 +193,11 @@ impl<D: TextureDomain> TabDoc for ImageDoc<D> {
         true
     }
 
+    fn status(&self, ctx: &StatusCtx) -> Option<StatusInfo> {
+        let counts = super::cache::status_counts::<D>(ctx.project, &self.path, true);
+        Some(StatusInfo::new(false, ctx, counts))
+    }
+
     fn revision(&self) -> u64 {
         self.revision
     }
@@ -347,14 +352,7 @@ fn redraw_bar<D: TextureDomain>(
     }
     *last = Some(key);
     commands.entity(bar).despawn_children();
-    let info = PreviewInfoText::<D>::default();
-    let mut controls: Vec<Box<dyn Scene>> = vec![
-        Box::new(text(doc.base_title(), TEXT, 13.0)),
-        Box::new(bsn! { @text("", TEXT_DIM, 12.0) info }),
-        Box::new(bsn! { Node { flex_grow: 1.0 } }),
-    ];
-    controls.extend(preview_controls::<D>(doc));
-    for c in controls {
+    for c in preview_controls::<D>(doc) {
         commands.spawn_scene(bsn! { @{c} ChildOf(bar) });
     }
 }

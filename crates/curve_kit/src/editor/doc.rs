@@ -183,6 +183,22 @@ impl<D> CurveDoc<D> {
         }
     }
 
+    /// Applies the built-in curve preset at `index` in [`super::CURVE_PRESETS`] as a single undo step, preserving the
+    /// curve's output range (`min..max`), clearing the point selection, and switching the preview interpolation to the
+    /// preset's [`Interp`]. Returns `true` if the points, selection, or preview interpolation changed.
+    pub fn apply_preset(&mut self, index: usize) -> bool {
+        let Some(preset) = super::CURVE_PRESETS.get(index) else { return false };
+        let round4 = |x: f32| (x.clamp(0.0, 1.0) * 10_000.0).round() / 10_000.0;
+        let points: Vec<(f32, f32)> = preset.points.iter().map(|&[t, v]| (round4(t), round4(v))).collect();
+        let points_changed = self.curve.points != points;
+        let preview_changed = self.preview != preset.interp;
+        let sel_changed = !self.selection.is_empty();
+        self.set_points(points, BTreeSet::new(), None);
+        self.end_merge();
+        self.set_preview(preset.interp);
+        points_changed || preview_changed || sel_changed
+    }
+
     pub fn end_merge(&mut self) {
         self.history.end_merge();
     }
@@ -407,5 +423,51 @@ pub(crate) mod tests {
         d.insert_points(&[(0.25, 0.75), (0.75, 0.25)]);
         assert_eq!(d.curve.points.len(), 4);
         assert_eq!(d.selected_points(), vec![(0.25, 0.75), (0.75, 0.25)]);
+    }
+
+    #[test]
+    fn apply_preset_scales_with_range_updates_preview_and_undoes_in_one_step() {
+        use super::super::CURVE_PRESETS;
+
+        let mut d = doc();
+        d.set_range(-2.0, 10.0, None).unwrap();
+        d.mark_saved();
+        d.select([0].into());
+
+        // Preset 1: Fade Out (`Simple`, `[(0.0, 1.0), (1.0, 0.0)]`).
+        let rev_before = d.revision;
+        assert!(d.apply_preset(1));
+        assert!(d.revision > rev_before);
+        assert!(d.is_dirty());
+        assert!(d.selection.is_empty());
+        assert_eq!(d.preview, Interp::Simple);
+        assert_eq!(d.curve.points, vec![(0.0, 1.0), (1.0, 0.0)]);
+        assert_eq!((d.curve.min, d.curve.max), (-2.0, 10.0), "output range is preserved");
+        assert!((d.curve.sample(0.0, d.preview) - 10.0).abs() < 1e-5);
+        assert!((d.curve.sample(0.5, d.preview) - 4.0).abs() < 1e-5);
+        assert!((d.curve.sample(1.0, d.preview) - (-2.0)).abs() < 1e-5);
+
+        // Preset 2: Ease In (Quad) (`CatmullRom`, 5 points).
+        assert!(d.apply_preset(2));
+        assert_eq!(d.preview, Interp::CatmullRom);
+        assert_eq!(d.curve.points.len(), 5);
+        assert!((d.curve.sample(0.5, d.preview) - 1.0).abs() < 1e-4, "-2 + 0.25 * 12 = 1.0");
+
+        // Re-applying the same preset when nothing is selected is a no-op.
+        let rev_same = d.revision;
+        assert!(!d.apply_preset(2));
+        assert_eq!(d.revision, rev_same);
+
+        // Out-of-bounds preset index returns false without changing anything.
+        assert!(!d.apply_preset(CURVE_PRESETS.len() + 5));
+
+        // Undo steps back through the applied presets one step at a time.
+        assert!(d.undo());
+        assert_eq!(d.curve.points, vec![(0.0, 1.0), (1.0, 0.0)]);
+        assert!(d.undo());
+        assert_eq!(d.curve.points, vec![(0.0, 0.0), (1.0, 1.0)]);
+        assert!(!d.is_dirty());
+        assert!(d.redo());
+        assert_eq!(d.curve.points, vec![(0.0, 1.0), (1.0, 0.0)]);
     }
 }

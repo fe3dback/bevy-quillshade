@@ -13,7 +13,6 @@ use crate::consts_doc::ConstsDoc;
 use crate::doc_kind::{DocCtx, TabDoc, asset_title, io_error, project_of};
 use crate::ops::Editor;
 use crate::ops::prelude::*;
-use crate::ui::consts_view::ConstsViewBar;
 use crate::ui::icons::IconRef;
 use crate::ui::props::hotkey_row;
 use crate::ui::widgets::subpane_box;
@@ -30,9 +29,8 @@ impl EditorAreas for ConstsEditor {
     const VIEW: ViewKindId = CONSTS;
     const SIDEBAR_TITLE: &'static str = "Constants";
 
-    /// The bar row, filled by `ui::consts_view::redraw`.
     fn topbar() -> Option<impl Scene> {
-        Some(bsn! { @super::bar_row() ConstsViewBar })
+        None::<Box<dyn Scene>>
     }
 
     /// What the table is and how it is used, the hotkeys.

@@ -31,9 +31,8 @@ use editor_core::ui::shell::VIEW_BG;
 use editor_core::ui::widgets::{Caption, GroupButton, button_group, scroll_column, subpane_box};
 
 use super::{
-    FilterPreset, GameImageCache, PREVIEW_HOTKEYS, PreviewInfoText, TextureAction, TextureDoc, TextureDomain,
-    TextureEdit, TextureField, TextureProp, active, fits_easy, preview_area, preview_controls, previewable,
-    texture_key,
+    FilterPreset, GameImageCache, PREVIEW_HOTKEYS, TextureAction, TextureDoc, TextureDomain, TextureEdit, TextureField,
+    TextureProp, active, fits_easy, preview_area, preview_controls, previewable, texture_key,
 };
 
 /// Width of the form column.
@@ -107,8 +106,6 @@ fn texture_rows<D: TextureDomain>(editor: &Editor, t: &TextureDoc<D>) -> Vec<Box
     let kind = if t.is_internal() { "Built-in texture, read-only" } else { "Type: Texture asset" };
     texture.push(Box::new(text(kind, TEXT_DIM, 12.0)));
     texture.push(Box::new(text(format!("Image: assets/{}", t.asset.path), TEXT_DIM, 12.0)));
-    let info = PreviewInfoText::<D>::default();
-    texture.push(Box::new(bsn! { @text("", TEXT_DIM, 12.0) info }));
     if !t.is_internal() {
         texture.push(Box::new(text(D::SETTINGS_NOTE, TEXT_DIM, 12.0)));
     }

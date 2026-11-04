@@ -33,7 +33,7 @@ use crate::ui::gradient_strip::{GradientStrip, slot_list_row};
 use crate::ui::icons::{IconId, IconRef};
 use crate::ui::props::{hotkey_row, labeled, text_hint};
 use crate::ui::widgets::{Caption, GroupButton, button_group, subpane_box};
-use crate::ui::{TEXT, TEXT_DIM, clipped_text, text};
+use crate::ui::{TEXT_DIM, text};
 use crate::util::text::plural;
 
 /// The gradients editor's window areas.
@@ -249,7 +249,6 @@ fn redraw_bar(
     let Ok(bar) = bar.single() else { return };
     *last = Some(key);
     commands.entity(bar).despawn_children();
-    commands.spawn_scene(bsn! { @clipped_text(g.id.source_rel(), TEXT, 13.0) ChildOf(bar) });
     commands.spawn_scene(bsn! { Node { flex_grow: 1.0 } ChildOf(bar) });
     commands.spawn_scene(bsn! { @text(format!("Slot {}", g.slot), TEXT_DIM, 12.0) ChildOf(bar) });
     let buttons = slot_buttons(g.slot, slot);
@@ -287,19 +286,19 @@ fn redraw_name(
 /// The selected slot's subpane: its editor-only name and what it holds.
 fn name_rows(g: &GradientsDoc) -> Vec<Box<dyn Scene>> {
     let Some(slot) = g.current() else { return Vec::new() };
-    let stops = if slot.is_empty() { "empty".to_string() } else { plural(slot.stops.len(), "stop", "stops") };
     let rows: Vec<Box<dyn Scene>> = vec![
         Box::new(labeled("Name".into(), text_hint(GradientProp::Name, slot.name.clone(), "optional"))),
-        Box::new(text(format!("Slot {}, id {}, {stops}", g.slot, slot.id), TEXT_DIM, 12.0)),
+        Box::new(text(format!("Slot {}, id {}", g.slot, slot.id), TEXT_DIM, 12.0)),
     ];
     vec![subpane_box("Gradient", rows)]
 }
 
 /// Hotkeys of the gradients editor, shown in its right sidebar.
-const GRADIENT_HOTKEYS: [(&str, &str); 8] = [
+const GRADIENT_HOTKEYS: [(&str, &str); 9] = [
     ("Click", "Add a stop (above / on the bar)"),
-    ("Click stop", "Pick its color (or click its swatch)"),
+    ("Click stop", "Pick its color"),
     ("Drag", "Move a stop / midpoint"),
+    ("Drag stop up", "Delete stop"),
     ("Arrows", "Nudge stop (Shift: x10)"),
     ("Del", "Delete the selected stop"),
     ("Ctrl+C / V", "Copy / paste the gradient"),
@@ -387,10 +386,12 @@ impl TabDoc for GradientsDoc {
         Some(self.id.source_rel())
     }
 
-    /// `N / 128 used` and the baked texture's size (gradient design §8).
+    /// `N / 128 used`, active slot stop count, and the baked texture's size (gradient design §8).
     fn status(&self, ctx: &StatusCtx) -> Option<StatusInfo> {
         let used = self.collection.slots.iter().filter(|s| !s.is_empty()).count();
-        let counts = vec![format!("{used} / {SLOTS} used"), format!("{SAMPLES}×{SLOTS} RGBA8")];
+        let stops = self.current().map_or(0, |s| s.stops.len());
+        let counts =
+            vec![format!("{used} / {SLOTS} used"), plural(stops, "stop", "stops"), format!("{SAMPLES}×{SLOTS} RGBA8")];
         Some(StatusInfo::new(GradientsDoc::is_dirty(self), ctx, counts))
     }
 }

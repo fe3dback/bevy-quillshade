@@ -8,7 +8,7 @@ use shader_graph_core::features::FeatureEnum;
 
 use super::icons::IconId;
 use super::props::{PropField, text_w};
-use super::{BORDER, PANEL_BG, TEXT, TEXT_DIM, VIEW_BG, ViewOf, icon_button, icon_tool_button, scroll_column, text};
+use super::{BORDER, PANEL_BG, TEXT_DIM, VIEW_BG, ViewOf, icon_button, icon_tool_button, scroll_column, text};
 use crate::editors::features::FEATURES;
 use crate::features_doc::FeaturesDoc;
 use crate::ops::prelude::*;
@@ -17,10 +17,6 @@ use crate::ops::{Action, Actions, Editor, FeaturesAction, FeaturesProp};
 const NAME_W: f32 = 240.0;
 const ERROR: Color = Color::srgb(0.95, 0.42, 0.42);
 const ROW_LINE: Color = Color::srgb_u8(40, 42, 48);
-
-/// The editor topbar row of a features tab.
-#[derive(Component, Default, Clone)]
-pub(crate) struct FeaturesViewBar;
 
 /// Form and enum cards, rebuilt on [`FeaturesDoc::layout`].
 #[derive(Component, Default, Clone)]
@@ -173,7 +169,6 @@ fn enum_card(f: &FeaturesDoc, en: &FeatureEnum) -> Box<dyn Scene> {
 
 fn redraw(
     editor: Res<Editor>,
-    bar: Query<Entity, With<FeaturesViewBar>>,
     body: Query<Entity, With<FeaturesViewBody>>,
     mut last: Local<Option<u64>>,
     mut commands: Commands,
@@ -182,10 +177,8 @@ fn redraw(
     if *last == Some(f.layout) {
         return;
     }
-    let (Ok(bar), Ok(body)) = (bar.single(), body.single()) else { return };
+    let Ok(body) = body.single() else { return };
     *last = Some(f.layout);
-    commands.entity(bar).despawn_children();
-    commands.spawn_scene(bsn! { @text(f.id.source_rel(), TEXT, 13.0) ChildOf(bar) });
     commands.entity(body).despawn_children();
     for r in add_enum_form(f) {
         commands.spawn_scene(bsn! { @{r} ChildOf(body) });

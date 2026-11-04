@@ -60,7 +60,7 @@ mod preview;
 
 pub use cache::{
     CachedImage, Channel, FileStamp, GameImageCache, GameImagePlugin, decode, decode_layers, describe, grey_channel,
-    previewable, sampler, stack_layers,
+    previewable, sampler, stack_layers, status_counts,
 };
 pub use cubemap::{
     CUBEMAP_PREVIEW_KIND, CubeMapPreview, CubeMapPreviewCaption, CubeMapPreviewImage, CubeMapPreviewSession,

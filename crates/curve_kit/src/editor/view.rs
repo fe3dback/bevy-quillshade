@@ -12,21 +12,24 @@
 use std::collections::BTreeSet;
 use std::marker::PhantomData;
 
+use bevy::picking::cursor::EntityCursor;
 use bevy::prelude::*;
 use bevy::ui::ui_transform::UiGlobalTransform;
+use bevy::window::SystemCursorIcon;
 use bevy_enhanced_input::prelude::ModKeys;
 use editor_core::action::{Action, Actions, TabAction};
 use editor_core::dynval::{PropValue, display_value};
 use editor_core::editors::ViewOf;
 use editor_core::keys::mods;
 use editor_core::state::editor::Editor;
-use editor_core::theme::{TEXT, TEXT_DIM, text};
+use editor_core::theme::{BORDER, PANEL_BG, TEXT, TEXT_DIM, text};
+use editor_core::tooltip::Tooltip;
 use editor_core::ui::dialog::open_icon_menu;
 use editor_core::ui::icons::IconId;
 use editor_core::ui::props::set_action;
 use editor_core::ui::shell::{VIEW_BG, clipped_text};
-use editor_core::ui::widgets::{Caption, GroupButton, button_group};
-use editor_core::ui::{icon_tool_button, tool_button};
+use editor_core::ui::widgets::{Caption, GroupButton, button_group, scroll_column};
+use editor_core::ui::{OnActivate, icon_tool_button, tool_button};
 use editor_core::util::geom::{local_pos, logical_size};
 use editor_core::util::raster::{opaque_image, skia_color};
 use resvg::tiny_skia;
@@ -44,6 +47,103 @@ pub const CURVE_COLOR: Color = Color::srgb_u8(250, 204, 92);
 const POINT_COLOR: Color = Color::srgb(0.86, 0.87, 0.90);
 /// Grid cells per unit: a Shift-drag snaps to the plot's grid lines (0.1).
 const GRID: f32 = 10.0;
+/// Background color of a preset card in [`CurvePresetsPane`].
+pub const PRESET_CARD_BG: Color = Color::srgb_u8(34, 36, 42);
+const PRESET_CARD_HOVER_BG: Color = Color::srgb_u8(44, 47, 55);
+const PRESET_PREVIEW_W: u32 = 112;
+const PRESET_PREVIEW_H: u32 = 68;
+
+/// A built-in curve shape preset shown in the curve editor's right-hand `Presets` pane.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CurvePreset {
+    pub id: &'static str,
+    pub title: &'static str,
+    pub subtitle: &'static str,
+    pub interp: Interp,
+    pub points: &'static [[f32; 2]],
+}
+
+impl CurvePreset {
+    /// Builds a normalized [`Curve`] from this preset's points.
+    pub fn to_curve(&self) -> Curve {
+        let round4 = |x: f32| (x.clamp(0.0, 1.0) * 10_000.0).round() / 10_000.0;
+        Curve::new(self.id, self.points.iter().map(|&[t, v]| (round4(t), round4(v))).collect())
+    }
+}
+
+/// Built-in popular curve presets available in the curve editor's `Presets` pane.
+pub const CURVE_PRESETS: &[CurvePreset] = &[
+    CurvePreset {
+        id: "linear",
+        title: "Linear",
+        subtitle: "2 pts | Linear",
+        interp: Interp::Simple,
+        points: &[[0.0, 0.0], [1.0, 1.0]],
+    },
+    CurvePreset {
+        id: "fade_out",
+        title: "Fade Out",
+        subtitle: "2 pts | Decay",
+        interp: Interp::Simple,
+        points: &[[0.0, 1.0], [1.0, 0.0]],
+    },
+    CurvePreset {
+        id: "ease_in_quad",
+        title: "Ease In (Quad)",
+        subtitle: "5 pts | Quad in",
+        interp: Interp::CatmullRom,
+        points: &[[0.0, 0.0], [0.25, 0.0625], [0.5, 0.25], [0.75, 0.5625], [1.0, 1.0]],
+    },
+    CurvePreset {
+        id: "ease_out_quad",
+        title: "Ease Out (Quad)",
+        subtitle: "5 pts | Quad out",
+        interp: Interp::CatmullRom,
+        points: &[[0.0, 0.0], [0.25, 0.4375], [0.5, 0.75], [0.75, 0.9375], [1.0, 1.0]],
+    },
+    CurvePreset {
+        id: "cubic_s_curve",
+        title: "Cubic S-Curve",
+        subtitle: "5 pts | Smooth S",
+        interp: Interp::CatmullRom,
+        points: &[[0.0, 0.0], [0.25, 0.156], [0.5, 0.5], [0.75, 0.844], [1.0, 1.0]],
+    },
+    CurvePreset {
+        id: "cubic_in",
+        title: "Cubic In",
+        subtitle: "5 pts | Cubic in",
+        interp: Interp::CatmullRom,
+        points: &[[0.0, 0.0], [0.25, 0.016], [0.5, 0.125], [0.75, 0.422], [1.0, 1.0]],
+    },
+    CurvePreset {
+        id: "cubic_out",
+        title: "Cubic Out",
+        subtitle: "5 pts | Cubic out",
+        interp: Interp::CatmullRom,
+        points: &[[0.0, 0.0], [0.25, 0.578], [0.5, 0.875], [0.75, 0.984], [1.0, 1.0]],
+    },
+    CurvePreset {
+        id: "fade_in_out",
+        title: "Fade In-Out",
+        subtitle: "5 pts | Bell pulse",
+        interp: Interp::CatmullRom,
+        points: &[[0.0, 0.0], [0.25, 0.5], [0.5, 1.0], [0.75, 0.5], [1.0, 0.0]],
+    },
+    CurvePreset {
+        id: "square_step",
+        title: "Square / Step",
+        subtitle: "4 pts | Step",
+        interp: Interp::Simple,
+        points: &[[0.0, 0.0], [0.499, 0.0], [0.501, 1.0], [1.0, 1.0]],
+    },
+    CurvePreset {
+        id: "triangle",
+        title: "Triangle",
+        subtitle: "3 pts | Bounce",
+        interp: Interp::Simple,
+        points: &[[0.0, 0.0], [0.5, 1.0], [1.0, 0.0]],
+    },
+];
 
 marker! {
     /// The editor topbar row of `D`'s curve tab (path, select all / delete, preview switch, the domain's extras),
@@ -52,7 +152,7 @@ marker! {
 }
 
 marker! {
-    /// The plot area: the unit square plus margins. Receives clicks on empty space.
+    /// The plot area (left 80% of the curve view): the unit square plus margins. Receives clicks on empty space.
     CurveCanvas
 }
 
@@ -60,6 +160,55 @@ marker! {
     /// Image with grid and curve, filling [`CurveCanvas`].
     CurvePlotImage
 }
+
+marker! {
+    /// Right 20% pane of `D`'s curve view listing [`CURVE_PRESETS`].
+    CurvePresetsPane
+}
+
+/// Interactive card in [`CurvePresetsPane`] that applies `CURVE_PRESETS[self.0]` when clicked.
+#[derive(Component)]
+pub struct CurvePresetCard<D>(pub usize, PhantomData<fn() -> D>);
+
+impl<D> CurvePresetCard<D> {
+    pub fn new(index: usize) -> Self {
+        CurvePresetCard(index, PhantomData)
+    }
+
+    pub fn index(&self) -> usize {
+        self.0
+    }
+}
+
+impl<D> Clone for CurvePresetCard<D> {
+    fn clone(&self) -> Self {
+        CurvePresetCard::new(self.0)
+    }
+}
+
+/// Thumbnail [`ImageNode`] inside a [`CurvePresetCard`].
+#[derive(Component)]
+pub struct CurvePresetPreview<D>(pub usize, PhantomData<fn() -> D>);
+
+impl<D> CurvePresetPreview<D> {
+    pub fn new(index: usize) -> Self {
+        CurvePresetPreview(index, PhantomData)
+    }
+
+    pub fn index(&self) -> usize {
+        self.0
+    }
+}
+
+impl<D> Clone for CurvePresetPreview<D> {
+    fn clone(&self) -> Self {
+        CurvePresetPreview::new(self.0)
+    }
+}
+
+/// Cached thumbnail [`Handle<Image>`]s for [`CURVE_PRESETS`], shared across curve domains.
+#[derive(Resource, Default)]
+struct PresetPreviewImages(Vec<Handle<Image>>);
 
 /// Handle of the point with this index.
 #[derive(Component)]
@@ -89,7 +238,7 @@ impl<D> Default for CurveDrag<D> {
     }
 }
 
-/// The window systems of `D`'s curve editor: its editor topbar, the plot and the point gestures.
+/// The window systems of `D`'s curve editor: its editor topbar, the plot, the preset cards and the point gestures.
 pub struct CurveEditorPlugin<D>(PhantomData<fn() -> D>);
 
 impl<D> Default for CurveEditorPlugin<D> {
@@ -101,10 +250,12 @@ impl<D> Default for CurveEditorPlugin<D> {
 impl<D: CurveDomain> Plugin for CurveEditorPlugin<D> {
     fn build(&self, app: &mut App) {
         app.init_resource::<CurveDrag<D>>()
+            .init_resource::<PresetPreviewImages>()
             // After the actions of this frame's gestures are applied: a drag shows without a frame of lag.
             .add_systems(
                 Update,
-                (redraw_bar::<D>, render_plot::<D>, place_handles::<D>).after(editor_core::apply_actions),
+                (init_preset_previews::<D>, redraw_bar::<D>, render_plot::<D>, place_handles::<D>)
+                    .after(editor_core::apply_actions),
             )
             .add_observer(handle_press::<D>)
             .add_observer(handle_drag_start::<D>)
@@ -112,13 +263,22 @@ impl<D: CurveDomain> Plugin for CurveEditorPlugin<D> {
             .add_observer(handle_drag_end::<D>)
             .add_observer(handle_hover::<D, PointerOver, true>)
             .add_observer(handle_hover::<D, PointerOut, false>)
+            .add_observer(preset_card_click::<D>)
+            .add_observer(preset_card_hover::<D, PointerOver, true>)
+            .add_observer(preset_card_hover::<D, PointerOut, false>)
             .add_observer(canvas_click::<D>);
     }
 }
 
-/// `D`'s curve view in the editor content.
+/// `D`'s curve view in the editor content (`{80% curve plot} | {20% presets}`).
 pub fn curve_view<D: CurveDomain>() -> impl Scene {
-    let (view, canvas, image) = (ViewOf(D::VIEW), CurveCanvas::<D>::default(), CurvePlotImage::<D>::default());
+    let (view, canvas, image, presets_pane) = (
+        ViewOf(D::VIEW),
+        CurveCanvas::<D>::default(),
+        CurvePlotImage::<D>::default(),
+        CurvePresetsPane::<D>::default(),
+    );
+    let cards: Vec<Box<dyn Scene>> = CURVE_PRESETS.iter().enumerate().map(|(i, p)| preset_card::<D>(i, p)).collect();
     bsn! {
         view
         Node {
@@ -127,21 +287,197 @@ pub fn curve_view<D: CurveDomain>() -> impl Scene {
             right: px(0),
             top: px(0),
             bottom: px(0),
-            flex_direction: FlexDirection::Column,
+            flex_direction: FlexDirection::Row,
         }
         BackgroundColor(VIEW_BG)
         Visibility::Hidden
         Children [
-            // The bottom margin keeps the plot clear of the file type watermark.
             canvas
-            Node { flex_grow: 1.0, min_height: px(0), margin: UiRect::bottom(px(56)) }
+            Node {
+                width: percent(80),
+                height: percent(100),
+                position_type: PositionType::Relative,
+                overflow: Overflow::clip(),
+                flex_shrink: 0.0,
+            }
+            BackgroundColor(VIEW_BG)
             Children [
                 image
                 ImageNode
-                Node { position_type: PositionType::Absolute, left: px(0), right: px(0), top: px(0), bottom: px(0) }
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: px(0),
+                    top: px(0),
+                    width: percent(100),
+                    height: percent(100),
+                }
+                Pickable::IGNORE
+            ]
+            --
+            presets_pane
+            Node {
+                width: percent(20),
+                height: percent(100),
+                flex_direction: FlexDirection::Column,
+                border: UiRect::left(px(1)),
+                padding: UiRect::all(px(8)),
+                row_gap: px(6),
+                flex_shrink: 0.0,
+            }
+            BackgroundColor(PANEL_BG)
+            BorderColor::all(BORDER)
+            Children [
+                @text("Presets", TEXT_DIM, 12.0)
+                --
+                @scroll_column()
+                Children [ {cards} ]
+            ]
+        ]
+    }
+}
+
+/// One bordered preset card inside [`CurvePresetsPane`]: preview curve on the left, title and subtitle on the right.
+fn preset_card<D: CurveDomain>(index: usize, preset: &CurvePreset) -> Box<dyn Scene> {
+    let card = CurvePresetCard::<D>::new(index);
+    let preview = CurvePresetPreview::<D>::new(index);
+    let act = OnActivate(Action::from(CurveEdit::<D>::new(CurveAction::ApplyPreset(index))));
+    let tip = Tooltip(format!("{}: {} (click to apply)", preset.title, preset.subtitle));
+    Box::new(bsn! {
+        card
+        Node {
+            width: percent(100),
+            flex_direction: FlexDirection::Row,
+            align_items: AlignItems::Center,
+            column_gap: px(6),
+            padding: UiRect::all(px(5)),
+            border: UiRect::all(px(1)),
+            border_radius: BorderRadius::all(px(4)),
+            margin: UiRect::bottom(px(3)),
+        }
+        BackgroundColor(PRESET_CARD_BG)
+        BorderColor::all(BORDER)
+        EntityCursor::System(SystemCursorIcon::Pointer)
+        act
+        tip
+        Children [
+            preview
+            Node {
+                width: px(46),
+                height: px(28),
+                flex_shrink: 0.0,
+                border: UiRect::all(px(1)),
+                border_radius: BorderRadius::all(px(2)),
+            }
+            BorderColor::all(BORDER)
+            ImageNode
+            Pickable::IGNORE
+            --
+            Node {
+                flex_direction: FlexDirection::Column,
+                row_gap: px(2),
+                min_width: px(0),
+                flex_grow: 1.0,
+            }
+            Pickable::IGNORE
+            Children [
+                @clipped_text(preset.title, TEXT, 11.0)
+                Pickable::IGNORE
+                --
+                @clipped_text(preset.subtitle, TEXT_DIM, 10.0)
                 Pickable::IGNORE
             ]
         ]
+    })
+}
+
+/// Rasterizes a `112x68` thumbnail preview of `preset` with a dark background, subtle midline grid, and [`CURVE_COLOR`]
+/// curve stroke.
+pub fn rasterize_preset_preview(preset: &CurvePreset) -> tiny_skia::Pixmap {
+    let mut pixmap = tiny_skia::Pixmap::new(PRESET_PREVIEW_W, PRESET_PREVIEW_H).expect("non-empty preset preview size");
+    pixmap.fill(skia_color(Color::srgb_u8(24, 25, 29), 1.0));
+    let pad = 5.0;
+    let w = (PRESET_PREVIEW_W as f32 - 2.0 * pad).max(1.0);
+    let h = (PRESET_PREVIEW_H as f32 - 2.0 * pad).max(1.0);
+    let at = |t: f32, v: f32| (pad + t * w, pad + (1.0 - v.clamp(-0.05, 1.05)) * h);
+    let mut paint = tiny_skia::Paint { anti_alias: true, ..default() };
+    let id = tiny_skia::Transform::identity();
+
+    // Subtle midline grid.
+    paint.set_color(skia_color(Color::WHITE, 0.10));
+    let grid_stroke = tiny_skia::Stroke { width: 1.0, ..default() };
+    for ((x0, y0), (x1, y1)) in [(at(0.0, 0.5), at(1.0, 0.5)), (at(0.5, 0.0), at(0.5, 1.0))] {
+        let mut pb = tiny_skia::PathBuilder::new();
+        pb.move_to(x0, y0);
+        pb.line_to(x1, y1);
+        if let Some(path) = pb.finish() {
+            pixmap.stroke_path(&path, &paint, &grid_stroke, id, None);
+        }
+    }
+
+    // Curve stroke.
+    let curve = preset.to_curve();
+    let slopes = curve.slopes();
+    let steps = 56usize;
+    let mut pb = tiny_skia::PathBuilder::new();
+    for k in 0..=steps {
+        let t = k as f32 / steps as f32;
+        let (x, y) = at(t, curve.sample_normalized_with(t, preset.interp, &slopes));
+        if k == 0 {
+            pb.move_to(x, y);
+        } else {
+            pb.line_to(x, y);
+        }
+    }
+    if let Some(path) = pb.finish() {
+        paint.set_color(skia_color(CURVE_COLOR, 1.0));
+        let stroke = tiny_skia::Stroke {
+            width: 2.5,
+            line_join: tiny_skia::LineJoin::Round,
+            line_cap: tiny_skia::LineCap::Round,
+            ..default()
+        };
+        pixmap.stroke_path(&path, &paint, &stroke, id, None);
+    }
+    pixmap
+}
+
+fn init_preset_previews<D: CurveDomain>(
+    mut previews: Query<(&CurvePresetPreview<D>, &mut ImageNode), Added<CurvePresetPreview<D>>>,
+    mut cache: ResMut<PresetPreviewImages>,
+    mut images: ResMut<Assets<Image>>,
+) {
+    if previews.is_empty() {
+        return;
+    }
+    if cache.0.len() != CURVE_PRESETS.len() {
+        cache.0 = CURVE_PRESETS.iter().map(|p| images.add(opaque_image(rasterize_preset_preview(p)))).collect();
+    }
+    for (preview, mut image_node) in &mut previews {
+        if let Some(handle) = cache.0.get(preview.index()) {
+            image_node.image = handle.clone();
+        }
+    }
+}
+
+fn preset_card_click<D: CurveDomain>(
+    mut ev: On<PointerClick>,
+    cards: Query<&CurvePresetCard<D>>,
+    mut actions: ResMut<Actions>,
+) {
+    let Ok(card) = cards.get(ev.event_target()) else { return };
+    if ev.button != PointerButton::Primary {
+        return;
+    }
+    ev.propagate(false);
+    actions.push(Action::from(CurveEdit::<D>::new(CurveAction::ApplyPreset(card.index()))));
+}
+
+fn preset_card_hover<D: CurveDomain, E: EntityEvent, const ON: bool>(
+    ev: On<E>,
+    mut cards: Query<&mut BackgroundColor, With<CurvePresetCard<D>>>,
+) {
+    if let Ok(mut bg) = cards.get_mut(ev.event_target()) {
+        bg.0 = if ON { PRESET_CARD_HOVER_BG } else { PRESET_CARD_BG };
     }
 }
 
@@ -192,7 +528,6 @@ fn redraw_bar<D: CurveDomain>(
     let Ok(bar) = bar.single() else { return };
     *last = Some(key);
     commands.entity(bar).despawn_children();
-    commands.spawn_scene(bsn! { @clipped_text(c.aref.source_rel(), TEXT, 13.0) ChildOf(bar) });
     let tools: [Box<dyn Scene>; 2] = [
         Box::new(tool_button("Select all", Action::Tab(TabAction::SelectAll))),
         Box::new(icon_tool_button(
@@ -640,5 +975,29 @@ mod tests {
         let (points, _) = dragged(&from, &[0, 1].into(), 0, (0.05, 0.0), keys);
         assert_eq!(points[0].0, 0.3);
         assert!((points[1].0 - 0.52).abs() < 1e-6, "{points:?}");
+    }
+
+    #[test]
+    fn all_presets_are_valid_and_rasterize_preview_curve() {
+        assert!(CURVE_PRESETS.len() >= 8);
+        for preset in CURVE_PRESETS {
+            assert!(!preset.id.is_empty() && !preset.title.is_empty() && !preset.subtitle.is_empty());
+            let c = preset.to_curve();
+            assert!(crate::range_error(c.min, c.max).is_none(), "preset {}", preset.id);
+            assert_eq!(c.points.len(), preset.points.len(), "preset {} points should already be normalized", preset.id);
+            assert!(
+                c.points.iter().all(|&(t, v)| (0.0..=1.0).contains(&t) && (0.0..=1.0).contains(&v)),
+                "preset {} points out of unit square: {:?}",
+                preset.id,
+                c.points
+            );
+            assert!(c.points.windows(2).all(|w| w[0].0 < w[1].0), "preset {} t not strictly increasing", preset.id);
+
+            let pixmap = rasterize_preset_preview(preset);
+            assert_eq!((pixmap.width(), pixmap.height()), (PRESET_PREVIEW_W, PRESET_PREVIEW_H));
+            let corner_bg = pixmap.pixels()[0];
+            let painted = pixmap.pixels().iter().filter(|p| **p != corner_bg).count();
+            assert!(painted > 20, "preset {} preview should draw visible curve pixels (got {painted})", preset.id);
+        }
     }
 }

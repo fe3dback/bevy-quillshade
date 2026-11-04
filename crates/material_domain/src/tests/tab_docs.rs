@@ -141,19 +141,41 @@ fn no_status_for_read_only_kinds() {
     e.regenerate();
     let rock = AssetId::new(AssetType::Material, "env/rock_wet");
     e.apply(MaterialAction::ShowGenerated(rock.clone(), WESL));
-    assert!(e.tab().and_then(Tab::get::<TextDoc>).is_some());
-    assert_eq!(e.status_info(), None, "generated WESL");
+    let text_doc = e.tab().and_then(Tab::get::<TextDoc>).expect("generated WESL");
+    let src = text_doc.text.as_deref().unwrap();
+    let status = e.status_info().expect("generated WESL has status");
+    assert!(!status.dirty);
+    assert_eq!(
+        status.counts,
+        vec![
+            crate::util::text::plural(src.lines().count(), "line", "lines"),
+            crate::util::text::format_bytes(src.len() as u64),
+        ],
+    );
     let path = "textures/env/rock.png";
     let file = dir.path().join("assets").join(path);
     std::fs::create_dir_all(file.parent().unwrap()).unwrap();
-    std::fs::write(&file, b"not decoded by the editor state").unwrap();
+    let raw = b"not decoded by the editor state";
+    std::fs::write(&file, raw).unwrap();
     e.refresh_game_files();
     e.apply(Action::OpenGameImage(path.into()));
     assert!(e.tab().and_then(Tab::get::<ImageDoc>).is_some());
-    assert_eq!(e.status_info(), None, "game image");
-    e.apply(Action::OpenAsset(AssetId::new(AssetType::Texture, "textures/rock_albedo").to_ref()));
+    let img_status = e.status_info().expect("game image has status");
+    assert_eq!(img_status.counts.len(), 2);
+    assert_eq!(img_status.counts[0], crate::util::text::format_bytes(raw.len() as u64));
+    assert!(img_status.counts[1].starts_with("cannot load image:"), "{:?}", img_status.counts);
+    e.apply(Action::OpenAsset(AssetId::new(AssetType::Texture, "textures/sprite").to_ref()));
     assert!(e.texture_doc().is_some());
-    assert_eq!(e.status_info(), None, "texture");
+    let tex_status = e.status_info().expect("texture has status");
+    assert!(tex_status.counts.is_empty(), "missing image file has empty counts");
+    std::fs::copy(
+        dir.path().join("assets/quillshade/material/internal/default.png"),
+        dir.path().join("assets/textures/sprite.png"),
+    )
+    .unwrap();
+    let tex_status = e.status_info().expect("texture has status");
+    assert_eq!(tex_status.counts.len(), 4);
+    assert_eq!(&tex_status.counts[2..], &["Rgba8UnormSrgb".to_string(), "1 mip".to_string()]);
     while !e.tabs.is_empty() {
         e.close_tab(e.tabs.len() - 1, true);
     }

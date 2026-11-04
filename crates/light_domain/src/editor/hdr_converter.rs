@@ -392,8 +392,29 @@ impl TabDoc for HdrConverterDoc {
     }
 
     fn status(&self, ctx: &StatusCtx) -> Option<StatusInfo> {
-        let src = if self.hdr.is_some() { self.source_summary() } else { "No HDR loaded".to_string() };
-        Some(StatusInfo::new(false, ctx, vec![src, self.output_summary()]))
+        let mut counts = Vec::new();
+        if let Some(path) = &self.source_path {
+            let resolved = if path.is_relative()
+                && let Some(project) = ctx.project
+            {
+                project.root.join(path)
+            } else {
+                path.clone()
+            };
+            if let Ok(meta) = std::fs::metadata(&resolved)
+                && meta.is_file()
+            {
+                counts.push(editor_core::util::text::format_bytes(meta.len()));
+            }
+        }
+        let src = if let Some(hdr) = &self.hdr {
+            format!("source: {}x{}", hdr.width, hdr.height)
+        } else {
+            "No HDR loaded".to_string()
+        };
+        counts.push(src);
+        counts.push(self.output_summary());
+        Some(StatusInfo::new(false, ctx, counts))
     }
 
     fn preview_handle(&self) -> Option<&PreviewHandle> {
@@ -766,16 +787,10 @@ fn redraw_bar(
         "Open a Radiance .hdr panorama file from disk",
     );
     let export_btn = export_tool_button(has_hdr);
-    let summary_str = doc.output_summary();
 
     commands.spawn_scene(bsn! { @{mode_group} ChildOf(bar) });
     commands.spawn_scene(bsn! { @{import_btn} ChildOf(bar) });
     commands.spawn_scene(bsn! { @{export_btn} ChildOf(bar) });
-    commands.spawn_scene(bsn! {
-        HdrConverterSummaryText
-        @text(summary_str, TEXT_DIM, 12.0)
-        ChildOf(bar)
-    });
 }
 
 fn redraw_left(
@@ -1000,7 +1015,6 @@ fn redraw_right(
         })
     };
 
-    let summary_str = doc.output_summary();
     let export_btn = export_primary_button(has_hdr);
 
     commands.spawn_scene(bsn! {
@@ -1025,17 +1039,11 @@ fn redraw_right(
         Node {
             flex_direction: FlexDirection::Row,
             align_items: AlignItems::Center,
-            justify_content: JustifyContent::SpaceBetween,
+            justify_content: JustifyContent::FlexEnd,
             column_gap: px(10),
             min_height: px(30),
         }
         Children [
-            Node { flex_grow: 1.0, min_width: px(0), overflow: Overflow::clip() }
-            Children [
-                HdrConverterSummaryText
-                @text(summary_str, TEXT_DIM, 11.0)
-            ]
-            --
             @{export_btn}
         ]
         ChildOf(right)
@@ -1060,7 +1068,6 @@ fn sidebar_rows(doc: &HdrConverterDoc) -> Vec<Box<dyn Scene>> {
     if let Some(hdr) = &doc.hdr {
         info.push(Box::new(text(format!("Source dimensions: {}x{}", hdr.width, hdr.height), TEXT_DIM, 12.0)));
     }
-    info.push(Box::new(text(format!("Output: {}", doc.output_summary()), TEXT_DIM, 12.0)));
     info.push(Box::new(text(format!("Effective scale: {:.3}x", doc.settings.scale()), TEXT_DIM, 12.0)));
     info.push(Box::new(text(
         "Converts an equirectangular .hdr panorama directly to a Bevy .ktx2 cubemap without creating a Texture asset.",
@@ -1090,10 +1097,10 @@ pub fn update_hdr_converter_preview(world: &mut World) {
     let active_info = world.get_resource::<Editor>().and_then(|editor| {
         let doc = editor.active_doc::<HdrConverterDoc>()?;
         let id = doc.preview.is_alive().then(|| doc.preview.id())?;
-        Some((id, doc.hdr.clone(), doc.settings.clone(), doc.cube_mode, doc.output_summary()))
+        Some((id, doc.hdr.clone(), doc.settings.clone(), doc.cube_mode))
     });
 
-    let Some((active_id, hdr_opt, settings, cube_mode, summary)) = active_info else {
+    let Some((active_id, hdr_opt, settings, cube_mode)) = active_info else {
         if let Some(sessions) = world.get_resource::<CubeMapPreviewSessions>() {
             let cams: Vec<Entity> =
                 hdr_tab_ids.iter().filter_map(|id| sessions.sessions.get(id).map(|s| s.camera)).collect();
@@ -1108,15 +1115,6 @@ pub fn update_hdr_converter_preview(world: &mut World) {
         }
         return;
     };
-
-    {
-        let mut q = world.query_filtered::<&mut Text, With<HdrConverterSummaryText>>();
-        for mut t in q.iter_mut(world) {
-            if t.0 != summary {
-                t.0 = summary.clone();
-            }
-        }
-    }
 
     let Some(hdr) = hdr_opt else {
         if let Some(sessions) = world.get_resource::<CubeMapPreviewSessions>() {

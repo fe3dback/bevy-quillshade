@@ -15,6 +15,7 @@ use project_core::{AssetRef, DomainId};
 use crate::action::{Action, Actions};
 use crate::tab::Tab;
 use crate::theme::{ACCENT, TEXT, TEXT_DIM, text};
+use crate::tooltip::Tooltip;
 use crate::ui::HoverRow;
 use crate::ui::icons::{IconId, IconRef, icon};
 
@@ -90,7 +91,14 @@ struct RowState {
     dirty: bool,
 }
 
-fn row(label: String, icons: Vec<Box<dyn Scene>>, depth: usize, row: TreeRow, state: RowState) -> impl Scene {
+fn row(
+    label: String,
+    tip: Tooltip,
+    icons: Vec<Box<dyn Scene>>,
+    depth: usize,
+    row: TreeRow,
+    state: RowState,
+) -> impl Scene {
     let RowState { active, error, dirty } = state;
     let base = if active { ROW_ACTIVE } else { Color::NONE };
     let hover = HoverRow { base };
@@ -117,6 +125,7 @@ fn row(label: String, icons: Vec<Box<dyn Scene>>, depth: usize, row: TreeRow, st
         BackgroundColor(base)
         hover
         row
+        tip
         Children [
             {icons}
             --
@@ -240,12 +249,17 @@ fn draw_tree(
     commands: &mut Commands,
 ) {
     let tree = source.id();
+    let (domain, is_game_tree) = match tree {
+        TreeId::Project(d) => (d, false),
+        TreeId::GameAssets => (editor.active_domain.unwrap_or(DomainId::PROJECT), true),
+    };
     let active = editor.tab().and_then(Tab::owner);
     let dirty_owners: BTreeSet<&AssetRef> =
         editor.tabs.iter().filter(|t| t.doc().is_dirty()).filter_map(Tab::owner).collect();
     let file = IconRef::from(IconId::File);
     for (depth, item) in source.rows(editor) {
         let label = tree::row_label(tree, &item);
+        let tip = Tooltip(tree::tree_item_tooltip(editor.project.as_ref(), domain, is_game_tree, &item));
         let (icons, state) = match &item {
             TreeItem::Folder(f) if f.is_empty() => (row_icons(None, IconId::FolderOpen), RowState::default()),
             TreeItem::Folder(f) | TreeItem::VirtualFolder(f, _) => {
@@ -266,7 +280,7 @@ fn draw_tree(
             TreeItem::Virtual(r) => (row_icons(None, assets.get(r).map_or(file, |a| a.0)), RowState::default()),
         };
         let r = TreeRow { tree, item };
-        commands.spawn_scene(bsn! { @row(label, icons, depth, r, state) ChildOf(body) });
+        commands.spawn_scene(bsn! { @row(label, tip, icons, depth, r, state) ChildOf(body) });
     }
 }
 

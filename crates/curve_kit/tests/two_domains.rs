@@ -294,3 +294,89 @@ fn curve_edit_for_other_domain_is_dropped() {
     e.apply(Action::from(CurveEdit::<CurveB>::new(CurveAction::Nudge((0.0, -0.1)))));
     assert_ne!(e.tabs[b].doc().revision(), revision);
 }
+
+#[test]
+fn curve_view_splits_80_20_and_preset_card_click_applies_preset() {
+    use bevy::ui_widgets::Activate;
+    use curve_kit::Interp;
+    use curve_kit::editor::{CURVE_PRESETS, CurveCanvas, CurvePresetCard, CurvePresetPreview, CurvePresetsPane};
+    use editor_core::editors::ViewOf;
+    use editor_core::ui::shell::activate_action;
+
+    let (_dir, mut editor) = project();
+    editor.apply(Action::OpenAsset(x("a")));
+    let mut app = App::new();
+    app.add_plugins((
+        MinimalPlugins,
+        AssetPlugin::default(),
+        bevy::scene::ScenePlugin,
+        bevy::input::InputPlugin,
+        EnhancedInputPlugin,
+    ));
+    app.init_asset::<Font>().init_asset::<Image>();
+    app.init_resource::<bevy::input_focus::InputFocus>();
+    app.insert_resource(editor);
+    app.add_plugins((EditorPlugins, AreasPlugin, DomainWindowPlugin, InputContextsPlugin));
+    app.add_observer(activate_action);
+    for view in domain_doc_views(app.world().resource::<DomainList>()) {
+        app.world_mut().spawn_scene(view).unwrap();
+    }
+    app.finish();
+    app.update();
+    app.update();
+
+    // Verify 80% / 20% split on `CurveA`'s view.
+    {
+        let w = app.world_mut();
+        let mut views = w.query::<(&ViewOf, &Node)>();
+        let (_, view_node) = views.iter(w).find(|(v, _)| v.0 == CurveA::VIEW).expect("CurveA view");
+        assert_eq!(view_node.flex_direction, FlexDirection::Row);
+
+        let canvas_node = w.query_filtered::<&Node, With<CurveCanvas<CurveA>>>().single(w).expect("CurveCanvas");
+        assert_eq!(canvas_node.width, percent(80));
+        assert_eq!(canvas_node.height, percent(100));
+
+        let pane_node =
+            w.query_filtered::<&Node, With<CurvePresetsPane<CurveA>>>().single(w).expect("CurvePresetsPane");
+        assert_eq!(pane_node.width, percent(20));
+        assert_eq!(pane_node.height, percent(100));
+
+        let card_count = w.query::<&CurvePresetCard<CurveA>>().iter(w).count();
+        assert_eq!(card_count, CURVE_PRESETS.len());
+
+        let preview_handles: Vec<_> =
+            w.query::<(&CurvePresetPreview<CurveA>, &ImageNode)>().iter(w).map(|(_, img)| img.image.clone()).collect();
+        assert_eq!(preview_handles.len(), CURVE_PRESETS.len());
+        let images = w.resource::<Assets<Image>>();
+        for handle in preview_handles {
+            assert!(images.get(&handle).is_some(), "preset preview image handle should be populated");
+        }
+    }
+
+    // Set a non-unit output range [-5..5] on `a`'s curve, then activate the Triangle preset card.
+    let triangle_idx = CURVE_PRESETS.iter().position(|p| p.id == "triangle").expect("triangle preset");
+    act(
+        &mut app,
+        Action::Tab(TabAction::SetValue {
+            key: editor_core::dynval::PropKey::new(editor_core::dynval::KitProp::<CurveA, _>::new(CurveProp::Range)),
+            value: editor_core::dynval::PropValue::Float2([-5.0, 5.0]),
+            merge: false,
+        }),
+    );
+
+    let card_entity = {
+        let w = app.world_mut();
+        let mut q = w.query::<(Entity, &CurvePresetCard<CurveA>)>();
+        q.iter(w).find(|(_, c)| c.index() == triangle_idx).map(|(e, _)| e).expect("triangle preset card")
+    };
+    app.world_mut().trigger(Activate { entity: card_entity });
+    app.update();
+    app.update();
+
+    let e = app.world().resource::<Editor>();
+    let doc = active::<CurveA>(e).expect("active CurveA doc");
+    assert_eq!(doc.curve.points, vec![(0.0, 0.0), (0.5, 1.0), (1.0, 0.0)]);
+    assert_eq!(doc.preview, Interp::Simple);
+    assert_eq!((doc.curve.min, doc.curve.max), (-5.0, 5.0));
+    assert!((doc.curve.sample(0.5, doc.preview) - 5.0).abs() < 1e-6);
+}

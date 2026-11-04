@@ -200,7 +200,12 @@ impl Editor {
         let tab = self.tab()?;
         let diagnostics = self.active_diagnostics();
         let domain = self.domains.get_dyn(tab.domain).map_or(&() as &dyn std::any::Any, |s| s as &dyn std::any::Any);
-        tab.doc().status(&StatusCtx { diagnostics: &diagnostics, domain, index: &self.asset_index })
+        tab.doc().status(&StatusCtx {
+            diagnostics: &diagnostics,
+            domain,
+            index: &self.asset_index,
+            project: self.project.as_ref(),
+        })
     }
 
     /// The first diagnostic of the active tab's asset, in console/logs order: what a click on the editor statusbar's
@@ -504,6 +509,9 @@ impl Editor {
     pub fn current_value(&self, key: &PropKey) -> Option<PropValue> {
         let tab = self.tab()?;
         let domain = self.domains.get_dyn(tab.domain).map_or(&() as &dyn std::any::Any, |s| s as &dyn std::any::Any);
-        tab.doc().current_value(key, &StatusCtx { diagnostics: &[], domain, index: &self.asset_index })
+        tab.doc().current_value(
+            key,
+            &StatusCtx { diagnostics: &[], domain, index: &self.asset_index, project: self.project.as_ref() },
+        )
     }
 }

@@ -836,7 +836,11 @@ fn focus_lw102_diagnostic_opens_game_rust_file_in_text_tab() {
     assert_eq!(text_doc.lang, "rust");
     assert_eq!(text_doc.highlights, BTreeSet::from([2]));
     assert!(text_doc.text.as_deref().unwrap_or_default().contains("DirectionalLight"));
-    assert_eq!(e.status_info().map(|s| s.counts), Some(vec!["3 lines".to_string(), "highlight=[2]".to_string()]));
+    let byte_str = editor_core::util::text::format_bytes(text_doc.text.as_deref().unwrap().len() as u64);
+    assert_eq!(
+        e.status_info().map(|s| s.counts),
+        Some(vec!["3 lines".to_string(), byte_str, "1 highlighted line".to_string()])
+    );
 
     // Focusing the same diagnostic again activates the existing tab rather than duplicating it.
     e.apply(Action::OpenAsset(environment_ref("day")));

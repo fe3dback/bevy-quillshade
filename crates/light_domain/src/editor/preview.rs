@@ -91,7 +91,11 @@ pub fn setup_preview_ui(app: &mut App) {
     }
 }
 
-fn light_debug_screenshot(mut frames: Local<u32>, mut actions: ResMut<editor_core::action::Actions>) {
+fn light_debug_screenshot(
+    mut frames: Local<u32>,
+    editor: Res<Editor>,
+    mut actions: ResMut<editor_core::action::Actions>,
+) {
     *frames += 1;
     if *frames == 4
         && let Ok(open) = std::env::var("SHADER_EDITOR_OPEN")
@@ -118,12 +122,14 @@ fn light_debug_screenshot(mut frames: Local<u32>, mut actions: ResMut<editor_cor
                 }
             }
         } else {
-            let rel = if open.starts_with("quillshade/light/") { open } else { format!("quillshade/light/{open}") };
+            let explicit_light = open.starts_with("quillshade/light/");
+            let rel = if explicit_light { open } else { format!("quillshade/light/{open}") };
             if let Some(r) = project_core::asset_ref::parse(
                 &rel,
                 crate::backend::LIGHT,
                 &[crate::backend::ENVIRONMENT_SUFFIX, crate::backend::CURVE_SUFFIX, crate::backend::TEXTURE_SUFFIX],
-            ) {
+            ) && (explicit_light || editor.project.as_ref().is_some_and(|p| p.root.join(&rel).is_file()))
+            {
                 actions.push(editor_core::action::Action::OpenAsset(r));
             }
         }

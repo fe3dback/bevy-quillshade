@@ -15,7 +15,7 @@ use crate::theme::{TEXT as TEXT_COLOR, TEXT_DIM, text};
 use crate::ui::icons::{IconId, IconRef};
 use crate::ui::text_view::TextViewBar;
 use crate::ui::widgets::subpane_box;
-use crate::util::text::plural;
+use crate::util::text::{format_bytes, plural};
 
 /// The text editor's window areas.
 pub struct TextEditor;
@@ -83,9 +83,6 @@ fn text_rows(t: &TextDoc) -> Vec<Box<dyn Scene>> {
     out.push(Box::new(text(t.rel.clone(), TEXT_COLOR, 15.0)));
     out.push(Box::new(text(format!("Generated {lang}, read-only"), TEXT_DIM, 12.0)));
     out.push(Box::new(text(format!("Source: {}", t.source.source_rel()), TEXT_DIM, 12.0)));
-    if let Some(src) = &t.text {
-        out.push(Box::new(text(plural(src.lines().count(), "line", "lines"), TEXT_DIM, 12.0)));
-    }
     if !t.highlights.is_empty() {
         out.push(Box::new(text(format_highlights(&t.highlights), TEXT_DIM, 12.0)));
     }
@@ -177,14 +174,14 @@ impl TabDoc for TextDoc {
     }
 
     fn status(&self, ctx: &StatusCtx) -> Option<StatusInfo> {
-        if self.highlights.is_empty() {
-            return None;
-        }
         let mut counts = Vec::new();
         if let Some(src) = &self.text {
             counts.push(plural(src.lines().count(), "line", "lines"));
+            counts.push(format_bytes(src.len() as u64));
         }
-        counts.push(format_highlights(&self.highlights));
+        if !self.highlights.is_empty() {
+            counts.push(plural(self.highlights.len(), "highlighted line", "highlighted lines"));
+        }
         Some(StatusInfo::new(false, ctx, counts))
     }
 }
@@ -261,5 +258,20 @@ mod tests {
         assert_eq!(doc.rel, "old.txt", "core cannot know the new file");
         doc.retarget(&p, moved.clone(), new);
         assert_eq!((doc.source.clone(), doc.rel.as_str(), doc.text.clone()), (moved, "new.txt", None));
+    }
+
+    #[test]
+    fn text_doc_status_reports_lines_bytes_and_highlights() {
+        let (_dir, p) = project();
+        let file = p.root.join("out.txt");
+        std::fs::write(&file, "one\ntwo\n").unwrap();
+        let mut doc = TextDoc::open(&p, source(), "note", file);
+        let ctx = StatusCtx::default();
+        let s = doc.status(&ctx).expect("text doc has status");
+        assert!(!s.dirty);
+        assert_eq!(s.counts, vec!["2 lines".to_string(), "8 B".to_string()]);
+        doc.set_highlights([1, 2]);
+        let s = doc.status(&ctx).unwrap();
+        assert_eq!(s.counts, vec!["2 lines".to_string(), "8 B".to_string(), "2 highlighted lines".to_string()]);
     }
 }

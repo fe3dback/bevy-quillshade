@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use editor_core::action::{Handled, TabAction};
-use editor_core::doc_kind::{DocCtx, StatusCtx, TabDoc};
+use editor_core::doc_kind::{DocCtx, StatusCtx, StatusInfo, TabDoc};
 use editor_core::dynval::{PropKey, PropValue};
 use editor_core::history::{History, MergeKey};
 use editor_core::preview::{PreviewHandle, start_preview};
@@ -312,6 +312,11 @@ impl<D: TextureDomain> TabDoc for TextureDoc<D> {
 
     fn is_read_only(&self) -> bool {
         self.is_internal()
+    }
+
+    fn status(&self, ctx: &StatusCtx) -> Option<StatusInfo> {
+        let counts = super::cache::status_counts::<D>(ctx.project, self.image_key(), self.asset.settings.is_srgb);
+        Some(StatusInfo::new(self.is_dirty(), ctx, counts))
     }
 
     fn revision(&self) -> u64 {

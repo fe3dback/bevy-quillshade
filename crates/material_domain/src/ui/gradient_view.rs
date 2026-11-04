@@ -1,42 +1,39 @@
 //! Gradients editor content (gradient design §8, layout 2 of the approved mockup): a large bar of the selected slot
 //! (a [`GradientStrip`] over a checkerboard), color stop handles above it, midpoint diamonds below each segment, a
-//! `t` ruler, and under them the selected stop's (or midpoint's) fields.
+//! `t` ruler, and under them a scrollable list of read-only color cards ([`GradientCardsList`], [`GradientStopCard`]).
 //!
 //! Handles and diamonds are absolutely positioned UI nodes (so picking, hover and drags come from `bevy_picking`, as
 //! in `curve_kit`'s curve view): a press on a stop selects it, a drag moves its `t` (one undo step, clamped to
-//! `0..1`, re-sorted as it passes other stops); a drag on a diamond sets its segment's midpoint; a click on the bar
-//! or on the empty strip above it adds a stop there (refused past `MAX_STOPS`, with a log message); a press there
-//! that moves [`DRAG_THRESHOLD`] or more before its release adds nothing. Keys are the gradients editor's input
-//! context (`editors::gradients`).
+//! `0..1`, re-sorted as it passes other stops) or deletes it when pulled upwards past [`DELETE_STOP_UP_PX`]; a drag on
+//! a diamond sets its segment's midpoint; a click on the bar or on the empty strip above it adds a stop there (refused
+//! past `MAX_STOPS`, with a log message); a press there that moves [`DRAG_THRESHOLD`] or more before its release adds
+//! nothing. Keys are the gradients editor's input context (`editors::gradients`).
 //!
-//! A click on a stop (press and release without passing [`DRAG_THRESHOLD`]) or on the color swatch of its fields
-//! opens Feathers' color picker for it: one hidden `FeathersColorInput` ([`StopColorInput`]) spans the stop's handle
-//! and the bar, so the picker's popover sits below the bar (above the handle when there is no room), and is opened
-//! through its lazy menu's `MenuEvent`. Its changes are undoable stop edits ([`stop_color_changed`]); while it is open
-//! a [`dialog::menu_barrier`] makes an outside click only close it (decision 0034).
+//! A click on a stop (press and release without passing [`DRAG_THRESHOLD`]) opens Feathers' color picker for it: one
+//! hidden `FeathersColorInput` ([`StopColorInput`]) spans the stop's handle and the bar, so the picker's popover sits
+//! below the bar (above the handle when there is no room), and is opened through its lazy menu's `MenuEvent`. Its
+//! changes are undoable stop edits ([`stop_color_changed`]); while it is open a [`dialog::menu_barrier`] makes an
+//! outside click only close it (decision 0034).
 
-use bevy::feathers::controls::{
-    ColorInputValue, ColorSwatchValue, FeathersColorInput, FeathersColorSwatch, FeathersMenuPopup, NumberInputValue,
-};
+use bevy::feathers::controls::{ColorInputValue, FeathersColorInput, FeathersMenuPopup};
 use bevy::input_focus::InputFocus;
 use bevy::input_focus::tab_navigation::NavAction;
 use bevy::prelude::*;
 use bevy::ui::ui_transform::UiGlobalTransform;
 use bevy::ui_widgets::{MenuAction, MenuEvent, ValueChange};
-use shader_graph_core::gradient::{MID_MAX, MID_MIN, Slot};
+use shader_graph_core::gradient::{MID_MAX, MID_MIN, Slot, Stop};
+use shader_project::AssetId;
 
 use super::gradient_strip::GradientStrip;
-use super::props::{PropField, linear_color, number_ranged};
-use super::tooltip::Tooltip;
-use super::{ACCENT, BORDER, TEXT, TEXT_DIM, VIEW_BG, ViewOf, dialog, text};
+use super::props::linear_color;
+use super::{ACCENT, BORDER, PANEL_BG, TEXT, TEXT_DIM, VIEW_BG, ViewOf, dialog, scroll_column, text};
 use crate::editors::gradients::GRADIENTS;
-use crate::editors::{SidebarKey, fill_sidebar_with};
 use crate::gradients_doc::{GradientSel, GradientsDoc};
 use editor_core::action::TabAction;
 use editor_core::history::MergeKey;
 
 use crate::ops::prelude::*;
-use crate::ops::{Action, Actions, Editor, GradientProp, GradientsAction, display_value};
+use crate::ops::{Action, Actions, Editor, GradientsAction};
 use crate::util::geom::{local_pos, logical_size};
 
 /// Height of the strip above the bar holding the stop handles (logical px).
@@ -44,7 +41,7 @@ const HANDLES_H: f32 = 24.0;
 /// Stop handle size (logical px).
 const HANDLE: Vec2 = Vec2::new(12.0, 16.0);
 /// Height of the gradient bar.
-const BAR_H: f32 = 80.0;
+const BAR_H: f32 = 120.0;
 /// Height of the strip below the bar holding the midpoint diamonds.
 const MIDS_H: f32 = 20.0;
 /// Midpoint diamond side (before its 45° turn).
@@ -58,6 +55,8 @@ const DIAMOND_COLOR: Color = Color::srgb(0.62, 0.64, 0.69);
 /// A pointer that moved less than this (logical px) since pressing a stop is a click: the stop stays put and the
 /// release opens its color picker. Bevy's picking starts a drag on any movement.
 pub const DRAG_THRESHOLD: f32 = 3.0;
+/// Pulling a dragged stop handle upwards by at least this many logical pixels deletes the stop.
+const DELETE_STOP_UP_PX: f32 = 32.0;
 /// Top of a stop handle in [`GradientCanvas`].
 const HANDLE_TOP: f32 = HANDLES_H - HANDLE.y - 3.0;
 
@@ -73,9 +72,13 @@ pub struct GradientBarImage;
 #[derive(Component, Default, Clone)]
 struct EmptyBarHint;
 
-/// The selected stop's or midpoint's fields under the ruler, refilled on the right sidebar's key.
+/// Scrollable list of read-only color cards below [`GradientCanvas`].
 #[derive(Component, Default, Clone)]
-pub struct GradientSelRow;
+pub struct GradientCardsList;
+
+/// Read-only color card for stop `.0` in the active gradient slot.
+#[derive(Component, Default, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GradientStopCard(pub usize);
 
 /// Handle of the stop with this index in the selected slot. A press selects it and a drag moves it; a click (press
 /// and release without a drag) can be told apart through `PointerClick` on the same entity.
@@ -97,10 +100,6 @@ pub struct MidHandle {
     index: usize,
     hovered: bool,
 }
-
-/// Swatch of stop `.0`'s color in [`GradientSelRow`]; a click opens the stop's color picker.
-#[derive(Component, Default, Clone)]
-struct StopSwatch(usize);
 
 /// The stop color picker: a hidden `FeathersColorInput` (only its popup shows) over the handle of stop `stop` and
 /// the bar, which its popover is placed against. Opened by [`open_stop_color`].
@@ -144,7 +143,7 @@ impl Plugin for GradientViewPlugin {
             // After the actions of this frame's gestures are applied: a drag shows without a frame of lag.
             .add_systems(
                 Update,
-                (sync_bar, place_handles, redraw_sel_row, sync_fields, stop_color_popup).after(crate::apply_actions),
+                (sync_bar, place_handles, redraw_color_cards, stop_color_popup).after(crate::apply_actions),
             )
             .add_observer(handle_press)
             .add_observer(stop_click)
@@ -192,7 +191,11 @@ pub fn gradient_view() -> impl Scene {
         Visibility::Hidden
         Children [
             GradientCanvas
-            Node { height: px(HANDLES_H + BAR_H + MIDS_H + RULER_H), flex_shrink: 0.0 }
+            Node {
+                height: px(HANDLES_H + BAR_H + MIDS_H + RULER_H),
+                margin: UiRect::top(px(16)),
+                flex_shrink: 0.0,
+            }
             Children [
                 GradientBarImage
                 GradientStrip
@@ -237,8 +240,11 @@ pub fn gradient_view() -> impl Scene {
                 Visibility::Hidden
             ]
             --
-            GradientSelRow
-            Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(8), min_height: px(28) }
+            @text("Used Colors", TEXT_DIM, 12.0)
+            --
+            @scroll_column()
+            GradientCardsList
+            Node { row_gap: px(8), padding: UiRect::bottom(px(24)) }
         ]
     }
 }
@@ -374,86 +380,96 @@ fn place_handles(
     }
 }
 
-/// The selected stop's `T` and color, or the selected midpoint, or a hint; refilled when the right sidebar is.
-fn redraw_sel_row(
+type CardsKey = (u64, AssetId, usize, u64);
+
+/// Populates [`GradientCardsList`] with one read-only [`GradientStopCard`] per stop in the active slot (or an empty
+/// hint when the slot has no stops).
+fn redraw_color_cards(
     editor: Res<Editor>,
-    row: Query<Entity, With<GradientSelRow>>,
-    mut key: Local<SidebarKey>,
+    list: Query<Entity, With<GradientCardsList>>,
+    mut last: Local<Option<CardsKey>>,
     mut commands: Commands,
 ) {
-    let Some((g, slot)) = active(&editor) else { return key.forget() };
-    fill_sidebar_with(&mut commands, &row, &mut key, SidebarKey::now(&editor), || sel_row(g, slot));
-}
-
-fn sel_row(g: &GradientsDoc, slot: &Slot) -> Vec<Box<dyn Scene>> {
-    let field = |w: Box<dyn Scene>| -> Box<dyn Scene> { Box::new(bsn! { Node { width: px(140) } Children [ @{w} ] }) };
-    match g.selection {
-        Some(GradientSel::Stop(i)) if i < slot.stops.len() => {
-            let stop = slot.stops[i];
-            let (color, swatch) = (stop_color(stop.color).with_alpha(stop.color[3]), StopSwatch(i));
-            vec![
-                Box::new(text(format!("Stop {} of {}", i + 1, slot.stops.len()), TEXT, 13.0)),
-                Box::new(text("T", TEXT_DIM, 13.0)),
-                field(number_ranged(GradientProp::Stop(i, 0), 0, stop.t, Some((0.0, 1.0)), None)),
-                Box::new(text("Color", TEXT_DIM, 13.0)),
-                Box::new(bsn! {
-                    @FeathersColorSwatch
-                    ColorSwatchValue(color)
-                    Node { width: px(22), height: px(22), flex_shrink: 0.0 }
-                    Tooltip("Pick the stop's color (or click its handle)")
-                    swatch
-                }),
-            ]
-        }
-        Some(GradientSel::Mid(i)) if i + 1 < slot.stops.len() => vec![
-            Box::new(text(format!("Segment {} to {}", i + 1, i + 2), TEXT, 13.0)),
-            Box::new(text("Midpoint", TEXT_DIM, 13.0)),
-            field(number_ranged(GradientProp::Mid(i), 0, slot.stops[i].mid, Some((MID_MIN, MID_MAX)), None)),
-        ],
-        _ => {
-            let hint = if slot.is_empty() {
-                "Click the bar to add a stop."
-            } else {
-                "Click a stop or a midpoint to edit it; click the bar or above it to add a stop."
-            };
-            vec![Box::new(text(hint, TEXT_DIM, 13.0))]
-        }
-    }
-}
-
-/// Keeps the `T` / `Midpoint` field and the color swatch in step with the model while a handle is dragged (merged
-/// edits leave the row as it is); the field being typed into is left alone.
-fn sync_fields(
-    editor: Res<Editor>,
-    focus: Option<Res<InputFocus>>,
-    fields: Query<(Entity, &PropField, &NumberInputValue)>,
-    mut swatches: Query<(&StopSwatch, &mut ColorSwatchValue)>,
-    parents: Query<&ChildOf>,
-    mut commands: Commands,
-) {
-    if !editor.is_changed() {
+    let Some((g, slot)) = active(&editor) else {
+        *last = None;
+        return;
+    };
+    let key = (editor.project_generation, g.id.clone(), g.slot, g.revision);
+    if last.as_ref() == Some(&key) {
         return;
     }
-    let Some((_, slot)) = active(&editor) else { return };
-    let typing = focus.and_then(|f| f.get()).and_then(|f| parents.get(f).ok()).map(ChildOf::parent);
-    for (e, field, shown) in &fields {
-        if Some(e) == typing || !matches!(field.target.downcast(), Some(GradientProp::Stop(..) | GradientProp::Mid(_)))
-        {
-            continue;
-        }
-        let Some(v) = editor.current_value(&field.target) else { continue };
-        let want = NumberInputValue::F32(display_value(v.as_f32()));
-        if *shown != want {
-            // `try_`: the row may be refilled (its fields despawned) in this frame.
-            commands.entity(e).try_insert(want);
-        }
+    let Ok(list) = list.single() else { return };
+    *last = Some(key);
+    commands.entity(list).despawn_children();
+    if slot.stops.is_empty() {
+        commands.spawn_scene(bsn! {
+            @text("Empty gradient slot - click the gradient bar above to add a color stop.", TEXT_DIM, 12.0)
+            ChildOf(list)
+        });
+        return;
     }
-    for (sw, mut value) in &mut swatches {
-        let Some(stop) = slot.stops.get(sw.0) else { continue };
-        let want = stop_color(stop.color).with_alpha(stop.color[3]);
-        if value.0 != want {
-            value.0 = want;
+    for (i, stop) in slot.stops.iter().enumerate() {
+        let card = stop_card(i, stop);
+        commands.spawn_scene(bsn! { @{card} ChildOf(list) });
+    }
+}
+
+fn stop_card(i: usize, stop: &Stop) -> impl Scene {
+    let card = GradientStopCard(i);
+    let srgb_color = stop_color(stop.color);
+    let srgba = srgb_color.to_srgba();
+    let to_u8 = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let (r8, g8, b8) = (to_u8(srgba.red), to_u8(srgba.green), to_u8(srgba.blue));
+    let hsla = Hsla::from(srgb_color);
+    let h = if hsla.saturation <= 1e-6 || !hsla.hue.is_finite() { 0.0 } else { hsla.hue.clamp(0.0, 360.0) };
+    let s = hsla.saturation.clamp(0.0, 1.0) * 100.0;
+    let l = hsla.lightness.clamp(0.0, 1.0) * 100.0;
+    let info1 = format!("Stop #{i}   |   T: {:.3}", stop.t);
+    let info2 = format!("RGB: ({r8}, {g8}, {b8})   |   #{r8:02X}{g8:02X}{b8:02X}");
+    let info3 = format!("HSL: ({h:.0} deg, {s:.0}%, {l:.0}%)");
+    bsn! {
+        card
+        Node {
+            width: percent(100),
+            flex_direction: FlexDirection::Row,
+            align_items: AlignItems::Center,
+            column_gap: px(12),
+            padding: UiRect::all(px(10)),
+            border: UiRect::all(px(1)),
+            border_radius: BorderRadius::all(px(4)),
         }
+        BackgroundColor(PANEL_BG)
+        BorderColor::all(BORDER)
+        Children [
+            Node {
+                width: px(64),
+                height: px(64),
+                flex_shrink: 0.0,
+                border: UiRect::all(px(1)),
+                border_radius: BorderRadius::all(px(4)),
+            }
+            BackgroundColor(srgb_color)
+            BorderColor::all(BORDER)
+            --
+            Node {
+                width: px(1),
+                height: px(64),
+                flex_shrink: 0.0,
+            }
+            BackgroundColor(BORDER)
+            --
+            Node {
+                flex_direction: FlexDirection::Column,
+                row_gap: px(4),
+            }
+            Children [
+                @text(info1, TEXT, 13.0)
+                --
+                @text(info2, TEXT_DIM, 12.0)
+                --
+                @text(info3, TEXT_DIM, 12.0)
+            ]
+        ]
     }
 }
 
@@ -528,6 +544,14 @@ fn handle_drag(
                 Some(GradientSel::Stop(j)) if *moved => j,
                 _ => *index,
             };
+            if ev.distance.y <= -DELETE_STOP_UP_PX {
+                let remaining: Vec<_> =
+                    slot.stops.iter().enumerate().filter(|(idx, _)| *idx != i).map(|(_, s)| *s).collect();
+                actions.push(Action::from(GradientsAction::SetStops(remaining, None, key)));
+                actions.push(Action::Tab(TabAction::CommitInline));
+                drag.0 = None;
+                return;
+            }
             *moved = true;
             actions.push(Action::from(GradientsAction::SetStopT(i, (*from + dt).clamp(0.0, 1.0), key)));
         }
@@ -555,23 +579,12 @@ fn handle_drag_end(
 }
 
 /// A click on a stop handle that did not move it (bevy_picking sends `PointerClick` before `PointerDragEnd`, so the
-/// drag is still known here), or on the stop's swatch in [`GradientSelRow`], opens the stop's color picker.
-fn stop_click(
-    mut ev: On<PointerClick>,
-    stops: Query<&StopHandle>,
-    swatches: Query<&StopSwatch>,
-    drag: Res<GradientDrag>,
-    mut commands: Commands,
-) {
-    let target = ev.event_target();
-    let stop = match (stops.get(target), swatches.get(target)) {
-        (Ok(h), _) => h.index,
-        (_, Ok(s)) => s.0,
-        _ => return,
-    };
+/// drag is still known here) opens the stop's color picker.
+fn stop_click(mut ev: On<PointerClick>, stops: Query<&StopHandle>, drag: Res<GradientDrag>, mut commands: Commands) {
+    let Ok(h) = stops.get(ev.event_target()) else { return };
     ev.propagate(false);
     if ev.button == PointerButton::Primary && !matches!(drag.0, Some(Drag::Stop { moved: true, .. })) {
-        open_stop_color(&mut commands, stop);
+        open_stop_color(&mut commands, h.index);
     }
 }
 

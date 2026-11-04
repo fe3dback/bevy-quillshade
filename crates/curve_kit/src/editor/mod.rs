@@ -53,7 +53,11 @@ mod view;
 pub use doc::CurveDoc;
 pub use input::{CurveCtx, CurveEditor, Nudge};
 pub use ops::{CurveAction, CurveClipboard, CurveEdit, CurveProp, PASTE_STEP, curve_key};
-pub use view::{CURVE_COLOR, CurveCanvas, CurveEditorPlugin, CurveHandle, CurvePlotImage, CurveViewBar, curve_view};
+pub use view::{
+    CURVE_COLOR, CURVE_PRESETS, CurveCanvas, CurveEditorPlugin, CurveHandle, CurvePlotImage, CurvePreset,
+    CurvePresetCard, CurvePresetPreview, CurvePresetsPane, CurveViewBar, PRESET_CARD_BG, curve_view,
+    rasterize_preset_preview,
+};
 
 /// The icon of curve assets (secondbar, Project tree, "New Curve...").
 pub const CURVE_ICON: IconRef = IconRef::new(&icon_rs::SPLINE);

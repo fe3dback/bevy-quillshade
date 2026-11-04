@@ -6,13 +6,15 @@
 //! [`click_actions`], [`row_menu`] and [`drop_action`]. Collapse state is kept per tree in `Editor::collapsed`.
 
 use std::collections::BTreeSet;
+use std::path::Path;
 
 use crate::action::Action;
 pub use crate::action::TreeId;
 use crate::menu::MenuEntry;
 use crate::ui::icons::{IconId, IconRef};
+use crate::util::text::{format_bytes, format_system_time};
 use bevy::prelude::*;
-use project_core::{AssetRef, DomainId};
+use project_core::{AssetRef, DomainId, Project};
 
 use crate::domain::{GameAssetsDef, TreeAsset, TreeFolder};
 use crate::state::editor::Editor;
@@ -332,4 +334,100 @@ pub fn active_game_assets(editor: &Editor) -> Option<&GameAssetsDef> {
 pub fn project_tools(editor: &Editor) -> Vec<(String, Action)> {
     let tools = editor.domain_list.tools(DomainId::PROJECT).iter();
     tools.map(|t| (t.title.to_string(), Action::OpenTool { domain: DomainId::PROJECT, id: t.id, arg: None })).collect()
+}
+
+fn append_file_metadata(lines: &mut Vec<String>, path: &Path, include_size: bool) {
+    let Ok(meta) = std::fs::metadata(path) else { return };
+    if include_size {
+        lines.push(format!("Size: {}", format_bytes(meta.len())));
+    }
+    if let Ok(modified) = meta.modified() {
+        lines.push(format!("Modified: {}", format_system_time(modified)));
+    }
+    if let Ok(created) = meta.created() {
+        lines.push(format!("Created: {}", format_system_time(created)));
+    }
+}
+
+/// Hover tooltip for a row in the Project or Game Assets tree.
+pub fn tree_item_tooltip(project: Option<&Project>, domain: DomainId, is_game_tree: bool, item: &TreeItem) -> String {
+    match item {
+        TreeItem::Asset(r) => {
+            let rel = r.source_rel();
+            let mut lines = vec![rel.clone()];
+            if let Some(p) = project {
+                append_file_metadata(&mut lines, &p.root.join(&rel), true);
+            }
+            lines.join("\n")
+        }
+        TreeItem::GameFile(path) => {
+            let mut lines = vec![format!("assets/{path}")];
+            if let Some(p) = project {
+                append_file_metadata(&mut lines, &p.assets_dir().join(path), true);
+            }
+            lines.join("\n")
+        }
+        TreeItem::Folder(f) => {
+            let header = match (is_game_tree, f.is_empty()) {
+                (true, true) => "assets/".to_string(),
+                (true, false) => format!("assets/{f}/"),
+                (false, true) => format!("quillshade/{}/", domain.as_str()),
+                (false, false) => format!("quillshade/{}/{f}/", domain.as_str()),
+            };
+            let mut lines = vec![header];
+            if let Some(p) = project {
+                let dir = if is_game_tree { p.assets_dir().join(f) } else { p.domain_dir(domain).join(f) };
+                append_file_metadata(&mut lines, &dir, false);
+            }
+            lines.join("\n")
+        }
+        TreeItem::Virtual(r) => format!("{}\nBuilt-in default texture", r.path),
+        TreeItem::VirtualFolder(_, label) => (*label).to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tree_item_tooltips_include_paths_and_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname = \"g\"\n").unwrap();
+        std::fs::create_dir_all(dir.path().join("assets/textures")).unwrap();
+        let project = Project::create(dir.path()).unwrap();
+        let material = DomainId::new("material");
+
+        let mat_dir = project.domain_dir(material).join("pbr");
+        std::fs::create_dir_all(&mat_dir).unwrap();
+        let mat_file = mat_dir.join("stone.material.ron");
+        std::fs::write(&mat_file, "Asset(format_version: 2)").unwrap();
+
+        let game_file = project.assets_dir().join("textures/rock.png");
+        std::fs::write(&game_file, [0u8; 64]).unwrap();
+
+        let asset_ref = AssetRef { domain: material, path: "pbr/stone".into(), suffix: "material" };
+        let asset_tip = tree_item_tooltip(Some(&project), material, false, &TreeItem::Asset(asset_ref));
+        assert!(asset_tip.starts_with("quillshade/material/pbr/stone.material.ron\n"), "{asset_tip}");
+        assert!(asset_tip.contains("Size: 24 B"), "{asset_tip}");
+        assert!(asset_tip.contains("Modified: "), "{asset_tip}");
+
+        let game_tip =
+            tree_item_tooltip(Some(&project), material, true, &TreeItem::GameFile("textures/rock.png".into()));
+        assert!(game_tip.starts_with("assets/textures/rock.png\n"), "{game_tip}");
+        assert!(game_tip.contains("Size: 64 B"), "{game_tip}");
+        assert!(game_tip.contains("Modified: "), "{game_tip}");
+
+        let proj_folder_tip = tree_item_tooltip(Some(&project), material, false, &TreeItem::Folder("pbr".into()));
+        assert!(proj_folder_tip.starts_with("quillshade/material/pbr/"), "{proj_folder_tip}");
+        assert!(proj_folder_tip.contains("Modified: "), "{proj_folder_tip}");
+
+        let game_folder_tip = tree_item_tooltip(Some(&project), material, true, &TreeItem::Folder("textures".into()));
+        assert!(game_folder_tip.starts_with("assets/textures/"), "{game_folder_tip}");
+        assert!(game_folder_tip.contains("Modified: "), "{game_folder_tip}");
+
+        let virt_ref = AssetRef { domain: material, path: "@internal/white".into(), suffix: "texture" };
+        let virt_tip = tree_item_tooltip(Some(&project), material, false, &TreeItem::Virtual(virt_ref));
+        assert_eq!(virt_tip, "@internal/white\nBuilt-in default texture");
+    }
 }
