@@ -1,0 +1,209 @@
+DtoAsset(
+  format_version: 1,
+  id: "019b76da-a800-7bc4-bfff-f535c9495a04",
+  doc: "Catalog entry for a physical book displayed on the 3D library shelf.",
+  fields: [
+    Field(
+      id: "019b76da-a800-7e90-8e4e-ca9c79a73a56",
+      name: "title",
+      ty: String,
+      category: "Identity",
+      is_name: true,
+      default: String("Untitled Tome"),
+      settings: FieldSettings(
+        max_len: Some(64),
+        doc: "Display title of the tome.",
+        required: true,
+      ),
+    ),
+    Field(
+      id: "019b76da-a800-7bcd-8743-b42748b2544d",
+      name: "author",
+      ty: Dto("019b76da-a800-710a-8a7d-0c41af3e4571"), // library/author
+      category: "Identity",
+      is_name: true,
+      default: Dto({
+        "019b76da-a800-71e8-9ce5-03dd61ff0ff3": String("Anonymous"), // pen_name
+        "019b76da-a800-74e2-89e3-22a2276a8d37": U8(1), // guild_rank
+        "019b76da-a800-7f4d-b37a-02965bae5380": Dto({ // homeworld
+          "019b76da-a800-720f-adf0-edac3b118f01": F32(1.0), // gravity_g
+          "019b76da-a800-72ea-ae91-02447f352ff3": String("Aethelgard"), // planet_name
+          "019b76da-a800-79eb-b5c2-6ae9403b6860": Dto({ // coordinates
+            "019b76da-a800-75aa-9356-a0bc9eea37e3": Vec3((0.0, 0.0, 0.0)), // galactic_xyz
+            "019b76da-a800-7b9a-9b7b-7e6df8b91638": String("Coreward"), // sector_name
+          }),
+        }),
+      }),
+      settings: FieldSettings(
+        doc: "Attributed author and origin metadata.",
+      ),
+    ),
+    Field(
+      id: "019b76da-a800-7046-87cb-b47ae46d2dea",
+      name: "pages",
+      ty: U32,
+      category: "Specs",
+      is_name: true,
+      default: U32(120),
+      settings: FieldSettings(
+        min: Some(1.0),
+        max: Some(2000.0),
+        step: Some(10.0),
+        doc: "Total leaf count.",
+      ),
+    ),
+    Field(
+      id: "019b76da-a800-7772-814d-7a0d3b540a8b",
+      name: "weight_kg",
+      ty: F32,
+      category: "Specs",
+      default: F32(0.8),
+      settings: FieldSettings(
+        min: Some(0.05),
+        max: Some(25.0),
+        step: Some(0.05),
+        doc: "Physical weight in kilograms.",
+      ),
+    ),
+    Field(
+      id: "019b76da-a800-715d-b2f2-c0b175cfeebe",
+      name: "cover_tint",
+      ty: Color,
+      category: "Appearance",
+      default: Color((0.45, 0.25, 0.15, 1.0)),
+    ),
+    Field(
+      id: "019b76da-a800-7ef9-8ed6-fe8621637797",
+      name: "dimensions_cm",
+      ty: Vec3,
+      category: "Appearance",
+      default: Vec3((15.0, 22.0, 3.0)),
+      settings: FieldSettings(
+        min: Some(1.0),
+        max: Some(100.0),
+        step: Some(0.5),
+        doc: "Book width (X), height (Y), and spine thickness (Z) in centimeters.",
+      ),
+    ),
+    Field(
+      id: "019b76da-a800-7c70-a0d0-f9cb3e01b971",
+      name: "is_rare_edition",
+      ty: Bool,
+      category: "Catalog",
+      default: Bool(false),
+    ),
+    Field(
+      id: "019b76da-a800-77d7-8fbc-023f5a9d3a57",
+      name: "wear_curve",
+      ty: Curve,
+      category: "Visuals",
+      default: Curve("019b76da-a800-783e-be72-971715772890"), // material:common/pulse
+      settings: FieldSettings(
+        doc: "Aging and cover-sheen transfer curve.",
+      ),
+    ),
+    Field(
+      id: "019b76da-a800-7054-ae19-727de624cea1",
+      name: "spine_gradient",
+      ty: Gradient,
+      category: "Visuals",
+      default: Gradient("019b76da-a800-7236-9c55-fbb62d9f20ab", 1007), // material:common/terrain.Terrain height
+      settings: FieldSettings(
+        doc: "OKLab color ramp across the book spine.",
+      ),
+    ),
+    Field(
+      id: "019b76da-a800-7dc4-87ec-33dad4ebefdd",
+      name: "cover_material",
+      ty: Material,
+      category: "Visuals",
+      default: Material("019b76da-a800-75c1-939b-7e0a98afeaba"), // material:env/rock_wet
+      settings: FieldSettings(
+        doc: "Quillshade material asset assigned to the book binding.",
+      ),
+    ),
+    Field(
+      id: "019b76da-a800-7dcd-968c-44a6e3c50b79",
+      name: "seal_texture",
+      ty: Texture,
+      category: "Visuals",
+      default: Texture("019b76da-a800-7bbb-869e-d9578e3a856f"), // material:textures/atlas
+      settings: FieldSettings(
+        doc: "Quillshade texture policy for the guild wax seal.",
+      ),
+    ),
+    Field(
+      id: "019b76da-a800-71a2-8080-15f8f2439e28",
+      name: "reading_ambience",
+      ty: LightEnvironment,
+      category: "Visuals",
+      default: LightEnvironment("019b76da-a800-7294-a4ff-75e62eae7ad0"), // light:day
+      settings: FieldSettings(
+        doc: "Recommended reading lighting preset (`LightPreset`).",
+      ),
+    ),
+    Field(
+      id: "019b76da-a800-7d53-8406-08c30ca6b091",
+      name: "ex_libris_stamp",
+      ty: GameAsset(Image),
+      category: "Visuals",
+      default: GameAsset("textures/atlas.png"),
+      settings: FieldSettings(
+        doc: "Raw game image path (`assets/<path>`) for the bookplate stamp.",
+      ),
+    ),
+    Field(
+      id: "019b76da-a800-79ba-b3cc-369ab24813db",
+      name: "companion_volume",
+      ty: SoftRef("019b76da-a800-7bc4-bfff-f535c9495a04"), // library/book
+      category: "Catalog",
+      default: SoftRef("00000000-0000-0000-0000-000000000000"),
+      settings: FieldSettings(
+        doc: "Optional companion or sequel tome in the archive (`SoftRef<Book>`).",
+      ),
+    ),
+    Field(
+      id: "019b76da-a800-71d9-8c32-812ad7c6b767",
+      name: "tags",
+      ty: Set(Enum("019b76da-a800-74b2-913b-3ea934ed58aa")), // library/book_tag
+      category: "Classification & Lore",
+      default: Set([]),
+      settings: FieldSettings(
+        doc: "Subject classification tags (`BTreeSet<BookTag>`).",
+      ),
+    ),
+    Field(
+      id: "019b76da-a800-71a4-b4bf-9d4902db8449",
+      name: "enchantment",
+      ty: Enum("019b76da-a800-79d2-a38c-b1db4d3dafb1"), // library/enchantment
+      category: "Arcane & Effects",
+      default: Enum(
+        variant: "019b76da-a800-7b91-8bf4-9fe039f94913", // library/enchantment::unenchanted
+        fields: {},
+      ),
+      settings: FieldSettings(
+        doc: "Protective arcane enchantment (`Enchantment` tagged union).",
+      ),
+    ),
+    Field(
+      id: "019b76da-a800-7a20-afe1-8241ecebe4aa",
+      name: "chapters",
+      ty: Array(LocalizedString),
+      category: "Content & Structure",
+      default: Array([]),
+      settings: FieldSettings(
+        doc: "Ordered chapter headings (`Vec<LocalizedString>`).",
+      ),
+    ),
+    Field(
+      id: "019b76da-a800-7eec-af09-965388ede030",
+      name: "errata_note",
+      ty: Option(LocalizedString),
+      category: "Content & Structure",
+      default: Option(None),
+      settings: FieldSettings(
+        doc: "Optional archivist errata or margin note (`Option<LocalizedString>`).",
+      ),
+    ),
+  ],
+)

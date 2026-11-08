@@ -174,9 +174,9 @@ pub fn commit(
     Ok(committed)
 }
 
-/// Writes only the umbrella crate files (`Cargo.toml`, `src/lib.rs`) from `project`'s settings, with no domain output
-/// and no orphan scan: what saving the project settings rewrites (design §14.2). A foreign file there is
-/// [`Committed::blocked`] (E008), not overwritten.
+/// Writes only the umbrella crate files (`Cargo.toml`, `src/lib.rs`, `src/common/`) from `project`'s settings, with
+/// no domain output and no orphan scan: what saving the project settings rewrites (design §14.2). A foreign file
+/// there is [`Committed::blocked`] (E008), not overwritten.
 pub fn write_umbrella(project: &Project, crates: &[CrateContribution]) -> io::Result<Committed> {
     commit(project, &[], crates, false)
 }
@@ -361,7 +361,13 @@ mod tests {
         }
 
         fn crate_contribution(&self) -> CrateContribution {
-            CrateContribution { domain: self.id, plugin: "FakePlugin", bevy_features: &[], dependencies: &[] }
+            CrateContribution {
+                domain: self.id,
+                plugin: "FakePlugin",
+                loader: None,
+                bevy_features: &[],
+                dependencies: &[],
+            }
         }
 
         fn index(&self, _project: &Project) -> DomainIndex {
@@ -447,6 +453,47 @@ mod tests {
         assert!(e008[0].is_error() && e008[0].message.contains("crates/quillshade/src/lib.rs"), "{:?}", e008[0]);
         assert_eq!(std::fs::read_to_string(&lib).unwrap(), "// mine\n");
         assert!(p.output_dir(A).join("a.txt").is_file() && p.crate_dir().join("Cargo.toml").is_file());
+    }
+
+    #[test]
+    fn run_and_write_umbrella_emit_common_and_block_foreign_common_file() {
+        let (_d, p) = project();
+        let a = Fake::new(A, &["a.txt"]);
+        let r = run(&p, &[&a], &[], false, false).unwrap();
+        assert!(!r.has_errors(), "{:?}", r.diagnostics);
+        for rel in ["src/common/mod.rs", "src/common/curve.rs", "src/common/gradient.rs"] {
+            let path = p.crate_dir().join(rel);
+            assert!(path.is_file(), "{}", path.display());
+            assert!(r.changes.contains(&Change::Create(path)), "{:?}", r.changes);
+        }
+
+        // Fresh project: `write_umbrella` alone writes the three `src/common/` files.
+        let (_d2, p2) = project();
+        let c = write_umbrella(&p2, &[a.crate_contribution()]).unwrap();
+        assert!(c.blocked.is_empty());
+        for rel in ["src/common/mod.rs", "src/common/curve.rs", "src/common/gradient.rs"] {
+            let path = p2.crate_dir().join(rel);
+            assert!(path.is_file(), "{}", path.display());
+            assert!(c.changes.contains(&Change::Create(path)), "{:?}", c.changes);
+        }
+
+        // Foreign file at `src/common/curve.rs` is blocked with E008.
+        let (_d3, p3) = project();
+        let foreign_curve = p3.crate_dir().join("src/common/curve.rs");
+        std::fs::create_dir_all(foreign_curve.parent().unwrap()).unwrap();
+        std::fs::write(&foreign_curve, "// hand-written curve\n").unwrap();
+        let r3 = run(&p3, &[&a], &[], false, false).unwrap();
+        let e008: Vec<_> = r3.diagnostics.iter().filter(|d| d.code == "E008").collect();
+        assert_eq!(e008.len(), 1, "{:?}", r3.diagnostics);
+        assert_eq!(e008[0].domain, None);
+        assert!(
+            e008[0].is_error() && e008[0].message.contains("crates/quillshade/src/common/curve.rs"),
+            "{:?}",
+            e008[0]
+        );
+        assert_eq!(std::fs::read_to_string(&foreign_curve).unwrap(), "// hand-written curve\n");
+        assert!(p3.crate_dir().join("src/common/mod.rs").is_file());
+        assert!(p3.crate_dir().join("src/common/gradient.rs").is_file());
     }
 
     #[test]

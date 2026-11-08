@@ -1,0 +1,41 @@
+CollectionAsset(
+  format_version: 1,
+  id: "019b76da-a800-7e1d-b762-58972a4576b0",
+  dto: "019b76da-a800-712a-9a62-1578813e96dd", // library/library_rules
+  rows: [
+    Row(
+      id: "019b76da-a800-7fc7-a096-f667e8679551",
+      values: {
+        "019b76da-a800-708b-a8e5-8ac0038f12f2": F32(0.28), // shelf_spacing_m
+        "019b76da-a800-7382-b650-17e00746dc8b": String("Grand Archive - Shelf A"), // shelf_label
+        "019b76da-a800-74e5-ada5-fc7dc4da1c18": SoftRef("019b76da-a800-7863-ab90-c78a1ebcadbd"), // featured_book, library/books_core#Codex of Emberlight | Aurelia Vance | Solis Prime | Helios Reach | 340
+        "019b76da-a800-7511-95b0-acbac17576af": F32(2.5), // late_fee_coins_per_day
+        "019b76da-a800-760c-ac56-eeeb066fae51": Map([ // shelf_quotas
+          (Enum(
+            variant: "019b76da-a800-7ca3-a690-e9e5e31f8de5", // library/book_tag::alchemy
+            fields: {},
+          ), U32(12)),
+          (Enum(
+            variant: "019b76da-a800-72eb-aae5-7bc43d83a13b", // library/book_tag::forbidden
+            fields: {},
+          ), U32(3)),
+          (Enum(
+            variant: "019b76da-a800-7f31-ba72-111e126ca45f", // library/book_tag::history
+            fields: {},
+          ), U32(10)),
+          (Enum(
+            variant: "019b76da-a800-7e72-a115-de7e0c2de5d5", // library/book_tag::star_lore
+            fields: {},
+          ), U32(8)),
+          (Enum(
+            variant: "019b76da-a800-7a23-a664-90867aa170ff", // library/book_tag::treatise
+            fields: {},
+          ), U32(15)),
+        ]),
+        "019b76da-a800-7623-b26f-fc4de6c2ffa4": F32(1.5), // rare_glow_boost
+        "019b76da-a800-7666-bf45-99fbbf0aafa8": F32(3.2), // book_scale
+        "019b76da-a800-7f57-b411-f8d64e01c567": U32(14), // max_loan_days
+      },
+    ),
+  ],
+)

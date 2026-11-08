@@ -1,0 +1,74 @@
+EnumAsset(
+  format_version: 1,
+  id: "019b76da-a800-79d2-a38c-b1db4d3dafb1",
+  doc: "Protective arcane seal or temporal ward bound to a tome.",
+  variants: [
+    EnumVariant(
+      id: "019b76da-a800-7b91-8bf4-9fe039f94913",
+      name: "unenchanted",
+      doc: "Mundane binding with no active spell.",
+    ),
+    EnumVariant(
+      id: "019b76da-a800-7062-b25c-689e91e35a02",
+      name: "ward",
+      doc: "Protective abjuration barrier woven into the cover.",
+      fields: [
+        Field(
+          id: "019b76da-a800-7ba4-8866-30bea12267e0",
+          name: "strength",
+          ty: F32,
+          is_name: true,
+          default: F32(0.75),
+          settings: FieldSettings(
+            min: Some(0.0),
+            max: Some(1.0),
+            step: Some(0.05),
+            slider: true,
+            doc: "Barrier attenuation factor (0..=1).",
+          ),
+        ),
+        Field(
+          id: "019b76da-a800-7e31-bd85-3d19eac1ae84",
+          name: "school",
+          ty: LocalizedString,
+          is_name: true,
+          default: LocalizedString("Abjuration"),
+          settings: FieldSettings(
+            max_len: Some(32),
+            doc: "Arcane school of the protective ward.",
+            required: true,
+          ),
+        ),
+      ],
+    ),
+    EnumVariant(
+      id: "019b76da-a800-79df-9cee-5598e5923d37",
+      name: "chrono_lock",
+      doc: "Temporal stasis seal preserving fragile pages.",
+      fields: [
+        Field(
+          id: "019b76da-a800-7561-8a69-3df4d2680d44",
+          name: "seal_duration",
+          ty: Duration,
+          is_name: true,
+          default: Duration(30.0),
+          settings: FieldSettings(
+            min: Some(1.0),
+            max: Some(3600.0),
+            step: Some(5.0),
+            doc: "Stasis cycle duration in seconds.",
+          ),
+        ),
+        Field(
+          id: "019b76da-a800-7a42-9b86-3ee31f1c5900",
+          name: "paradox_safe",
+          ty: Bool,
+          default: Bool(true),
+          settings: FieldSettings(
+            doc: "Whether temporal readers are shielded from causal loops.",
+          ),
+        ),
+      ],
+    ),
+  ],
+)

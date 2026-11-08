@@ -105,6 +105,8 @@ pub struct AssetIndex {
     by_id: BTreeMap<AssetUuid, AssetEntry>,
     /// Sub-item UUID → `(domain, "<asset_path>::<sub_label>")` for D27 path comments.
     sub_by_id: BTreeMap<AssetUuid, (DomainId, String)>,
+    /// Sub-item UUID → owning asset UUID (winner of duplicates).
+    sub_owner: BTreeMap<AssetUuid, AssetUuid>,
     /// Every file with a valid id, duplicate losers included.
     by_ref: BTreeMap<AssetRef, AssetUuid>,
     /// Forward edges, keyed by file: duplicate files share a UUID but are different referrers.
@@ -172,11 +174,16 @@ impl AssetIndex {
                 if let Some(sub_uuid) = sub.uuid {
                     self.sub_by_id
                         .insert(sub_uuid, (winner.asset.domain, format!("{}::{}", winner.asset.path, sub.label)));
+                    self.sub_owner.insert(sub_uuid, id);
                 }
             }
             self.by_id.insert(id, AssetEntry { id, asset: winner.asset.clone(), sub_items: winner.sub_items.clone() });
         }
         self.parts = parts;
+    }
+
+    fn target_entry(&self, id: AssetUuid) -> Option<&AssetEntry> {
+        self.by_id.get(&id).or_else(|| self.sub_owner.get(&id).and_then(|owner| self.by_id.get(owner)))
     }
 
     /// Changes whenever the index is built or a domain replaced; never repeats within the process.
@@ -222,6 +229,17 @@ impl AssetIndex {
                     todo.push(referrer.clone());
                 }
             }
+            if let Some(entry) = self.by_id.get(&id) {
+                for sub in &entry.sub_items {
+                    if let Some(sub_uuid) = sub.uuid {
+                        for referrer in self.refs_to(sub_uuid) {
+                            if out.insert(referrer.clone()) {
+                                todo.push(referrer.clone());
+                            }
+                        }
+                    }
+                }
+            }
         }
         out
     }
@@ -231,7 +249,7 @@ impl AssetIndex {
         self.refs_from
             .iter()
             .flat_map(|(from, refs)| refs.iter().map(move |r| (from, r)))
-            .filter(|(_, r)| !self.by_id.contains_key(&r.to))
+            .filter(|(_, r)| self.target_entry(r.to).is_none())
             .map(|(from, r)| (from.clone(), r.clone()))
             .collect()
     }
@@ -285,7 +303,7 @@ impl AssetIndex {
                 )));
             }
             for r in self.refs_from(file) {
-                let d = match self.by_id.get(&r.to) {
+                let d = match self.target_entry(r.to) {
                     None => Diagnostic::error("AE002", format!("references the UUID {}, which no asset has", r.to)),
                     Some(target) if !project.domain_enabled(target.asset.domain) => Diagnostic::error(
                         "AE003",
@@ -312,21 +330,20 @@ impl RefNames for AssetIndex {
 }
 
 /// Appends the D27 path comment to every line of `text` (serializer output, one value per line) that holds a
-/// UUID-shaped token, except the root `id` line (the first `id: "<uuid>"` line): ` // <label>` with label = the
-/// target's domain-relative path without suffix, prefixed `<domain>:` when it is not in `from`, `(missing)` when
-/// unknown; several tokens on a line are joined with `, `. A `//` comment already on such a line (outside strings) is
-/// replaced, so annotating annotated text changes nothing.
+/// UUID-shaped token, except `id` lines (`id: "<uuid>"`, the root asset id or a sub-item/row id): ` // <label>` with
+/// label = the target's domain-relative path without suffix, prefixed `<domain>:` when it is not in `from`,
+/// `(missing)` when unknown; several tokens on a line are joined with `, `. A `//` comment already on such a line
+/// (outside strings) is replaced, so annotating annotated text changes nothing.
 pub fn annotate_refs(text: &str, names: &dyn RefNames, from: DomainId) -> String {
-    let root = root_id_line(text);
     let mut out = String::with_capacity(text.len() + 64);
-    for (i, line) in text.split_inclusive('\n').enumerate() {
+    for line in text.split_inclusive('\n') {
         let (body, eol) = match line.strip_suffix('\n') {
             Some(b) => b.strip_suffix('\r').map_or((b, "\n"), |b| (b, "\r\n")),
             None => (line, ""),
         };
         let code = &body[..comment_start(body).unwrap_or(body.len())];
         let tokens = uuid_tokens(code);
-        if Some(i) == root || tokens.is_empty() {
+        if is_id_line(code) || tokens.is_empty() {
             out.push_str(line);
             continue;
         }
@@ -363,15 +380,18 @@ pub fn rewrite_root_id(text: &str, new: AssetUuid) -> Option<String> {
     Some(out)
 }
 
+/// Whether `line` reads `id: "<uuid>"` (any indentation, an optional trailing `,` and comment).
+fn is_id_line(line: &str) -> bool {
+    line.trim_start()
+        .strip_prefix("id:")
+        .map(str::trim_start)
+        .and_then(|v| v.strip_prefix('"'))
+        .is_some_and(|v| v.get(..36).is_some_and(is_uuid_shaped) && v[36..].starts_with('"'))
+}
+
 /// Index of the first line that reads `id: "<uuid>"` (any indentation, an optional trailing `,` and comment).
 fn root_id_line(text: &str) -> Option<usize> {
-    text.split_inclusive('\n').position(|line| {
-        line.trim_start()
-            .strip_prefix("id:")
-            .map(str::trim_start)
-            .and_then(|v| v.strip_prefix('"'))
-            .is_some_and(|v| v.get(..36).is_some_and(is_uuid_shaped) && v[36..].starts_with('"'))
-    })
+    text.split_inclusive('\n').position(is_id_line)
 }
 
 /// Byte offset of a `//` comment outside RON string literals.
@@ -716,5 +736,28 @@ mod tests {
         // Nothing to rewrite: no id line, or an `id` that is no UUID (a constant's local id).
         assert_eq!(super::rewrite_root_id("(\n  format_version: 1,\n  consts: [(id: 3)],\n)\n", new), None);
         assert_eq!(super::rewrite_root_id("(\n  id: \"common/pulse\",\n)\n", new), None);
+    }
+
+    #[test]
+    fn sub_item_uuid_refs_resolve_to_owning_asset_and_propagate_affected() {
+        const DATA: DomainId = DomainId::new("data");
+        let (_d, mut p) = project();
+        p.settings.domains.insert(DATA.as_str().into(), DomainEntry { enabled: true });
+
+        let mut books = asset(r(DATA, "books", "collection"), 10, &[]);
+        books.sub_items = vec![SubItem::with_uuid(id(11), "The Shader Alchemist")];
+        let authors = asset(r(DATA, "authors", "collection"), 20, &[(11, None, "row[0].favorite_book")]);
+
+        let ix = AssetIndex::build(vec![DomainIndex { domain: DATA, assets: vec![books, authors] }]);
+        assert!(ix.dangling().is_empty(), "reference to sub-item UUID should not be dangling");
+        assert!(ix.diagnostics(&p).is_empty(), "reference to sub-item UUID should not emit AE002");
+        assert_eq!(ix.name_of(id(11)), Some((DATA, "books::The Shader Alchemist")));
+
+        let affected = ix.affected(&BTreeSet::from([r(DATA, "books", "collection")]));
+        assert_eq!(
+            affected,
+            BTreeSet::from([r(DATA, "books", "collection"), r(DATA, "authors", "collection")]),
+            "changing the collection that owns a referenced row UUID must mark referrers as affected"
+        );
     }
 }

@@ -39,6 +39,7 @@ const BEVY_FEATURES: &[&str] = &[
 pub const MATERIAL_CRATE: CrateContribution = CrateContribution {
     domain: MATERIAL,
     plugin: "QuillshadeMaterialInternalPlugin",
+    loader: Some("BakedMaterialsLoader"),
     bevy_features: BEVY_FEATURES,
     dependencies: &[("serde", r#"{ version = "1", features = ["derive"] }"#), ("ron", r#""0.12""#)],
 };

@@ -1,0 +1,271 @@
+CollectionAsset(
+  format_version: 1,
+  id: "019b76da-a800-7752-84a6-e849e37cc23c",
+  dto: "019b76da-a800-7bc4-bfff-f535c9495a04", // library/book
+  rows: [
+    Row(
+      id: "019b76da-a800-7863-ab90-c78a1ebcadbd",
+      values: {
+        "019b76da-a800-7046-87cb-b47ae46d2dea": U32(340), // pages
+        "019b76da-a800-7054-ae19-727de624cea1": Gradient("019b76da-a800-7236-9c55-fbb62d9f20ab", 1007), // spine_gradient, material:common/terrain.Terrain height
+        "019b76da-a800-715d-b2f2-c0b175cfeebe": Color((0.82, 0.24, 0.14, 1.0)), // cover_tint
+        "019b76da-a800-71a2-8080-15f8f2439e28": LightEnvironment("019b76da-a800-7294-a4ff-75e62eae7ad0"), // reading_ambience, light:day
+        "019b76da-a800-71a4-b4bf-9d4902db8449": Enum( // enchantment
+          variant: "019b76da-a800-7062-b25c-689e91e35a02", // library/enchantment::ward
+          fields: {
+            "019b76da-a800-7ba4-8866-30bea12267e0": F32(0.85), // strength
+            "019b76da-a800-7e31-bd85-3d19eac1ae84": LocalizedString("Pyromancy"), // school
+          },
+        ),
+        "019b76da-a800-71d9-8c32-812ad7c6b767": Set([ // tags
+          Enum(
+            variant: "019b76da-a800-7ca3-a690-e9e5e31f8de5", // library/book_tag::alchemy
+            fields: {},
+          ),
+          Enum(
+            variant: "019b76da-a800-72eb-aae5-7bc43d83a13b", // library/book_tag::forbidden
+            fields: {},
+          ),
+        ]),
+        "019b76da-a800-7772-814d-7a0d3b540a8b": F32(1.45), // weight_kg
+        "019b76da-a800-77d7-8fbc-023f5a9d3a57": Curve("019b76da-a800-783e-be72-971715772890"), // wear_curve, material:common/pulse
+        "019b76da-a800-79ba-b3cc-369ab24813db": SoftRef("019b76da-a800-7168-ab90-c78d1ebc9930"), // companion_volume, library/books_core#Treatise on Astral Geometry | Orion Kael | Zenith Station | Orrery Core | 480
+        "019b76da-a800-7a20-afe1-8241ecebe4aa": Array([ // chapters
+          LocalizedString("I. Ignition of the Core"),
+          LocalizedString("II. Cinder Lattices"),
+          LocalizedString("III. Rite of Ash"),
+        ]),
+        "019b76da-a800-7bcd-8743-b42748b2544d": Dto({ // author
+          "019b76da-a800-71e8-9ce5-03dd61ff0ff3": String("Aurelia Vance"), // pen_name
+          "019b76da-a800-74e2-89e3-22a2276a8d37": U8(9), // guild_rank
+          "019b76da-a800-7f4d-b37a-02965bae5380": Dto({ // homeworld
+            "019b76da-a800-720f-adf0-edac3b118f01": F32(1.15), // gravity_g
+            "019b76da-a800-72ea-ae91-02447f352ff3": String("Solis Prime"), // planet_name
+            "019b76da-a800-79eb-b5c2-6ae9403b6860": Dto({ // coordinates
+              "019b76da-a800-75aa-9356-a0bc9eea37e3": Vec3((12.5, 4.0, -3.2)), // galactic_xyz
+              "019b76da-a800-7b9a-9b7b-7e6df8b91638": String("Helios Reach"), // sector_name
+            }),
+          }),
+        }),
+        "019b76da-a800-7c70-a0d0-f9cb3e01b971": Bool(true), // is_rare_edition
+        "019b76da-a800-7d53-8406-08c30ca6b091": GameAsset("textures/atlas.png"), // ex_libris_stamp
+        "019b76da-a800-7dc4-87ec-33dad4ebefdd": Material("019b76da-a800-75c1-939b-7e0a98afeaba"), // cover_material, material:env/rock_wet
+        "019b76da-a800-7dcd-968c-44a6e3c50b79": Texture("019b76da-a800-7bbb-869e-d9578e3a856f"), // seal_texture, material:textures/atlas
+        "019b76da-a800-7e90-8e4e-ca9c79a73a56": String("Codex of Emberlight"), // title
+        "019b76da-a800-7eec-af09-965388ede030": Option(Some(LocalizedString("Margin warning: keep away from frost runes."))), // errata_note
+        "019b76da-a800-7ef9-8ed6-fe8621637797": Vec3((18.0, 26.0, 4.2)), // dimensions_cm
+      },
+    ),
+    Row(
+      id: "019b76da-a800-7b65-ab90-c78b1ebc306b",
+      values: {
+        "019b76da-a800-7046-87cb-b47ae46d2dea": U32(215), // pages
+        "019b76da-a800-7054-ae19-727de624cea1": Gradient("019b76da-a800-7236-9c55-fbb62d9f20ab", 1014), // spine_gradient, material:common/terrain.Water depth
+        "019b76da-a800-715d-b2f2-c0b175cfeebe": Color((0.16, 0.48, 0.76, 1.0)), // cover_tint
+        "019b76da-a800-71a2-8080-15f8f2439e28": LightEnvironment("019b76da-a800-7e94-b703-05f4e65081f5"), // reading_ambience, light:night
+        "019b76da-a800-71a4-b4bf-9d4902db8449": Enum( // enchantment
+          variant: "019b76da-a800-79df-9cee-5598e5923d37", // library/enchantment::chrono_lock
+          fields: {
+            "019b76da-a800-7561-8a69-3df4d2680d44": Duration(120.0), // seal_duration
+            "019b76da-a800-7a42-9b86-3ee31f1c5900": Bool(true), // paradox_safe
+          },
+        ),
+        "019b76da-a800-71d9-8c32-812ad7c6b767": Set([ // tags
+          Enum(
+            variant: "019b76da-a800-7f31-ba72-111e126ca45f", // library/book_tag::history
+            fields: {},
+          ),
+          Enum(
+            variant: "019b76da-a800-7e72-a115-de7e0c2de5d5", // library/book_tag::star_lore
+            fields: {},
+          ),
+        ]),
+        "019b76da-a800-7772-814d-7a0d3b540a8b": F32(0.95), // weight_kg
+        "019b76da-a800-77d7-8fbc-023f5a9d3a57": Curve("019b76da-a800-7294-83e9-c69a51f99e5e"), // wear_curve, material:common/steps
+        "019b76da-a800-79ba-b3cc-369ab24813db": SoftRef("019b76da-a800-7e67-ab90-c78c1ebc7376"), // companion_volume, library/books_core#Herbarium of Sunlit Glades | Sylvia Moss | Verdania | Briar Expanse | 180
+        "019b76da-a800-7a20-afe1-8241ecebe4aa": Array([ // chapters
+          LocalizedString("I. Pelagic Currents"),
+          LocalizedString("II. Sunken Astrolabes"),
+        ]),
+        "019b76da-a800-7bcd-8743-b42748b2544d": Dto({ // author
+          "019b76da-a800-71e8-9ce5-03dd61ff0ff3": String("Corvus Sterling"), // pen_name
+          "019b76da-a800-74e2-89e3-22a2276a8d37": U8(7), // guild_rank
+          "019b76da-a800-7f4d-b37a-02965bae5380": Dto({ // homeworld
+            "019b76da-a800-720f-adf0-edac3b118f01": F32(0.88), // gravity_g
+            "019b76da-a800-72ea-ae91-02447f352ff3": String("Thalassa"), // planet_name
+            "019b76da-a800-79eb-b5c2-6ae9403b6860": Dto({ // coordinates
+              "019b76da-a800-75aa-9356-a0bc9eea37e3": Vec3((-42.0, 18.5, 9.0)), // galactic_xyz
+              "019b76da-a800-7b9a-9b7b-7e6df8b91638": String("Pelagic Rim"), // sector_name
+            }),
+          }),
+        }),
+        "019b76da-a800-7c70-a0d0-f9cb3e01b971": Bool(false), // is_rare_edition
+        "019b76da-a800-7d53-8406-08c30ca6b091": GameAsset("textures/sprite.png"), // ex_libris_stamp
+        "019b76da-a800-7dc4-87ec-33dad4ebefdd": Material("019b76da-a800-7944-befc-7d739007bf84"), // cover_material, material:fx/hologram
+        "019b76da-a800-7dcd-968c-44a6e3c50b79": Texture("019b76da-a800-75bd-afa0-13ccc9fe4e14"), // seal_texture, material:textures/sprite
+        "019b76da-a800-7e90-8e4e-ca9c79a73a56": String("Atlas of Whispering Tides"), // title
+        "019b76da-a800-7eec-af09-965388ede030": Option(None), // errata_note
+        "019b76da-a800-7ef9-8ed6-fe8621637797": Vec3((16.0, 24.0, 2.8)), // dimensions_cm
+      },
+    ),
+    Row(
+      id: "019b76da-a800-7e67-ab90-c78c1ebc7376",
+      values: {
+        "019b76da-a800-7046-87cb-b47ae46d2dea": U32(180), // pages
+        "019b76da-a800-7054-ae19-727de624cea1": Gradient("019b76da-a800-7236-9c55-fbb62d9f20ab", 1007), // spine_gradient, material:common/terrain.Terrain height
+        "019b76da-a800-715d-b2f2-c0b175cfeebe": Color((0.22, 0.64, 0.32, 1.0)), // cover_tint
+        "019b76da-a800-71a2-8080-15f8f2439e28": LightEnvironment("019b76da-a800-7294-a4ff-75e62eae7ad0"), // reading_ambience, light:day
+        "019b76da-a800-71a4-b4bf-9d4902db8449": Enum( // enchantment
+          variant: "019b76da-a800-7b91-8bf4-9fe039f94913", // library/enchantment::unenchanted
+          fields: {},
+        ),
+        "019b76da-a800-71d9-8c32-812ad7c6b767": Set([ // tags
+          Enum(
+            variant: "019b76da-a800-7ca3-a690-e9e5e31f8de5", // library/book_tag::alchemy
+            fields: {},
+          ),
+          Enum(
+            variant: "019b76da-a800-7a23-a664-90867aa170ff", // library/book_tag::treatise
+            fields: {},
+          ),
+        ]),
+        "019b76da-a800-7772-814d-7a0d3b540a8b": F32(0.72), // weight_kg
+        "019b76da-a800-77d7-8fbc-023f5a9d3a57": Curve("019b76da-a800-7c6a-bf59-e563ad5994f2"), // wear_curve, light:smooth
+        "019b76da-a800-79ba-b3cc-369ab24813db": SoftRef("019b76da-a800-7b65-ab90-c78b1ebc306b"), // companion_volume, library/books_core#Atlas of Whispering Tides | Corvus Sterling | Thalassa | Pelagic Rim | 215
+        "019b76da-a800-7a20-afe1-8241ecebe4aa": Array([ // chapters
+          LocalizedString("I. Luminous Spores"),
+          LocalizedString("II. Canopy Distillation"),
+          LocalizedString("III. Root Elixirs"),
+        ]),
+        "019b76da-a800-7bcd-8743-b42748b2544d": Dto({ // author
+          "019b76da-a800-71e8-9ce5-03dd61ff0ff3": String("Sylvia Moss"), // pen_name
+          "019b76da-a800-74e2-89e3-22a2276a8d37": U8(6), // guild_rank
+          "019b76da-a800-7f4d-b37a-02965bae5380": Dto({ // homeworld
+            "019b76da-a800-720f-adf0-edac3b118f01": F32(0.94), // gravity_g
+            "019b76da-a800-72ea-ae91-02447f352ff3": String("Verdania"), // planet_name
+            "019b76da-a800-79eb-b5c2-6ae9403b6860": Dto({ // coordinates
+              "019b76da-a800-75aa-9356-a0bc9eea37e3": Vec3((7.0, -14.0, 2.5)), // galactic_xyz
+              "019b76da-a800-7b9a-9b7b-7e6df8b91638": String("Briar Expanse"), // sector_name
+            }),
+          }),
+        }),
+        "019b76da-a800-7c70-a0d0-f9cb3e01b971": Bool(false), // is_rare_edition
+        "019b76da-a800-7d53-8406-08c30ca6b091": GameAsset("textures/rock_albedo.png"), // ex_libris_stamp
+        "019b76da-a800-7dc4-87ec-33dad4ebefdd": Material("019b76da-a800-7c36-ada5-5de79099892e"), // cover_material, material:fx/curve_bands
+        "019b76da-a800-7dcd-968c-44a6e3c50b79": Texture("019b76da-a800-77a0-a990-734147946a3b"), // seal_texture, material:textures/rock_albedo
+        "019b76da-a800-7e90-8e4e-ca9c79a73a56": String("Herbarium of Sunlit Glades"), // title
+        "019b76da-a800-7eec-af09-965388ede030": Option(None), // errata_note
+        "019b76da-a800-7ef9-8ed6-fe8621637797": Vec3((14.5, 21.0, 2.4)), // dimensions_cm
+      },
+    ),
+    Row(
+      id: "019b76da-a800-7168-ab90-c78d1ebc9930",
+      values: {
+        "019b76da-a800-7046-87cb-b47ae46d2dea": U32(480), // pages
+        "019b76da-a800-7054-ae19-727de624cea1": Gradient("019b76da-a800-7236-9c55-fbb62d9f20ab", 1014), // spine_gradient, material:common/terrain.Water depth
+        "019b76da-a800-715d-b2f2-c0b175cfeebe": Color((0.56, 0.28, 0.78, 1.0)), // cover_tint
+        "019b76da-a800-71a2-8080-15f8f2439e28": LightEnvironment("019b76da-a800-7e94-b703-05f4e65081f5"), // reading_ambience, light:night
+        "019b76da-a800-71a4-b4bf-9d4902db8449": Enum( // enchantment
+          variant: "019b76da-a800-7062-b25c-689e91e35a02", // library/enchantment::ward
+          fields: {
+            "019b76da-a800-7ba4-8866-30bea12267e0": F32(0.95), // strength
+            "019b76da-a800-7e31-bd85-3d19eac1ae84": LocalizedString("Abjuration"), // school
+          },
+        ),
+        "019b76da-a800-71d9-8c32-812ad7c6b767": Set([ // tags
+          Enum(
+            variant: "019b76da-a800-72eb-aae5-7bc43d83a13b", // library/book_tag::forbidden
+            fields: {},
+          ),
+          Enum(
+            variant: "019b76da-a800-7e72-a115-de7e0c2de5d5", // library/book_tag::star_lore
+            fields: {},
+          ),
+          Enum(
+            variant: "019b76da-a800-7a23-a664-90867aa170ff", // library/book_tag::treatise
+            fields: {},
+          ),
+        ]),
+        "019b76da-a800-7772-814d-7a0d3b540a8b": F32(1.85), // weight_kg
+        "019b76da-a800-77d7-8fbc-023f5a9d3a57": Curve("019b76da-a800-783e-be72-971715772890"), // wear_curve, material:common/pulse
+        "019b76da-a800-79ba-b3cc-369ab24813db": SoftRef("019b76da-a800-7863-ab90-c78a1ebcadbd"), // companion_volume, library/books_core#Codex of Emberlight | Aurelia Vance | Solis Prime | Helios Reach | 340
+        "019b76da-a800-7a20-afe1-8241ecebe4aa": Array([ // chapters
+          LocalizedString("I. Non-Euclidean Orbits"),
+          LocalizedString("II. Void Parallels"),
+          LocalizedString("III. Zenith Projections"),
+        ]),
+        "019b76da-a800-7bcd-8743-b42748b2544d": Dto({ // author
+          "019b76da-a800-71e8-9ce5-03dd61ff0ff3": String("Orion Kael"), // pen_name
+          "019b76da-a800-74e2-89e3-22a2276a8d37": U8(10), // guild_rank
+          "019b76da-a800-7f4d-b37a-02965bae5380": Dto({ // homeworld
+            "019b76da-a800-720f-adf0-edac3b118f01": F32(0.42), // gravity_g
+            "019b76da-a800-72ea-ae91-02447f352ff3": String("Zenith Station"), // planet_name
+            "019b76da-a800-79eb-b5c2-6ae9403b6860": Dto({ // coordinates
+              "019b76da-a800-75aa-9356-a0bc9eea37e3": Vec3((0.0, 120.0, 64.0)), // galactic_xyz
+              "019b76da-a800-7b9a-9b7b-7e6df8b91638": String("Orrery Core"), // sector_name
+            }),
+          }),
+        }),
+        "019b76da-a800-7c70-a0d0-f9cb3e01b971": Bool(true), // is_rare_edition
+        "019b76da-a800-7d53-8406-08c30ca6b091": GameAsset("textures/atlas.png"), // ex_libris_stamp
+        "019b76da-a800-7dc4-87ec-33dad4ebefdd": Material("019b76da-a800-7a78-a4fc-50e06b0ca34a"), // cover_material, material:env/exp42
+        "019b76da-a800-7dcd-968c-44a6e3c50b79": Texture("019b76da-a800-7bbb-869e-d9578e3a856f"), // seal_texture, material:textures/atlas
+        "019b76da-a800-7e90-8e4e-ca9c79a73a56": String("Treatise on Astral Geometry"), // title
+        "019b76da-a800-7eec-af09-965388ede030": Option(Some(LocalizedString("Folio 42 recalibrated after the Solstice eclipse."))), // errata_note
+        "019b76da-a800-7ef9-8ed6-fe8621637797": Vec3((20.0, 28.0, 5.0)), // dimensions_cm
+      },
+    ),
+    Row(
+      id: "019b76da-a800-746a-ab90-c78e1ebcc230",
+      values: {
+        "019b76da-a800-7046-87cb-b47ae46d2dea": U32(290), // pages
+        "019b76da-a800-7054-ae19-727de624cea1": Gradient("019b76da-a800-7236-9c55-fbb62d9f20ab", 1007), // spine_gradient, material:common/terrain.Terrain height
+        "019b76da-a800-715d-b2f2-c0b175cfeebe": Color((0.76, 0.58, 0.2, 1.0)), // cover_tint
+        "019b76da-a800-71a2-8080-15f8f2439e28": LightEnvironment("019b76da-a800-7294-a4ff-75e62eae7ad0"), // reading_ambience, light:day
+        "019b76da-a800-71a4-b4bf-9d4902db8449": Enum( // enchantment
+          variant: "019b76da-a800-79df-9cee-5598e5923d37", // library/enchantment::chrono_lock
+          fields: {
+            "019b76da-a800-7561-8a69-3df4d2680d44": Duration(45.0), // seal_duration
+            "019b76da-a800-7a42-9b86-3ee31f1c5900": Bool(false), // paradox_safe
+          },
+        ),
+        "019b76da-a800-71d9-8c32-812ad7c6b767": Set([ // tags
+          Enum(
+            variant: "019b76da-a800-7f31-ba72-111e126ca45f", // library/book_tag::history
+            fields: {},
+          ),
+          Enum(
+            variant: "019b76da-a800-7a23-a664-90867aa170ff", // library/book_tag::treatise
+            fields: {},
+          ),
+        ]),
+        "019b76da-a800-7772-814d-7a0d3b540a8b": F32(1.2), // weight_kg
+        "019b76da-a800-77d7-8fbc-023f5a9d3a57": Curve("019b76da-a800-7294-83e9-c69a51f99e5e"), // wear_curve, material:common/steps
+        "019b76da-a800-79ba-b3cc-369ab24813db": SoftRef("00000000-0000-0000-0000-000000000000"), // companion_volume
+        "019b76da-a800-7a20-afe1-8241ecebe4aa": Array([ // chapters
+          LocalizedString("I. Smelting the Star-Ore"),
+          LocalizedString("II. Anvil Covenants"),
+        ]),
+        "019b76da-a800-7bcd-8743-b42748b2544d": Dto({ // author
+          "019b76da-a800-71e8-9ce5-03dd61ff0ff3": String("Bram Ironhand"), // pen_name
+          "019b76da-a800-74e2-89e3-22a2276a8d37": U8(8), // guild_rank
+          "019b76da-a800-7f4d-b37a-02965bae5380": Dto({ // homeworld
+            "019b76da-a800-720f-adf0-edac3b118f01": F32(1.65), // gravity_g
+            "019b76da-a800-72ea-ae91-02447f352ff3": String("Ferrum"), // planet_name
+            "019b76da-a800-79eb-b5c2-6ae9403b6860": Dto({ // coordinates
+              "019b76da-a800-75aa-9356-a0bc9eea37e3": Vec3((31.0, -8.5, -19.0)), // galactic_xyz
+              "019b76da-a800-7b9a-9b7b-7e6df8b91638": String("Anvil Belt"), // sector_name
+            }),
+          }),
+        }),
+        "019b76da-a800-7c70-a0d0-f9cb3e01b971": Bool(false), // is_rare_edition
+        "019b76da-a800-7d53-8406-08c30ca6b091": GameAsset("textures/rock_normal.png"), // ex_libris_stamp
+        "019b76da-a800-7dc4-87ec-33dad4ebefdd": Material("019b76da-a800-7bd6-9883-09fe5ca761db"), // cover_material, material:fx/global_tint
+        "019b76da-a800-7dcd-968c-44a6e3c50b79": Texture("019b76da-a800-77a0-a990-734147946a3b"), // seal_texture, material:textures/rock_albedo
+        "019b76da-a800-7e90-8e4e-ca9c79a73a56": String("Chronicles of the Iron Forge"), // title
+        "019b76da-a800-7eec-af09-965388ede030": Option(None), // errata_note
+        "019b76da-a800-7ef9-8ed6-fe8621637797": Vec3((17.0, 23.5, 3.6)), // dimensions_cm
+      },
+    ),
+  ],
+)

@@ -271,6 +271,15 @@ pub enum Action {
     /// Asks for the path of a new folder of a domain's Project tree (`None`: the active tab's domain, else the first
     /// domain), proposed in that domain's selected folder.
     NewFolderDialog(Option<DomainId>),
+    /// Duplicates an asset in its own folder under a unique `<name>_copy` / `<name>_copy_N` name with a fresh UUIDv7.
+    DuplicateAsset(AssetRef),
+    /// Copies an [`AssetRef`] to the editor's asset clipboard ([`crate::state::editor::Editor::copied_asset`]).
+    CopyAsset(AssetRef),
+    /// Pastes [`crate::state::editor::Editor::copied_asset`] into `folder` of `domain` with a fresh UUIDv7.
+    PasteAsset {
+        domain: DomainId,
+        folder: String,
+    },
     RenameDialog(AssetRef),
     MoveDialog(AssetRef),
     DeleteDialog(AssetRef),
@@ -298,6 +307,8 @@ pub enum Action {
     /// The tab keeps its edits: the file's version becomes its saved baseline ([`crate::doc_kind::TabDoc::keep_mine`]).
     KeepMine(crate::tab::TabKey),
     CloseDialog,
+    /// Copies text to the system clipboard (`Editor::copy_text`).
+    CopyText(String),
     ClearMessages,
     /// Warning for the log (e.g. a refused wire).
     Notify(String),

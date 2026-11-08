@@ -324,7 +324,7 @@ pub fn materials_rs(entries: &[MaterialEntry]) -> String {
     o.push_str(
         "/// Every generated material, nested by folder (`baked.env.rock_wet`). The handles are reserved when the\n",
     );
-    o.push_str("/// plugin is built; `BakedMaterialsLoader::load` inserts the materials behind them.\n");
+    o.push_str("/// plugin is built; `QuillshadeLoader::load` inserts the materials behind them.\n");
     o.push_str("#[derive(Resource, Clone, Debug)]\n");
     o.push_str("pub struct BakedMaterials {\n");
     o.push_str(&generator.fields(&tree));
@@ -570,14 +570,16 @@ pub fn textures_rs(ids: &[String]) -> String {
     o.push_str(
         "/// `internal` (`tex.internal.default`), baked gradient collections under `gradients`, nested by path\n",
     );
-    o.push_str("/// (`tex.gradients.common.terrain`). Default handles until `BakedMaterialsLoader::load` fills them; use these\n");
+    o.push_str(
+        "/// (`tex.gradients.common.terrain`). Default handles until `QuillshadeLoader::load` fills them; use these\n",
+    );
     o.push_str("/// instead of `AssetServer::load` on a file that has a Texture asset, so the asset's loader settings apply.\n");
     o.push_str("#[derive(Resource, Clone, Debug, Default)]\n");
     o.push_str("pub struct BakedTextures {\n");
     o.push_str(&generator.fields(&tree));
     o.push_str("    /// Every texture by id (`textures/rock_albedo`: its path under `quillshade/material/` without\n");
     o.push_str("    /// `.texture.ron`; `@internal/default`; `@gradients/common/terrain`: a baked gradient collection), for game\n");
-    o.push_str("    /// data that names textures. Filled by `BakedMaterialsLoader::load` and kept in sync with the fields on hot\n");
+    o.push_str("    /// data that names textures. Filled by `QuillshadeLoader::load` and kept in sync with the fields on hot\n");
     o.push_str("    /// reload; also holds a texture created in the editor after the build that a material uses (it has no field\n");
     o.push_str("    /// until a rebuild).\n");
     o.push_str(&format!("    pub {BY_PATH_FIELD}: HashMap<String, Handle<Image>>,\n"));

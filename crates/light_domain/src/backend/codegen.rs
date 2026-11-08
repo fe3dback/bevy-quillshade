@@ -234,19 +234,19 @@ fn emit_generated_items(assets: &LightAssets, manifest_str: &str) -> String {
     }
     o.push_str("            _ => None,\n        }\n    }\n\n");
 
-    o.push_str("    /// Compiled default [`BakedCurve`] for this curve.\n");
-    o.push_str("    pub fn default_curve(self) -> BakedCurve {\n        match self {\n");
-    o.push_str("            Self::Linear => BakedCurve::linear(),\n");
+    o.push_str("    /// Compiled default [`CurveData`] for this curve.\n");
+    o.push_str("    pub fn default_curve(self) -> CurveData {\n        match self {\n");
+    o.push_str("            Self::Linear => CurveData::linear(),\n");
     for (_, variant, curve) in &curve_entries {
         o.push_str(&format!("            Self::{variant} => {},\n", emit_curve_literal(curve)));
     }
     o.push_str("        }\n    }\n\n");
 
-    o.push_str("    /// Evaluates the compiled curve at `t` in `0.0..=1.0`.\n");
+    o.push_str("    /// Evaluates the compiled curve at `t` in `0.0..=1.0`, clamped to `min..=max`.\n");
     o.push_str("    pub fn sample(self, t: f32) -> f32 {\n        match self {\n");
     o.push_str("            Self::Linear => t.clamp(0.0, 1.0),\n");
     if !curve_entries.is_empty() {
-        o.push_str("            other => other.default_curve().sample(t),\n");
+        o.push_str("            other => transition_sample(&other.default_curve(), t),\n");
     }
     o.push_str("        }\n    }\n");
     o.push_str("}\n\n");
@@ -306,7 +306,12 @@ fn fmt_arr4(a: [f32; 4]) -> String {
 
 fn emit_curve_literal(c: &curve_kit::Curve) -> String {
     let pts: Vec<String> = c.points.iter().map(|(t, v)| format!("({}, {})", fmt_f32(*t), fmt_f32(*v))).collect();
-    format!("BakedCurve {{ min: {}, max: {}, points: vec![{}] }}", fmt_f32(c.min), fmt_f32(c.max), pts.join(", "))
+    format!(
+        "CurveData {{ interp: Interp::CatmullRom, min: {}, max: {}, points: vec![{}] }}",
+        fmt_f32(c.min),
+        fmt_f32(c.max),
+        pts.join(", ")
+    )
 }
 
 fn emit_section_literal(s: &ColorGradingSectionDef) -> String {

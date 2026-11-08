@@ -1,0 +1,106 @@
+DtoAsset(
+  format_version: 1,
+  id: "019b76da-a800-712a-9a62-1578813e96dd",
+  doc: "Global display and loan policy parameters for the Grand Archive shelf.",
+  fields: [
+    Field(
+      id: "019b76da-a800-7382-b650-17e00746dc8b",
+      name: "shelf_label",
+      ty: String,
+      category: "General",
+      is_name: true,
+      default: String("Grand Archive - Shelf A"),
+      settings: FieldSettings(
+        max_len: Some(64),
+        doc: "Display banner for the library shelf.",
+        required: true,
+      ),
+    ),
+    Field(
+      id: "019b76da-a800-7f57-b411-f8d64e01c567",
+      name: "max_loan_days",
+      ty: U32,
+      category: "Loan Policy",
+      is_name: true,
+      default: U32(14),
+      settings: FieldSettings(
+        min: Some(1.0),
+        max: Some(90.0),
+        step: Some(1.0),
+        doc: "Maximum days a tome may be borrowed.",
+      ),
+    ),
+    Field(
+      id: "019b76da-a800-7511-95b0-acbac17576af",
+      name: "late_fee_coins_per_day",
+      ty: F32,
+      category: "Loan Policy",
+      default: F32(2.5),
+      settings: FieldSettings(
+        min: Some(0.0),
+        max: Some(100.0),
+        step: Some(0.5),
+        doc: "Overdue fee per day in gold coins.",
+      ),
+    ),
+    Field(
+      id: "019b76da-a800-708b-a8e5-8ac0038f12f2",
+      name: "shelf_spacing_m",
+      ty: F32,
+      category: "Display",
+      default: F32(0.28),
+      settings: FieldSettings(
+        min: Some(0.1),
+        max: Some(1.0),
+        step: Some(0.02),
+        doc: "Horizontal spacing between books on the 3D shelf in meters.",
+      ),
+    ),
+    Field(
+      id: "019b76da-a800-7666-bf45-99fbbf0aafa8",
+      name: "book_scale",
+      ty: F32,
+      category: "Display",
+      default: F32(3.2),
+      settings: FieldSettings(
+        min: Some(0.5),
+        max: Some(10.0),
+        step: Some(0.1),
+        doc: "Visual multiplier applied to book dimensions on the 3D shelf.",
+      ),
+    ),
+    Field(
+      id: "019b76da-a800-7623-b26f-fc4de6c2ffa4",
+      name: "rare_glow_boost",
+      ty: F32,
+      category: "Display",
+      default: F32(1.5),
+      settings: FieldSettings(
+        min: Some(0.0),
+        max: Some(5.0),
+        step: Some(0.1),
+        doc: "Emissive multiplier applied to rare editions.",
+      ),
+    ),
+    Field(
+      id: "019b76da-a800-74e5-ada5-fc7dc4da1c18",
+      name: "featured_book",
+      ty: SoftRef("019b76da-a800-7bc4-bfff-f535c9495a04"), // library/book
+      category: "Display",
+      default: SoftRef("019b76da-a800-7863-ab90-c78a1ebcadbd"), // library/books_core#Codex of Emberlight | Aurelia Vance | Solis Prime | Helios Reach | 340
+      settings: FieldSettings(
+        doc: "Featured tome highlighted on the Grand Archive banner (`SoftRef<Book>`).",
+      ),
+    ),
+    Field(
+      id: "019b76da-a800-760c-ac56-eeeb066fae51",
+      name: "shelf_quotas",
+      ty: Map(Enum("019b76da-a800-74b2-913b-3ea934ed58aa"), U32), // library/book_tag
+      category: "Quotas",
+      default: Map([]),
+      settings: FieldSettings(
+        doc: "Maximum allowed volumes per subject tag (`BTreeMap<BookTag, u32>`).",
+      ),
+    ),
+  ],
+)

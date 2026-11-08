@@ -214,6 +214,7 @@ impl project_core::regen::DomainBackend for ModBackend {
         project_core::umbrella::CrateContribution {
             domain: IDS[0],
             plugin: "DummyPlugin",
+            loader: None,
             bevy_features: &[],
             dependencies: &[],
         }

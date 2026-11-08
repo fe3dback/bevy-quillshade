@@ -1,0 +1,33 @@
+DtoAsset(
+  format_version: 1,
+  id: "019b76da-a800-7c9f-bc79-2625811dddaa",
+  doc: "Galactic sector and 3D parsec coordinates for a celestial world.",
+  fields: [
+    Field(
+      id: "019b76da-a800-7b9a-9b7b-7e6df8b91638",
+      name: "sector_name",
+      ty: String,
+      category: "Astrogation",
+      is_name: true,
+      default: String("Coreward"),
+      settings: FieldSettings(
+        max_len: Some(48),
+        doc: "Named region of the galactic archive map.",
+        required: true,
+      ),
+    ),
+    Field(
+      id: "019b76da-a800-75aa-9356-a0bc9eea37e3",
+      name: "galactic_xyz",
+      ty: Vec3,
+      category: "Astrogation",
+      default: Vec3((0.0, 0.0, 0.0)),
+      settings: FieldSettings(
+        min: Some(-1000.0),
+        max: Some(1000.0),
+        step: Some(0.5),
+        doc: "Parsec offset from the Grand Archive meridian.",
+      ),
+    ),
+  ],
+)

@@ -395,6 +395,7 @@ const LIGHT_BEVY_FEATURES: &[&str] = &[
 const LIGHT_CRATE: CrateContribution = CrateContribution {
     domain: project_core::DomainId::new("light"),
     plugin: "QuillshadeLightInternalPlugin",
+    loader: Some("BakedLightLoader"),
     bevy_features: LIGHT_BEVY_FEATURES,
     dependencies: &[("serde", r#"{ version = "1", features = ["derive"] }"#), ("ron", r#""0.12""#)],
 };

@@ -7,7 +7,10 @@
 
 use serde::{Deserialize, Serialize};
 
+use project_core::common::curve::{CurveData, normalize_points, sample_normalized_with, slopes};
 use project_core::{AssetUuid, LoadError, check_version, probe_version};
+
+pub use project_core::common::curve::{Interp, MIN_SPAN};
 
 #[cfg(feature = "editor")]
 pub mod editor;
@@ -15,9 +18,6 @@ pub mod editor;
 /// Current curve file format version: 2 carries the asset `id` (ADR 0047 §2, written by the v3 migration); older
 /// files are upgraded by the Migration Tool (`shader-editor migrate`), never by the loader.
 pub const CURVE_FORMAT_VERSION: u32 = 2;
-
-/// Smallest segment length used as a divisor (points with equal `t` make a step).
-const MIN_SPAN: f32 = 1e-6;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Curve {
@@ -60,32 +60,6 @@ pub fn range_error(min: f32, max: f32) -> Option<String> {
         Some(format!("curve range min {min} must be less than max {max}"))
     } else {
         None
-    }
-}
-
-/// How a curve is evaluated between its points.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
-pub enum Interp {
-    /// Piecewise linear.
-    Simple,
-    /// Cubic Hermite with Catmull-Rom tangents (non-uniform knots).
-    #[default]
-    CatmullRom,
-}
-
-impl Interp {
-    pub const ALL: [Interp; 2] = [Interp::CatmullRom, Interp::Simple];
-
-    /// Option label of the node's `type` parameter and the editor switch.
-    pub fn label(self) -> &'static str {
-        match self {
-            Interp::Simple => "Simple",
-            Interp::CatmullRom => "Catmull-Rom",
-        }
-    }
-
-    pub fn from_label(s: &str) -> Option<Interp> {
-        Interp::ALL.into_iter().find(|i| i.label() == s)
     }
 }
 
@@ -137,11 +111,12 @@ impl Curve {
     /// Drops non-finite points, clamps to the unit square, sorts by `t` (stable: equal `t` keep their order). The
     /// output range is left alone.
     pub fn normalize(&mut self) {
-        self.points.retain(|(t, v)| t.is_finite() && v.is_finite());
-        for p in &mut self.points {
-            *p = (p.0.clamp(0.0, 1.0), p.1.clamp(0.0, 1.0));
-        }
-        self.points.sort_by(|a, b| a.0.total_cmp(&b.0));
+        normalize_points(&mut self.points);
+    }
+
+    /// Runtime [`CurveData`] representation with the given [`Interp`].
+    pub fn data(&self, interp: Interp) -> CurveData {
+        CurveData { interp, min: self.min, max: self.max, points: self.points.clone() }
     }
 
     /// `max - min`: the scale from normalized values (and slopes) to real units.
@@ -161,20 +136,7 @@ impl Curve {
 
     /// Catmull-Rom slope `dv/dt` at every point, normalized (real units: times [`Curve::span`]).
     pub fn slopes(&self) -> Vec<f32> {
-        let p = &self.points;
-        let n = p.len();
-        let diff = |a: usize, b: usize| {
-            let dt = p[b].0 - p[a].0;
-            if dt.abs() < MIN_SPAN { 0.0 } else { (p[b].1 - p[a].1) / dt }
-        };
-        (0..n)
-            .map(|i| match (i, n) {
-                (_, 0 | 1) => 0.0,
-                (0, _) => diff(0, 1),
-                (i, n) if i == n - 1 => diff(n - 2, n - 1),
-                (i, _) => diff(i - 1, i + 1),
-            })
-            .collect()
+        slopes(&self.points)
     }
 
     /// Value at `t` in real units (same math as the generated `sample_curve_*` functions, whose constants hold the
@@ -190,44 +152,112 @@ impl Curve {
 
     /// [`Curve::sample_normalized`] with the [`Curve::slopes`] computed once (drawing samples many `t`).
     pub fn sample_normalized_with(&self, t: f32, interp: Interp, slopes: &[f32]) -> f32 {
-        let p = &self.points;
-        match p.len() {
-            0 => return 0.0,
-            1 => return p[0].1,
-            _ => {}
-        }
-        let x = t.clamp(p[0].0, p[p.len() - 1].0);
-        // Last point whose `t` is <= x, among the segment starts.
-        let i = (1..p.len() - 1).rfind(|k| x >= p[*k].0).unwrap_or(0);
-        let (a, b) = (p[i], p[i + 1]);
-        match interp {
-            Interp::Simple => linear(a, b, x),
-            Interp::CatmullRom => hermite((a.0, a.1, slopes[i]), (b.0, b.1, slopes[i + 1]), x),
-        }
+        sample_normalized_with(&self.points, slopes, interp, t)
     }
 }
 
-/// `sg_curve_linear` of `stdlib/curve.wesl`.
-fn linear(a: (f32, f32), b: (f32, f32), t: f32) -> f32 {
-    let s = ((t - a.0) / (b.0 - a.0).max(MIN_SPAN)).clamp(0.0, 1.0);
-    a.1 + (b.1 - a.1) * s
-}
-
-/// `sg_curve_hermite` of `stdlib/curve.wesl`: points are `(t, value, slope)`.
-fn hermite(a: (f32, f32, f32), b: (f32, f32, f32), t: f32) -> f32 {
-    let h = (b.0 - a.0).max(MIN_SPAN);
-    let s = ((t - a.0) / h).clamp(0.0, 1.0);
-    let (s2, s3) = (s * s, s * s * s);
-    (2.0 * s3 - 3.0 * s2 + 1.0) * a.1
-        + (s3 - 2.0 * s2 + s) * h * a.2
-        + (-2.0 * s3 + 3.0 * s2) * b.1
-        + (s3 - s2) * h * b.2
+impl From<&Curve> for CurveData {
+    fn from(c: &Curve) -> Self {
+        c.data(Interp::default())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use project_core::LoadError;
+
+    fn reference_slopes(p: &[(f32, f32)]) -> Vec<f32> {
+        let n = p.len();
+        let diff = |a: usize, b: usize| {
+            let dt = p[b].0 - p[a].0;
+            if dt.abs() < MIN_SPAN { 0.0 } else { (p[b].1 - p[a].1) / dt }
+        };
+        (0..n)
+            .map(|i| match (i, n) {
+                (_, 0 | 1) => 0.0,
+                (0, _) => diff(0, 1),
+                (i, n) if i == n - 1 => diff(n - 2, n - 1),
+                (i, _) => diff(i - 1, i + 1),
+            })
+            .collect()
+    }
+
+    fn reference_linear(a: (f32, f32), b: (f32, f32), t: f32) -> f32 {
+        let s = ((t - a.0) / (b.0 - a.0).max(MIN_SPAN)).clamp(0.0, 1.0);
+        a.1 + (b.1 - a.1) * s
+    }
+
+    fn reference_hermite(a: (f32, f32, f32), b: (f32, f32, f32), t: f32) -> f32 {
+        let h = (b.0 - a.0).max(MIN_SPAN);
+        let s = ((t - a.0) / h).clamp(0.0, 1.0);
+        let (s2, s3) = (s * s, s * s * s);
+        (2.0 * s3 - 3.0 * s2 + 1.0) * a.1
+            + (s3 - 2.0 * s2 + s) * h * a.2
+            + (-2.0 * s3 + 3.0 * s2) * b.1
+            + (s3 - s2) * h * b.2
+    }
+
+    fn reference_sample(curve: &Curve, t: f32, interp: Interp) -> f32 {
+        let p = &curve.points;
+        let norm = match p.len() {
+            0 => 0.0,
+            1 => p[0].1,
+            _ => {
+                let sl = reference_slopes(p);
+                let x = t.clamp(p[0].0, p[p.len() - 1].0);
+                let i = (1..p.len() - 1).rfind(|k| x >= p[*k].0).unwrap_or(0);
+                let (a, b) = (p[i], p[i + 1]);
+                match interp {
+                    Interp::Simple => reference_linear(a, b, x),
+                    Interp::CatmullRom => reference_hermite((a.0, a.1, sl[i]), (b.0, b.1, sl[i + 1]), x),
+                }
+            }
+        };
+        curve.min + norm * (curve.max - curve.min)
+    }
+
+    #[test]
+    fn bitwise_parity_with_curve_data_and_pre_move_reference() {
+        let pulse = Curve::new("pulse", vec![(0.0, 0.0), (0.25, 1.0), (0.5, 0.3), (0.75, 0.1), (1.0, 0.0)]);
+        let steps = Curve::new("steps", vec![(0.0, 0.2), (0.33, 0.2), (0.34, 1.0), (0.66, 1.0), (0.67, 0.5)]);
+        let smooth = Curve::new("smooth", vec![(0.0, 0.0), (0.25, 0.15), (0.75, 0.85), (1.0, 1.0)]);
+        let ramp = Curve::ramp("ramp");
+        let one_pt = Curve::new("one", vec![(0.35, 0.7)]);
+        let dup_t = Curve::new("dup", vec![(0.0, 0.0), (0.5, 0.1), (0.5, 0.9), (1.0, 1.0)]);
+        let ranged = Curve { min: -2.0, max: 5.0, ..pulse.clone() };
+        let curves = [pulse, steps, smooth, ramp, one_pt, dup_t, ranged];
+
+        let mut ts = vec![-1.0_f32, -0.01, 0.0, 0.001];
+        for k in 1..=20 {
+            ts.push(k as f32 * 0.05);
+        }
+        ts.extend([0.999, 1.0, 1.5, f32::NEG_INFINITY, f32::INFINITY]);
+
+        for curve in &curves {
+            assert_eq!(CurveData::from(curve), curve.data(Interp::CatmullRom));
+            for interp in Interp::ALL {
+                let data = curve.data(interp);
+                for &t in &ts {
+                    let from_curve = curve.sample(t, interp);
+                    let from_data = data.sample(t);
+                    let from_ref = reference_sample(curve, t, interp);
+                    assert_eq!(
+                        from_curve.to_bits(),
+                        from_data.to_bits(),
+                        "Curve vs CurveData mismatch on {} ({interp:?}, t={t}): {from_curve} vs {from_data}",
+                        curve.name
+                    );
+                    assert_eq!(
+                        from_curve.to_bits(),
+                        from_ref.to_bits(),
+                        "Curve vs reference mismatch on {} ({interp:?}, t={t}): {from_curve} vs {from_ref}",
+                        curve.name
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn roundtrip_and_normalize() {

@@ -351,6 +351,9 @@ impl Editor {
             Action::Domain(id, payload) => self.domain_step(id, &payload),
             Action::NewAssetDialog { kind, template } => self.new_asset_dialog(kind, template),
             Action::NewFolderDialog(domain) => self.new_folder_dialog(domain),
+            Action::DuplicateAsset(r) => self.duplicate_asset(&r),
+            Action::CopyAsset(r) => self.copy_asset(&r),
+            Action::PasteAsset { domain, folder } => self.paste_asset(domain, &folder),
             Action::RenameDialog(r) => {
                 self.dialog = Some(Dialog::Input {
                     title: format!("Rename {}", r.source_rel()),
@@ -423,6 +426,7 @@ impl Editor {
                 self.dialog = None;
                 self.pick_folder = false;
             }
+            Action::CopyText(s) => self.copy_text = Some(s),
             Action::Notify(text) => self.push_msg(Level::Warning, text),
             Action::ClearMessages => {
                 self.messages.clear();

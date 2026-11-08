@@ -2,6 +2,10 @@
 
 use std::fmt;
 
+/// Identifier of an asset domain (`material`, `light`, …).
+///
+/// The ids `"project"` ([`DomainId::PROJECT`]) and `"common"` (the shared runtime module `quillshade::common`,
+/// ADR 0048) are reserved and must not be used by any domain.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub struct DomainId(&'static str);
 

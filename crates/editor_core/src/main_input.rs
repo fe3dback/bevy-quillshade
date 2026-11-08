@@ -67,7 +67,9 @@ impl Plugin for InputContextsPlugin {
         }
         app.init_resource::<KeyboardGate>()
             .init_resource::<KeyboardHold>()
+            .init_resource::<crate::ui::browser::HoveredTreeRow>()
             .add_input_context::<MainCtx>()
+            .add_input_context::<TreeCtx>()
             .add_systems(Startup, spawn_input_root)
             // After `InputSystems`: the gate reads this frame's keys and mouse buttons (a Space pressed on a focused
             // button must be held back in the frame it goes down).
@@ -75,7 +77,7 @@ impl Plugin for InputContextsPlugin {
                 PreUpdate,
                 InputSync.after(InputSystems).before(EnhancedInputSystems::Update).before(InputFocusSystems::Dispatch),
             )
-            .add_systems(PreUpdate, (clear_keyboard_hold, gate_keyboard).chain().in_set(InputSync))
+            .add_systems(PreUpdate, (clear_keyboard_hold, gate_keyboard, sync_tree_context).chain().in_set(InputSync))
             .add_observer(tab_into_number_input);
         on_combo::<Save>(app, state::Action::Save);
         on_combo::<SaveAll>(app, state::Action::SaveAll);
@@ -101,6 +103,11 @@ impl Plugin for InputContextsPlugin {
         on_combo::<EditDuplicate>(app, state::Action::Tab(TabAction::Duplicate));
         on_combo::<EditSelectAll>(app, state::Action::Tab(TabAction::SelectAll));
         on_plain::<EditDelete>(app, state::Action::Tab(TabAction::DeleteSelection));
+        app.add_observer(on_rename_asset)
+            .add_observer(on_tree_duplicate)
+            .add_observer(on_tree_copy)
+            .add_observer(on_tree_paste)
+            .add_observer(on_tree_delete);
         // Every kind's `EditorAreas::input`, then the domains' own contexts (design §6.7). Both come from the domain
         // list `EditorCorePlugin` put in the app, which must come first.
         let Some(kinds) = app.world().get_resource::<EditorKinds>().cloned() else {
@@ -221,10 +228,35 @@ pub struct EditSelectAll;
 #[action_output(bool)]
 pub struct EditDelete;
 
+/// F2: renames the hovered Project Tree asset or the active tab's editable asset.
+#[derive(InputAction)]
+#[action_output(bool)]
+pub struct RenameAsset;
+
+/// Context active while the pointer is hovering an editable Project Tree row (`HoveredTreeRow`).
+#[derive(Component, Default, Clone)]
+pub struct TreeCtx;
+
+#[derive(InputAction)]
+#[action_output(bool)]
+pub struct TreeDuplicate;
+
+#[derive(InputAction)]
+#[action_output(bool)]
+pub struct TreeCopy;
+
+#[derive(InputAction)]
+#[action_output(bool)]
+pub struct TreePaste;
+
+#[derive(InputAction)]
+#[action_output(bool)]
+pub struct TreeDelete;
+
 fn main_bindings() -> impl Scene {
     use KeyCode::{
-        Backquote, BracketLeft, BracketRight, BrowserBack, BrowserForward, Digit1, Digit2, Digit3, KeyO, KeyQ, KeyS,
-        KeyW, KeyY, KeyZ, Tab,
+        Backquote, BracketLeft, BracketRight, BrowserBack, BrowserForward, Digit1, Digit2, Digit3, F2, KeyO, KeyQ,
+        KeyS, KeyW, KeyY, KeyZ, Tab,
     };
     // Physical keys: Ctrl+[ / ] are the same keys on any layout (`х` / `ъ` on the Russian one).
     let back = ctrl(BracketLeft).into_iter().chain([BrowserBack.into(), MouseButton::Back.into()]);
@@ -255,6 +287,8 @@ fn main_bindings() -> impl Scene {
             --
             @{hotkey::<ToggleZen>(plain([Backquote]))}
             --
+            @{hotkey::<RenameAsset>(plain([F2]))}
+            --
             @{hotkey::<NavBack>(back)}
             --
             @{hotkey::<NavForward>(forward)}
@@ -262,10 +296,137 @@ fn main_bindings() -> impl Scene {
     }
 }
 
+fn tree_bindings() -> impl Scene {
+    use KeyCode::{Backspace, Delete, KeyC, KeyD, KeyV};
+    bsn! {
+        Actions<TreeCtx> [
+            @{hotkey::<TreeDuplicate>(ctrl(KeyD))}
+            --
+            @{hotkey::<TreeCopy>(ctrl(KeyC))}
+            --
+            @{hotkey::<TreePaste>(ctrl(KeyV))}
+            --
+            @{hotkey::<TreeDelete>(plain([Delete, Backspace]))}
+        ]
+    }
+}
+
 fn spawn_input_root(world: &mut World) {
-    let mut root = world.spawn((InputRoot, MainCtx, ContextPriority::<MainCtx>::new(2)));
+    let mut root = world.spawn((
+        InputRoot,
+        MainCtx,
+        ContextPriority::<MainCtx>::new(2),
+        TreeCtx,
+        ContextPriority::<TreeCtx>::new(2),
+        ContextActivity::<TreeCtx>::INACTIVE,
+    ));
     if let Err(e) = root.apply_scene(main_bindings()) {
         error!("cannot bind the global hotkeys: {e}");
+    }
+    if let Err(e) = root.apply_scene(tree_bindings()) {
+        error!("cannot bind the project tree hotkeys: {e}");
+    }
+}
+
+fn sync_tree_context(
+    hovered: Res<crate::ui::browser::HoveredTreeRow>,
+    gate: Res<KeyboardGate>,
+    root: Single<(Entity, &ContextActivity<TreeCtx>), With<InputRoot>>,
+    bindings: ContextBindings<TreeCtx>,
+    mut commands: Commands,
+) {
+    let (root, activity) = *root;
+    let active = hovered.0.as_ref().is_some_and(crate::ui::tree::editable);
+    if active != **activity {
+        let activity = if active { ContextActivity::<TreeCtx>::ACTIVE } else { ContextActivity::INACTIVE };
+        commands.entity(root).insert(activity);
+    }
+    if active && (!**activity || gate.reopened) {
+        bindings.rearm(root, &mut commands);
+    }
+}
+
+fn on_rename_asset(
+    _: On<Start<RenameAsset>>,
+    keys: Res<ButtonInput<KeyCode>>,
+    hovered: Res<crate::ui::browser::HoveredTreeRow>,
+    editor: Res<Editor>,
+    mut actions: ResMut<state::Actions>,
+) {
+    if !no_command_mods(&keys) {
+        return;
+    }
+    if let Some(row) = hovered.0.as_ref().filter(|r| crate::ui::tree::editable(r))
+        && let crate::ui::tree::TreeItem::Asset(r) = &row.item
+    {
+        actions.push(state::Action::RenameDialog(r.clone()));
+        return;
+    }
+    if let Some(r) = editor.tab().and_then(|t| t.doc().asset()).cloned() {
+        actions.push(state::Action::RenameDialog(r));
+    }
+}
+
+fn on_tree_duplicate(
+    _: On<Start<TreeDuplicate>>,
+    hovered: Res<crate::ui::browser::HoveredTreeRow>,
+    mut actions: ResMut<state::Actions>,
+) {
+    if let Some(row) = hovered.0.as_ref().filter(|r| crate::ui::tree::editable(r))
+        && let crate::ui::tree::TreeItem::Asset(r) = &row.item
+    {
+        actions.push(state::Action::DuplicateAsset(r.clone()));
+    }
+}
+
+fn on_tree_copy(
+    _: On<Start<TreeCopy>>,
+    hovered: Res<crate::ui::browser::HoveredTreeRow>,
+    mut actions: ResMut<state::Actions>,
+) {
+    if let Some(row) = hovered.0.as_ref().filter(|r| crate::ui::tree::editable(r))
+        && let crate::ui::tree::TreeItem::Asset(r) = &row.item
+    {
+        actions.push(state::Action::CopyAsset(r.clone()));
+    }
+}
+
+fn on_tree_paste(
+    _: On<Start<TreePaste>>,
+    hovered: Res<crate::ui::browser::HoveredTreeRow>,
+    mut actions: ResMut<state::Actions>,
+) {
+    let Some(row) = hovered.0.as_ref().filter(|r| crate::ui::tree::editable(r)) else { return };
+    match (&row.item, row.tree) {
+        (crate::ui::tree::TreeItem::Asset(r), _) => {
+            let folder = r.path.rsplit_once('/').map_or("", |(d, _)| d).to_string();
+            actions.push(state::Action::PasteAsset { domain: r.domain, folder });
+        }
+        (crate::ui::tree::TreeItem::Folder(f), crate::ui::tree::TreeId::Project(domain)) => {
+            actions.push(state::Action::PasteAsset { domain, folder: f.clone() });
+        }
+        _ => {}
+    }
+}
+
+fn on_tree_delete(
+    _: On<Start<TreeDelete>>,
+    keys: Res<ButtonInput<KeyCode>>,
+    hovered: Res<crate::ui::browser::HoveredTreeRow>,
+    mut actions: ResMut<state::Actions>,
+) {
+    if !no_command_mods(&keys) {
+        return;
+    }
+    let Some(row) = hovered.0.as_ref().filter(|r| crate::ui::tree::editable(r)) else { return };
+    match (&row.item, row.tree) {
+        (crate::ui::tree::TreeItem::Asset(r), _) => {
+            actions.push(state::Action::DeleteDialog(r.clone()));
+        }
+        (crate::ui::tree::TreeItem::Folder(f), crate::ui::tree::TreeId::Project(domain)) if !f.is_empty() => {
+            actions.push(state::Action::DeleteFolderDialog(domain, f.clone()));
+        }
+        _ => {}
     }
 }
 

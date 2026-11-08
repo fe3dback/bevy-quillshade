@@ -12,7 +12,7 @@ use bevy::prelude::*;
 use super::MaterialValues;
 
 /// Every generated material, nested by folder (`baked.env.rock_wet`). The handles are reserved when the
-/// plugin is built; `BakedMaterialsLoader::load` inserts the materials behind them.
+/// plugin is built; `QuillshadeLoader::load` inserts the materials behind them.
 #[derive(Resource, Clone, Debug)]
 pub struct BakedMaterials {
     pub env: dir_env::Group,

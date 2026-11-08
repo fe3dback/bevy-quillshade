@@ -14,6 +14,7 @@ mod inspect;
 pub mod preview;
 mod preview_terrain;
 pub mod preview_tool;
+pub mod quick_start;
 mod state;
 mod texture;
 
@@ -98,6 +99,7 @@ impl EditorDomain for LightDomain {
     /// `.ktx2` Game Assets).
     fn register(&self, r: &mut DomainRegistrar) {
         r.state(|| Box::new(LightState::default()))
+            .quick_start(quick_start::QUICK_START)
             .preview(preview::preview_callbacks())
             .logic(preview::setup_preview_logic)
             .asset_kind(AssetKindDef {

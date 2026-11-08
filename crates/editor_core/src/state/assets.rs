@@ -98,6 +98,9 @@ impl Editor {
         if to == *r {
             return;
         }
+        if self.copied_asset.as_ref() == Some(r) {
+            self.copied_asset = Some(to.clone());
+        }
         self.rescan();
         // The asset's document and its generated files follow (the domain's regeneration fills the files).
         for t in &mut self.tabs {
@@ -132,9 +135,104 @@ impl Editor {
         if let Err(e) = deleted.unwrap_or_else(|| super::kinds::delete_file(self, r)) {
             return self.io_error("Cannot delete", e);
         }
+        if self.copied_asset.as_ref() == Some(r) {
+            self.copied_asset = None;
+        }
         self.info(format!("Deleted {}", r.source_rel()));
         self.rescan();
         self.with_domain(r.domain, |e, s| s.deleted(e, r));
+        self.touch_all();
+    }
+
+    /// Whether `Action::PasteAsset` into `domain` is currently disabled, returning the reason when disabled.
+    pub fn paste_disabled_reason(&self, domain: DomainId) -> Option<String> {
+        let Some(project) = &self.project else {
+            return Some("No project open".into());
+        };
+        let Some(copied) = &self.copied_asset else {
+            return Some("Nothing copied".into());
+        };
+        if copied.domain != domain {
+            return Some(format!("Copied asset is from the `{}` domain", copied.domain));
+        }
+        if !project.root.join(copied.source_rel()).is_file() {
+            return Some(format!("`{}` no longer exists", copied.source_rel()));
+        }
+        None
+    }
+
+    /// `Action::CopyAsset`: stores `r` in [`Editor::copied_asset`].
+    pub fn copy_asset(&mut self, r: &AssetRef) {
+        let Some(project) = &self.project else { return };
+        if !project.root.join(r.source_rel()).is_file() {
+            return;
+        }
+        self.copied_asset = Some(r.clone());
+        self.info(format!("Copied {}", r.source_rel()));
+    }
+
+    /// `Action::DuplicateAsset`: copies `r` in its own folder under `<name>_copy` / `<name>_copy_N` with a fresh
+    /// UUIDv7, rescans, and opens the new asset.
+    pub fn duplicate_asset(&mut self, r: &AssetRef) {
+        let folder = r.path.rsplit_once('/').map_or("", |(dir, _)| dir);
+        self.copy_asset_to_folder(r, folder, false, "Duplicated");
+    }
+
+    /// `Action::PasteAsset`: copies [`Editor::copied_asset`] into `folder` of `domain` (keeping its leaf name when
+    /// unoccupied in `folder`, else `<name>_copy` / `<name>_copy_N`) with a fresh UUIDv7, rescans, and opens it.
+    pub fn paste_asset(&mut self, domain: DomainId, folder: &str) {
+        if self.paste_disabled_reason(domain).is_some() {
+            return;
+        }
+        let Some(copied) = self.copied_asset.clone() else { return };
+        let folder = folder.trim_matches('/');
+        if !folder.is_empty()
+            && let Err(e) = project_core::ident::check_path(folder)
+        {
+            return self.io_error("Cannot paste asset", e);
+        }
+        self.copy_asset_to_folder(&copied, folder, true, "Pasted");
+    }
+
+    fn copy_asset_to_folder(&mut self, r: &AssetRef, folder: &str, keep_name_if_free: bool, verb: &str) {
+        let Some(project) = self.project.clone() else { return };
+        if let Some(i) = self.asset_tab(r)
+            && self.tabs[i].doc().is_dirty()
+            && !self.save(i)
+        {
+            return;
+        }
+        let from_file = project.root.join(r.source_rel());
+        if !from_file.is_file() {
+            return self.io_error("Cannot copy asset", format!("`{}` does not exist", r.source_rel()));
+        }
+        let to = unique_copy_ref(&project, r, folder, keep_name_if_free);
+        let to_file = project.root.join(to.source_rel());
+        if let Some(parent) = to_file.parent()
+            && let Err(e) = std::fs::create_dir_all(parent)
+        {
+            return self.io_error("Cannot create parent folder", e);
+        }
+        if let Err(e) = std::fs::copy(&from_file, &to_file) {
+            return self.io_error("Cannot copy asset", e);
+        }
+        let new_id = AssetUuid::new_v7();
+        let set = self.with_domain(to.domain, |e, s| s.set_asset_uuid(e, &to, new_id));
+        if let Err(e) = set.unwrap_or_else(|| super::kinds::set_asset_uuid(self, &to, new_id))
+            && self.domain_list.backends().iter().any(|b| b.id() == to.domain)
+        {
+            let _ = std::fs::remove_file(&to_file);
+            return self.io_error("Cannot assign UUID to copied asset", e);
+        }
+        self.current_folders.insert(to.domain, folder.to_string());
+        self.info(format!("{verb} {} -> {}", r.source_rel(), to.source_rel()));
+        self.rescan();
+        self.open_ref(&to);
+        if let Some(i) = self.asset_tab(&to) {
+            self.with_domain(to.domain, |e, s| s.after_save(e, &[i]));
+        } else {
+            self.with_domain(to.domain, |e, s| s.after_save(e, &[]));
+        }
         self.touch_all();
     }
 
@@ -298,4 +396,47 @@ fn create_folder(project: &Project, domain: DomainId, path: &str) -> Result<(), 
     project_core::ident::check_path(path)?;
     project.ensure_layout().map_err(|e| e.to_string())?;
     std::fs::create_dir_all(project.domain_dir(domain).join(path)).map_err(|e| e.to_string())
+}
+
+fn copy_stem(leaf: &str) -> &str {
+    if let Some(stem) = leaf.strip_suffix("_copy")
+        && !stem.is_empty()
+    {
+        return stem;
+    }
+    if let Some((before, digits)) = leaf.rsplit_once("_copy_")
+        && !before.is_empty()
+        && !digits.is_empty()
+        && digits.bytes().all(|b| b.is_ascii_digit())
+    {
+        return before;
+    }
+    leaf
+}
+
+fn unique_copy_ref(project: &Project, r: &AssetRef, folder: &str, keep_name_if_free: bool) -> AssetRef {
+    let leaf = r.path.rsplit('/').next().unwrap_or(&r.path);
+    let join = |name: &str| {
+        let path = if folder.is_empty() { name.to_string() } else { format!("{folder}/{name}") };
+        AssetRef { domain: r.domain, path, suffix: r.suffix }
+    };
+    if keep_name_if_free {
+        let candidate = join(leaf);
+        if !project.root.join(candidate.source_rel()).exists() {
+            return candidate;
+        }
+    }
+    let stem = copy_stem(leaf);
+    let first = join(&format!("{stem}_copy"));
+    if !project.root.join(first.source_rel()).exists() {
+        return first;
+    }
+    let mut n = 2usize;
+    loop {
+        let candidate = join(&format!("{stem}_copy_{n}"));
+        if !project.root.join(candidate.source_rel()).exists() {
+            return candidate;
+        }
+        n += 1;
+    }
 }

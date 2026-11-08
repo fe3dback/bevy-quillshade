@@ -15,7 +15,11 @@ use shader_project::writer::Change;
 
 /// The domains, one line each (design §6.1): the GUI and the CLI share this list.
 fn domains() -> Vec<Box<dyn EditorDomain>> {
-    vec![Box::new(material_domain::MaterialDomain), Box::new(light_domain::LightDomain)]
+    vec![
+        Box::new(material_domain::MaterialDomain),
+        Box::new(light_domain::LightDomain),
+        Box::new(data_domain::DataDomain),
+    ]
 }
 
 #[derive(Parser)]

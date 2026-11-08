@@ -20,12 +20,17 @@ use crate::ui::HoverRow;
 use crate::ui::icons::{IconId, IconRef, icon};
 
 use super::OnActivate;
-use super::dialog::{open_icon_menu, open_menu_entries};
+use super::dialog::open_menu_entries;
 use super::shell::ROW_ACTIVE;
 use super::tree::{
     self, GameAssetsTree, LeftPanes, ProjectTree, TreeId, TreeItem, TreeRow, TreeSource, left_panes, project_tools,
 };
 use crate::state::editor::Editor;
+
+/// Tracks the sidebar [`TreeRow`] currently under the pointer so Project Tree keyboard shortcuts (`Ctrl+D`, `Ctrl+C`,
+/// `Ctrl+V`, `F2`, `Del`) can act on the hovered asset or folder row.
+#[derive(Resource, Default, Clone, Debug)]
+pub struct HoveredTreeRow(pub Option<TreeRow>);
 
 /// The Project panel's scroll body.
 #[derive(Component, Default, Clone)]
@@ -65,10 +70,13 @@ pub struct BrowserPlugin;
 
 impl Plugin for BrowserPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, (redraw, show_panes, redraw_tools).after(crate::apply_actions))
+        app.init_resource::<HoveredTreeRow>()
+            .add_systems(Update, (redraw, show_panes, redraw_tools).after(crate::apply_actions))
             .add_observer(click_row)
             .add_observer(click_background)
-            .add_observer(drop_on_folder);
+            .add_observer(drop_on_folder)
+            .add_observer(tree_row_hover_on)
+            .add_observer(tree_row_hover_off);
     }
 }
 
@@ -331,7 +339,22 @@ fn click_background(
     // The empty space lies below the shown Project tree: its root takes the menu.
     let Some(domain) = shown_tree(&editor) else { return };
     actions.push(Action::SelectFolder(domain, String::new()));
-    open_icon_menu(&mut commands, ev.pointer.position, tree::create_items(&editor, domain));
+    let root_row = TreeRow { tree: TreeId::Project(domain), item: TreeItem::Folder(String::new()) };
+    open_menu_entries(&mut commands, ev.pointer.position, tree::row_menu(&editor, &root_row));
+}
+
+fn tree_row_hover_on(ev: On<PointerOver>, rows: Query<&TreeRow>, mut hovered: ResMut<HoveredTreeRow>) {
+    if let Ok(row) = rows.get(ev.event_target()) {
+        hovered.0 = Some(row.clone());
+    }
+}
+
+fn tree_row_hover_off(ev: On<PointerOut>, rows: Query<&TreeRow>, mut hovered: ResMut<HoveredTreeRow>) {
+    if let Ok(row) = rows.get(ev.event_target())
+        && hovered.0.as_ref().is_some_and(|h| h.tree == row.tree && h.item == row.item)
+    {
+        hovered.0 = None;
+    }
 }
 
 /// Dragging an asset row onto a folder row of the same editable tree moves the asset there.

@@ -330,61 +330,52 @@ impl AssetLoader for ManifestLoader {
     }
 }
 
-/// Texture load progress, written whenever a count changes (and once when loading starts). `total` is the number of
-/// textures in the compiled manifest (every Texture asset, the internal ones and the baked gradient collections; a
-/// manifest hot reload before [`BakedMaterialsReady`] may add the textures it newly references); loading is over when
-/// `loaded + failed == total`. Textures a later hot reload loads are not reported.
+/// Internal texture load progress for the Material domain, aggregated into [`crate::QuillshadeProgress`].
 #[derive(Message, Clone, Copy, Debug, PartialEq, Eq)]
-pub struct BakedMaterialsProgress {
+pub(crate) struct BakedMaterialsProgress {
     pub loaded: u32,
     pub failed: u32,
     pub total: u32,
 }
 
-/// Written once, when every texture has loaded or failed. Materials exist (and render) before that: Bevy waits for
-/// their images on its own; a texture that failed is replaced by `@internal/default` in every material using it.
+/// Written once internally when every texture in the Material domain has loaded or failed.
 #[derive(Message, Clone, Copy, Debug)]
-pub struct BakedMaterialsReady;
+pub(crate) struct BakedMaterialsReady;
 
-/// Starts loading the baked materials and reports progress (design §3.1):
-///
-/// ```no_run
-/// fn start(mut loader: quillshade::material::BakedMaterialsLoader) {
-///     let textures = loader.load(); // idempotent
-///     bevy::log::info!("loading {textures} textures");
-/// }
-/// ```
-///
-/// Optional: without a `load()` call [`BakedPlugin`] starts loading in the first `PreUpdate` (decision 0027). Call it
-/// to use [`BakedTextures`] in `Startup` or to size a loading screen. [`BakedMaterials`] holds reserved handles from
-/// the start. `load()` fills [`BakedTextures`] at once (so a system running after it, even in the same schedule, can
-/// use `tex.textures.sprite`), the materials are inserted behind their handles on the next `PreUpdate`, then
-/// [`BakedMaterialsProgress`] / [`BakedMaterialsReady`] follow.
+/// Schedule set for the Material domain's `PreUpdate` loading and tracking systems.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct LoadSet;
+
+/// Internal Material domain loader delegated to by [`crate::QuillshadeLoader`].
 #[derive(SystemParam)]
-pub struct BakedMaterialsLoader<'w> {
-    state: ResMut<'w, BakedState>,
-    server: Res<'w, AssetServer>,
-    textures: ResMut<'w, BakedTextures>,
+pub(crate) struct BakedMaterialsLoader<'w> {
+    state: Option<ResMut<'w, BakedState>>,
+    server: Option<Res<'w, AssetServer>>,
+    textures: Option<ResMut<'w, BakedTextures>>,
 }
 
 impl BakedMaterialsLoader<'_> {
     /// Starts loading every texture of the compiled manifest with its Texture asset settings and fills
     /// [`BakedTextures`]; the materials follow on the next `PreUpdate`, then `baked.ron` itself is loaded as an asset
-    /// (design §3.3 step 2). Idempotent. Returns the number of textures being loaded ([`BakedMaterialsProgress`]
-    /// `total`; a call after loading started returns the current one).
-    pub fn load(&mut self) -> u32 {
-        if !self.state.started {
+    /// (design §3.3 step 2). Idempotent. Returns the number of textures being loaded.
+    pub(crate) fn load(&mut self) -> u32 {
+        let Some(started) = self.state.as_ref().map(|s| s.started) else {
+            return 0;
+        };
+        if !started {
             self.start(crate::material::COMPILED_MANIFEST, true);
         }
-        self.state.progress().total
+        self.progress().total
     }
 
     /// Loads from `manifest` instead of [`crate::material::COMPILED_MANIFEST`] (tests); ignored once loading has
     /// started. `manifest` stands for the compiled snapshot *and* the runtime manifest: `baked.ron` is not loaded, so
     /// nothing overlays it.
-    #[doc(hidden)]
-    pub fn load_from_str(&mut self, manifest: &str) {
-        if self.state.started {
+    pub(crate) fn load_from_str(&mut self, manifest: &str) {
+        let Some(started) = self.state.as_ref().map(|s| s.started) else {
+            return;
+        };
+        if started {
             warn!("baked materials: load_from_str after loading started; ignored");
             return;
         }
@@ -393,21 +384,26 @@ impl BakedMaterialsLoader<'_> {
 
     /// Starts loading from manifest `text`; `hot_reload`: then load `baked.ron` as an asset and apply it on top.
     fn start(&mut self, text: &str, hot_reload: bool) {
+        let (Some(state), Some(server), Some(textures_res)) =
+            (self.state.as_deref_mut(), self.server.as_deref(), self.textures.as_deref_mut())
+        else {
+            return;
+        };
         let manifest = BakedManifest::parse(text).unwrap_or_else(|e| {
             error!("baked materials: the compiled manifest does not parse ({e}); using compiled defaults");
             BakedManifest::empty()
         });
         let mut textures = BTreeMap::new();
         for (id, def) in &manifest.textures {
-            let entry = TextureEntry::load(&self.server, def);
-            self.textures.set(id, entry.handle.clone());
+            let entry = TextureEntry::load(server, def);
+            textures_res.set(id, entry.handle.clone());
             textures.insert(id.clone(), entry);
         }
         // A field without a manifest entry: its Texture asset had an error at regeneration (E011 / E012 / E013).
         let fallback = textures.get(DEFAULT_TEXTURE).map(|e| e.handle.clone()).unwrap_or_default();
         for id in BakedTextures::IDS.iter().filter(|id| !manifest.textures.contains_key(**id)) {
             warn!("baked materials: texture `{id}` is not in the manifest (invalid Texture asset); using the default");
-            self.textures.set(id, fallback.clone());
+            textures_res.set(id, fallback.clone());
         }
 
         for id in manifest.materials.keys() {
@@ -423,7 +419,6 @@ impl BakedMaterialsLoader<'_> {
             });
             materials.insert(id.to_string(), values);
         }
-        let state = &mut *self.state;
         state.started = true;
         state.pending_build = true;
         state.textures = textures;
@@ -431,19 +426,24 @@ impl BakedMaterialsLoader<'_> {
         state.materials = materials;
         state.base_textures = manifest.textures;
         if hot_reload {
-            state.manifest = Some(self.server.load(MANIFEST_PATH));
+            state.manifest = Some(server.load(MANIFEST_PATH));
         }
     }
 
     /// Current counts; before `load()`, `total` is the number of textures of the compiled manifest and nothing is
     /// loaded.
-    pub fn progress(&self) -> BakedMaterialsProgress {
-        self.state.progress()
+    pub(crate) fn progress(&self) -> BakedMaterialsProgress {
+        self.state.as_ref().map_or(BakedMaterialsProgress { loaded: 0, failed: 0, total: 0 }, |s| s.progress())
+    }
+
+    /// `true` once `load()` or `auto_load` has started loading the Material domain.
+    pub(crate) fn is_started(&self) -> bool {
+        self.state.as_ref().is_none_or(|s| s.started)
     }
 
     /// `true` once every texture has loaded or failed ([`BakedMaterialsReady`] was written).
-    pub fn is_ready(&self) -> bool {
-        self.state.ready
+    pub(crate) fn is_ready(&self) -> bool {
+        self.state.as_ref().is_none_or(|s| s.ready)
     }
 }
 
@@ -592,7 +592,8 @@ impl Plugin for BakedPlugin {
                     track_progress.run_if(|s: Res<BakedState>| s.started && (!s.ready || s.loading())),
                     apply_samplers.run_if(|s: Res<BakedState>| s.sampler_pending()),
                 )
-                    .chain(),
+                    .chain()
+                    .in_set(LoadSet),
             )
             .add_systems(PostUpdate, sync_features.run_if(|s: Res<BakedState>| s.started && !s.pending_build));
     }

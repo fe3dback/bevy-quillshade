@@ -7,8 +7,13 @@
 use std::collections::HashSet;
 use std::hash::{BuildHasher, RandomState};
 
+use project_core::common::gradient::sample_stops_f64;
 use project_core::{AssetUuid, check_version, probe_version};
 use serde::{Deserialize, Serialize};
+
+pub use project_core::common::gradient::{
+    DEFAULT_MID, MID_MAX, MID_MIN, RawGradient, RawStop, linear_to_oklab, oklab_to_linear,
+};
 
 use crate::model::LoadError;
 
@@ -23,16 +28,6 @@ pub const SLOTS: usize = 128;
 pub const SAMPLES: usize = 128;
 /// Most stops a slot may hold.
 pub const MAX_STOPS: usize = 32;
-
-/// Range a segment midpoint is clamped to, so the midpoint remap never divides by zero.
-pub const MID_MIN: f32 = 0.01;
-pub const MID_MAX: f32 = 0.99;
-
-/// Midpoint of a segment nobody has moved: the colors mix 50/50 halfway.
-const DEFAULT_MID: f32 = 0.5;
-
-/// Smallest segment length used as a divisor (stops with equal `t` make a step), as in `curve.rs`.
-const MIN_SPAN: f64 = 1e-6;
 
 /// Prefix of the baked texture id of a collection; it can never collide with a Texture asset id (an asset path has
 /// no `@`).
@@ -230,38 +225,14 @@ impl Slot {
     /// [`Slot::sample`] in `f64`: baking rounds to 8 bits, and the wider math keeps platform `libm` differences far
     /// from a rounding boundary (the baked PNG must be byte-identical on every OS).
     fn sample_f64(&self, t: f64) -> Option<[f64; 4]> {
-        let s = &self.stops;
-        let color = |k: usize| s[k].color.map(|c| f64::from(c).clamp(0.0, 1.0));
-        let (first, last) = (s.first()?, s.len() - 1);
-        if s.len() == 1 || t.is_nan() || t < f64::from(first.t) {
-            return Some(color(0));
-        }
-        if t >= f64::from(s[last].t) {
-            return Some(color(last));
-        }
-        // Last segment start whose `t` is <= t (a later stop wins at equal `t`).
-        let i = (0..last).rfind(|k| t >= f64::from(s[*k].t)).unwrap_or(0);
-        let (a, b) = (f64::from(s[i].t), f64::from(s[i + 1].t));
-        if b - a < MIN_SPAN {
-            return Some(color(i + 1));
-        }
-        let x = ((t - a) / (b - a)).clamp(0.0, 1.0);
-        let m = f64::from(if s[i].mid.is_nan() { DEFAULT_MID } else { s[i].mid.clamp(MID_MIN, MID_MAX) });
-        let f = if x < m { 0.5 * x / m } else { 0.5 + 0.5 * (x - m) / (1.0 - m) };
-        let (ca, cb) = (color(i), color(i + 1));
-        if f <= 0.0 {
-            return Some(ca);
-        }
-        if f >= 1.0 {
-            return Some(cb);
-        }
-        let rgb = if ca[..3] == cb[..3] {
-            [ca[0], ca[1], ca[2]]
-        } else {
-            let (la, lb) = (oklab_f64([ca[0], ca[1], ca[2]]), oklab_f64([cb[0], cb[1], cb[2]]));
-            oklab_to_linear_f64([0, 1, 2].map(|k| la[k] + (lb[k] - la[k]) * f)).map(|c| c.clamp(0.0, 1.0))
-        };
-        Some([rgb[0], rgb[1], rgb[2], ca[3] + (cb[3] - ca[3]) * f])
+        sample_stops_f64(
+            self.stops.len(),
+            |k| {
+                let s = &self.stops[k];
+                (s.t, s.color, s.mid)
+            },
+            t,
+        )
     }
 
     /// One baked row: [`SAMPLES`] pixels, pixel `x` = `sample(x / (SAMPLES - 1))`, RGB sRGB-encoded, alpha stored
@@ -276,46 +247,10 @@ impl Slot {
     }
 }
 
-// OKLab (Björn Ottosson, 2020) over linear sRGB: the matrices of `stdlib/color.wesl` (decision 0036).
-
-const RGB_TO_LMS: [[f64; 3]; 3] = [
-    [0.4122214708, 0.5363325363, 0.0514459929],
-    [0.2119034982, 0.6806995451, 0.1073969566],
-    [0.0883024619, 0.2817188376, 0.6299787005],
-];
-const LMS_TO_LAB: [[f64; 3]; 3] = [
-    [0.2104542553, 0.7936177850, -0.0040720468],
-    [1.9779984951, -2.4285922050, 0.4505937099],
-    [0.0259040371, 0.7827717662, -0.8086757660],
-];
-const LAB_TO_LMS: [[f64; 3]; 3] =
-    [[1.0, 0.3963377774, 0.2158037573], [1.0, -0.1055613458, -0.0638541728], [1.0, -0.0894841775, -1.2914855480]];
-const LMS_TO_RGB: [[f64; 3]; 3] = [
-    [4.0767416621, -3.3077115913, 0.2309699292],
-    [-1.2684380046, 2.6097574011, -0.3413193965],
-    [-0.0041960863, -0.7034186147, 1.7076147010],
-];
-
-fn mul(m: &[[f64; 3]; 3], v: [f64; 3]) -> [f64; 3] {
-    m.map(|row| row[0] * v[0] + row[1] * v[1] + row[2] * v[2])
-}
-
-fn oklab_f64(c: [f64; 3]) -> [f64; 3] {
-    mul(&LMS_TO_LAB, mul(&RGB_TO_LMS, c).map(f64::cbrt))
-}
-
-fn oklab_to_linear_f64(lab: [f64; 3]) -> [f64; 3] {
-    mul(&LMS_TO_RGB, mul(&LAB_TO_LMS, lab).map(|t| t * t * t))
-}
-
-/// Linear sRGB → OKLab (`sg_rgb_to_oklab`).
-pub fn linear_to_oklab(c: [f32; 3]) -> [f32; 3] {
-    oklab_f64(c.map(f64::from)).map(|v| v as f32)
-}
-
-/// OKLab → linear sRGB (`sg_oklab_to_rgb` without its clamp: out-of-gamut results stay out of `0..1`).
-pub fn oklab_to_linear(c: [f32; 3]) -> [f32; 3] {
-    oklab_to_linear_f64(c.map(f64::from)).map(|v| v as f32)
+impl From<&Slot> for RawGradient {
+    fn from(slot: &Slot) -> Self {
+        Self { stops: slot.stops.iter().map(|s| RawStop { t: s.t, color: s.color, mid: s.mid }).collect() }
+    }
 }
 
 // sRGB transfer function (IEC 61966-2-1), as `sg_linear_to_srgb` / `sg_srgb_to_linear`: negative input clamps to 0.
@@ -377,6 +312,120 @@ mod tests {
         move || {
             n += 1;
             n
+        }
+    }
+
+    const REF_MIN_SPAN: f64 = 1e-6;
+    const REF_RGB_TO_LMS: [[f64; 3]; 3] = [
+        [0.4122214708, 0.5363325363, 0.0514459929],
+        [0.2119034982, 0.6806995451, 0.1073969566],
+        [0.0883024619, 0.2817188376, 0.6299787005],
+    ];
+    const REF_LMS_TO_LAB: [[f64; 3]; 3] = [
+        [0.2104542553, 0.7936177850, -0.0040720468],
+        [1.9779984951, -2.4285922050, 0.4505937099],
+        [0.0259040371, 0.7827717662, -0.8086757660],
+    ];
+    const REF_LAB_TO_LMS: [[f64; 3]; 3] =
+        [[1.0, 0.3963377774, 0.2158037573], [1.0, -0.1055613458, -0.0638541728], [1.0, -0.0894841775, -1.2914855480]];
+    const REF_LMS_TO_RGB: [[f64; 3]; 3] = [
+        [4.0767416621, -3.3077115913, 0.2309699292],
+        [-1.2684380046, 2.6097574011, -0.3413193965],
+        [-0.0041960863, -0.7034186147, 1.7076147010],
+    ];
+
+    fn ref_mul(m: &[[f64; 3]; 3], v: [f64; 3]) -> [f64; 3] {
+        m.map(|row| row[0] * v[0] + row[1] * v[1] + row[2] * v[2])
+    }
+
+    fn ref_oklab_f64(c: [f64; 3]) -> [f64; 3] {
+        ref_mul(&REF_LMS_TO_LAB, ref_mul(&REF_RGB_TO_LMS, c).map(f64::cbrt))
+    }
+
+    fn ref_oklab_to_linear_f64(lab: [f64; 3]) -> [f64; 3] {
+        ref_mul(&REF_LMS_TO_RGB, ref_mul(&REF_LAB_TO_LMS, lab).map(|t| t * t * t))
+    }
+
+    fn reference_sample_f64(slot: &Slot, t: f64) -> Option<[f64; 4]> {
+        let s = &slot.stops;
+        let color = |k: usize| s[k].color.map(|c| f64::from(c).clamp(0.0, 1.0));
+        let (first, last) = (s.first()?, s.len() - 1);
+        if s.len() == 1 || t.is_nan() || t < f64::from(first.t) {
+            return Some(color(0));
+        }
+        if t >= f64::from(s[last].t) {
+            return Some(color(last));
+        }
+        let i = (0..last).rfind(|k| t >= f64::from(s[*k].t)).unwrap_or(0);
+        let (a, b) = (f64::from(s[i].t), f64::from(s[i + 1].t));
+        if b - a < REF_MIN_SPAN {
+            return Some(color(i + 1));
+        }
+        let x = ((t - a) / (b - a)).clamp(0.0, 1.0);
+        let m = f64::from(if s[i].mid.is_nan() { DEFAULT_MID } else { s[i].mid.clamp(MID_MIN, MID_MAX) });
+        let f = if x < m { 0.5 * x / m } else { 0.5 + 0.5 * (x - m) / (1.0 - m) };
+        let (ca, cb) = (color(i), color(i + 1));
+        if f <= 0.0 {
+            return Some(ca);
+        }
+        if f >= 1.0 {
+            return Some(cb);
+        }
+        let rgb = if ca[..3] == cb[..3] {
+            [ca[0], ca[1], ca[2]]
+        } else {
+            let (la, lb) = (ref_oklab_f64([ca[0], ca[1], ca[2]]), ref_oklab_f64([cb[0], cb[1], cb[2]]));
+            ref_oklab_to_linear_f64([0, 1, 2].map(|k| la[k] + (lb[k] - la[k]) * f)).map(|c| c.clamp(0.0, 1.0))
+        };
+        Some([rgb[0], rgb[1], rgb[2], ca[3] + (cb[3] - ca[3]) * f])
+    }
+
+    fn reference_sample(slot: &Slot, t: f32) -> Option<[f32; 4]> {
+        reference_sample_f64(slot, f64::from(t)).map(|c| c.map(|v| v as f32))
+    }
+
+    #[test]
+    fn bitwise_parity_with_raw_gradient_and_pre_move_reference() {
+        const TERRAIN_RON: &str =
+            include_str!("../../../examples/sample_game/quillshade/material/common/terrain.gradients.ron");
+        let terrain = GradientCollection::from_ron(TERRAIN_RON).expect("load sample terrain.gradients.ron");
+
+        let edge_slots = [
+            slot(&[]),
+            slot(&[(0.35, GREEN, 0.5)]),
+            slot(&[(0.0, RED, 0.5), (0.5, RED, 0.5), (0.5, BLUE, 0.5), (1.0, BLUE, 0.5)]),
+            slot(&[(0.0, RED, 0.15), (0.6, GREEN, 0.85), (1.0, BLUE, 0.5)]),
+            slot(&[(0.0, [1.0, 0.5, 0.2, 1.0], 0.5), (1.0, [0.1, 0.8, 0.9, 0.0], 0.5)]),
+            slot(&[(0.0, [0.3, 0.6, 0.9, 0.2], 0.35), (1.0, [0.3, 0.6, 0.9, 0.8], 0.5)]),
+        ];
+
+        let mut ts = vec![-1.0_f32, -0.01, 0.0, 0.001];
+        for k in 1..=19 {
+            ts.push(k as f32 * 0.05);
+        }
+        ts.extend([0.999, 1.0, 1.5, f32::NEG_INFINITY, f32::INFINITY, f32::NAN]);
+
+        let to_bits = |opt: Option<[f32; 4]>| opt.map(|c| c.map(f32::to_bits));
+
+        for s in terrain.slots.iter().chain(edge_slots.iter()) {
+            let raw = RawGradient::from(s);
+            for &t in &ts {
+                let from_slot = s.sample(t);
+                let from_raw = raw.sample(t);
+                let from_ref = reference_sample(s, t);
+                assert_eq!(
+                    to_bits(from_slot),
+                    to_bits(from_raw),
+                    "Slot vs RawGradient mismatch on slot {} (t={t}): {from_slot:?} vs {from_raw:?}",
+                    s.id
+                );
+                assert_eq!(
+                    to_bits(from_slot),
+                    to_bits(from_ref),
+                    "Slot vs reference mismatch on slot {} (t={t}): {from_slot:?} vs {from_ref:?}",
+                    s.id
+                );
+            }
         }
     }
 

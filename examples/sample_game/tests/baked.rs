@@ -16,14 +16,15 @@ use quillshade::material::baked::{
     AddressModeDef, BakedManifest, FilterModeDef, MANIFEST_PATH, MaterialValues, ParamValue, SamplerDef, TextureDef,
 };
 use quillshade::material::{
-    BakedMaterials, BakedMaterialsLoader, BakedMaterialsProgress, BakedMaterialsReady, BakedTextures, CoordsMaterial,
-    FlagMaterial, HologramMaterial, RockWetMaterial, TexLayersMaterial, WaterMaterial,
+    BakedMaterials, BakedTextures, CoordsMaterial, FlagMaterial, HologramMaterial, RockWetMaterial, TexLayersMaterial,
+    WaterMaterial,
 };
+use quillshade::{QuillshadeLoader, QuillshadeLoaderPlugin, QuillshadeProgress, QuillshadeReady};
 
 /// Messages seen by the test app.
 #[derive(Resource, Default)]
 struct Seen {
-    progress: Vec<BakedMaterialsProgress>,
+    progress: Vec<QuillshadeProgress>,
     ready: u32,
     /// What `load()` returned (`Start::Load`).
     load_count: Option<u32>,
@@ -37,8 +38,8 @@ struct Seen {
 
 fn record(
     mut seen: ResMut<Seen>,
-    mut progress: MessageReader<BakedMaterialsProgress>,
-    mut ready: MessageReader<BakedMaterialsReady>,
+    mut progress: MessageReader<QuillshadeProgress>,
+    mut ready: MessageReader<QuillshadeReady>,
     mut failed: MessageReader<AssetLoadFailedEvent<BakedManifest>>,
     mut rock: MessageReader<AssetEvent<RockWetMaterial>>,
     baked: Res<BakedMaterials>,
@@ -123,11 +124,12 @@ fn app_with(start: Start) -> App {
         AssetPlugin { file_path: "assets".into(), watch_for_changes_override: Some(false), ..default() },
         ImagePlugin::default(),
         quillshade::material::BakedPlugin,
+        QuillshadeLoaderPlugin,
     ));
     // Without the render plugin nobody registers the image loader (it only preregisters it).
     app.register_asset_loader(ImageLoader::new(CompressedImageFormats::NONE));
     app.init_resource::<Seen>();
-    let load = move |mut loader: BakedMaterialsLoader, mut seen: ResMut<Seen>| match &start {
+    let load = move |mut loader: QuillshadeLoader, mut seen: ResMut<Seen>| match &start {
         Start::Load => seen.load_count = Some(loader.load()),
         Start::FromStr(m) => loader.load_from_str(m),
         Start::Auto => {}
@@ -140,7 +142,7 @@ fn app_with(start: Start) -> App {
     app
 }
 
-/// Updates until `BakedMaterialsReady` arrived (then 30 more frames, to catch a second one), at most 600 frames.
+/// Updates until `QuillshadeReady` arrived (then 30 more frames, to catch a second one), at most 600 frames.
 fn run(app: &mut App) {
     let mut after_ready = 0;
     for _ in 0..600 {
@@ -161,15 +163,15 @@ fn progress_reaches_ready() {
     run(&mut app);
     let world = app.world_mut();
     let seen = world.resource::<Seen>();
-    assert_eq!(seen.ready, 1, "BakedMaterialsReady once; progress: {:?}", seen.progress);
+    assert_eq!(seen.ready, 1, "QuillshadeReady once; progress: {:?}", seen.progress);
     let last = *seen.progress.last().expect("progress messages");
     let compiled = BakedManifest::parse(quillshade::material::COMPILED_MANIFEST).unwrap();
     assert_eq!(last.total as usize, compiled.textures.len());
     assert_eq!(seen.load_count, Some(last.total), "load() returns the number of textures");
-    assert_eq!(last, BakedMaterialsProgress { loaded: last.total, failed: 0, total: last.total });
+    assert_eq!(last, QuillshadeProgress { loaded: last.total, failed: 0, total: last.total });
     let baked = world.resource::<BakedMaterials>().clone();
     assert_eq!(baked.unresolved(world), Vec::<&str>::new(), "materials not in their Assets<M>");
-    let state = world.run_system_cached(|l: BakedMaterialsLoader| (l.is_ready(), l.progress())).unwrap();
+    let state = world.run_system_cached(|l: QuillshadeLoader| (l.is_ready(), l.progress())).unwrap();
     assert_eq!(state, (true, last));
     // The manifest asset is loaded for hot reload.
     assert_eq!(world.resource::<Assets<BakedManifest>>().len(), 1);
@@ -190,7 +192,7 @@ fn loads_without_explicit_call() {
     assert_eq!(baked.unresolved(world), Vec::<&str>::new(), "materials not in their Assets<M>");
     // A later call returns the same count and changes nothing.
     let total = seen.progress.last().unwrap().total;
-    assert_eq!(world.run_system_cached(|mut l: BakedMaterialsLoader| l.load()).unwrap(), total);
+    assert_eq!(world.run_system_cached(|mut l: QuillshadeLoader| l.load()).unwrap(), total);
 }
 
 /// Design §3.1: `load()` fills `BakedTextures` at once, so a system after it in the same schedule gets real handles.
@@ -223,7 +225,7 @@ fn texture_without_manifest_entry_gets_default() {
     assert_ne!(tex.internal.default, Handle::default());
     assert_eq!(tex.textures.sprite, tex.internal.default);
     let last = *world.resource::<Seen>().progress.last().expect("progress messages");
-    assert_eq!(last, BakedMaterialsProgress { loaded: total, failed: 0, total });
+    assert_eq!(last, QuillshadeProgress { loaded: total, failed: 0, total });
 }
 
 /// Review Focus 4: a texture that fails to load is counted, its materials use `@internal/default`, Ready still comes.
@@ -236,9 +238,9 @@ fn missing_texture_counts_failed() {
     run(&mut app);
     let world = app.world();
     let seen = world.resource::<Seen>();
-    assert_eq!(seen.ready, 1, "BakedMaterialsReady once; progress: {:?}", seen.progress);
+    assert_eq!(seen.ready, 1, "QuillshadeReady once; progress: {:?}", seen.progress);
     let last = *seen.progress.last().expect("progress messages");
-    assert_eq!(last, BakedMaterialsProgress { loaded: last.total - 1, failed: 1, total: last.total });
+    assert_eq!(last, QuillshadeProgress { loaded: last.total - 1, failed: 1, total: last.total });
     let baked = world.resource::<BakedMaterials>();
     let tex = world.resource::<BakedTextures>();
     let coords = world.resource::<Assets<CoordsMaterial>>().get(&baked.fx.coords).expect("coords material");
@@ -577,4 +579,68 @@ fn hot_reload_garbage_ron_keeps_state() {
         }
         assert_eq!(rock(app.world()).extension.params.inp_wetness, 0.9, "state kept after failure {n}");
     }
+}
+
+#[test]
+fn unified_quillshade_loader_tracks_all_domains() {
+    use quillshade::data::{DataDomainPlugin, DataStore};
+    use quillshade::light::{LightRuntime, QuillshadeLightInternalPlugin};
+
+    #[derive(Resource, Default)]
+    struct UnifiedSeen {
+        load_total: Option<u32>,
+        progress: Vec<QuillshadeProgress>,
+        ready: u32,
+        is_ready: bool,
+    }
+
+    let mut app = App::new();
+    app.add_plugins((
+        MinimalPlugins,
+        AssetPlugin { file_path: "assets".into(), watch_for_changes_override: Some(false), ..default() },
+        ImagePlugin::default(),
+        quillshade::material::BakedPlugin,
+        QuillshadeLightInternalPlugin,
+        DataDomainPlugin,
+        QuillshadeLoaderPlugin,
+    ));
+    app.register_asset_loader(ImageLoader::new(CompressedImageFormats::NONE));
+    app.init_resource::<UnifiedSeen>();
+    app.add_systems(Startup, |mut loader: QuillshadeLoader, mut seen: ResMut<UnifiedSeen>| {
+        seen.load_total = Some(loader.load());
+    });
+    app.add_systems(
+        Update,
+        |loader: QuillshadeLoader,
+         mut seen: ResMut<UnifiedSeen>,
+         mut q_prog: MessageReader<QuillshadeProgress>,
+         mut q_ready: MessageReader<QuillshadeReady>| {
+            seen.progress.extend(q_prog.read().copied());
+            seen.ready += q_ready.read().count() as u32;
+            seen.is_ready = loader.is_ready();
+        },
+    );
+    app.finish();
+    app.cleanup();
+
+    let mut after_ready = 0;
+    for _ in 0..600 {
+        app.update();
+        if app.world().resource::<UnifiedSeen>().ready > 0 {
+            after_ready += 1;
+            if after_ready > 20 {
+                break;
+            }
+        }
+    }
+
+    let seen = app.world().resource::<UnifiedSeen>();
+    assert_eq!(seen.ready, 1, "QuillshadeReady emitted exactly once");
+    assert!(seen.is_ready, "QuillshadeLoader::is_ready() is true");
+    assert!(app.world().resource::<LightRuntime>().is_ready(), "LightRuntime::is_ready() is true");
+    assert!(app.world().resource::<DataStore>().is_ready(), "DataStore::is_ready() is true");
+    let last_prog = seen.progress.last().copied().expect("at least one QuillshadeProgress message");
+    assert_eq!(last_prog.loaded, last_prog.total);
+    assert_eq!(last_prog.failed, 0);
+    assert_eq!(Some(last_prog.total), seen.load_total);
 }

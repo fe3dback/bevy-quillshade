@@ -8,6 +8,7 @@
 pub mod asset_index;
 pub mod asset_ref;
 pub mod asset_uuid;
+pub mod common;
 pub mod diag;
 pub mod domain;
 pub mod files;

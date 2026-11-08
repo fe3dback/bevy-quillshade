@@ -89,6 +89,8 @@ pub struct Editor {
     pub external: Vec<PathBuf>,
     /// Text for the system clipboard (Ctrl+C in a text tab).
     pub copy_text: Option<String>,
+    /// Project tree asset clipboard (`Action::CopyAsset` / `Action::PasteAsset`).
+    pub copied_asset: Option<AssetRef>,
     /// What the tabs copied inside the editor (curve points, …), shared by every tab ([`DocCtx::clipboards`]).
     pub clipboards: Clipboards,
     /// The native folder picker is requested (Open / New project dialogs); the app runs it and sends
@@ -142,6 +144,7 @@ impl Editor {
             quit: false,
             external: Vec::new(),
             copy_text: None,
+            copied_asset: None,
             clipboards: Clipboards::default(),
             pick_folder: false,
             settings_changed: false,

@@ -37,8 +37,8 @@ impl EditorAreas for SettingsEditor {
     /// What saving writes, the hotkeys.
     fn sidebar() -> Option<impl Scene> {
         let saving = [
-            "Saving writes quillshade/project.ron and rewrites the umbrella crate files crates/quillshade/Cargo.toml \
-             and src/lib.rs.",
+            "Saving writes quillshade/project.ron and rewrites the umbrella crate files crates/quillshade/Cargo.toml, \
+             src/lib.rs and src/common/.",
             "A domain not used in game removes its plugin from QuillshadePlugin, deletes \
              crates/quillshade/src/<domain>/, and disables the domain in the editor while keeping \
              quillshade/<domain>/.",

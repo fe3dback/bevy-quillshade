@@ -40,19 +40,9 @@ fn quick_start_core_steps_first() {
     let titles: Vec<(Option<DomainId>, String, bool)> =
         steps(&list).into_iter().map(|s| (s.domain, s.title, s.optional)).collect();
     assert_eq!(CORE_STEPS[0].0, "Crate", "the first step is core's crate step");
-    let core = |t: &str| (None, t.to_string(), false);
+    let core = |t: &str, optional| (None, t.to_string(), optional);
     let material = |t: &str, optional| (Some(MATERIAL), format!("Material: {t}"), optional);
-    assert_eq!(
-        titles,
-        [
-            core("Crate"),
-            core("Plugin"),
-            material("Files", false),
-            material("Spawn", false),
-            material("Loading", true),
-            material("Hot reload", false),
-        ]
-    );
+    assert_eq!(titles, [core("Crate", false), core("Plugin", false), core("Loader", true), material("Spawn", false),]);
 }
 
 /// The welcome screen's line of the domain (design §8.1).

@@ -1,0 +1,47 @@
+DtoAsset(
+  format_version: 1,
+  id: "019b76da-a800-7941-a48f-0441f7c16519",
+  doc: "Homeworld metadata and astrogation coordinates.",
+  fields: [
+    Field(
+      id: "019b76da-a800-72ea-ae91-02447f352ff3",
+      name: "planet_name",
+      ty: String,
+      category: "World",
+      is_name: true,
+      default: String("Aethelgard"),
+      settings: FieldSettings(
+        max_len: Some(48),
+        doc: "Canonical planetary name.",
+        required: true,
+      ),
+    ),
+    Field(
+      id: "019b76da-a800-720f-adf0-edac3b118f01",
+      name: "gravity_g",
+      ty: F32,
+      category: "World",
+      default: F32(1.0),
+      settings: FieldSettings(
+        min: Some(0.1),
+        max: Some(10.0),
+        step: Some(0.05),
+        doc: "Surface gravity in standard G.",
+      ),
+    ),
+    Field(
+      id: "019b76da-a800-79eb-b5c2-6ae9403b6860",
+      name: "coordinates",
+      ty: Dto("019b76da-a800-7c9f-bc79-2625811dddaa"), // lore/sector_coords
+      category: "Astrogation",
+      is_name: true,
+      default: Dto({
+        "019b76da-a800-75aa-9356-a0bc9eea37e3": Vec3((0.0, 0.0, 0.0)), // galactic_xyz
+        "019b76da-a800-7b9a-9b7b-7e6df8b91638": String("Coreward"), // sector_name
+      }),
+      settings: FieldSettings(
+        doc: "Galactic sector coordinates of this world.",
+      ),
+    ),
+  ],
+)

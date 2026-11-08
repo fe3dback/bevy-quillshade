@@ -1,0 +1,32 @@
+EnumAsset(
+  format_version: 1,
+  id: "019b76da-a800-74b2-913b-3ea934ed58aa",
+  doc: "Thematic subject tags assigned to tomes in the Grand Archive.",
+  variants: [
+    EnumVariant(
+      id: "019b76da-a800-7ca3-a690-e9e5e31f8de5",
+      name: "alchemy",
+      doc: "Alchemical transmutation and elixirs.",
+    ),
+    EnumVariant(
+      id: "019b76da-a800-72eb-aae5-7bc43d83a13b",
+      name: "forbidden",
+      doc: "Restricted or warded knowledge.",
+    ),
+    EnumVariant(
+      id: "019b76da-a800-7f31-ba72-111e126ca45f",
+      name: "history",
+      doc: "Chronicles and imperial records.",
+    ),
+    EnumVariant(
+      id: "019b76da-a800-7e72-a115-de7e0c2de5d5",
+      name: "star_lore",
+      doc: "Celestial navigation and astral geometry.",
+    ),
+    EnumVariant(
+      id: "019b76da-a800-7a23-a664-90867aa170ff",
+      name: "treatise",
+      doc: "Academic or botanical monograph.",
+    ),
+  ],
+)

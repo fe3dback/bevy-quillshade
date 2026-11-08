@@ -11,13 +11,17 @@ use crate::theme::{TEXT, TEXT_DIM, text};
 use crate::ui::welcome::code;
 
 /// Core's steps as `(title, optional)`; the first one is the crate step.
-pub const CORE_STEPS: [(&str, bool); 2] = [("Crate", false), ("Plugin", false)];
+pub const CORE_STEPS: [(&str, bool); 3] = [("Crate", false), ("Plugin", false), ("Loader", true)];
 
 /// One step of the Quick Start dialog.
 #[derive(Clone)]
 pub struct Step {
     /// `None`: core's.
     pub domain: Option<DomainId>,
+    /// Display title of the domain when `domain` is `Some`.
+    pub domain_title: Option<String>,
+    /// Sub-section title within the domain (`"Files"`, `"Spawn"`, ...) or core step title (`"Crate"`).
+    pub section_title: String,
     /// A domain's step reads `"{domain title}: {title}"`.
     pub title: String,
     pub optional: bool,
@@ -37,7 +41,9 @@ impl Step {
 pub fn steps(list: &DomainList) -> Vec<Step> {
     let core = CORE_STEPS.iter().enumerate().map(|(index, (title, optional))| Step {
         domain: None,
-        title: title.to_string(),
+        domain_title: None,
+        section_title: (*title).to_string(),
+        title: (*title).to_string(),
         optional: *optional,
         body: core_body,
         index,
@@ -46,6 +52,8 @@ pub fn steps(list: &DomainList) -> Vec<Step> {
         let name = list.get(id).map_or(id.as_str(), |d| d.info.title);
         def.steps.iter().enumerate().map(move |(index, (title, optional))| Step {
             domain: Some(id),
+            domain_title: Some(name.to_string()),
+            section_title: (*title).to_string(),
             title: format!("{name}: {title}"),
             optional: *optional,
             body: def.body,
@@ -101,7 +109,7 @@ fn core_blocks(step: usize) -> Vec<Block> {
                   bevy = { workspace = true }, so the game's Bevy version and features apply.",
             ),
         ],
-        _ => vec![
+        1 => vec![
             p("Add QuillshadePlugin after DefaultPlugins: it adds the plugin of every domain the project uses. The \
                next steps show what each domain gives the game."),
             Block::Code(
@@ -112,6 +120,36 @@ fn core_blocks(step: usize) -> Vec<Block> {
                  \x20       .run();\n\
                  }",
                 true,
+            ),
+        ],
+        _ => vec![
+            p("Loading starts automatically on the first frame. To drive a loading screen or start loading \
+               explicitly in Startup across all enabled domains at once, use QuillshadeLoader, QuillshadeProgress, \
+               and QuillshadeReady:"),
+            Block::Code(
+                "use bevy::prelude::*;\n\
+                 use quillshade::{QuillshadeLoader, QuillshadeProgress, QuillshadeReady};\n\n\
+                 // .add_systems(Startup, start_load).add_systems(Update, loading_screen)\n\
+                 fn start_load(mut loader: QuillshadeLoader) {\n\
+                 \x20   let total = loader.load(); // idempotent across all enabled domains\n\
+                 \x20   info!(\"loading {total} quillshade assets\");\n\
+                 }\n\n\
+                 fn loading_screen(\n\
+                 \x20   mut progress: MessageReader<QuillshadeProgress>,\n\
+                 \x20   mut ready: MessageReader<QuillshadeReady>,\n\
+                 ) {\n\
+                 \x20   for p in progress.read() {\n\
+                 \x20       info!(\"quillshade loading: {} / {} ({} failed)\", p.loaded, p.total, p.failed);\n\
+                 \x20   }\n\
+                 \x20   if ready.read().next().is_some() {\n\
+                 \x20       info!(\"all quillshade domains ready\");\n\
+                 \x20   }\n\
+                 }",
+                true,
+            ),
+            note(
+                "Without an explicit load() call in Startup, QuillshadePlugin starts loading automatically in the \
+                  first PreUpdate across all enabled domains.",
             ),
         ],
     }
@@ -150,6 +188,6 @@ mod tests {
     fn no_domain_steps_without_registrations() {
         let list = DomainList::new(Vec::new());
         let titles: Vec<String> = steps(&list).into_iter().map(|s| s.title).collect();
-        assert_eq!(titles, ["Crate", "Plugin"]);
+        assert_eq!(titles, ["Crate", "Plugin", "Loader"]);
     }
 }

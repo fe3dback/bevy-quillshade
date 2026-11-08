@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use bevy::asset::io::Reader;
-use bevy::asset::{AssetLoader, LoadContext, RenderAssetUsages};
+use bevy::asset::{AssetLoader, LoadContext, LoadState, RenderAssetUsages};
 use bevy::camera::{Camera3d, ClearColor, Exposure, Hdr};
 use bevy::color::LinearRgba;
 use bevy::core_pipeline::tonemapping::{DebandDither, Tonemapping};
@@ -18,6 +18,9 @@ use bevy::render::view::{ColorGrading, ColorGradingGlobal, ColorGradingSection};
 use bevy::state::app::{AppExtStates, StatesPlugin};
 use bevy::state::state::{NextState, State as BevyState, StateTransition, States};
 use serde::{Deserialize, Serialize};
+
+#[allow(unused_imports)]
+use crate::common::{CurveData, Interp};
 
 /// Asset path of the Light runtime manifest (`assets/quillshade/light/autogen/baked.ron`).
 pub const MANIFEST_PATH: &str = "quillshade/light/autogen/baked.ron";
@@ -45,63 +48,30 @@ pub struct LightTransitionFinished {
     pub preset: Preset,
 }
 
-/// Baked 1D Catmull-Rom transition curve (`*.curve.ron`).
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct BakedCurve {
-    #[serde(default)]
-    pub min: f32,
-    #[serde(default = "default_one")]
-    pub max: f32,
-    #[serde(default)]
-    pub points: Vec<(f32, f32)>,
+/// Schedule set for the Light domain's `PreUpdate` loading and tracking systems.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct LoadSet;
+
+/// Internal loading progress of the baked Light manifest (`baked.ron`) and its cube-map textures, aggregated into
+/// [`crate::QuillshadeProgress`].
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BakedLightProgress {
+    /// Assets that have finished loading successfully.
+    pub loaded: u32,
+    /// Assets that failed to load.
+    pub failed: u32,
+    /// Total assets requested (`1` for `baked.ron` + `N` cube-map textures).
+    pub total: u32,
 }
 
-impl Default for BakedCurve {
-    fn default() -> Self {
-        Self::linear()
-    }
-}
+/// Emitted once internally when the baked Light manifest and all of its cube-map textures have finished loading.
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct BakedLightReady;
 
-impl BakedCurve {
-    /// Identity linear ramp `(0.0, 0.0) -> (1.0, 1.0)` over `0.0..1.0`.
-    pub fn linear() -> Self {
-        Self { min: 0.0, max: 1.0, points: vec![(0.0, 0.0), (1.0, 1.0)] }
-    }
-
-    /// Evaluates the curve at `t` using cubic Hermite interpolation with Catmull-Rom tangents, clamped to
-    /// `min..=max`.
-    pub fn sample(&self, t: f32) -> f32 {
-        const MIN_SPAN: f32 = 1e-6;
-        let p = &self.points;
-        let normalized = match p.len() {
-            0 => 0.0,
-            1 => p[0].1,
-            n => {
-                let x = t.clamp(p[0].0, p[n - 1].0);
-                let i = (1..n - 1).rfind(|k| x >= p[*k].0).unwrap_or(0);
-                let diff = |a: usize, b: usize| {
-                    let dt = p[b].0 - p[a].0;
-                    if dt.abs() < MIN_SPAN { 0.0 } else { (p[b].1 - p[a].1) / dt }
-                };
-                let slope = |idx: usize| match idx {
-                    0 => diff(0, 1),
-                    k if k == n - 1 => diff(n - 2, n - 1),
-                    k => diff(k - 1, k + 1),
-                };
-                let (a, b) = (p[i], p[i + 1]);
-                let (sa, sb) = (slope(i), slope(i + 1));
-                let h = (b.0 - a.0).max(MIN_SPAN);
-                let s = ((x - a.0) / h).clamp(0.0, 1.0);
-                let (s2, s3) = (s * s, s * s * s);
-                (2.0 * s3 - 3.0 * s2 + 1.0) * a.1
-                    + (s3 - 2.0 * s2 + s) * h * sa
-                    + (-2.0 * s3 + 3.0 * s2) * b.1
-                    + (s3 - s2) * h * sb
-            }
-        };
-        let real = self.min + normalized * (self.max - self.min);
-        real.clamp(self.min.min(self.max), self.min.max(self.max))
-    }
+/// Evaluates a transition curve at `t` and clamps the output to `[c.min, c.max]` (panic-free).
+fn transition_sample(c: &CurveData, t: f32) -> f32 {
+    let (lo, hi) = (c.min.min(c.max), c.min.max(c.max));
+    c.sample(t).max(lo).min(hi)
 }
 
 /// A directional light slot in an [`EnvironmentValues`].
@@ -907,7 +877,7 @@ pub struct BakedLightManifest {
     #[serde(default)]
     pub environments: BTreeMap<String, EnvironmentValues>,
     #[serde(default)]
-    pub curves: BTreeMap<String, BakedCurve>,
+    pub curves: BTreeMap<String, CurveData>,
 }
 
 impl BakedLightManifest {
@@ -963,7 +933,7 @@ struct ActiveTransition {
 #[derive(Resource, Debug, Clone)]
 pub struct LightRuntime {
     presets: BTreeMap<Preset, EnvironmentValues>,
-    curves: BTreeMap<Curve, BakedCurve>,
+    curves: BTreeMap<Curve, CurveData>,
     texture_defs: BTreeMap<String, BakedLightTextureEntry>,
     textures: BTreeMap<String, Handle<Image>>,
     manifest_handle: Option<Handle<BakedLightManifest>>,
@@ -981,6 +951,8 @@ pub struct LightRuntime {
     ibl_rejected: Option<AssetId<Image>>,
     dirty: bool,
     manifest_started: bool,
+    ready: bool,
+    sent_progress: Option<BakedLightProgress>,
 }
 
 impl Default for LightRuntime {
@@ -1010,6 +982,8 @@ impl Default for LightRuntime {
             ibl_rejected: None,
             dirty: false,
             manifest_started: false,
+            ready: false,
+            sent_progress: None,
         };
         if let Ok(manifest) = BakedLightManifest::parse(COMPILED_MANIFEST) {
             runtime.apply_manifest_data(&manifest, None);
@@ -1072,17 +1046,102 @@ impl LightRuntime {
         self.presets.get(&preset).cloned().unwrap_or_else(|| preset.default_values())
     }
 
-    /// Evaluates `curve` at `t` using the hot-reloadable curve table.
+    /// Evaluates `curve` at `t` using the hot-reloadable curve table, clamped to `[min, max]`.
     pub fn sample_curve(&self, curve: Curve, t: f32) -> f32 {
         if curve == Curve::Linear {
             return t.clamp(0.0, 1.0);
         }
-        self.curves.get(&curve).map_or_else(|| curve.sample(t), |c| c.sample(t))
+        self.curves.get(&curve).map_or_else(|| curve.sample(t), |c| transition_sample(c, t))
     }
 
     /// Returns the loaded cube-map [`Handle<Image>`] for Light texture asset `id`, if available.
     pub fn texture_handle(&self, id: &str) -> Option<Handle<Image>> {
         self.textures.get(id).cloned()
+    }
+
+    /// Current loading progress (`1` for `baked.ron` + `N` cube-map textures).
+    pub(crate) fn progress(&self, asset_server: Option<&AssetServer>) -> BakedLightProgress {
+        if !self.manifest_started {
+            let total = 1 + self.texture_defs.len() as u32;
+            return BakedLightProgress { loaded: 0, failed: 0, total };
+        }
+        let Some(server) = asset_server else {
+            let total = 1 + self.texture_defs.len() as u32;
+            return BakedLightProgress { loaded: total, failed: 0, total };
+        };
+        let mut total = 1u32;
+        let mut loaded = 0u32;
+        let mut failed = 0u32;
+        match self.manifest_handle.as_ref().and_then(|h| server.get_load_state(h.id())) {
+            None | Some(LoadState::Loaded) => {
+                if self.manifest_handle.is_none()
+                    || matches!(
+                        self.manifest_handle.as_ref().and_then(|h| server.get_load_state(h.id())),
+                        Some(LoadState::Loaded)
+                    )
+                {
+                    loaded += 1;
+                }
+            }
+            Some(LoadState::Failed(_)) => failed += 1,
+            Some(LoadState::NotLoaded | LoadState::Loading) => {}
+        }
+        for h in self.textures.values() {
+            total += 1;
+            match server.get_load_state(h.id()) {
+                Some(LoadState::Loaded) => loaded += 1,
+                Some(LoadState::Failed(_)) => failed += 1,
+                _ => {}
+            }
+        }
+        BakedLightProgress { loaded, failed, total }
+    }
+
+    /// `true` once the manifest and all cube-map textures have settled (`Loaded` or `Failed`).
+    pub fn is_ready(&self) -> bool {
+        self.ready
+    }
+}
+
+/// Internal system parameter that starts or queries loading of the baked Light manifest (`baked.ron`) and its cube-map
+/// textures.
+///
+/// Delegated to by [`crate::QuillshadeLoader`].
+#[allow(dead_code)]
+#[derive(SystemParam)]
+pub(crate) struct BakedLightLoader<'w> {
+    runtime: Option<ResMut<'w, LightRuntime>>,
+    asset_server: Option<Res<'w, AssetServer>>,
+}
+
+#[allow(dead_code)]
+impl BakedLightLoader<'_> {
+    /// Starts loading `quillshade/light/autogen/baked.ron` and all cube-map textures if not already started.
+    ///
+    /// Returns the total number of assets tracked by this loader (`1` for `baked.ron` + `N` cube-map textures).
+    pub(crate) fn load(&mut self) -> u32 {
+        let Some(runtime) = self.runtime.as_deref_mut() else {
+            return 0;
+        };
+        start_light_load(runtime, self.asset_server.as_deref());
+        runtime.progress(self.asset_server.as_deref()).total
+    }
+
+    /// Current `(loaded, failed, total)` progress across the Light manifest and its cube-map textures.
+    pub(crate) fn progress(&self) -> BakedLightProgress {
+        self.runtime.as_ref().map_or(BakedLightProgress { loaded: 0, failed: 0, total: 0 }, |r| {
+            r.progress(self.asset_server.as_deref())
+        })
+    }
+
+    /// `true` once `load()` or `auto_load_light` has started loading the Light domain.
+    pub(crate) fn is_started(&self) -> bool {
+        self.runtime.as_ref().is_none_or(|r| r.manifest_started)
+    }
+
+    /// `true` once the Light manifest and all cube-map textures have finished loading.
+    pub(crate) fn is_ready(&self) -> bool {
+        self.runtime.as_ref().is_none_or(|r| r.is_ready())
     }
 }
 
@@ -1249,18 +1308,22 @@ impl Plugin for QuillshadeLightInternalPlugin {
 
         app.add_message::<LightTransitionStarted>()
             .add_message::<LightTransitionFinished>()
+            .add_message::<BakedLightProgress>()
+            .add_message::<BakedLightReady>()
             .init_resource::<LightRuntime>()
             .add_plugins(skybox::BlendedSkyboxPlugin)
             .add_systems(
                 PreUpdate,
                 (
-                    start_light_manifest_load,
+                    auto_load_light,
                     reload_light_manifest,
+                    track_light_progress,
                     flush_light_state_transitions,
                     update_light_transitions,
                     apply_light_to_world,
                 )
-                    .chain(),
+                    .chain()
+                    .in_set(LoadSet),
             )
             .add_systems(
                 PostUpdate,
@@ -1269,7 +1332,7 @@ impl Plugin for QuillshadeLightInternalPlugin {
     }
 }
 
-fn start_light_manifest_load(mut runtime: ResMut<LightRuntime>, asset_server: Option<Res<AssetServer>>) {
+fn start_light_load(runtime: &mut LightRuntime, asset_server: Option<&AssetServer>) {
     if runtime.manifest_started {
         return;
     }
@@ -1288,6 +1351,30 @@ fn start_light_manifest_load(mut runtime: ResMut<LightRuntime>, asset_server: Op
         runtime.textures.insert(id, handle);
     }
     runtime.manifest_handle = Some(server.load::<BakedLightManifest>(MANIFEST_PATH));
+}
+
+fn auto_load_light(mut runtime: ResMut<LightRuntime>, asset_server: Option<Res<AssetServer>>) {
+    start_light_load(&mut runtime, asset_server.as_deref());
+}
+
+fn track_light_progress(
+    mut runtime: ResMut<LightRuntime>,
+    asset_server: Option<Res<AssetServer>>,
+    mut progress_out: MessageWriter<BakedLightProgress>,
+    mut ready_out: MessageWriter<BakedLightReady>,
+) {
+    if !runtime.manifest_started || runtime.ready {
+        return;
+    }
+    let progress = runtime.progress(asset_server.as_deref());
+    if runtime.sent_progress != Some(progress) {
+        runtime.sent_progress = Some(progress);
+        progress_out.write(progress);
+    }
+    if progress.loaded + progress.failed >= progress.total {
+        runtime.ready = true;
+        ready_out.write(BakedLightReady);
+    }
 }
 
 fn reload_light_manifest(

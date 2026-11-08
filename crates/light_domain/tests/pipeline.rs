@@ -349,6 +349,8 @@ fn sample_game_light_is_clean() {
     let module = String::from_utf8(plan.output.files[0].bytes.clone()).unwrap();
     assert!(module.contains("pub const ENVIRONMENTS: &[&str] = &[\n    \"day\",\n    \"night\",\n];"), "{module}");
     assert!(module.contains("pub const CURVES: &[&str] = &[\n    \"smooth\",\n];"), "{module}");
+    assert!(module.contains("CurveData { interp: Interp::CatmullRom,"), "{module}");
+    assert!(!module.contains("BakedCurve"), "{module}");
 }
 
 #[test]

@@ -49,6 +49,7 @@ impl project_core::regen::DomainBackend for CardBackend {
         project_core::umbrella::CrateContribution {
             domain: self.0,
             plugin: "IdxPlugin",
+            loader: None,
             bevy_features: &[],
             dependencies: &[],
         }
@@ -485,4 +486,58 @@ fn saving_calls_regenerate_affected_of_a_referring_domain() {
     e.apply(TabAction::doc(Append("more\n")));
     e.apply(Action::Save);
     assert_eq!(link_calls(&e).len(), 1);
+}
+
+#[test]
+fn duplicate_copy_and_paste_mint_fresh_uuids_and_populate_row_menu() {
+    let a = AssetUuid::new_v7();
+    let (_dir, mut e) = cards(&[("sub/hero", text(a, &[]))]);
+    let p = e.project.clone().unwrap();
+    let hero = card("sub/hero");
+
+    // Check asset row_menu labels and disabled Paste before copying.
+    let asset_row = TreeRow { tree: TreeId::Project(IDX), item: TreeItem::Asset(hero.clone()) };
+    let menu = row_menu(&e, &asset_row);
+    let labels: Vec<&str> = menu.iter().map(|m| m.label.as_str()).collect();
+    assert_eq!(
+        labels,
+        ["Open", "Duplicate\tCtrl+D", "Copy\tCtrl+C", "Paste\tCtrl+V", "Rename...\tF2", "Move to...", "Delete...\tDel"]
+    );
+    assert!(menu[3].disabled.is_some(), "Paste disabled before CopyAsset");
+
+    // Duplicate a dirty tab: saves the edit first, creates `sub/hero_copy` with a fresh UUIDv7, and opens it.
+    e.apply(Action::OpenAsset(hero.clone()));
+    e.apply(TabAction::doc(Append("edited\n")));
+    assert!(e.is_dirty());
+    e.apply(Action::DuplicateAsset(hero.clone()));
+    let copy1 = card("sub/hero_copy");
+    assert!(!e.is_dirty());
+    assert_eq!(e.tab().and_then(|t| t.doc().asset()), Some(&copy1));
+    let id1 = e.asset_index.id_of(&copy1).expect("hero_copy indexed");
+    assert_ne!(id1, a);
+    assert!(read(&p, &copy1).ends_with("edited\n"));
+    assert!(e.index_diagnostics.is_empty(), "no AE001 duplicate UUID: {:?}", e.index_diagnostics);
+
+    // Duplicating again creates `sub/hero_copy_2`.
+    e.apply(Action::DuplicateAsset(hero.clone()));
+    let copy2 = card("sub/hero_copy_2");
+    let id2 = e.asset_index.id_of(&copy2).expect("hero_copy_2 indexed");
+    assert_ne!(id2, a);
+    assert_ne!(id2, id1);
+    assert!(e.index_diagnostics.is_empty());
+
+    // Copy `sub/hero` and paste into root folder `""` -> keeps leaf name `hero` since `hero` is free at root.
+    e.apply(Action::CopyAsset(hero.clone()));
+    assert_eq!(e.copied_asset, Some(hero.clone()));
+    let root_folder = TreeRow { tree: TreeId::Project(IDX), item: TreeItem::Folder(String::new()) };
+    let folder_menu = row_menu(&e, &root_folder);
+    let paste_entry = folder_menu.iter().find(|m| m.label == "Paste\tCtrl+V").expect("folder Paste entry");
+    assert!(paste_entry.disabled.is_none(), "Paste enabled after CopyAsset");
+    e.apply(paste_entry.action.clone());
+
+    let pasted_root = card("hero");
+    let id_root = e.asset_index.id_of(&pasted_root).expect("pasted root hero indexed");
+    assert_ne!(id_root, a);
+    assert_eq!(e.tab().and_then(|t| t.doc().asset()), Some(&pasted_root));
+    assert!(e.index_diagnostics.is_empty());
 }

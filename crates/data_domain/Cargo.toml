@@ -1,0 +1,39 @@
+[package]
+name = "data_domain"
+version = { workspace = true }
+edition = { workspace = true }
+rust-version = { workspace = true }
+license = { workspace = true }
+
+[features]
+# The editor half (`DataDomain`). The CLI backend (`data_domain::backend`) is Bevy-free.
+default = ["editor"]
+editor = ["dep:bevy", "dep:editor_core", "dep:icon-rs", "curve_kit/editor"]
+dynamic_linking = ["bevy?/dynamic_linking", "editor_core?/dynamic_linking", "curve_kit/dynamic_linking"]
+
+[dependencies]
+project_core = { workspace = true }
+project_migrate = { workspace = true }
+curve_kit = { workspace = true }
+serde = { workspace = true }
+ron = { workspace = true }
+postcard = { workspace = true }
+thiserror = { workspace = true }
+bevy = { workspace = true, optional = true }
+editor_core = { workspace = true, optional = true }
+icon-rs = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+# `cargo test -p data_domain` links Bevy dynamically, as the workspace build does (dev-dependencies only: the crate's
+# own feature set stays without it).
+bevy = { workspace = true, features = ["dynamic_linking"] }
+
+[[example]]
+name = "make_sample"
+test = true
+
+[[test]]
+name = "editor"
+path = "tests/editor.rs"
+required-features = ["editor"]

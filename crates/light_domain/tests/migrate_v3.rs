@@ -278,8 +278,10 @@ fn sample_v2_migrates_both_domains_to_the_committed_sample() {
     let dir = tempfile::tempdir().unwrap();
     copy_dir(&sample, dir.path(), &["target", "quillshade"]);
     copy_dir(&sample_v2, dir.path(), &[]);
-    let generated = generated_tree(dir.path());
-    assert!(generated.len() > 50, "{:?}", generated.keys());
+    // `sample_v2` predates the Data domain (`quillshade/data`), so remove the committed Data outputs before comparing
+    // the 2-domain (Material + Light) migration and regeneration.
+    let _ = std::fs::remove_dir_all(dir.path().join("assets/quillshade/data"));
+    let _ = std::fs::remove_dir_all(dir.path().join("crates/quillshade/src/data"));
 
     let report = migrator(dir.path(), &[&MaterialMigrator, &LightMigrator]).run(&mut |_| {}).unwrap();
     let count = |d: DomainId| report.written.iter().filter(|f| f.domain == d).count();
@@ -295,10 +297,20 @@ fn sample_v2_migrates_both_domains_to_the_committed_sample() {
         assert!(text.contains(&format!("\n  cubemap: Some(\"{sky}\"), // sky\n")), "{env}:\n{text}");
     }
     let sources = |root: &Path| snapshot(&root.join("quillshade"));
-    assert_same(&sources(dir.path()), &sources(&sample), "migrated vs committed sources");
+    let mut expected_sources = sources(&sample);
+    expected_sources.retain(|k, _| !k.starts_with("data/"));
+    assert_same(&sources(dir.path()), &expected_sources, "migrated vs committed sources");
 
     let project = Project::open(dir.path()).unwrap();
     let backends: [&dyn DomainBackend; 2] = [&MaterialBackend::default(), &LightBackend];
+    project_core::regen::write_umbrella(
+        &project,
+        &[MaterialBackend::default().crate_contribution(), LightBackend.crate_contribution()],
+    )
+    .unwrap();
+    let generated = generated_tree(dir.path());
+    assert!(generated.len() > 50, "{:?}", generated.keys());
+
     let run = project_core::regen::run(&project, &backends, &[], false, false).unwrap();
     assert!(!run.has_errors(), "{:?}", run.diagnostics);
     assert!(run.diagnostics.iter().all(|d| !d.code.starts_with("AE")), "{:?}", run.diagnostics);

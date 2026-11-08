@@ -22,7 +22,7 @@ fn unknown_domain_exits_2() {
     let out = editor(&["regen", "--domain", "nope"], dir.path());
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(2), "{stderr}");
-    assert!(stderr.contains("error: unknown domain `nope` (known: light, material)"), "{stderr}");
+    assert!(stderr.contains("error: unknown domain `nope` (known: data, light, material)"), "{stderr}");
     assert!(!dir.path().join("crates/quillshade").exists());
     assert!(!dir.path().join("quillshade").exists());
 }
@@ -52,6 +52,20 @@ fn cli_domain_light() {
     assert!(lib.contains("pub mod light;") && lib.contains("pub mod material;"), "{lib}");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("create crates/quillshade/src/light/mod.rs"), "{stdout}");
+}
+
+/// `--domain data` selects the Data domain alone: its module (`src/data/mod.rs` and `src/data/dtos/mod.rs`) and the umbrella.
+#[test]
+fn cli_domain_data() {
+    let dir = game();
+    let out = editor(&["regen", "--domain", "data"], dir.path());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    assert!(dir.path().join("crates/quillshade/src/data/mod.rs").is_file());
+    assert!(dir.path().join("crates/quillshade/src/data/dtos/mod.rs").is_file());
+    assert!(!dir.path().join("crates/quillshade/src/material").exists());
+    let lib = std::fs::read_to_string(dir.path().join("crates/quillshade/src/lib.rs")).unwrap();
+    assert!(lib.contains("pub mod data;"), "{lib}");
 }
 
 #[test]

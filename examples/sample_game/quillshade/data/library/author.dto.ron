@@ -1,0 +1,51 @@
+DtoAsset(
+  format_version: 1,
+  id: "019b76da-a800-710a-8a7d-0c41af3e4571",
+  doc: "Attributed scribe or scholar in the Grand Archive registry.",
+  fields: [
+    Field(
+      id: "019b76da-a800-71e8-9ce5-03dd61ff0ff3",
+      name: "pen_name",
+      ty: String,
+      category: "Identity",
+      is_name: true,
+      default: String("Anonymous"),
+      settings: FieldSettings(
+        max_len: Some(48),
+        doc: "Attributed author or scribe pen name.",
+        required: true,
+      ),
+    ),
+    Field(
+      id: "019b76da-a800-74e2-89e3-22a2276a8d37",
+      name: "guild_rank",
+      ty: U8,
+      category: "Identity",
+      default: U8(1),
+      settings: FieldSettings(
+        min: Some(1.0),
+        max: Some(10.0),
+        step: Some(1.0),
+        doc: "Archivist guild tier (1..=10).",
+      ),
+    ),
+    Field(
+      id: "019b76da-a800-7f4d-b37a-02965bae5380",
+      name: "homeworld",
+      ty: Dto("019b76da-a800-7941-a48f-0441f7c16519"), // lore/planet
+      category: "Origin",
+      is_name: true,
+      default: Dto({
+        "019b76da-a800-720f-adf0-edac3b118f01": F32(1.0), // gravity_g
+        "019b76da-a800-72ea-ae91-02447f352ff3": String("Aethelgard"), // planet_name
+        "019b76da-a800-79eb-b5c2-6ae9403b6860": Dto({ // coordinates
+          "019b76da-a800-75aa-9356-a0bc9eea37e3": Vec3((0.0, 0.0, 0.0)), // galactic_xyz
+          "019b76da-a800-7b9a-9b7b-7e6df8b91638": String("Coreward"), // sector_name
+        }),
+      }),
+      settings: FieldSettings(
+        doc: "Birthworld and galactic coordinates of the author.",
+      ),
+    ),
+  ],
+)

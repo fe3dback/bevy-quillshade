@@ -19,7 +19,7 @@ use crate::ui::icons::{IconId, icon};
 use crate::ui::widgets::{Caption, GroupButton, button_group};
 
 use super::shell::VIEW_BG;
-use super::{OnActivate, button, icon_button};
+use super::{OnActivate, button, icon_button, icon_tool_button};
 use crate::domain::Highlighter;
 use crate::quick_start::Step;
 use crate::state::editor::Editor;
@@ -121,12 +121,82 @@ fn setup_help(rust: Option<Highlighter>) -> Vec<Box<dyn Scene>> {
     ]
 }
 
-/// Body of the Quick Start dialog showing step `step` of `steps` (clamped): the step tabs, then the step's heading
-/// and its lines ([`crate::quick_start::Step::body`]).
+/// Body of the Quick Start dialog showing step `step` of `steps` (clamped):
+/// - Row 1: common setup button group (`Crate`, `Plugin`, `Loader`) + domain switcher button group (`Material`, `Light`, `Data`).
+/// - Row 2 (when a domain step is active): that domain's sub-sections button group (`Files`, `Spawn`, ...).
+/// - Step heading and body lines ([`crate::quick_start::Step::body`]).
 pub fn quick_start(steps: Vec<Step>, step: usize) -> impl Scene {
     let step = step.min(steps.len().saturating_sub(1));
-    let tabs: Vec<GroupButton> =
-        steps.iter().enumerate().map(|(i, s)| step_tab(i, &s.title, s.optional, i == step)).collect();
+    let active_domain = steps.get(step).and_then(|s| s.domain);
+
+    let core_tabs: Vec<GroupButton> = steps
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| s.domain.is_none())
+        .map(|(i, s)| step_tab(i, &s.section_title, s.optional, i == step))
+        .collect();
+
+    let mut domain_tabs: Vec<GroupButton> = Vec::new();
+    let mut seen_domains = Vec::new();
+    for (i, s) in steps.iter().enumerate() {
+        let Some(dom) = s.domain else { continue };
+        if seen_domains.contains(&dom) {
+            continue;
+        }
+        seen_domains.push(dom);
+        let label = s.domain_title.clone().unwrap_or_else(|| dom.as_str().to_string());
+        let tip = format!("{label} domain Quick Start");
+        domain_tabs.push(GroupButton {
+            caption: Caption::Text(label),
+            action: Action::QuickStart(i),
+            selected: active_domain == Some(dom),
+            disabled: false,
+            tip,
+        });
+    }
+
+    let mut nav_rows: Vec<Box<dyn Scene>> = Vec::new();
+    let mut top_groups: Vec<Box<dyn Scene>> = Vec::new();
+    if !core_tabs.is_empty() {
+        top_groups.push(Box::new(button_group(core_tabs)));
+    }
+    if !domain_tabs.is_empty() {
+        top_groups.push(Box::new(button_group(domain_tabs)));
+    }
+    nav_rows.push(Box::new(bsn! {
+        Node {
+            flex_direction: FlexDirection::Row,
+            flex_wrap: FlexWrap::Wrap,
+            column_gap: px(12),
+            row_gap: px(6),
+            align_items: AlignItems::Center,
+        }
+        Children [ {top_groups} ]
+    }));
+
+    if let Some(dom) = active_domain {
+        let sub_tabs: Vec<GroupButton> = steps
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.domain == Some(dom))
+            .map(|(i, s)| {
+                let label =
+                    if s.optional { format!("{} (optional)", s.section_title) } else { s.section_title.clone() };
+                let tip = format!("Step {}: {}", i + 1, s.title);
+                GroupButton {
+                    caption: Caption::Text(label),
+                    action: Action::QuickStart(i),
+                    selected: i == step,
+                    disabled: false,
+                    tip,
+                }
+            })
+            .collect();
+        if sub_tabs.len() > 1 {
+            nav_rows.push(Box::new(button_group(sub_tabs)));
+        }
+    }
+
     let mut lines: Vec<Box<dyn Scene>> = Vec::new();
     if let Some(s) = steps.get(step) {
         let mut heading = format!("Step {} of {}: {}", step + 1, steps.len(), s.title);
@@ -139,7 +209,8 @@ pub fn quick_start(steps: Vec<Step>, step: usize) -> impl Scene {
     bsn! {
         Node { flex_direction: FlexDirection::Column, row_gap: px(12) }
         Children [
-            @button_group(tabs)
+            Node { flex_direction: FlexDirection::Column, row_gap: px(6) }
+            Children [ {nav_rows} ]
             --
             // A fixed minimum height: the dialog does not jump between short and long steps.
             Node { flex_direction: FlexDirection::Column, row_gap: px(8), min_height: px(440) }
@@ -164,7 +235,8 @@ pub fn code_spans(s: &'static str, highlight: Option<Highlighter>) -> Vec<(&'sta
     }
 }
 
-/// A monospace code block; the pieces of [`code_spans`] are `TextSpan`s of one `Text`.
+/// A monospace code block; the pieces of [`code_spans`] are `TextSpan`s of one `Text`, with a Copy button on the
+/// top-right.
 pub fn code(s: &'static str, highlight: Option<Highlighter>) -> impl Scene {
     let spans: Vec<Box<dyn Scene>> = code_spans(s, highlight)
         .into_iter()
@@ -176,14 +248,27 @@ pub fn code(s: &'static str, highlight: Option<Highlighter>) -> impl Scene {
             })
         })
         .collect();
+    let copy = icon_tool_button(IconId::Copy, "Copy", Action::CopyText(s.to_string()), "Copy code to clipboard");
     bsn! {
-        Node { padding: UiRect::axes(px(10), px(6)), border_radius: BorderRadius::all(px(4)) }
+        Node {
+            width: percent(100),
+            padding: UiRect::axes(px(10), px(6)),
+            border_radius: BorderRadius::all(px(4)),
+            flex_direction: FlexDirection::Row,
+            justify_content: JustifyContent::SpaceBetween,
+            align_items: AlignItems::Start,
+            column_gap: px(8),
+        }
         BackgroundColor(Color::srgb_u8(36, 38, 44))
         Children [
+            Node { flex_grow: 1.0, min_width: px(0) }
             Text("")
             TextFont { font: FontSourceTemplate::Handle(fonts::MONO), font_size: FontSize::Px(12.0) }
             TextColor(TEXT)
+            Pickable::IGNORE
             Children [ {spans} ]
+            --
+            @{copy}
         ]
     }
 }

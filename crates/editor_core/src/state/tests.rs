@@ -726,6 +726,8 @@ fn quick_start_switches_steps() {
     assert_eq!(e.dialog, Some(Dialog::QuickStart(0)));
     e.apply(Action::QuickStart(5));
     assert_eq!(e.dialog, Some(Dialog::QuickStart(5)), "a step tab switches the open dialog");
+    e.apply(Action::CopyText("fn main() {}".into()));
+    assert_eq!(e.copy_text.as_deref(), Some("fn main() {}"));
     e.apply(Action::CloseDialog);
     assert_eq!(e.dialog, None);
 }
@@ -1306,6 +1308,7 @@ impl project_core::regen::DomainBackend for DummyBackend {
         project_core::umbrella::CrateContribution {
             domain: IDS[0],
             plugin: "DummyPlugin",
+            loader: None,
             bevy_features: &[],
             dependencies: &[],
         }
@@ -1639,6 +1642,7 @@ impl<const N: usize> project_core::regen::DomainBackend for Built<N> {
         project_core::umbrella::CrateContribution {
             domain: BUILT[N],
             plugin: "Plugin",
+            loader: None,
             bevy_features: &[],
             dependencies: &[],
         }

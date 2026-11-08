@@ -44,6 +44,7 @@ impl Editor {
         self.active = None;
         self.last_tabs.clear();
         self.current_folders.clear();
+        self.copied_asset = None;
         self.scan_game_files();
         // Each domain drops the previous project's state and loads this one.
         self.rescan();
@@ -543,6 +544,7 @@ impl Editor {
         self.last_tabs.clear();
         self.nav.clear();
         self.current_folders.clear();
+        self.copied_asset = None;
         // Folders cleared, every domain back to its empty state.
         self.rescan();
         self.info(format!("Closed project {root}"));

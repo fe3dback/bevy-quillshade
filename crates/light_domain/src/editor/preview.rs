@@ -1084,10 +1084,7 @@ fn update_light_previews(world: &mut World) {
                 let s = if doc.curve.is_empty() {
                     raw_t
                 } else {
-                    shown_assets
-                        .curves
-                        .get(&doc.curve)
-                        .map_or(raw_t, |c| c.sample(raw_t, curve_kit::Interp::CatmullRom))
+                    shown_assets.curves.get(&doc.curve).map_or(raw_t, |c| sample_transition_curve(c, raw_t))
                 };
                 let env = interpolate_environments(&from, &to, raw_t, s);
                 let skybox_blend = PreviewSkyboxBlend::interpolate(&from, &to, raw_t, s);
@@ -1150,6 +1147,13 @@ fn update_light_previews(world: &mut World) {
             }
         }
     }
+}
+
+/// Evaluates a transition curve at `raw_t` using Catmull-Rom interpolation and clamps the output to `[c.min, c.max]`
+/// (matching the Light runtime's `transition_sample`).
+pub(crate) fn sample_transition_curve(c: &curve_kit::Curve, raw_t: f32) -> f32 {
+    let (lo, hi) = (c.min.min(c.max), c.min.max(c.max));
+    c.sample(raw_t, curve_kit::Interp::CatmullRom).max(lo).min(hi)
 }
 
 /// Interpolates between `from` and `to` environments at linear progress `raw_t` (`0.0..=1.0`) and curve-sampled
@@ -2001,4 +2005,27 @@ fn prepare_blended_skybox_bind_groups(
 
 fn is_cubemap(image: &bevy::render::texture::GpuImage) -> bool {
     image.texture_view_descriptor.as_ref().and_then(|desc| desc.dimension) == Some(TextureViewDimension::Cube)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sample_transition_curve;
+
+    #[test]
+    fn sample_transition_curve_clamps_catmull_rom_overshoot() {
+        let mut c = curve_kit::Curve::new("overshoot", vec![(0.0, 0.0), (0.5, 0.0), (0.8, 1.0), (1.0, 1.0)]);
+        c.min = -2.0;
+        c.max = 3.0;
+
+        // Unclamped Catmull-Rom undershoots below min at t = 0.25 and overshoots above max at t = 0.9.
+        assert!(c.sample(0.25, curve_kit::Interp::CatmullRom) < c.min);
+        assert!(c.sample(0.9, curve_kit::Interp::CatmullRom) > c.max);
+
+        assert_eq!(sample_transition_curve(&c, 0.25).to_bits(), c.min.to_bits());
+        assert_eq!(sample_transition_curve(&c, 0.9).to_bits(), c.max.to_bits());
+        assert_eq!(
+            sample_transition_curve(&c, 0.65).to_bits(),
+            c.sample(0.65, curve_kit::Interp::CatmullRom).to_bits()
+        );
+    }
 }

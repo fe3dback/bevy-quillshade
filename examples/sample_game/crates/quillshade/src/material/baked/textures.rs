@@ -8,7 +8,7 @@ use bevy::prelude::*;
 
 /// The image of every Texture asset, nested by folder (`tex.textures.rock_albedo`), internal textures under
 /// `internal` (`tex.internal.default`), baked gradient collections under `gradients`, nested by path
-/// (`tex.gradients.common.terrain`). Default handles until `BakedMaterialsLoader::load` fills them; use these
+/// (`tex.gradients.common.terrain`). Default handles until `QuillshadeLoader::load` fills them; use these
 /// instead of `AssetServer::load` on a file that has a Texture asset, so the asset's loader settings apply.
 #[derive(Resource, Clone, Debug, Default)]
 pub struct BakedTextures {
@@ -17,7 +17,7 @@ pub struct BakedTextures {
     pub textures: dir_textures::Group,
     /// Every texture by id (`textures/rock_albedo`: its path under `quillshade/material/` without
     /// `.texture.ron`; `@internal/default`; `@gradients/common/terrain`: a baked gradient collection), for game
-    /// data that names textures. Filled by `BakedMaterialsLoader::load` and kept in sync with the fields on hot
+    /// data that names textures. Filled by `QuillshadeLoader::load` and kept in sync with the fields on hot
     /// reload; also holds a texture created in the editor after the build that a material uses (it has no field
     /// until a rebuild).
     pub by_path: HashMap<String, Handle<Image>>,

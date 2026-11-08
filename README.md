@@ -70,59 +70,7 @@ cargo build --release --no-default-features
 
 ### 1. Project
 
-**File → New Project…** on your game crate (the directory with its `Cargo.toml`); domains can be toggled in **File → Project Settings…**.
-
-```text
-my_game/
-  Cargo.toml                 # yours: the editor never edits it
-  quillshade/
-    project.ron              # project version and enabled domains (required; written by the editor)
-    material/                # your graphs: *.material.ron, *.function.ron, *.texture.ron, ...
-    light/                   # environments, curves and cube maps: *.environment.ron, *.curve.ron, *.texture.ron
-  assets/quillshade/material/autogen/    # generated WESL + baked.ron (do not edit)
-  assets/quillshade/material/internal/   # built-in textures (generated)
-  assets/quillshade/light/autogen/       # generated light baked.ron (do not edit)
-  crates/quillshade/         # generated Rust crate, one module per domain (do not edit)
-```
-
-#### Upgrading a project
-
-`project.ron` records the project version. When a newer editor opens an older project, the **Migration Tool** opens
-over the window and the rest of the editor is unavailable until it is done: it shows the version step (e.g.
-`v1 -> v2`), the steps and the source files each one rewrites, grouped by domain, and a warning when the project has
-uncommitted git changes. **Dry run** lists the plan and writes nothing, **Migrate** rewrites the sources and then
-regenerates every domain (a progress bar and a log follow the run), and **Open project** then opens the project.
-Rewriting `project.ron` keeps every setting but not its comments or keys the editor does not know. **Commit first** so
-the migration can be reviewed and reverted; an interrupted or failed migration resumes where it stopped on the next
-run. A project newer than the editor is refused. The same engine runs headless:
-`shader-editor migrate my_game [--dry-run]`. Upgrading to project version 3 gives every source an asset UUID (see
-below) and rewrites references to use it; the generated code does not change.
-
-#### Asset identity: UUIDs
-
-Every source file the editor owns (materials, functions, curves, constant tables, gradient collections, Texture assets,
-environments and user nodes in `quillshade/material/.nodes/`) has an `id` line with a UUID that the editor writes
-(never write or change one by hand), and references between sources use that UUID. The editor adds the target's path
-as a comment on every such line, so files stay readable in a diff:
-
-```ron
-      kind: "function::019b76da-a800-79a4-861e-ba527e418587", // common/tex_layer
-      ...
-      kind: "stdlib::SampleCurve",
-      params: {
-        "curve": Str("019b76da-a800-783e-be72-971715772890"), // common/pulse
-```
-
-- **Rename and move freely**, in the editor or outside it (`git mv`, a file manager, an IDE): references keep working,
-  nothing is rewritten, and the comments catch up on the next save. Generated Rust names follow the path, so renaming
-  a material renames its field in `BakedMaterials` (the game gets a compile error, as intended).
-- **Copying a file** outside the editor copies its UUID too: the copy is reported as `AE001` (duplicate asset UUID)
-  and references keep pointing at the file whose path sorts first (usually the original). Click the error in the console (or
-  use **Regenerate UUID** in the Project tree's menu of the copy) to give the copy a new UUID.
-- A source without a valid `id` (e.g. a hand-written user node) is `AE004`: click the error for the **Assign UUID**
-  quick fix (saving an asset in the editor assigns one too). Graphs can use a user node only once it has a UUID.
-- A reference to a UUID that no file has is `AE002` (e.g. the target was deleted). Game files under `assets/`
-  (images) are still referenced by path.
+**File → New Project…** on your game crate (the directory with its `Cargo.toml`);
 
 ### 2. Cargo.toml
 
@@ -143,11 +91,48 @@ Add `QuillshadePlugin` after `DefaultPlugins`:
 
 ```rust
 use bevy::prelude::*;
+use quillshade::{QuillshadePlugin};
 
 fn main() {
     App::new()
-        .add_plugins((DefaultPlugins, quillshade::QuillshadePlugin))
+        .add_plugins(DefaultPlugins)
+        .add_plugins(QuillshadePlugin)
         .run();
+}
+```
+
+### 4. Load data (optional)
+
+Quillshade plugin will load data automatically on first frame. But if you want integrate loading materials/textures/data into your loading screen - you can run `load` by hand and watch progress stats / events.
+
+```rust
+use bevy::prelude::*;
+use quillshade::{QuillshadeLoader, QuillshadeProgress, QuillshadeReady};
+
+fn main() {
+    App::new()
+        //..
+        .add_systems(Startup, start_load)
+        .add_systems(Update, loading_screen)
+        //..
+        .run();
+}
+
+fn start_load(mut loader: QuillshadeLoader) {
+    let total = loader.load();
+    info!("loading {total} quillshade assets");
+}
+
+fn loading_screen(
+    mut progress: MessageReader<QuillshadeProgress>,
+    mut ready: MessageReader<QuillshadeReady>,
+) {
+    for p in progress.read() {
+        info!("quillshade loading: {} / {} ({} failed)", p.loaded, p.total, p.failed);
+    }
+    if ready.read().next().is_some() {
+        info!("all quillshade domains ready");
+    }
 }
 ```
 
@@ -176,13 +161,9 @@ regenerates WESL shaders and a typed Rust crate that the game hot-reloads.
 - **Global constants**: named tables of values, inlined into every material that reads them.
 - **Scene depth**: SceneDepth and DepthFade (soft particles, shorelines) read the camera's depth prepass in
   translucent 3D materials; add `DepthPrepass` to the camera.
-- **Comfortable canvas**: comments, named routes, auto-layout, minimap, node preview, copy / paste,
-  undo / redo, Back / Forward navigation.
 - **Live validation**: errors and warnings are pinned to their node and pin, and an error blocks only its own asset.
   Informational notes (`I103`, a vertex attribute a mesh may lack) never block, are not pinned on the canvas, and show
   in the console only with its "Info" checkbox on.
-- **Readable output**: view the generated WESL and Rust right in the editor. The game gets typed material structs and
-  baked material and texture handles, and hot-reloads both the shaders and the baked values.
 - **Headless CLI**: `regen`, `check` and `diff` for CI; `--domain <id>` (`material`, `light`; repeatable) limits a
   run to those domains (default: all), e.g. `shader-editor check my_game --domain light`.
   `migrate <project> [--dry-run]` upgrades an older project and regenerates it (exit `0` done or up to date, `1`
@@ -261,6 +242,11 @@ fn toggle_light(keys: Res<ButtonInput<KeyCode>>, mut light: Light) {
     }
 }
 ```
+
+### Data editor
+
+Allow create and edit data-assets (DTO/tables). WIP.
+
 
 ### Animation Graph
 

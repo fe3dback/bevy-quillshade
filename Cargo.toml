@@ -21,6 +21,7 @@ wesl = { version = "0.6", features = ["naga-ext"] }
 naga = { version = "30", features = ["wgsl-in"] }
 serde = { version = "1", features = ["derive"] }
 ron = "0.12"
+postcard = { version = "1", default-features = false, features = ["alloc"] }
 thiserror = "2"
 ulid = "1"
 # Asset UUIDs (ADR 0047): used by `project_core` only; the other crates go through `project_core::AssetUuid`.
@@ -57,6 +58,7 @@ node_graph_base = { path = "crates/node_graph_base", default-features = false }
 material_domain = { path = "crates/material_domain", default-features = false }
 # Without its default `editor` feature (the CLI backend is Bevy-free); the root package asks for it.
 light_domain = { path = "crates/light_domain", default-features = false }
+data_domain = { path = "crates/data_domain", default-features = false }
 
 [package]
 name = "bevy-quillshade"
@@ -81,6 +83,7 @@ dynamic_linking = [
     "curve_kit/dynamic_linking",
     "texture_kit/dynamic_linking",
     "light_domain/dynamic_linking",
+    "data_domain/dynamic_linking",
 ]
 
 [dependencies]
@@ -92,6 +95,7 @@ editor_core = { workspace = true }
 node_graph_base = { workspace = true }
 material_domain = { workspace = true }
 light_domain = { workspace = true, features = ["editor"] }
+data_domain = { workspace = true, features = ["editor"] }
 # Only to name their `dynamic_linking` features.
 curve_kit = { workspace = true }
 texture_kit = { workspace = true }

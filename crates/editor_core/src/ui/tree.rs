@@ -232,23 +232,54 @@ pub fn row_menu(editor: &Editor, row: &TreeRow) -> Vec<MenuEntry> {
     let entries = |items: Vec<(Option<IconRef>, String, Action)>| items.into_iter().map(MenuEntry::from).collect();
     match (&row.item, row.tree) {
         (TreeItem::Folder(f), TreeId::Project(domain)) if editable(row) => {
-            let mut items = create_items(editor, domain);
+            let mut menu: Vec<MenuEntry> = entries(create_items(editor, domain));
+            menu.push(MenuEntry {
+                icon: Some(IconId::File.into()),
+                label: "Paste\tCtrl+V".into(),
+                action: Action::PasteAsset { domain, folder: f.clone() },
+                disabled: editor.paste_disabled_reason(domain),
+            });
             if !f.is_empty() {
-                items.push((
+                menu.push(MenuEntry::from((
                     Some(IconId::Delete.into()),
-                    "Delete folder...".into(),
+                    "Delete folder...\tDel".to_string(),
                     Action::DeleteFolderDialog(domain, f.clone()),
-                ));
+                )));
             }
-            entries(items)
+            menu
         }
         (TreeItem::Asset(r), _) if editable(row) => {
-            let mut menu: Vec<MenuEntry> = entries(vec![
-                (Some(asset_icon(editor, r)), "Open".to_string(), Action::OpenAsset(r.clone())),
-                (Some(IconId::Edit.into()), "Rename...".into(), Action::RenameDialog(r.clone())),
-                (Some(IconId::MoveToFolder.into()), "Move to...".into(), Action::MoveDialog(r.clone())),
-                (Some(IconId::Delete.into()), "Delete...".into(), Action::DeleteDialog(r.clone())),
-            ]);
+            let folder = r.path.rsplit_once('/').map_or("", |(d, _)| d).to_string();
+            let mut menu: Vec<MenuEntry> = vec![
+                MenuEntry::from((Some(asset_icon(editor, r)), "Open".to_string(), Action::OpenAsset(r.clone()))),
+                MenuEntry::from((
+                    Some(IconId::Copy.into()),
+                    "Duplicate\tCtrl+D".to_string(),
+                    Action::DuplicateAsset(r.clone()),
+                )),
+                MenuEntry::from((Some(IconId::Copy.into()), "Copy\tCtrl+C".to_string(), Action::CopyAsset(r.clone()))),
+                MenuEntry {
+                    icon: Some(IconId::File.into()),
+                    label: "Paste\tCtrl+V".into(),
+                    action: Action::PasteAsset { domain: r.domain, folder },
+                    disabled: editor.paste_disabled_reason(r.domain),
+                },
+                MenuEntry::from((
+                    Some(IconId::Edit.into()),
+                    "Rename...\tF2".to_string(),
+                    Action::RenameDialog(r.clone()),
+                )),
+                MenuEntry::from((
+                    Some(IconId::MoveToFolder.into()),
+                    "Move to...".to_string(),
+                    Action::MoveDialog(r.clone()),
+                )),
+                MenuEntry::from((
+                    Some(IconId::Delete.into()),
+                    "Delete...\tDel".to_string(),
+                    Action::DeleteDialog(r.clone()),
+                )),
+            ];
             // The UUID quick fixes (ADR 0047 §11, §16).
             if editor.duplicate_winner(r).is_some() {
                 menu.push(MenuEntry::from((

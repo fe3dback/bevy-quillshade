@@ -21,7 +21,7 @@ use editor_core::ui::shell::VIEW_BG;
 use editor_core::ui::widgets::subpane_box;
 use project_core::{AssetRef, Project};
 
-use super::preview::{LIGHT_PREVIEW_KIND, interpolate_environments};
+use super::preview::{LIGHT_PREVIEW_KIND, interpolate_environments, sample_transition_curve};
 use super::{EnvironmentDoc, LightCurve, LightState};
 use crate::backend::{CURVE_SUFFIX, ENVIRONMENT_SUFFIX, Environment, FogFalloffDef, LIGHT};
 
@@ -360,7 +360,7 @@ fn resolve_preview(editor: &Editor, doc: &LightPreviewDoc) -> (Environment, f32)
     let s = if doc.curve.is_empty() {
         raw_t
     } else {
-        shown.curves.get(&doc.curve).map_or(raw_t, |c| c.sample(raw_t, curve_kit::Interp::CatmullRom))
+        shown.curves.get(&doc.curve).map_or(raw_t, |c| sample_transition_curve(c, raw_t))
     };
     let env = interpolate_environments(&from, &to, raw_t, s);
     (env, s)
